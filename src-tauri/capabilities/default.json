@@ -1,0 +1,19 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for BentoDesk",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-cursor-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:tray:default"
+  ]
+}
