@@ -250,6 +250,10 @@ async function refreshWindowPosition(): Promise<void> {
  * cursorPosition() returns physical (screen) coordinates; getBoundingClientRect()
  * returns viewport-relative CSS pixels. We convert viewport-relative to screen
  * coordinates by scaling by DPR and adding the window's screen position.
+ *
+ * The window's screen position (`windowScreenX/Y`) is needed when the taskbar
+ * is on the left or top edge, because the work area (and thus the window) is
+ * offset from (0,0) in screen coordinates.
  */
 function isPointInElement(
   screenX: number,
@@ -258,13 +262,12 @@ function isPointInElement(
 ): boolean {
   const rect = el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  // Convert viewport-relative CSS pixels to physical screen coordinates.
-  // The window is positioned at (0,0) covering the work area, so no
-  // additional offset is needed — screen coords and window coords align.
-  const elLeft = rect.left * dpr;
-  const elTop = rect.top * dpr;
-  const elRight = rect.right * dpr;
-  const elBottom = rect.bottom * dpr;
+  // Convert viewport-relative CSS pixels to physical screen coordinates
+  // by scaling by DPR and adding the cached window screen position.
+  const elLeft = rect.left * dpr + windowScreenX;
+  const elTop = rect.top * dpr + windowScreenY;
+  const elRight = rect.right * dpr + windowScreenX;
+  const elBottom = rect.bottom * dpr + windowScreenY;
 
   return (
     screenX >= elLeft &&
@@ -325,10 +328,12 @@ async function pollCursorPosition(): Promise<void> {
 function scheduleNextPoll(): void {
   if (!pollingActive) return;
   animFrameId = requestAnimationFrame(() => {
-    frameCount++;
+    // Increment with wraparound to prevent unbounded growth.
+    // Using bitwise OR 0 to keep it as a 32-bit integer.
+    frameCount = (frameCount + 1) | 0;
     // Throttle to ~30fps in PASSTHROUGH state — no need for 60fps precision
     // when nothing interactive is happening. Each poll is an async IPC call.
-    if (state === "PASSTHROUGH" && frameCount % 2 !== 0) {
+    if (state === "PASSTHROUGH" && (frameCount & 1) !== 0) {
       scheduleNextPoll();
       return;
     }

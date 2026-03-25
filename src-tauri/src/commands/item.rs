@@ -14,6 +14,22 @@ pub async fn add_item(
     zone_id: String,
     path: String,
 ) -> Result<BentoItem, String> {
+    // Security: validate that the file resides on the user's Desktop directory.
+    // This prevents a compromised frontend from moving arbitrary system files
+    // into .bentodesk/.
+    {
+        let desktop_path = {
+            let settings = state.settings.lock().map_err(|e| e.to_string())?;
+            settings.desktop_path.clone()
+        };
+        if !hidden_items::is_desktop_path_with_custom(&path, Some(&desktop_path)) {
+            return Err(format!(
+                "Security: cannot add item outside the Desktop directory: {}",
+                path
+            ));
+        }
+    }
+
     let file_path = std::path::Path::new(&path);
 
     let ext = file_path

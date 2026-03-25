@@ -424,7 +424,6 @@ pub fn is_desktop_path(path: &str) -> bool {
 
 /// Check whether a file path is on the user's Desktop directory,
 /// also checking against a custom desktop path from settings.
-#[allow(dead_code)]
 pub fn is_desktop_path_with_custom(path: &str, custom_desktop: Option<&str>) -> bool {
     let file_parent = Path::new(path).parent().unwrap_or(Path::new(path));
 

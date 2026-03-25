@@ -62,7 +62,18 @@ pub fn setup_tray(app: &App) -> Result<(), BentoDeskError> {
     let show_item_for_menu = show_item.clone();
     let show_item_for_tray = show_item.clone();
 
+    // Load tray icon from the embedded 32x32 PNG (generated from bentodesk.svg).
+    // Using include_bytes! embeds the icon at compile time — no file I/O at runtime.
+    let tray_icon = {
+        let png_bytes = include_bytes!("../../icons/32x32.png");
+        let img = image::load_from_memory(png_bytes).expect("Failed to decode tray icon PNG");
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        tauri::image::Image::new_owned(rgba.into_raw(), w, h)
+    };
+
     let _tray = TrayIconBuilder::new()
+        .icon(tray_icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("BentoDesk")
