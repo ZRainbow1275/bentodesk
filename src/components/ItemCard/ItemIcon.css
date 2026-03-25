@@ -1,0 +1,21 @@
+/* ItemIcon — icon display with loading and error states */
+
+.item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.item-icon__img {
+  display: block;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.item-icon__fallback {
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

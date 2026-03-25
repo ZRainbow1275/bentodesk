@@ -1,0 +1,21 @@
+/* ItemGrid — CSS grid layout */
+
+.item-grid {
+  display: grid;
+  gap: var(--spacing-sm);
+  align-content: start;
+}
+
+.item-grid__empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-xl) var(--spacing-lg);
+}
+
+.item-grid__empty-text {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}

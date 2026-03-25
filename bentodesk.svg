@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF512F"/>
+      <stop offset="100%" stop-color="#DD2476"/>
+    </linearGradient>
+    <filter id="glow">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#DD2476" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#FAFAFA"/>
+
+  <g stroke="#CBD5E1" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 12">
+    <line x1="64" y1="128" x2="448" y2="128"/>
+    <line x1="64" y1="256" x2="448" y2="256"/>
+    <line x1="64" y1="384" x2="448" y2="384"/>
+    <line x1="128" y1="64" x2="128" y2="448"/>
+    <line x1="256" y1="64" x2="256" y2="448"/>
+    <line x1="384" y1="64" x2="384" y2="448"/>
+  </g>
+  
+  <g fill="#94A3B8">
+    <circle cx="128" cy="128" r="4"/>
+    <circle cx="384" cy="128" r="4"/>
+    <circle cx="128" cy="384" r="4"/>
+    <circle cx="384" cy="384" r="4"/>
+    <path d="M 252 252 h 8 v 8 h -8 z" fill="#FF512F"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <rect x="136" y="128" width="72" height="256" rx="36" fill="url(#brandGrad)"/>
+    <path d="M 224 128 h 56 a 56 56 0 0 1 56 56 v 0 a 56 56 0 0 1 -56 56 h -56 v -112 z" fill="#1F2937"/>
+    <path d="M 224 256 h 64 a 64 64 0 0 1 64 64 v 0 a 64 64 0 0 1 -64 64 h -64 v -128 z" fill="#374151"/>
+  </g>
+  
+  <circle cx="172" cy="164" r="10" fill="#FFFFFF" opacity="0.8"/>
+  <circle cx="280" cy="184" r="8" fill="#FFFFFF" opacity="0.2"/>
+</svg>

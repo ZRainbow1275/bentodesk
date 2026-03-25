@@ -1,0 +1,85 @@
+/* ItemCard — standard and wide variants */
+
+.item-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-subtle, rgba(255, 255, 255, 0.02));
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  padding: 8px 4px;
+  cursor: pointer;
+  text-align: center;
+  min-height: 76px;
+  gap: var(--spacing-xs);
+  transition: all var(--transition-fast, 150ms ease-out);
+}
+
+/* Hover state */
+.item-card:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-hover);
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: var(--shadow-item-hover);
+}
+
+/* Active (click) */
+.item-card:active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+
+/* Focus ring for keyboard navigation */
+.item-card:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+  border-color: transparent;
+}
+
+/* Selected state — uses zone accent when available */
+.item-card--selected {
+  background: var(--surface-active);
+  border-color: var(--zone-accent, var(--accent-blue));
+}
+
+/* Dragging state — semi-transparent source card while being reordered */
+.item-card--dragging {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+/* Wide variant — horizontal layout */
+.item-card--wide {
+  flex-direction: row;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  gap: 10px;
+  min-height: auto;
+}
+
+/* Name — standard (vertical) */
+.item-card__name {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-normal);
+  color: var(--text-secondary);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-all;
+  max-width: 100%;
+}
+
+/* Name — wide variant */
+.item-card__name--wide {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  -webkit-line-clamp: 1;
+  white-space: nowrap;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

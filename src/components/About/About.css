@@ -1,0 +1,117 @@
+/* About — simple info dialog */
+
+.about-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  pointer-events: auto;
+}
+
+.about-dialog {
+  width: 340px;
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  border-radius: var(--radius-expanded);
+  box-shadow: var(--shadow-expanded);
+  padding: var(--spacing-2xl, 28px);
+  text-align: center;
+  animation: dialogScaleIn 200ms ease-out forwards;
+}
+
+.about-dialog__icon {
+  font-size: 48px;
+  line-height: 1;
+  margin-bottom: var(--spacing-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.about-dialog__logo {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.about-dialog__name {
+  font-size: 20px;
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-primary);
+  margin: 0 0 var(--spacing-xs) 0;
+}
+
+.about-dialog__version {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  margin: 0 0 var(--spacing-lg) 0;
+}
+
+.about-dialog__desc {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0 0 var(--spacing-lg) 0;
+}
+
+/* ─── System Info ────────────────────────── */
+
+.about-dialog__system {
+  background: var(--surface-subtle, rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-card);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+  text-align: left;
+}
+
+.about-dialog__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.about-dialog__row-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.about-dialog__row-value {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── License & Close ────────────────────── */
+
+.about-dialog__license {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin: 0 0 var(--spacing-lg) 0;
+}
+
+.about-dialog__close-btn {
+  padding: 8px 28px;
+  border-radius: 8px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast, 150ms ease-out);
+}
+
+.about-dialog__close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}

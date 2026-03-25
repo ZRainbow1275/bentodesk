@@ -1,0 +1,166 @@
+/**
+ * Chinese (Simplified) locale — default language for BentoDesk.
+ * Keys are camelCase English identifiers; values are Chinese translations.
+ */
+const zhCN = {
+  // ─── Settings Panel ────────────────────────────────────────
+  settingsTitle: "设置",
+  settingsCloseAriaLabel: "关闭设置",
+  settingsGroupGeneral: "通用",
+  settingsGroupPaths: "路径",
+  settingsGroupAppearance: "外观",
+  settingsGroupPerformance: "性能",
+  settingsGhostLayer: "桌面嵌入层",
+  settingsLaunchAtStartup: "开机启动",
+  settingsShowInTaskbar: "显示在任务栏",
+  settingsAutoGroup: "智能自动分组",
+  settingsPortableMode: "便携模式",
+  settingsPortableModeNote: "(需要重启)",
+  settingsDesktopPath: "桌面路径",
+  settingsDesktopPathPlaceholder: "C:\\Users\\...\\Desktop",
+  settingsWatchPaths: "监控路径（每行一个）",
+  settingsWatchPathsPlaceholder: "添加要监控的文件夹...",
+  settingsTheme: "主题",
+  settingsThemeDark: "深色",
+  settingsThemeLight: "浅色",
+  settingsThemeSystem: "跟随系统",
+  settingsAccentColor: "强调色",
+  settingsExpandDelay: "展开延迟",
+  settingsCollapseDelay: "收起延迟",
+  settingsIconCacheSize: "图标缓存大小",
+  settingsBtnCancel: "取消",
+  settingsBtnSave: "保存",
+  settingsLanguage: "语言 / Language",
+
+  // ─── Context Menu ──────────────────────────────────────────
+  contextMenuEditZone: "编辑区域",
+  contextMenuAutoArrange: "自动排列项目",
+  contextMenuSmartGroup: "智能分组建议",
+  contextMenuSearchInZone: "在区域中搜索",
+  contextMenuSaveSnapshot: "保存布局快照",
+  contextMenuDeleteZone: "删除区域",
+  contextMenuOpenFile: "打开文件",
+  contextMenuRevealInExplorer: "在资源管理器中显示",
+  contextMenuCopyPath: "复制路径",
+  contextMenuSetNormalCard: "设为普通卡片",
+  contextMenuSetWideCard: "设为宽卡片",
+  contextMenuMoveToZone: "移动到区域",
+  contextMenuRemoveFromZone: "从区域中移除",
+  contextMenuConfirmRemove: "确定要从此区域中移除\u201C{name}\u201D吗？",
+  contextMenuBtnCancel: "取消",
+  contextMenuBtnDelete: "删除",
+
+  // ─── Zone Editor ───────────────────────────────────────────
+  zoneEditorTitle: "编辑区域",
+  zoneEditorCloseAriaLabel: "关闭编辑器",
+  zoneEditorZoneName: "区域名称",
+  zoneEditorZoneNamePlaceholder: "区域名称",
+  zoneEditorIcon: "图标",
+  zoneEditorAccentColor: "强调色",
+  zoneEditorAccentColorNone: "None",
+  zoneEditorGridColumns: "网格列数",
+  zoneEditorCapsuleShape: "胶囊形状",
+  zoneEditorCapsuleShapePill: "药丸",
+  zoneEditorCapsuleShapeRounded: "圆角",
+  zoneEditorCapsuleShapeCircle: "圆形",
+  zoneEditorCapsuleShapeMinimal: "极简",
+  zoneEditorCapsuleSize: "胶囊大小",
+  zoneEditorCapsuleSizeSmall: "小",
+  zoneEditorCapsuleSizeMedium: "中",
+  zoneEditorCapsuleSizeLarge: "大",
+  zoneEditorBtnCancel: "取消",
+  zoneEditorBtnSave: "保存",
+
+  // ─── Smart Group Suggestor ─────────────────────────────────
+  smartGroupTitle: "智能分组建议",
+  smartGroupCloseAriaLabel: "关闭",
+  smartGroupScanning: "正在扫描桌面文件...",
+  smartGroupAnalyzing: "正在分析文件模式...",
+  smartGroupError: "分析失败：",
+  smartGroupEmpty: "未找到分组建议。请尝试在桌面添加更多文件。",
+  smartGroupFiles: "个文件",
+  smartGroupConfidenceHigh: "高",
+  smartGroupConfidenceMedium: "中",
+  smartGroupConfidenceLow: "低",
+  smartGroupApplyToZone: "应用到当前区域",
+  smartGroupApplying: "应用中...",
+  smartGroupApply: "应用",
+  smartGroupNewZone: "+ 新区域",
+  smartGroupCreateAsNewZone: "创建为新区域",
+
+  // ─── Snapshot Picker ───────────────────────────────────────
+  snapshotPickerTitle: "布局快照",
+  snapshotPickerCloseAriaLabel: "关闭",
+  snapshotPickerLoading: "正在加载快照...",
+  snapshotPickerEmpty: "暂无保存的快照。右键点击区域并选择\u201C保存布局快照\u201D来创建一个。",
+  snapshotPickerZones: "个区域",
+  snapshotPickerLoad: "加载",
+  snapshotPickerDelete: "删除",
+  snapshotPickerConfirmDelete: "确认删除？",
+  snapshotPickerConfirmYes: "是",
+  snapshotPickerConfirmNo: "否",
+
+  // ─── Search Bar ────────────────────────────────────────────
+  searchBarPlaceholder: "搜索项目...",
+  searchBarClearAriaLabel: "清除搜索",
+
+  // ─── Item Grid ─────────────────────────────────────────────
+  itemGridEmptyDropHere: "拖放文件到这里",
+
+  // ─── About Dialog ──────────────────────────────────────────
+  aboutAppName: "BentoDesk",
+  aboutVersion: "v0.1.0",
+  aboutDescription: "一款便当盒风格的 Windows 桌面整理工具。毛玻璃区域悬浮于壁纸之上。",
+  aboutOs: "操作系统",
+  aboutDisplay: "显示器",
+  aboutWebView2: "WebView2",
+  aboutLicense: "MIT 许可证",
+  aboutClose: "关闭",
+
+  // ─── App / Tray ────────────────────────────────────────────
+  appNewZone: "新建区域",
+  appNewZonePrefix: "新建区域",
+  appAutoOrganize: "自动整理",
+  appSnapshotPrefix: "快照",
+
+  // ─── Panel Header ──────────────────────────────────────────
+  panelHeaderSearchTitle: "搜索 (Ctrl+F)",
+  panelHeaderSearchAriaLabel: "搜索",
+  panelHeaderCloseTitle: "关闭",
+  panelHeaderCloseAriaLabel: "关闭区域",
+
+  // ─── Language Options ──────────────────────────────────────
+  languageChinese: "中文",
+  languageEnglish: "English",
+
+  // ─── Theme Names ─────────────────────────────────────────
+  themeDark: "深色",
+  themeLight: "浅色",
+  themeMidnight: "午夜",
+  themeForest: "森林",
+  themeSunset: "日落",
+  themeFrosted: "毛玻璃",
+  themeSolid: "纯色",
+  themeOrder: "秩序",
+  themeNeo: "新拟态",
+  themeFlat: "扁平",
+  themeCustom: "自定义",
+  themePickerLabel: "选择主题",
+
+  // ─── Custom Theme (Developer) ────────────────────────────
+  customTheme: "自定义主题",
+  importTheme: "导入主题",
+  exportTheme: "导出当前主题",
+  themeImportSuccess: "主题导入成功",
+  themeImportError: "主题导入失败",
+  themeJsonPlaceholder: "粘贴主题 JSON...",
+  developerOptions: "开发者选项",
+} as const;
+
+/** Keys of the translation object — used for type-safe key lookups. */
+export type TranslationKey = keyof typeof zhCN;
+
+/** The shape that every locale file must satisfy: same keys, string values. */
+export type Translations = Record<TranslationKey, string>;
+
+export default zhCN;

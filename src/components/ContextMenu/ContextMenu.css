@@ -1,0 +1,169 @@
+/* ContextMenu — glassmorphism context menu */
+
+.context-menu {
+  min-width: 200px;
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-expanded);
+  padding: var(--spacing-xs) 0;
+  /* NO overflow:hidden — submenu uses position:absolute and must not be clipped */
+  overflow: visible;
+}
+
+.context-menu__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--spacing-md);
+  gap: var(--spacing-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  transition: background var(--transition-fast, 150ms ease-out), color var(--transition-fast, 150ms ease-out);
+  cursor: pointer;
+  text-align: left;
+}
+
+.context-menu__item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.context-menu__item-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.context-menu__item:hover .context-menu__item-icon {
+  opacity: 1;
+}
+
+.context-menu__item-label {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.context-menu__separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.06);
+  margin: 3px var(--spacing-sm);
+}
+
+/* Danger item (red on hover) */
+.context-menu__item--danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red);
+}
+
+/* Submenu container */
+.context-menu__submenu-container {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Submenu toggle button */
+.context-menu__item--submenu {
+  position: relative;
+}
+
+.context-menu__item-arrow {
+  font-size: 8px;
+  color: var(--text-muted);
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: transform var(--transition-fast, 150ms ease-out);
+}
+
+/* Inline submenu — expands below the parent item */
+.context-menu__submenu-inline {
+  display: flex;
+  flex-direction: column;
+  padding-left: var(--spacing-md, 12px);
+  border-left: 2px solid var(--accent-blue);
+  margin-left: var(--spacing-lg, 16px);
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+.context-menu__item--child {
+  font-size: var(--font-size-sm, 13px) !important;
+  padding: 6px 10px !important;
+}
+
+/* Legacy submenu panel (kept for backward compat) */
+.context-menu__submenu {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  min-width: 160px;
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-expanded);
+  padding: var(--spacing-xs) 0;
+  z-index: 1001;
+}
+
+/* ─── Confirmation Dialog ────────────────────── */
+
+.confirm-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2500;
+  pointer-events: auto;
+}
+
+.confirm-dialog {
+  width: 340px;
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  border-radius: var(--radius-expanded);
+  box-shadow: var(--shadow-expanded);
+  padding: var(--spacing-xl);
+}
+
+.confirm-dialog__message {
+  font-size: var(--font-size-md);
+  color: var(--text-primary);
+  margin: 0 0 var(--spacing-lg) 0;
+  line-height: 1.5;
+}
+
+.confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+}
+
+/* Danger button (for delete confirmation) */
+.settings-btn--danger {
+  background: var(--accent-red);
+  color: white;
+  box-shadow: 0 1px 3px rgba(239, 68, 68, 0.3);
+}
+
+.settings-btn--danger:hover {
+  background: #f05252;
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.4);
+  transform: translateY(-1px);
+}
+
+.settings-btn--danger:active {
+  transform: translateY(0);
+}

@@ -1,0 +1,210 @@
+/* SnapshotPicker — modal dialog for layout snapshots */
+
+.snapshot-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  pointer-events: auto;
+}
+
+.snapshot-picker {
+  width: 440px;
+  max-height: 70vh;
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  border-radius: var(--radius-expanded);
+  box-shadow: var(--shadow-expanded);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: dialogScaleIn 200ms ease-out forwards;
+}
+
+/* ─── Header ─────────────────────────────── */
+
+.snapshot-picker__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  padding: 0 var(--spacing-xl);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.snapshot-picker__title {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.snapshot-picker__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast, 150ms ease-out);
+}
+
+.snapshot-picker__close:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--accent-red);
+}
+
+/* ─── Body ───────────────────────────────── */
+
+.snapshot-picker__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-lg) var(--spacing-xl);
+}
+
+.snapshot-picker__body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.snapshot-picker__body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.snapshot-picker__body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+.snapshot-picker__loading {
+  text-align: center;
+  padding: var(--spacing-xl);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.snapshot-picker__empty {
+  text-align: center;
+  padding: var(--spacing-xl);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}
+
+/* ─── Snapshot List ──────────────────────── */
+
+.snapshot-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.snapshot-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md);
+  background: var(--surface-subtle, rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-card);
+  transition: background var(--transition-fast, 150ms ease-out);
+}
+
+.snapshot-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.snapshot-item__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.snapshot-item__name {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.snapshot-item__meta {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.snapshot-item__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+  margin-left: var(--spacing-md);
+}
+
+.snapshot-item__confirm-text {
+  font-size: var(--font-size-xs);
+  color: var(--accent-red);
+  margin-right: var(--spacing-xs);
+}
+
+/* ─── Buttons ────────────────────────────── */
+
+.snapshot-btn {
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: all var(--transition-fast, 150ms ease-out);
+}
+
+.snapshot-btn--load {
+  background: var(--accent-blue);
+  color: white;
+}
+
+.snapshot-btn--load:hover {
+  background: #4b90f7;
+  box-shadow: 0 1px 4px rgba(59, 130, 246, 0.3);
+}
+
+.snapshot-btn--delete {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--accent-red);
+}
+
+.snapshot-btn--delete:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.snapshot-btn--confirm {
+  background: var(--accent-red);
+  color: white;
+}
+
+.snapshot-btn--confirm:hover {
+  background: #f05252;
+  box-shadow: 0 1px 4px rgba(239, 68, 68, 0.3);
+}
+
+.snapshot-btn--cancel {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+}
+
+.snapshot-btn--cancel:hover {
+  background: rgba(255, 255, 255, 0.1);
+}

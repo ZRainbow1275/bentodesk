@@ -1,0 +1,94 @@
+:root,
+[data-theme="dark"] {
+  /* Surface colors (glassmorphism) — deeper, richer dark surfaces */
+  --surface-zen: rgba(18, 18, 24, 0.55);
+  --surface-expanded: rgba(12, 12, 18, 0.82);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-active: rgba(255, 255, 255, 0.05);
+  --surface-subtle: rgba(255, 255, 255, 0.03);
+
+  /* Border colors — more subtle, refined */
+  --border-zen: rgba(255, 255, 255, 0.1);
+  --border-expanded: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.2);
+
+  /* Text colors — better contrast hierarchy */
+  --text-primary: #f0f0f5;
+  --text-secondary: #c0c0cc;
+  --text-muted: #78788a;
+
+  /* Accent colors (zone customization) */
+  --accent-blue: #3b82f6;
+  --accent-purple: #8b5cf6;
+  --accent-green: #22c55e;
+  --accent-orange: #f97316;
+  --accent-pink: #ec4899;
+  --accent-red: #ef4444;
+
+  /* Shadow — layered for depth */
+  --shadow-zen: 0 2px 8px rgba(0, 0, 0, 0.15), 0 8px 32px rgba(0, 0, 0, 0.25);
+  --shadow-expanded: 0 4px 16px rgba(0, 0, 0, 0.2), 0 16px 48px rgba(0, 0, 0, 0.4);
+  --shadow-item-hover: 0 2px 8px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.08);
+
+  /* Blur — improved clarity */
+  --blur-zen: blur(20px) saturate(160%);
+  --blur-expanded: blur(24px) saturate(170%);
+
+  /* Badge */
+  --badge-bg: rgba(255, 255, 255, 0.12);
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 28px;
+
+  /* Border radius */
+  --radius-capsule: 24px;
+  --radius-expanded: 16px;
+  --radius-card: 10px;
+  --radius-badge: 10px;
+
+  /* Typography */
+  --font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Transitions */
+  --transition-fast: 150ms ease-out;
+  --transition-normal: 250ms ease-out;
+}
+
+/* Light theme overrides */
+[data-theme="light"] {
+  --surface-zen: rgba(250, 250, 252, 0.6);
+  --surface-expanded: rgba(255, 255, 255, 0.85);
+  --surface-hover: rgba(0, 0, 0, 0.05);
+  --surface-active: rgba(0, 0, 0, 0.03);
+  --surface-subtle: rgba(0, 0, 0, 0.02);
+
+  --border-zen: rgba(0, 0, 0, 0.08);
+  --border-expanded: rgba(0, 0, 0, 0.1);
+  --border-hover: rgba(0, 0, 0, 0.16);
+
+  --text-primary: #111118;
+  --text-secondary: #3c3c46;
+  --text-muted: #8e8e9a;
+
+  --shadow-zen: 0 2px 8px rgba(0, 0, 0, 0.04), 0 8px 32px rgba(0, 0, 0, 0.06);
+  --shadow-expanded: 0 4px 16px rgba(0, 0, 0, 0.06), 0 16px 48px rgba(0, 0, 0, 0.12);
+  --shadow-item-hover: 0 2px 8px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.04);
+
+  --blur-zen: blur(20px) saturate(130%);
+  --blur-expanded: blur(24px) saturate(140%);
+
+  --badge-bg: rgba(0, 0, 0, 0.06);
+}

@@ -1,0 +1,37 @@
+/* BentoPanel — expanded panel layout */
+
+.bento-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.bento-panel__content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--spacing-sm) var(--spacing-lg) var(--spacing-lg) var(--spacing-lg);
+  /* Smooth scroll behavior */
+  scroll-behavior: smooth;
+}
+
+/* Custom scrollbar for content area */
+.bento-panel__content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.bento-panel__content::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px 0;
+}
+
+.bento-panel__content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+.bento-panel__content::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

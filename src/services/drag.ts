@@ -1,0 +1,253 @@
+/**
+ * Drag interaction coordinator.
+ *
+ * Two drag modes:
+ * 1. **OLE drag** — Detects drag intent from mousedown + movement that exits
+ *    the webview, then delegates to the backend OLE drag operation via IPC.
+ *    Used when dragging items OUT to Windows Explorer.
+ * 2. **Internal reorder drag** — Tracks an item being moved within or between
+ *    zones. Ghost card follows cursor, other cards shift. On drop, calls
+ *    reorderItems() or moveItem() on the zones store.
+ */
+import { createSignal } from "solid-js";
+import { startDrag } from "./ipc";
+import { reorderItems, moveItem } from "../stores/zones";
+
+/** Minimum pixel movement to detect drag intent */
+const DRAG_THRESHOLD_PX = 5;
+
+// ─── Internal reorder drag state (reactive) ─────────────────
+
+export interface InternalDragState {
+  /** Item being dragged */
+  itemId: string;
+  /** Source zone */
+  sourceZoneId: string;
+  /** Current hover target zone (may differ from source for cross-zone) */
+  targetZoneId: string;
+  /** Ghost insertion index within the target zone's item list */
+  targetIndex: number;
+  /** Current cursor position for ghost card positioning */
+  cursorX: number;
+  cursorY: number;
+  /** File path of the dragged item (for preview icon) */
+  filePath: string;
+  /** Display name of the dragged item (for preview label) */
+  itemName: string;
+}
+
+const [internalDrag, setInternalDrag] = createSignal<InternalDragState | null>(
+  null
+);
+
+export { internalDrag };
+
+export function updateInternalDragTarget(
+  targetZoneId: string,
+  targetIndex: number
+): void {
+  setInternalDrag((prev) => {
+    if (!prev) return null;
+    return { ...prev, targetZoneId, targetIndex };
+  });
+}
+
+export function updateInternalDragCursor(x: number, y: number): void {
+  setInternalDrag((prev) => {
+    if (!prev) return null;
+    return { ...prev, cursorX: x, cursorY: y };
+  });
+}
+
+/**
+ * Complete the internal drag — reorder within zone or move across zones.
+ */
+async function commitInternalDrag(state: InternalDragState): Promise<void> {
+  if (state.sourceZoneId === state.targetZoneId) {
+    // Same zone: reorder
+    // We need to figure out the new item order.
+    // The store/IPC expects a full ordered list of item IDs.
+    // This is handled at the ItemGrid level where we know the items.
+    // We emit a custom event that ItemGrid listens to.
+    const event = new CustomEvent("bentodesk:reorder-commit", {
+      detail: {
+        zoneId: state.sourceZoneId,
+        itemId: state.itemId,
+        targetIndex: state.targetIndex,
+      },
+    });
+    document.dispatchEvent(event);
+  } else {
+    // Cross-zone: move item
+    void moveItem(state.sourceZoneId, state.targetZoneId, state.itemId);
+  }
+}
+
+function cancelInternalDrag(): void {
+  setInternalDrag(null);
+}
+
+// ─── OLE drag state (non-reactive) ─────────────────────────
+
+interface OleDragState {
+  startX: number;
+  startY: number;
+  filePaths: string[];
+  itemId: string;
+  zoneId: string;
+  itemName: string;
+  isDragging: boolean;
+  cleanup: (() => void) | null;
+}
+
+let activeDrag: OleDragState | null = null;
+
+/**
+ * Initiate drag tracking on mousedown for an item.
+ * Detects whether the drag becomes an internal reorder (small movements within
+ * the webview) or an OLE external drag (larger movement).
+ *
+ * @param filePaths - Paths of files being dragged (for OLE mode)
+ * @param startX - Initial clientX from the mouse event
+ * @param startY - Initial clientY from the mouse event
+ * @param itemId - ID of the item being dragged
+ * @param zoneId - ID of the zone the item belongs to
+ * @param itemName - Display name of the item (for drag preview)
+ */
+export function beginDragTracking(
+  filePaths: string[],
+  startX: number,
+  startY: number,
+  itemId?: string,
+  zoneId?: string,
+  itemName?: string
+): void {
+  // Clean up any existing drag
+  cancelDragTracking();
+
+  const state: OleDragState = {
+    startX,
+    startY,
+    filePaths,
+    itemId: itemId ?? "",
+    zoneId: zoneId ?? "",
+    itemName: itemName ?? "",
+    isDragging: false,
+    cleanup: null,
+  };
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (state.isDragging) {
+      // Already in internal drag mode — update cursor position
+      updateInternalDragCursor(e.clientX, e.clientY);
+
+      // Hit-test which zone/grid cell the cursor is over
+      const targetEl = document.elementFromPoint(e.clientX, e.clientY);
+      if (targetEl) {
+        const zoneEl = targetEl.closest(".bento-zone");
+        if (zoneEl) {
+          const targetZoneId =
+            zoneEl.getAttribute("data-zone-id") ?? state.zoneId;
+          const gridEl = targetEl.closest(".item-grid");
+          if (gridEl) {
+            // Cursor is over a grid — compute precise insertion index
+            const cards = Array.from(gridEl.querySelectorAll(".item-card"));
+            let insertIndex = cards.length;
+
+            for (let i = 0; i < cards.length; i++) {
+              const rect = cards[i].getBoundingClientRect();
+              const midY = rect.top + rect.height / 2;
+              const midX = rect.left + rect.width / 2;
+              if (
+                e.clientY < midY ||
+                (e.clientY < rect.bottom && e.clientX < midX)
+              ) {
+                insertIndex = i;
+                break;
+              }
+            }
+
+            updateInternalDragTarget(targetZoneId, insertIndex);
+          } else {
+            // Cursor is over a zone but not a grid (e.g. zen capsule or header)
+            // — mark this zone as the target, append at end
+            updateInternalDragTarget(targetZoneId, 0);
+          }
+        }
+      }
+      return;
+    }
+
+    const dx = e.clientX - state.startX;
+    const dy = e.clientY - state.startY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance >= DRAG_THRESHOLD_PX) {
+      state.isDragging = true;
+
+      if (state.itemId && state.zoneId) {
+        // Start internal reorder drag
+        setInternalDrag({
+          itemId: state.itemId,
+          sourceZoneId: state.zoneId,
+          targetZoneId: state.zoneId,
+          targetIndex: 0,
+          cursorX: e.clientX,
+          cursorY: e.clientY,
+          filePath: state.filePaths[0] ?? "",
+          itemName: state.itemName,
+        });
+      } else {
+        // No item/zone context — fallback to OLE external drag
+        void executeDrag(state.filePaths);
+        cleanupListeners();
+      }
+    }
+  };
+
+  const onMouseUp = () => {
+    const dragState = internalDrag();
+    if (dragState) {
+      void commitInternalDrag(dragState);
+      cancelInternalDrag();
+    }
+    cleanupListeners();
+  };
+
+  const cleanupListeners = () => {
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    activeDrag = null;
+  };
+
+  state.cleanup = cleanupListeners;
+
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+
+  activeDrag = state;
+}
+
+/**
+ * Cancel any active drag tracking.
+ */
+export function cancelDragTracking(): void {
+  cancelInternalDrag();
+  if (activeDrag?.cleanup) {
+    activeDrag.cleanup();
+    activeDrag = null;
+  }
+}
+
+/**
+ * Execute the actual OLE drag operation via the backend.
+ */
+async function executeDrag(filePaths: string[]): Promise<string> {
+  try {
+    const result = await startDrag(filePaths);
+    return result;
+  } catch (err) {
+    console.error("Drag operation failed:", err);
+    return "cancelled";
+  }
+}

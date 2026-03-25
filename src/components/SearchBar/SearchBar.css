@@ -1,0 +1,58 @@
+/* SearchBar — inline search in zone header */
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  margin: 0 var(--spacing-lg);
+  padding: 0 var(--spacing-md);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  gap: var(--spacing-sm);
+  flex-shrink: 0;
+  transition: border-color var(--transition-fast, 150ms ease-out), background var(--transition-fast, 150ms ease-out);
+}
+
+.search-bar:focus-within {
+  border-color: var(--accent-blue);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.search-bar__icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.search-bar__input {
+  flex: 1;
+  height: 100%;
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+  min-width: 0;
+}
+
+.search-bar__input::placeholder {
+  color: var(--text-muted);
+}
+
+.search-bar__clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--transition-fast, 150ms ease-out);
+}
+
+.search-bar__clear:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}

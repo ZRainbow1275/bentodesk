@@ -1,0 +1,14 @@
+//! Tauri IPC command handlers.
+//!
+//! Each sub-module exposes `#[tauri::command]` functions that the frontend
+//! invokes via `@tauri-apps/api/core::invoke`.
+
+pub mod file_ops;
+pub mod grouping;
+pub mod icon;
+pub mod icon_positions;
+pub mod item;
+pub mod layout;
+pub mod settings;
+pub mod system;
+pub mod zone;

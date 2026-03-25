@@ -1,0 +1,126 @@
+/* ZenCapsule — collapsed capsule layout */
+
+.zen-capsule {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 var(--spacing-lg) 0 var(--spacing-xl);
+  gap: var(--spacing-md);
+  transition: background var(--transition-fast, 150ms ease-out);
+}
+
+.zen-capsule__icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.zen-capsule__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.3px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.zen-capsule__badge {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-primary);
+  background: var(--zone-accent, var(--badge-bg));
+  border-radius: var(--radius-badge);
+  padding: 2px 9px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+/* ─── Shape Variants ─────────────────────── */
+
+.zen-capsule--pill {
+  border-radius: 24px;
+}
+
+.zen-capsule--rounded {
+  border-radius: 12px;
+}
+
+.zen-capsule--circle {
+  border-radius: 50%;
+  aspect-ratio: 1;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+}
+
+.zen-capsule--circle .zen-capsule__title,
+.zen-capsule--circle .zen-capsule__badge {
+  display: none;
+}
+
+.zen-capsule--circle .zen-capsule__icon {
+  font-size: 22px;
+}
+
+.zen-capsule--minimal {
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* ─── Size Variants ──────────────────────── */
+
+.zen-capsule--small {
+  padding: 0 var(--spacing-md) 0 var(--spacing-md);
+  gap: var(--spacing-sm);
+}
+
+.zen-capsule--small .zen-capsule__icon {
+  font-size: 14px;
+}
+
+.zen-capsule--small .zen-capsule__title {
+  font-size: var(--font-size-xs);
+}
+
+.zen-capsule--small .zen-capsule__badge {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+/* medium is the default — no overrides needed */
+
+.zen-capsule--large {
+  padding: 0 var(--spacing-xl) 0 var(--spacing-2xl, var(--spacing-xl));
+  gap: var(--spacing-lg);
+}
+
+.zen-capsule--large .zen-capsule__icon {
+  font-size: 22px;
+}
+
+.zen-capsule--large .zen-capsule__title {
+  font-size: var(--font-size-lg);
+}
+
+.zen-capsule--large .zen-capsule__badge {
+  font-size: var(--font-size-sm);
+  padding: 3px 12px;
+}
+
+/* circle shape overrides padding for all sizes */
+.zen-capsule--circle.zen-capsule--small {
+  padding: 0;
+}
+
+.zen-capsule--circle.zen-capsule--large {
+  padding: 0;
+}
+
+.zen-capsule--circle.zen-capsule--large .zen-capsule__icon {
+  font-size: 28px;
+}

@@ -1,0 +1,228 @@
+/* BentoZone — base and state-specific styles */
+/* Architecture: Single container with two overlapping layers (zen + bento).
+   The container's width/height/border-radius are animated via .spring-expand.
+   Inner layers cross-fade via opacity/visibility transitions. */
+
+.bento-zone {
+  /* Shared base — spring-expand handles width/height/border-radius transition */
+  position: relative;
+  overflow: hidden;
+  /* GPU layer promotion for smooth compositing */
+  transform: translateZ(0);
+}
+
+/* ─── Dragging State (zone repositioning) ────────────── */
+.bento-zone--dragging {
+  /* Disable all transitions during drag — spring-expand fights position changes */
+  transition: none !important;
+  /* Hint browser to optimize left/top repaints via GPU compositing */
+  will-change: left, top;
+  /* Suppress backdrop-filter repaint storms during drag */
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* ─── Zen Mode (Collapsed Capsule) ──────────────────────── */
+.bento-zone--zen {
+  border-radius: var(--radius-capsule);
+  background: var(--surface-zen);
+  -webkit-backdrop-filter: var(--blur-zen);
+  backdrop-filter: var(--blur-zen);
+  border: 1px solid var(--border-zen);
+  box-shadow: var(--shadow-zen);
+  cursor: pointer;
+}
+
+/* ─── Capsule Shape Variants (applied to outer .bento-zone in zen state) ── */
+.bento-zone--shape-pill {
+  border-radius: 24px;
+}
+
+.bento-zone--shape-rounded {
+  border-radius: 12px;
+}
+
+.bento-zone--shape-circle {
+  border-radius: 50%;
+}
+
+.bento-zone--shape-minimal {
+  border-radius: 8px;
+  background: transparent !important;
+  border: 1px dashed rgba(255, 255, 255, 0.2) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+/* ─── Bento Mode (Expanded Panel) ───────────────────────── */
+.bento-zone--expanded {
+  min-width: 280px;
+  max-width: 600px;
+  min-height: 200px;
+  max-height: 600px;
+  border-radius: var(--radius-expanded);
+  background: var(--surface-expanded);
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  border: 1px solid var(--border-expanded);
+  box-shadow: var(--shadow-expanded);
+  /* Accent color border-top — uses --zone-accent injected via inline style */
+  border-top: 2px solid var(--zone-accent, transparent);
+}
+
+/* ─── Zen Layer (always mounted, cross-fades out on expand) ─ */
+.bento-zone__zen-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.15s ease-out, visibility 0.15s ease-out;
+  z-index: 1;
+}
+
+.bento-zone__zen-layer--hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* ─── Bento Layer (always mounted, cross-fades in on expand) ─ */
+.bento-zone__bento-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.3s ease 0.15s, visibility 0.3s ease 0.15s;
+  z-index: 2;
+}
+
+.bento-zone__bento-layer--visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* ─── Drop Target Highlight (file drag from Explorer) ──── */
+.bento-zone--drop-target {
+  border-color: var(--zone-accent, var(--accent-blue));
+  box-shadow: 0 0 0 2px var(--zone-accent, var(--accent-blue)), var(--shadow-expanded);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+/* ─── Cross-Zone Drag Hover (internal item drag targeting this zone) ─ */
+.bento-zone--drag-hover {
+  border-color: var(--zone-accent, var(--accent-purple));
+  box-shadow:
+    0 0 0 2px var(--zone-accent, var(--accent-purple)),
+    0 0 20px rgba(139, 92, 246, 0.15),
+    var(--shadow-expanded);
+  background: rgba(139, 92, 246, 0.08);
+  transition: box-shadow 150ms ease-out, border-color 150ms ease-out, background 150ms ease-out;
+}
+
+/* ─── Snapshot Flash Feedback ───────────────────────────── */
+.bento-zone--snapshot-flash {
+  animation: snapshot-flash 600ms ease-out;
+}
+
+@keyframes snapshot-flash {
+  0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6); }
+  50% { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.3); }
+  100% { box-shadow: var(--shadow-expanded); }
+}
+
+/* ─── Resizing State ─────────────────────────────────────── */
+.bento-zone--resizing {
+  /* Disable transitions during resize — instant width/height feedback */
+  transition: none !important;
+  /* GPU compositing hint for width/height repaints */
+  will-change: width, height;
+  /* Suppress backdrop-filter repaint storms during resize */
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* ─── Resize Handles ─────────────────────────────────────── */
+.bento-zone__resize-handle {
+  position: absolute;
+  z-index: 10;
+  /* Hidden by default, revealed on zone hover */
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+}
+
+/* Show edge handles when zone is hovered */
+.bento-zone--expanded:hover .bento-zone__resize-handle {
+  opacity: 1;
+}
+
+/* ── East (right edge) handle ── */
+.bento-zone__resize-handle--e {
+  top: 12px;
+  right: 0;
+  bottom: 12px;
+  width: 6px;
+  cursor: ew-resize;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.bento-zone__resize-handle--e:hover,
+.bento-zone--resizing .bento-zone__resize-handle--e {
+  background: var(--zone-accent, var(--accent-blue));
+  opacity: 0.5;
+}
+
+/* ── South (bottom edge) handle ── */
+.bento-zone__resize-handle--s {
+  left: 12px;
+  right: 12px;
+  bottom: 0;
+  height: 6px;
+  cursor: ns-resize;
+  border-radius: 3px;
+  background: transparent;
+}
+
+.bento-zone__resize-handle--s:hover,
+.bento-zone--resizing .bento-zone__resize-handle--s {
+  background: var(--zone-accent, var(--accent-blue));
+  opacity: 0.5;
+}
+
+/* ── Southeast (corner) handle — always visible when expanded ── */
+.bento-zone__resize-handle--se {
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  border-right: 2px solid var(--zone-accent, var(--accent-blue));
+  border-bottom: 2px solid var(--zone-accent, var(--accent-blue));
+  border-bottom-right-radius: var(--radius-expanded, 12px);
+  /* Corner handle is always visible (not gated by hover) */
+  opacity: 0.6;
+}
+
+.bento-zone__resize-handle--se:hover {
+  opacity: 1;
+}
+
+/* During active resize, force all handles visible */
+.bento-zone--resizing .bento-zone__resize-handle {
+  opacity: 1;
+}
+
+/* ─── Ghost Card (drag placeholder during reorder) ──────── */
+.bento-zone__ghost-card {
+  background: var(--surface-hover);
+  border: 2px dashed var(--zone-accent, var(--accent-blue));
+  border-radius: var(--radius-card);
+  opacity: 0.5;
+  pointer-events: none;
+  min-height: 80px;
+}

@@ -1,0 +1,361 @@
+/**
+ * App — Root component for BentoDesk.
+ *
+ * Responsibilities:
+ * - Initialize hit-testing (setIgnoreCursorEvents on mount)
+ * - Load zones and settings from backend on mount
+ * - Listen for file_changed and resolution_changed events
+ * - Render ZoneContainer, ContextMenu, and SettingsPanel
+ * - Register global keyboard shortcuts
+ */
+import { Component, onMount, onCleanup, Show, createEffect } from "solid-js";
+import {
+  enablePassthrough,
+  startPolling,
+  stopPolling,
+  acquireModalLock,
+} from "./services/hitTest";
+import {
+  startDragDropListener,
+  stopDragDropListener,
+} from "./services/dropTarget";
+import {
+  onFileChanged,
+  onResolutionChanged,
+  onSettingsChanged,
+  onTrayNewZone,
+  onTraySettings,
+  onTrayAbout,
+  onTrayAutoOrganize,
+  combineCleanups,
+  type EventCleanup,
+} from "./services/events";
+import { registerHotkeys, type HotkeyHandlers } from "./services/hotkeys";
+import { preloadIcons } from "./services/ipc";
+import {
+  loadZones,
+  handleFileChanged,
+  removeItem,
+  createZone,
+  zonesStore,
+} from "./stores/zones";
+import { loadSettings, applySettings } from "./stores/settings";
+import {
+  expandZone,
+  collapseZone,
+  collapseAllZones,
+  isZoneExpanded,
+  toggleZoneExpanded,
+  getFocusedZoneId,
+  setFocusedZone,
+  getSelectedItem,
+  clearSelection,
+  selectItem,
+  openSearch,
+  closeSearch,
+  getSearchActiveZone,
+  hideContextMenu,
+  closeSettingsPanel,
+  isSettingsPanelOpen,
+  openSettingsPanel,
+  openSmartGroupDialog,
+} from "./stores/ui";
+import { openFile } from "./services/ipc";
+import { openAboutDialog, isAnyModalOpen } from "./stores/ui";
+import { applyCurrentTheme } from "./themes";
+import { t } from "./i18n";
+import ZoneContainer from "./components/ZoneContainer";
+import ContextMenu from "./components/ContextMenu/ContextMenu";
+import SettingsPanel from "./components/Settings/SettingsPanel";
+import ZoneEditor from "./components/ZoneEditor/ZoneEditor";
+import SnapshotPicker from "./components/SnapshotPicker/SnapshotPicker";
+import About from "./components/About/About";
+import SmartGroupSuggestor from "./components/SmartGroup/SmartGroupSuggestor";
+import DragPreview from "./components/DragPreview";
+
+const App: Component = () => {
+  let eventCleanup: EventCleanup | null = null;
+  let hotkeyCleanup: (() => void) | null = null;
+
+  onMount(async () => {
+    // 1. Enable click-through passthrough for the overlay window,
+    //    start the cursor-position polling loop for hit detection,
+    //    and start the OS-level drag-drop listener for Explorer file drops
+    await enablePassthrough();
+    startPolling();
+    await startDragDropListener();
+
+    // 2. Apply saved theme immediately (from localStorage, before backend responds)
+    applyCurrentTheme();
+
+    // 3. Load initial data from backend
+    await Promise.all([loadZones(), loadSettings()]);
+
+    // 4. Set up event listeners from backend
+    const cleanups = await Promise.all([
+      onFileChanged((payload) => {
+        handleFileChanged(payload.event_type, payload.path, payload.old_path);
+      }),
+      onResolutionChanged((_payload) => {
+        // Zones use relative coordinates, so positions auto-adjust.
+        // Reload zones to get any backend-side bound corrections.
+        void loadZones();
+      }),
+      onSettingsChanged((payload) => {
+        applySettings(payload);
+      }),
+      onTrayNewZone(() => {
+        // Create a new zone with auto-incrementing name
+        const existingNames = new Set(zonesStore.zones.map((z) => z.name));
+        let name = t("appNewZonePrefix");
+        let counter = 2;
+        while (existingNames.has(name)) {
+          name = `${t("appNewZonePrefix")} ${counter}`;
+          counter++;
+        }
+        // Stagger position slightly based on zone count to avoid overlap
+        const offset = zonesStore.zones.length * 3;
+        void createZone(
+          name,
+          "folder",
+          { x_percent: 35 + offset, y_percent: 30 + offset },
+          { w_percent: 25, h_percent: 40 }
+        );
+      }),
+      onTraySettings(() => {
+        openSettingsPanel();
+      }),
+      onTrayAbout(() => {
+        openAboutDialog();
+      }),
+      onTrayAutoOrganize(() => {
+        // Open smart group dialog for the first zone, or create one if none exist
+        const zones = zonesStore.zones;
+        if (zones.length > 0) {
+          openSmartGroupDialog(zones[0].id);
+        } else {
+          // Create a default zone first, then open the dialog
+          void createZone(
+            t("appAutoOrganize"),
+            "lightning",
+            { x_percent: 30, y_percent: 20 },
+            { w_percent: 30, h_percent: 50 }
+          ).then((zone) => {
+            if (zone) {
+              openSmartGroupDialog(zone.id);
+            }
+          });
+        }
+      }),
+    ]);
+    eventCleanup = combineCleanups(...cleanups);
+
+    // 5. Register keyboard shortcuts
+    hotkeyCleanup = registerHotkeys(createHotkeyHandlers());
+
+    // 6. Preload icons for all visible zone items
+    const allPaths = zonesStore.zones.flatMap((z) =>
+      z.items.map((i) => i.path)
+    );
+    if (allPaths.length > 0) {
+      void preloadIcons(allPaths);
+    }
+  });
+
+  // When any modal opens, acquire a modal lock to disable passthrough
+  // so that clicks on modal overlays don't pass through to the desktop.
+  let releaseModalLock: (() => void) | null = null;
+  createEffect(() => {
+    if (isAnyModalOpen()) {
+      if (!releaseModalLock) {
+        releaseModalLock = acquireModalLock();
+      }
+    } else {
+      if (releaseModalLock) {
+        releaseModalLock();
+        releaseModalLock = null;
+      }
+    }
+  });
+
+  onCleanup(() => {
+    releaseModalLock?.();
+    stopPolling();
+    stopDragDropListener();
+    eventCleanup?.();
+    hotkeyCleanup?.();
+  });
+
+  return (
+    <div
+      id="desktop-overlay"
+      style={{
+        width: "100vw",
+        height: "100vh",
+        position: "relative",
+      }}
+    >
+      <Show
+        when={!zonesStore.loading}
+        fallback={null}
+      >
+        <ZoneContainer />
+      </Show>
+      <ContextMenu />
+      <SettingsPanel />
+      <ZoneEditor />
+      <SnapshotPicker />
+      <About />
+      <SmartGroupSuggestor />
+      <DragPreview />
+      <Show when={zonesStore.error}>
+        <div
+          style={{
+            position: "fixed",
+            bottom: "20px",
+            right: "20px",
+            background: "rgba(239, 68, 68, 0.9)",
+            color: "white",
+            padding: "12px 20px",
+            "border-radius": "8px",
+            "font-size": "13px",
+            "pointer-events": "auto",
+            "z-index": "3000",
+            "max-width": "400px",
+          }}
+        >
+          {zonesStore.error}
+        </div>
+      </Show>
+    </div>
+  );
+};
+
+// ─── Hotkey handler factory ──────────────────────────────────
+
+function createHotkeyHandlers(): HotkeyHandlers {
+  return {
+    onTab: (_e) => {
+      // Cycle focus between zones
+      const zones = zonesStore.zones;
+      if (zones.length === 0) return;
+
+      const currentFocused = getFocusedZoneId();
+      let nextIndex = 0;
+
+      if (currentFocused) {
+        const currentIndex = zones.findIndex((z) => z.id === currentFocused);
+        nextIndex = (currentIndex + 1) % zones.length;
+      }
+
+      setFocusedZone(zones[nextIndex].id);
+    },
+
+    onEnter: (_e) => {
+      // Open focused/selected item
+      const sel = getSelectedItem();
+      if (sel) {
+        const zone = zonesStore.zones.find((z) => z.id === sel.zoneId);
+        const item = zone?.items.find((i) => i.id === sel.itemId);
+        if (item) {
+          void openFile(item.path);
+        }
+      }
+    },
+
+    onSpace: (_e) => {
+      // Toggle expand/collapse on focused zone
+      const focused = getFocusedZoneId();
+      if (focused) {
+        toggleZoneExpanded(focused);
+      }
+    },
+
+    onArrowUp: (_e) => {
+      navigateGrid(0, -1);
+    },
+
+    onArrowDown: (_e) => {
+      navigateGrid(0, 1);
+    },
+
+    onArrowLeft: (_e) => {
+      navigateGrid(-1, 0);
+    },
+
+    onArrowRight: (_e) => {
+      navigateGrid(1, 0);
+    },
+
+    onDelete: (_e) => {
+      const sel = getSelectedItem();
+      if (sel) {
+        void removeItem(sel.zoneId, sel.itemId).then(() => {
+          clearSelection();
+        });
+      }
+    },
+
+    onCtrlF: (_e) => {
+      // Open search in focused zone
+      const focused = getFocusedZoneId();
+      if (focused && isZoneExpanded(focused)) {
+        openSearch(focused);
+      }
+    },
+
+    onEscape: (_e) => {
+      // Close in priority: search > context menu > settings > expanded zone
+      if (getSearchActiveZone()) {
+        closeSearch();
+      } else if (isSettingsPanelOpen()) {
+        closeSettingsPanel();
+      } else {
+        hideContextMenu();
+        collapseAllZones();
+        clearSelection();
+      }
+    },
+  };
+}
+
+/**
+ * Navigate within the focused zone's item grid.
+ */
+function navigateGrid(dx: number, dy: number): void {
+  const focusedZone = getFocusedZoneId();
+  if (!focusedZone) return;
+
+  const zone = zonesStore.zones.find((z) => z.id === focusedZone);
+  if (!zone || zone.items.length === 0) return;
+
+  // Ensure zone is expanded
+  if (!isZoneExpanded(focusedZone)) {
+    expandZone(focusedZone);
+    return;
+  }
+
+  const sel = getSelectedItem();
+  const cols = zone.grid_columns || 4;
+
+  if (!sel || sel.zoneId !== focusedZone) {
+    // Select first item
+    selectItem(focusedZone, zone.items[0].id);
+    return;
+  }
+
+  const currentIndex = zone.items.findIndex((i) => i.id === sel.itemId);
+  if (currentIndex === -1) return;
+
+  const currentRow = Math.floor(currentIndex / cols);
+  const currentCol = currentIndex % cols;
+  const newRow = currentRow + dy;
+  const newCol = currentCol + dx;
+  const newIndex = newRow * cols + newCol;
+
+  if (newIndex >= 0 && newIndex < zone.items.length && newCol >= 0 && newCol < cols) {
+    selectItem(focusedZone, zone.items[newIndex].id);
+  }
+}
+
+export default App;

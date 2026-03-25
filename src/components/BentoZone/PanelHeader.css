@@ -1,0 +1,74 @@
+/* PanelHeader — expanded zone header bar */
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 var(--spacing-lg);
+  gap: var(--spacing-sm);
+  flex-shrink: 0;
+  cursor: grab;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.panel-header:active {
+  cursor: grabbing;
+}
+
+.panel-header__icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.panel-header__title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.3px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.panel-header__badge {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-primary);
+  background: var(--zone-accent, var(--badge-bg));
+  border-radius: var(--radius-badge);
+  padding: 2px 9px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.panel-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+}
+
+.panel-header__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  transition: all var(--transition-fast, 150ms ease-out);
+  cursor: pointer;
+}
+
+.panel-header__btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.panel-header__btn--close:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--accent-red);
+}
