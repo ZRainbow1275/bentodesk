@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&color=DD2476&label=%E4%B8%8B%E8%BD%BD" alt="下载"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/ZRainbow1275/bentodesk?style=flat-square&color=3b82f6" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/%E5%8D%8F%E8%AE%AE-AGPL--3.0-3b82f6?style=flat-square" alt="AGPL-3.0"></a>
   <img src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%2010%20%2F%2011-0078D6?style=flat-square" alt="Windows">
   <img src="https://img.shields.io/badge/Tauri-v2-FFC131?style=flat-square" alt="Tauri v2">
   <a href="https://github.com/ZRainbow1275/bentodesk/actions"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/release.yml?style=flat-square&label=%E6%9E%84%E5%BB%BA" alt="构建状态"></a>
@@ -211,7 +211,7 @@ bentodesk/
 
 ## 开源协议
 
-[MIT](LICENSE) — 自由使用，自由修改。
+[AGPL-3.0](LICENSE) — 自由使用与修改，衍生作品须以相同协议开源。
 
 ---
 

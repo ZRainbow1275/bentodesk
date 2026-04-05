@@ -3,7 +3,7 @@ name = "bentodesk"
 version = "0.1.0"
 edition = "2021"
 description = "Zero-interference desktop visual organizer"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 default-run = "bentodesk"
 
 [dependencies]
