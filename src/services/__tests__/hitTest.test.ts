@@ -1,0 +1,292 @@
+/**
+ * Tests for the hit-test state machine.
+ *
+ * Mocks @tauri-apps/api/window to avoid native Tauri dependencies.
+ * Focuses on: state transitions, drag/modal locks, grace period, zone registration.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// ─── Mock Tauri window API ──────────────────────────────────
+
+const mockSetIgnoreCursorEvents = vi.fn<(ignore: boolean) => Promise<void>>().mockResolvedValue(undefined);
+const mockOuterPosition = vi.fn().mockResolvedValue({ x: 0, y: 0 });
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    setIgnoreCursorEvents: mockSetIgnoreCursorEvents,
+    outerPosition: mockOuterPosition,
+  }),
+  cursorPosition: vi.fn().mockResolvedValue({ x: 0, y: 0 }),
+}));
+
+// Import after mock is set up
+import {
+  enablePassthrough,
+  disablePassthrough,
+  isPassthroughEnabled,
+  registerZoneElement,
+  unregisterZoneElement,
+  acquireDragLock,
+  acquireModalLock,
+  startPolling,
+  stopPolling,
+  createHitTestHandlers,
+} from "../hitTest";
+
+// ─── Helpers ────────────────────────────────────────────────
+
+/**
+ * Flush microtask queue so fire-and-forget promises (void setPassthrough)
+ * settle. Uses a real microtask, not setTimeout (which fake timers intercept).
+ */
+async function flush(): Promise<void> {
+  // A resolved promise callback runs on the microtask queue, not the timer queue.
+  // Chaining two ensures that even nested microtasks from the mock settle.
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+// ─── Tests ──────────────────────────────────────────────────
+
+describe("hitTest state machine", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stopPolling(); // Ensure clean polling state
+  });
+
+  afterEach(() => {
+    stopPolling();
+    vi.restoreAllMocks();
+  });
+
+  // ── enablePassthrough / disablePassthrough ──
+
+  describe("enablePassthrough", () => {
+    it("should call setIgnoreCursorEvents(true) and set state to PASSTHROUGH", async () => {
+      await enablePassthrough();
+      expect(mockSetIgnoreCursorEvents).toHaveBeenCalledWith(true);
+      expect(isPassthroughEnabled()).toBe(true);
+    });
+  });
+
+  describe("disablePassthrough", () => {
+    it("should call setIgnoreCursorEvents(false)", async () => {
+      await enablePassthrough();
+      mockSetIgnoreCursorEvents.mockClear();
+      await disablePassthrough();
+      expect(mockSetIgnoreCursorEvents).toHaveBeenCalledWith(false);
+      expect(isPassthroughEnabled()).toBe(false);
+    });
+
+    it("should be idempotent when already disabled", async () => {
+      await disablePassthrough();
+      mockSetIgnoreCursorEvents.mockClear();
+      await disablePassthrough();
+      expect(mockSetIgnoreCursorEvents).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Zone registration ──
+
+  describe("registerZoneElement / unregisterZoneElement", () => {
+    it("should register and unregister zone elements without errors", () => {
+      const el = document.createElement("div");
+      registerZoneElement(el);
+      unregisterZoneElement(el);
+    });
+
+    it("should allow registering multiple elements", () => {
+      const el1 = document.createElement("div");
+      const el2 = document.createElement("div");
+      registerZoneElement(el1);
+      registerZoneElement(el2);
+      unregisterZoneElement(el1);
+      unregisterZoneElement(el2);
+    });
+
+    it("should handle unregistering an element that was never registered", () => {
+      const el = document.createElement("div");
+      unregisterZoneElement(el);
+    });
+  });
+
+  // ── Drag lock ──
+
+  describe("acquireDragLock", () => {
+    it("should disable passthrough when drag lock is acquired", async () => {
+      await enablePassthrough();
+      mockSetIgnoreCursorEvents.mockClear();
+
+      const release = acquireDragLock();
+      await flush();
+
+      expect(mockSetIgnoreCursorEvents).toHaveBeenCalledWith(false);
+      expect(isPassthroughEnabled()).toBe(false);
+      release();
+    });
+
+    it("should return a release function that can be called once", async () => {
+      await enablePassthrough();
+      const release = acquireDragLock();
+      await flush();
+
+      release();
+      await flush();
+      // Calling release again should be a no-op
+      release();
+      await flush();
+    });
+
+    it("should keep passthrough disabled with nested drag locks", async () => {
+      await enablePassthrough();
+
+      const release1 = acquireDragLock();
+      const release2 = acquireDragLock();
+      await flush();
+
+      release1();
+      await flush();
+      // Still locked by release2
+      expect(isPassthroughEnabled()).toBe(false);
+
+      release2();
+      await flush();
+    });
+  });
+
+  // ── Modal lock ──
+
+  describe("acquireModalLock", () => {
+    it("should disable passthrough when modal lock is acquired", async () => {
+      await enablePassthrough();
+      mockSetIgnoreCursorEvents.mockClear();
+
+      const release = acquireModalLock();
+      await flush();
+
+      expect(mockSetIgnoreCursorEvents).toHaveBeenCalledWith(false);
+      expect(isPassthroughEnabled()).toBe(false);
+      release();
+    });
+
+    it("should return a release function that can be called once", async () => {
+      await enablePassthrough();
+      const release = acquireModalLock();
+      await flush();
+
+      release();
+      await flush();
+      // Second call should be no-op
+      release();
+      await flush();
+    });
+
+    it("should keep passthrough disabled with nested modal locks", async () => {
+      await enablePassthrough();
+
+      const release1 = acquireModalLock();
+      const release2 = acquireModalLock();
+      await flush();
+
+      release1();
+      await flush();
+      expect(isPassthroughEnabled()).toBe(false);
+
+      release2();
+      await flush();
+    });
+
+    it("should restore PASSTHROUGH state when all modal locks released and no zones hovered", async () => {
+      await enablePassthrough();
+      const release = acquireModalLock();
+      await flush();
+
+      expect(isPassthroughEnabled()).toBe(false);
+
+      release();
+      await flush();
+
+      expect(isPassthroughEnabled()).toBe(true);
+    });
+  });
+
+  // ── Drag lock + Modal lock interaction ──
+
+  describe("drag and modal lock interaction", () => {
+    it("should keep passthrough disabled when modal released but drag still active", async () => {
+      await enablePassthrough();
+
+      const releaseDrag = acquireDragLock();
+      const releaseModal = acquireModalLock();
+      await flush();
+
+      releaseModal();
+      await flush();
+
+      // Drag lock still active
+      expect(isPassthroughEnabled()).toBe(false);
+
+      releaseDrag();
+      await flush();
+    });
+
+    it("should keep passthrough disabled when drag released but modal still active", async () => {
+      await enablePassthrough();
+
+      const releaseDrag = acquireDragLock();
+      await flush();
+      const releaseModal = acquireModalLock();
+      await flush();
+
+      releaseDrag();
+      await flush();
+
+      // Modal lock still active
+      expect(isPassthroughEnabled()).toBe(false);
+
+      releaseModal();
+      await flush();
+    });
+  });
+
+  // ── createHitTestHandlers ──
+
+  describe("createHitTestHandlers", () => {
+    it("should return onPointerEnter and onPointerLeave handlers", () => {
+      const handlers = createHitTestHandlers();
+      expect(typeof handlers.onPointerEnter).toBe("function");
+      expect(typeof handlers.onPointerLeave).toBe("function");
+    });
+
+    it("onPointerEnter should call disablePassthrough", async () => {
+      await enablePassthrough();
+      mockSetIgnoreCursorEvents.mockClear();
+
+      const handlers = createHitTestHandlers();
+      handlers.onPointerEnter();
+      await flush();
+
+      expect(mockSetIgnoreCursorEvents).toHaveBeenCalledWith(false);
+    });
+
+    it("onPointerLeave should be a no-op (poller handles transition)", () => {
+      const handlers = createHitTestHandlers();
+      handlers.onPointerLeave();
+    });
+  });
+
+  // ── Polling lifecycle ──
+
+  describe("startPolling / stopPolling", () => {
+    it("should start and stop without errors", () => {
+      startPolling();
+      stopPolling();
+    });
+
+    it("startPolling should be idempotent", () => {
+      startPolling();
+      startPolling();
+      stopPolling();
+    });
+  });
+});

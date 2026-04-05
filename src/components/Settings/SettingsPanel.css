@@ -444,3 +444,153 @@
   background: rgba(239, 68, 68, 0.12);
   color: var(--accent-red);
 }
+
+/* ─── Settings Row Description ───────────── */
+
+.settings-row__desc {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted);
+  margin: -4px 0 6px 0;
+  line-height: 1.4;
+}
+
+/* ─── Number Input ───────────────────────── */
+
+.settings-row__number-input {
+  width: 72px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-zen);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family);
+  padding: 6px 10px;
+  outline: none;
+  text-align: center;
+  transition: border-color var(--transition-fast, 150ms ease-out), box-shadow var(--transition-fast, 150ms ease-out);
+}
+
+.settings-row__number-input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+/* ─── Plugin Section ─────────────────────── */
+
+.plugin-install-btn {
+  width: 100%;
+  text-align: center;
+  margin-bottom: var(--spacing-md, 12px);
+}
+
+.plugin-empty,
+.plugin-loading {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  padding: var(--spacing-xl, 20px) 0;
+}
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm, 8px);
+}
+
+.plugin-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-zen);
+  border-radius: 10px;
+  padding: var(--spacing-md, 12px);
+  transition: border-color var(--transition-fast, 150ms ease-out);
+}
+
+.plugin-card:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.plugin-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.plugin-card__info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plugin-card__name {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-primary);
+}
+
+.plugin-card__version {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.plugin-card__badge {
+  font-size: 9px;
+  font-weight: var(--font-weight-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.plugin-card__badge--theme {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.plugin-card__badge--widget {
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+}
+
+.plugin-card__badge--organizer {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86efac;
+}
+
+.plugin-card__author {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.plugin-card__desc {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.plugin-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm, 8px);
+}
+
+.plugin-card__confirm-text {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--accent-red);
+  flex: 1;
+}
+
+/* ─── Danger Button ──────────────────────── */
+
+.settings-btn--danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red);
+}
+
+.settings-btn--danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+}

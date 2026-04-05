@@ -40,6 +40,18 @@ let animFrameId: number | null = null;
 /** Frame counter for throttling polls in low-priority states. */
 let frameCount = 0;
 
+/** Last known cursor position for idle detection in PASSTHROUGH state. */
+let lastCursorX = -1;
+let lastCursorY = -1;
+/** Consecutive frames where cursor has not moved (PASSTHROUGH only). */
+let idleFrameCount = 0;
+/** True when poller has switched to slow setTimeout mode due to idle. */
+let idleMode = false;
+/** setTimeout handle used in idle mode. */
+let idleTimerId: ReturnType<typeof setTimeout> | null = null;
+/** Frames of no movement before dropping to idle setTimeout polling (~5s at 30fps). */
+const IDLE_FRAME_THRESHOLD = 150;
+
 /** Current state machine state. */
 let state: HitTestState = "PASSTHROUGH";
 
@@ -293,6 +305,34 @@ async function pollCursorPosition(): Promise<void> {
 
   try {
     const pos = await cursorPosition();
+
+    // Idle detection: track cursor movement in PASSTHROUGH to throttle IPC polling
+    if (state === "PASSTHROUGH") {
+      if (pos.x === lastCursorX && pos.y === lastCursorY) {
+        idleFrameCount++;
+        if (!idleMode && idleFrameCount >= IDLE_FRAME_THRESHOLD) {
+          enterIdleMode();
+        }
+      } else {
+        // Cursor moved — exit idle mode if active
+        if (idleMode) {
+          exitIdleMode();
+          return; // exitIdleMode schedules the next rAF poll; don't double-schedule
+        }
+        idleFrameCount = 0;
+        lastCursorX = pos.x;
+        lastCursorY = pos.y;
+      }
+    } else {
+      // Not in PASSTHROUGH — always reset idle state so rAF resumes if we return to it
+      if (idleMode) {
+        idleMode = false;
+        idleFrameCount = 0;
+      }
+      lastCursorX = pos.x;
+      lastCursorY = pos.y;
+    }
+
     let foundZone: HTMLElement | null = null;
 
     for (const el of zoneElements) {
@@ -327,6 +367,16 @@ async function pollCursorPosition(): Promise<void> {
 
 function scheduleNextPoll(): void {
   if (!pollingActive) return;
+
+  // In idle mode (PASSTHROUGH + cursor stationary), use slow setTimeout instead of rAF
+  if (idleMode) {
+    idleTimerId = setTimeout(() => {
+      idleTimerId = null;
+      void pollCursorPosition();
+    }, 100);
+    return;
+  }
+
   animFrameId = requestAnimationFrame(() => {
     // Increment with wraparound to prevent unbounded growth.
     // Using bitwise OR 0 to keep it as a 32-bit integer.
@@ -339,6 +389,35 @@ function scheduleNextPoll(): void {
     }
     void pollCursorPosition();
   });
+}
+
+/**
+ * Enter idle polling mode: cancel rAF loop, switch to setTimeout(100ms).
+ * Called when cursor has been stationary in PASSTHROUGH for IDLE_FRAME_THRESHOLD frames.
+ */
+function enterIdleMode(): void {
+  if (idleMode) return;
+  idleMode = true;
+  // Cancel current rAF if pending — idle mode uses setTimeout instead
+  if (animFrameId !== null) {
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
+}
+
+/**
+ * Exit idle polling mode: reset idle counters and resume requestAnimationFrame.
+ * Called when cursor movement is detected.
+ */
+function exitIdleMode(): void {
+  if (!idleMode) return;
+  idleMode = false;
+  idleFrameCount = 0;
+  if (idleTimerId !== null) {
+    clearTimeout(idleTimerId);
+    idleTimerId = null;
+  }
+  scheduleNextPoll();
 }
 
 /**
@@ -356,10 +435,16 @@ export function startPolling(): void {
  */
 export function stopPolling(): void {
   pollingActive = false;
+  idleMode = false;
+  idleFrameCount = 0;
   clearGraceTimer();
   if (animFrameId !== null) {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
+  }
+  if (idleTimerId !== null) {
+    clearTimeout(idleTimerId);
+    idleTimerId = null;
   }
 }
 

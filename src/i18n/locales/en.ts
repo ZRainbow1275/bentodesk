@@ -157,6 +157,34 @@ const en: Translations = {
   themeImportError: "Theme import failed",
   themeJsonPlaceholder: "Paste theme JSON...",
   developerOptions: "Developer Options",
+
+  // ─── Startup Management ─────────────────────────────────────
+  settingsGroupStartup: "Startup",
+  settingsStartupHighPriority: "High Priority Startup",
+  settingsStartupHighPriorityDesc: "Launch immediately after login, no delay",
+  settingsCrashRestart: "Crash Auto Restart",
+  settingsCrashRestartDesc: "Monitor crashes via Guardian and auto restart",
+  settingsCrashMaxRetries: "Max Retries",
+  settingsCrashWindowSecs: "Crash Window (sec)",
+  settingsSafeStartHibernation: "Hibernate Safe Recovery",
+  settingsSafeStartHibernationDesc: "Delay startup after hibernate to ensure stability",
+  settingsHibernateDelay: "Resume Delay",
+  settingsHibernateDelayMs: "{value}ms",
+
+  // ─── Plugin Manager ─────────────────────────────────────────
+  settingsGroupPlugins: "Plugins",
+  pluginInstall: "Install Plugin...",
+  pluginUninstall: "Uninstall",
+  pluginUninstallConfirm: "Are you sure you want to uninstall {name}?",
+  pluginEnable: "Enable",
+  pluginDisable: "Disable",
+  pluginTypeTheme: "Theme",
+  pluginTypeWidget: "Widget",
+  pluginTypeOrganizer: "Organizer",
+  pluginEmpty: "No plugins installed",
+  pluginVersion: "v{version}",
+  pluginInstalledSuccess: "Plugin installed successfully",
+  pluginUninstalledSuccess: "Plugin uninstalled",
 };
 
 export default en;

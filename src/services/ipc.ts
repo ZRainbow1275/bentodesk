@@ -15,6 +15,8 @@ import type {
 } from "../types/zone";
 import type { AppSettings, SettingsUpdate } from "../types/settings";
 import type { SystemInfo, MemoryInfo, DesktopSnapshot } from "../types/system";
+import type { JsonTheme } from "../themes/types";
+import type { InstalledPlugin } from "../types/plugins";
 
 // ─── Zone Management ─────────────────────────────────────────
 
@@ -189,4 +191,40 @@ export async function startDrag(filePaths: string[]): Promise<string> {
 
 export async function getMemoryUsage(): Promise<MemoryInfo> {
   return invoke<MemoryInfo>("get_memory_usage");
+}
+
+// ─── JSON Theme Plugin ──────────────────────────────────────
+
+export async function listThemes(): Promise<JsonTheme[]> {
+  return invoke<JsonTheme[]>("list_themes");
+}
+
+export async function getTheme(id: string): Promise<JsonTheme> {
+  return invoke<JsonTheme>("get_theme", { id });
+}
+
+export async function getActiveTheme(): Promise<JsonTheme> {
+  return invoke<JsonTheme>("get_active_theme");
+}
+
+export async function setActiveTheme(id: string): Promise<JsonTheme> {
+  return invoke<JsonTheme>("set_active_theme", { id });
+}
+
+// ─── Plugin Management ──────────────────────────────────────
+
+export async function listPlugins(): Promise<InstalledPlugin[]> {
+  return invoke<InstalledPlugin[]>("list_plugins");
+}
+
+export async function installPlugin(path: string): Promise<InstalledPlugin> {
+  return invoke<InstalledPlugin>("install_plugin", { path });
+}
+
+export async function uninstallPlugin(id: string): Promise<void> {
+  return invoke<void>("uninstall_plugin", { id });
+}
+
+export async function togglePlugin(id: string, enabled: boolean): Promise<InstalledPlugin> {
+  return invoke<InstalledPlugin>("toggle_plugin", { id, enabled });
 }

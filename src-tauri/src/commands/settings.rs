@@ -7,10 +7,57 @@
 //!   - icon_cache_size    → Resize the in-memory LRU cache
 //!   - ghost_layer_enabled → Attach / detach the desktop overlay
 
+use std::path::Path;
+
 use tauri::{Emitter, Manager, State};
 
 use crate::config::settings::{AppSettings, SettingsUpdate};
 use crate::AppState;
+
+/// System-protected directory prefixes that must not be used as a desktop path.
+const PROTECTED_PREFIXES: &[&str] = &[
+    r"c:\windows",
+    r"c:\program files",
+    r"c:\program files (x86)",
+    r"c:\programdata",
+    r"c:\$recycle.bin",
+    r"c:\system volume information",
+];
+
+/// Validate that a `desktop_path` value is a real, existing directory and is
+/// not located under a Windows system-protected directory tree.
+/// Strip the Windows extended-length path prefix (`\\?\`).
+fn strip_unc(s: &str) -> &str {
+    s.strip_prefix(r"\\?\").unwrap_or(s)
+}
+
+fn validate_desktop_path(desktop_path: &str) -> Result<(), String> {
+    let path = Path::new(desktop_path);
+
+    if !path.exists() {
+        return Err(format!("Desktop path does not exist: {desktop_path}"));
+    }
+    if !path.is_dir() {
+        return Err(format!("Desktop path is not a directory: {desktop_path}"));
+    }
+
+    // Canonicalize to resolve symlinks / junctions, then compare lowercase.
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| format!("Cannot resolve desktop path: {e}"))?;
+    let canonical_lower = strip_unc(&canonical.to_string_lossy())
+        .to_lowercase()
+        .replace('/', "\\");
+
+    for prefix in PROTECTED_PREFIXES {
+        if canonical_lower.starts_with(prefix) {
+            return Err(format!(
+                "Desktop path must not be inside a system-protected directory ({prefix}): {desktop_path}"
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
@@ -25,15 +72,33 @@ pub async fn update_settings(
 ) -> Result<AppSettings, String> {
     // Capture which toggles changed so we can fire side effects after the lock
     // is released.
-    let (old_launch, old_taskbar, old_cache_size, old_ghost) = {
+    let (
+        old_launch,
+        old_taskbar,
+        old_cache_size,
+        old_ghost,
+        old_high_priority,
+        old_guardian,
+        old_crash_max,
+        old_crash_window,
+    ) = {
         let s = state.settings.lock().map_err(|e| e.to_string())?;
         (
             s.launch_at_startup,
             s.show_in_taskbar,
             s.icon_cache_size,
             s.ghost_layer_enabled,
+            s.startup_high_priority,
+            s.crash_restart_enabled,
+            s.crash_max_retries,
+            s.crash_window_secs,
         )
     };
+
+    // Validate desktop_path before applying the update.
+    if let Some(ref dp) = updates.desktop_path {
+        validate_desktop_path(dp)?;
+    }
 
     let result = {
         let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
@@ -44,9 +109,15 @@ pub async fn update_settings(
 
     // ── Side effects ─────────────────────────────────────────────
 
-    // 1. Launch at Startup — Windows Registry
-    if result.launch_at_startup != old_launch {
-        if let Err(e) = apply_launch_at_startup(result.launch_at_startup) {
+    // 1. Launch at Startup — Task Scheduler
+    //    Reconfigure whenever any startup-related setting changes.
+    let startup_changed = result.launch_at_startup != old_launch
+        || result.startup_high_priority != old_high_priority
+        || result.crash_restart_enabled != old_guardian
+        || result.crash_max_retries != old_crash_max
+        || result.crash_window_secs != old_crash_window;
+    if startup_changed {
+        if let Err(e) = apply_launch_at_startup(&state) {
             tracing::error!("Failed to update launch-at-startup: {e}");
         }
     }
@@ -87,76 +158,56 @@ pub async fn update_settings(
     Ok(result)
 }
 
-// ─── Launch at Startup via Windows Registry ──────────────────────────────
+// ─── Launch at Startup via Task Scheduler ─────────────────────────────────
 
-/// Add or remove BentoDesk from the Windows `Run` registry key.
+/// Configure or remove the BentoDesk Task Scheduler entry.
 ///
-/// Key: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-/// Value name: `BentoDesk`
-fn apply_launch_at_startup(enable: bool) -> Result<(), String> {
-    use windows::Win32::System::Registry::{
-        RegOpenKeyExW, RegDeleteValueW, RegSetValueExW, RegCloseKey,
-        HKEY_CURRENT_USER, KEY_WRITE, REG_SZ,
+/// Delegates to [`crate::startup::configure`] which manages `schtasks.exe`.
+/// On first call, also cleans up the legacy `HKCU\...\Run` registry value.
+fn apply_launch_at_startup(state: &AppState) -> Result<(), String> {
+    let (enabled, high_priority, use_guardian, crash_max, crash_window) = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        (
+            s.launch_at_startup,
+            s.startup_high_priority,
+            s.crash_restart_enabled,
+            s.crash_max_retries,
+            s.crash_window_secs,
+        )
     };
-    use windows::core::PCWSTR;
 
-    let sub_key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
-        .encode_utf16()
-        .collect();
-    let value_name: Vec<u16> = "BentoDesk\0".encode_utf16().collect();
-
-    unsafe {
-        let mut hkey = windows::Win32::System::Registry::HKEY::default();
-
-        let status = RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR(sub_key.as_ptr()),
-            0,
-            KEY_WRITE,
-            &mut hkey,
-        );
-        if status.is_err() {
-            return Err(format!("RegOpenKeyExW failed: {status:?}"));
-        }
-
-        let result = if enable {
-            // Get the current exe path
-            let exe_path = std::env::current_exe()
-                .map_err(|e| format!("Cannot get exe path: {e}"))?;
-            let exe_str = exe_path.to_string_lossy();
-            // Quote the path and encode as wide string with null terminator
-            let value_data: Vec<u16> = format!("\"{exe_str}\"\0").encode_utf16().collect();
-            let byte_len = value_data.len() * 2; // u16 = 2 bytes
-
-            let r = RegSetValueExW(
-                hkey,
-                PCWSTR(value_name.as_ptr()),
-                0,
-                REG_SZ,
-                Some(std::slice::from_raw_parts(
-                    value_data.as_ptr() as *const u8,
-                    byte_len,
-                )),
-            );
-
-            if r.is_ok() {
-                tracing::info!("Registered BentoDesk for startup: {exe_str}");
-            }
-            r
-        } else {
-            // Ignore error if the value doesn't exist
-            let _ = RegDeleteValueW(hkey, PCWSTR(value_name.as_ptr()));
-            tracing::info!("Removed BentoDesk from startup");
-            windows::Win32::Foundation::WIN32_ERROR(0) // ERROR_SUCCESS
-        };
-
-        let _ = RegCloseKey(hkey);
-        if result.is_err() {
-            Err(format!("Registry operation failed: {result:?}"))
-        } else {
-            Ok(())
-        }
+    // Clean up legacy registry key (idempotent, safe to call every time).
+    if let Err(e) = crate::startup::cleanup_legacy_registry() {
+        tracing::warn!("Legacy registry cleanup failed: {e}");
     }
+
+    let app_exe = std::env::current_exe()
+        .map_err(|e| format!("Cannot get exe path: {e}"))?;
+
+    let guardian_exe = app_exe
+        .parent()
+        .map(|p| p.join("guardian.exe"))
+        .unwrap_or_else(|| std::path::PathBuf::from("guardian.exe"));
+
+    let app_data = tauri::Manager::path(&state.app_handle)
+        .app_data_dir()
+        .map_err(|e| format!("Cannot determine app data dir: {e}"))?;
+
+    let crash_settings = crate::startup::CrashSettings {
+        max_retries: crash_max,
+        window_secs: crash_window,
+    };
+
+    crate::startup::configure(
+        enabled,
+        high_priority,
+        use_guardian,
+        &app_exe,
+        &guardian_exe,
+        &app_data,
+        &crash_settings,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ─── Show in Taskbar via Window Extended Styles ──────────────────────────
@@ -206,4 +257,86 @@ fn apply_show_in_taskbar(handle: &tauri::AppHandle, show: bool) -> Result<(), St
         if show { "shown" } else { "hidden" }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_desktop_path (P2-5: system-protected directory guard) ──
+
+    #[test]
+    fn accepts_valid_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = validate_desktop_path(&tmp.path().to_string_lossy());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_nonexistent_path() {
+        let result = validate_desktop_path(r"C:\ThisPathDoesNotExistAtAll_12345");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn rejects_file_path_not_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("notadir.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        let result = validate_desktop_path(&file.to_string_lossy());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a directory"));
+    }
+
+    #[test]
+    fn rejects_windows_system_directory() {
+        // C:\Windows should exist on all Windows machines and be protected
+        let result = validate_desktop_path(r"C:\Windows");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("system-protected"));
+    }
+
+    #[test]
+    fn rejects_program_files_directory() {
+        let result = validate_desktop_path(r"C:\Program Files");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("system-protected"));
+    }
+
+    #[test]
+    fn rejects_program_files_x86_directory() {
+        let result = validate_desktop_path(r"C:\Program Files (x86)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("system-protected"));
+    }
+
+    #[test]
+    fn protected_prefixes_cover_all_known_system_dirs() {
+        let expected = vec![
+            r"c:\windows",
+            r"c:\program files",
+            r"c:\program files (x86)",
+            r"c:\programdata",
+            r"c:\$recycle.bin",
+            r"c:\system volume information",
+        ];
+        for prefix in &expected {
+            assert!(
+                PROTECTED_PREFIXES.contains(prefix),
+                "Missing protected prefix: {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn protected_prefix_check_is_case_insensitive() {
+        // The function canonicalizes and lowercases before checking prefixes,
+        // so C:\WINDOWS should be caught by the c:\windows prefix.
+        // We test the inner logic: canonical_lower.starts_with(prefix).
+        let canonical = r"C:\Windows\Temp";
+        let canonical_lower = canonical.to_lowercase().replace('/', "\\");
+        assert!(canonical_lower.starts_with(r"c:\windows"));
+    }
 }

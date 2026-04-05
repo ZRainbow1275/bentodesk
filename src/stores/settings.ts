@@ -20,6 +20,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   portable_mode: false,
   launch_at_startup: false,
   show_in_taskbar: false,
+  startup_high_priority: false,
+  crash_restart_enabled: false,
+  crash_max_retries: 3,
+  crash_window_secs: 10,
+  safe_start_after_hibernation: true,
+  hibernate_resume_delay_ms: 2000,
 };
 
 const [settings, setSettings] = createSignal<AppSettings>(DEFAULT_SETTINGS);

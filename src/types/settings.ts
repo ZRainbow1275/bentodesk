@@ -16,6 +16,13 @@ export interface AppSettings {
   portable_mode: boolean;
   launch_at_startup: boolean;
   show_in_taskbar: boolean;
+  active_theme?: string | null;  // JSON theme ID (e.g. "ocean-blue")
+  startup_high_priority: boolean;
+  crash_restart_enabled: boolean;
+  crash_max_retries: number;
+  crash_window_secs: number;
+  safe_start_after_hibernation: boolean;
+  hibernate_resume_delay_ms: number;
 }
 
 export interface SettingsUpdate {
@@ -31,4 +38,11 @@ export interface SettingsUpdate {
   portable_mode?: boolean;
   launch_at_startup?: boolean;
   show_in_taskbar?: boolean;
+  active_theme?: string | null;
+  startup_high_priority?: boolean;
+  crash_restart_enabled?: boolean;
+  crash_max_retries?: number;
+  crash_window_secs?: number;
+  safe_start_after_hibernation?: boolean;
+  hibernate_resume_delay_ms?: number;
 }

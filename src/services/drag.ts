@@ -11,7 +11,7 @@
  */
 import { createSignal } from "solid-js";
 import { startDrag } from "./ipc";
-import { reorderItems, moveItem } from "../stores/zones";
+import { reorderItems, moveItem, getZoneById } from "../stores/zones";
 
 /** Minimum pixel movement to detect drag intent */
 const DRAG_THRESHOLD_PX = 5;
@@ -61,25 +61,21 @@ export function updateInternalDragCursor(x: number, y: number): void {
 
 /**
  * Complete the internal drag — reorder within zone or move across zones.
+ * MUST be awaited so the store is updated before the ghost card is removed.
  */
 async function commitInternalDrag(state: InternalDragState): Promise<void> {
   if (state.sourceZoneId === state.targetZoneId) {
-    // Same zone: reorder
-    // We need to figure out the new item order.
-    // The store/IPC expects a full ordered list of item IDs.
-    // This is handled at the ItemGrid level where we know the items.
-    // We emit a custom event that ItemGrid listens to.
-    const event = new CustomEvent("bentodesk:reorder-commit", {
-      detail: {
-        zoneId: state.sourceZoneId,
-        itemId: state.itemId,
-        targetIndex: state.targetIndex,
-      },
-    });
-    document.dispatchEvent(event);
+    // Same zone: reorder — compute new item order from the store directly
+    const zone = getZoneById(state.sourceZoneId);
+    if (!zone) return;
+    const currentIds = zone.items.map((i) => i.id);
+    const filtered = currentIds.filter((id) => id !== state.itemId);
+    const insertAt = Math.min(state.targetIndex, filtered.length);
+    filtered.splice(insertAt, 0, state.itemId);
+    await reorderItems(state.sourceZoneId, filtered);
   } else {
     // Cross-zone: move item
-    void moveItem(state.sourceZoneId, state.targetZoneId, state.itemId);
+    await moveItem(state.sourceZoneId, state.targetZoneId, state.itemId);
   }
 }
 
@@ -205,10 +201,13 @@ export function beginDragTracking(
     }
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = async () => {
     const dragState = internalDrag();
     if (dragState) {
-      void commitInternalDrag(dragState);
+      // MUST await so the store is updated BEFORE the ghost card is removed.
+      // Without await, clearing internalDrag causes items to momentarily
+      // snap back to their old positions (flicker/jump bug).
+      await commitInternalDrag(dragState);
       cancelInternalDrag();
     }
     cleanupListeners();

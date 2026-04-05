@@ -174,6 +174,12 @@ pub fn set_single_icon_position(name: &str, x: i32, y: i32) -> Result<(), BentoD
     writer::set_icon_position_by_name(&folder_view, name, x, y)
 }
 
+/// Return the path where the icon layout backup file would live for a given
+/// data directory. Used by tests and recovery to locate the backup file.
+pub fn backup_file_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(BACKUP_FILENAME)
+}
+
 /// Resolve the BentoDesk data directory for icon layout persistence.
 ///
 /// Uses `dirs::data_dir()` / "BentoDesk" as the base path.

@@ -30,5 +30,12 @@ pnpm-debug.log*
 # Trellis developer state (per-developer, not shared)
 .trellis/.developer/
 
+# AI tools
+.claude/
+.serena/
+
+# Temporary files
+.tmp_frames/
+
 # Tauri debug artifacts
 src-tauri/gen/

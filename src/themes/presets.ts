@@ -435,6 +435,132 @@ export const flatTheme: BentoTheme = {
   radius_badge: "4px",
 };
 
+export const oceanBlueTheme: BentoTheme = {
+  id: "ocean-blue",
+  name_key: "themeOceanBlue",
+  is_builtin: true,
+  preview_colors: ["#082f49", "#0ea5e9", "#e0f2fe", "#0c4a6e"],
+
+  surface_zen: "rgba(8, 47, 73, 0.6)",
+  surface_expanded: "rgba(8, 47, 73, 0.85)",
+  surface_hover: "rgba(14, 165, 233, 0.1)",
+  surface_active: "rgba(14, 165, 233, 0.06)",
+  surface_subtle: "rgba(14, 165, 233, 0.03)",
+
+  border_zen: "rgba(14, 165, 233, 0.15)",
+  border_expanded: "rgba(14, 165, 233, 0.2)",
+  border_hover: "rgba(14, 165, 233, 0.35)",
+
+  text_primary: "#e0f2fe",
+  text_secondary: "#7dd3fc",
+  text_muted: "#0369a1",
+
+  accent_blue: "#0ea5e9",
+  accent_purple: "#a78bfa",
+  accent_green: "#34d399",
+  accent_orange: "#fb923c",
+  accent_pink: "#f472b6",
+  accent_red: "#f87171",
+
+  shadow_zen: "0 2px 8px rgba(0, 0, 0, 0.2), 0 8px 32px rgba(8, 47, 73, 0.4)",
+  shadow_expanded: "0 4px 16px rgba(0, 0, 0, 0.25), 0 16px 48px rgba(8, 47, 73, 0.5)",
+  shadow_item_hover: "0 2px 8px rgba(14, 165, 233, 0.08), 0 8px 24px rgba(0, 0, 0, 0.1)",
+
+  blur_zen: "blur(20px) saturate(160%)",
+  blur_expanded: "blur(24px) saturate(170%)",
+
+  badge_bg: "rgba(14, 165, 233, 0.15)",
+
+  radius_capsule: "24px",
+  radius_expanded: "16px",
+  radius_card: "10px",
+  radius_badge: "10px",
+};
+
+export const roseGoldTheme: BentoTheme = {
+  id: "rose-gold",
+  name_key: "themeRoseGold",
+  is_builtin: true,
+  preview_colors: ["#4c1d27", "#f43f5e", "#fff1f2", "#881337"],
+
+  surface_zen: "rgba(76, 29, 39, 0.6)",
+  surface_expanded: "rgba(76, 29, 39, 0.85)",
+  surface_hover: "rgba(244, 63, 94, 0.1)",
+  surface_active: "rgba(244, 63, 94, 0.06)",
+  surface_subtle: "rgba(244, 63, 94, 0.03)",
+
+  border_zen: "rgba(244, 63, 94, 0.15)",
+  border_expanded: "rgba(244, 63, 94, 0.2)",
+  border_hover: "rgba(244, 63, 94, 0.35)",
+
+  text_primary: "#fff1f2",
+  text_secondary: "#fda4af",
+  text_muted: "#9f1239",
+
+  accent_blue: "#f43f5e",
+  accent_purple: "#c084fc",
+  accent_green: "#4ade80",
+  accent_orange: "#fbbf24",
+  accent_pink: "#f472b6",
+  accent_red: "#ef4444",
+
+  shadow_zen: "0 2px 8px rgba(0, 0, 0, 0.2), 0 8px 32px rgba(76, 29, 39, 0.4)",
+  shadow_expanded: "0 4px 16px rgba(0, 0, 0, 0.25), 0 16px 48px rgba(76, 29, 39, 0.5)",
+  shadow_item_hover: "0 2px 8px rgba(244, 63, 94, 0.08), 0 8px 24px rgba(0, 0, 0, 0.1)",
+
+  blur_zen: "blur(22px) saturate(150%)",
+  blur_expanded: "blur(28px) saturate(160%)",
+
+  badge_bg: "rgba(244, 63, 94, 0.15)",
+
+  radius_capsule: "24px",
+  radius_expanded: "16px",
+  radius_card: "10px",
+  radius_badge: "10px",
+};
+
+export const forestGreenTheme: BentoTheme = {
+  id: "forest-green",
+  name_key: "themeForestGreen",
+  is_builtin: true,
+  preview_colors: ["#142e1a", "#22c55e", "#dcfce7", "#166534"],
+
+  surface_zen: "rgba(20, 46, 26, 0.6)",
+  surface_expanded: "rgba(20, 46, 26, 0.85)",
+  surface_hover: "rgba(34, 197, 94, 0.1)",
+  surface_active: "rgba(34, 197, 94, 0.06)",
+  surface_subtle: "rgba(34, 197, 94, 0.03)",
+
+  border_zen: "rgba(34, 197, 94, 0.15)",
+  border_expanded: "rgba(34, 197, 94, 0.2)",
+  border_hover: "rgba(34, 197, 94, 0.35)",
+
+  text_primary: "#dcfce7",
+  text_secondary: "#86efac",
+  text_muted: "#166534",
+
+  accent_blue: "#22c55e",
+  accent_purple: "#a78bfa",
+  accent_green: "#4ade80",
+  accent_orange: "#fbbf24",
+  accent_pink: "#f472b6",
+  accent_red: "#ef4444",
+
+  shadow_zen: "0 2px 8px rgba(0, 0, 0, 0.2), 0 8px 32px rgba(20, 46, 26, 0.4)",
+  shadow_expanded: "0 4px 16px rgba(0, 0, 0, 0.25), 0 16px 48px rgba(20, 46, 26, 0.5)",
+  shadow_item_hover: "0 2px 8px rgba(34, 197, 94, 0.08), 0 8px 24px rgba(0, 0, 0, 0.1)",
+
+  blur_zen: "blur(20px) saturate(150%)",
+  blur_expanded: "blur(24px) saturate(160%)",
+
+  badge_bg: "rgba(34, 197, 94, 0.15)",
+
+  radius_capsule: "24px",
+  radius_expanded: "16px",
+  radius_card: "10px",
+  radius_badge: "10px",
+};
+
 /** All built-in themes in display order. */
 export const BUILTIN_THEMES: readonly BentoTheme[] = [
   darkTheme,
@@ -447,4 +573,7 @@ export const BUILTIN_THEMES: readonly BentoTheme[] = [
   orderTheme,
   neoTheme,
   flatTheme,
+  oceanBlueTheme,
+  roseGoldTheme,
+  forestGreenTheme,
 ];

@@ -258,47 +258,29 @@ fn remove_hidden_attribute(file_path: &str) -> bool {
 // --- Manifest I/O -----------------------------------------------------------
 
 /// Load the safety manifest from the `.bentodesk/` directory.
+///
+/// Uses [`storage::read_json_with_recovery`] so a corrupt primary file is
+/// automatically healed from the `.bak` sibling.
 fn load_manifest(dir: &Path) -> SafetyManifest {
     let path = dir.join("manifest.json");
-    if !path.exists() {
-        return SafetyManifest::default();
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
-            tracing::error!("Manifest corrupt, using empty manifest: {}", e);
-            SafetyManifest::default()
-        }),
+    match crate::storage::read_json_with_recovery::<SafetyManifest>(&path, "Safety manifest") {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => SafetyManifest::default(),
         Err(e) => {
-            tracing::error!("Failed to read manifest: {}", e);
+            tracing::error!("Manifest load failed even after backup recovery: {e}");
             SafetyManifest::default()
         }
     }
 }
 
-/// Save the safety manifest atomically (write to temp, then rename).
+/// Atomically persist the safety manifest to disk.
+///
+/// Uses [`storage::write_json_atomic`] to write to a temp file, flush, then
+/// swap into place. The previous file is retained as `.bak` for crash recovery.
 fn save_manifest(dir: &Path, manifest: &SafetyManifest) {
     let path = dir.join("manifest.json");
-    let temp_path = dir.join("manifest.json.tmp");
-
-    let content = match serde_json::to_string_pretty(manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to serialize manifest: {}", e);
-            return;
-        }
-    };
-
-    if let Err(e) = std::fs::write(&temp_path, &content) {
-        tracing::error!("Failed to write temp manifest: {}", e);
-        return;
-    }
-
-    if let Err(e) = std::fs::rename(&temp_path, &path) {
-        tracing::error!("Failed to rename temp manifest: {}", e);
-        // Fallback: direct write
-        if let Err(e2) = std::fs::write(&path, &content) {
-            tracing::error!("Fallback direct write also failed: {}", e2);
-        }
+    if let Err(e) = crate::storage::write_json_atomic(&path, manifest) {
+        tracing::error!("Failed to save manifest atomically: {e}");
     }
 }
 
@@ -1386,6 +1368,19 @@ pub fn migrate_flat_to_zone_dirs(app_handle: &AppHandle) -> u32 {
     migrated
 }
 
+/// Write a manifest snapshot to the `.bentodesk/` directory at the given
+/// desktop path. Used by recovery bundles to persist manifest data during
+/// disaster-recovery flows that bypass the normal AppHandle-based APIs.
+pub fn persist_manifest_snapshot_to_desktop_path(
+    desktop_path: &str,
+    manifest: &SafetyManifest,
+) -> Result<(), crate::error::BentoDeskError> {
+    let hdir = std::path::Path::new(desktop_path).join(".bentodesk");
+    std::fs::create_dir_all(&hdir)?;
+    let path = hdir.join("manifest.json");
+    crate::storage::write_json_atomic(&path, manifest)
+}
+
 /// Check if a directory only contains manifest.json / manifest.json.tmp (or is empty).
 fn is_dir_empty_except_manifest(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
@@ -1454,4 +1449,146 @@ fn scan_and_restore_orphans(dir: &Path, desktop_path: &str) -> u32 {
     }
 
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_desktop_path / is_desktop_path_with_custom ──
+
+    #[test]
+    fn file_on_system_desktop_is_detected() {
+        if let Some(desktop) = dirs::desktop_dir() {
+            let test_path = desktop.join("testfile.txt");
+            assert!(is_desktop_path(&test_path.to_string_lossy()));
+        }
+    }
+
+    #[test]
+    fn file_in_subdirectory_of_desktop_is_not_desktop_path() {
+        if let Some(desktop) = dirs::desktop_dir() {
+            let nested = desktop.join("subfolder").join("file.txt");
+            // Parent of nested is desktop/subfolder, not desktop itself
+            assert!(!is_desktop_path(&nested.to_string_lossy()));
+        }
+    }
+
+    #[test]
+    fn file_outside_desktop_is_not_detected() {
+        assert!(!is_desktop_path(r"C:\Windows\System32\cmd.exe"));
+    }
+
+    #[test]
+    fn custom_desktop_path_is_recognized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path();
+        let file = custom.join("myfile.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        assert!(is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&custom.to_string_lossy()),
+        ));
+    }
+
+    #[test]
+    fn file_outside_custom_desktop_is_rejected() {
+        let tmp_custom = tempfile::tempdir().unwrap();
+        let tmp_other = tempfile::tempdir().unwrap();
+        let file = tmp_other.path().join("outside.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        // Only check custom desktop (system desktop may or may not match)
+        let result = is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&tmp_custom.path().to_string_lossy()),
+        );
+        // File parent is tmp_other, not tmp_custom — unless system desktop matches,
+        // this should be false.
+        if let Some(sys) = dirs::desktop_dir() {
+            if file.parent().unwrap().starts_with(&sys) {
+                // Edge case: temp dir happens to be under Desktop
+                return;
+            }
+        }
+        assert!(!result);
+    }
+
+    #[test]
+    fn empty_custom_desktop_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        // Empty custom_desktop should not match anything
+        let result = is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(""),
+        );
+        // Should only match if system desktop matches
+        if let Some(sys) = dirs::desktop_dir() {
+            if file.parent().unwrap().starts_with(&sys) {
+                return;
+            }
+        }
+        assert!(!result);
+    }
+
+    #[test]
+    fn none_custom_desktop_falls_back_to_system() {
+        if let Some(desktop) = dirs::desktop_dir() {
+            let file = desktop.join("test.txt");
+            assert!(is_desktop_path_with_custom(
+                &file.to_string_lossy(),
+                None,
+            ));
+        }
+    }
+
+    #[test]
+    fn case_insensitive_matching_on_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = tmp.path();
+        let file = custom.join("CaseTest.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        // Use uppercased custom path
+        let upper = custom.to_string_lossy().to_uppercase();
+        assert!(is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&upper),
+        ));
+    }
+
+    // ── paths_match helper ──
+
+    #[test]
+    fn paths_match_with_identical_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(paths_match(tmp.path(), tmp.path()));
+    }
+
+    #[test]
+    fn paths_match_with_nonexistent_paths_returns_false() {
+        let a = Path::new(r"C:\NonExistent_A_12345");
+        let b = Path::new(r"C:\NonExistent_B_67890");
+        assert!(!paths_match(a, b));
+    }
+
+    // ── strip_unc_prefix ──
+
+    #[test]
+    fn strip_unc_prefix_removes_extended_prefix() {
+        let p = PathBuf::from(r"\\?\C:\Users\Desktop");
+        let stripped = strip_unc_prefix(&p);
+        assert_eq!(stripped, PathBuf::from(r"C:\Users\Desktop"));
+    }
+
+    #[test]
+    fn strip_unc_prefix_preserves_normal_path() {
+        let p = PathBuf::from(r"C:\Users\Desktop");
+        let stripped = strip_unc_prefix(&p);
+        assert_eq!(stripped, PathBuf::from(r"C:\Users\Desktop"));
+    }
 }

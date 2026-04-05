@@ -9,6 +9,7 @@ pub mod icon;
 pub mod icon_positions;
 pub mod item;
 pub mod layout;
+pub mod plugins;
 pub mod settings;
 pub mod system;
 pub mod zone;

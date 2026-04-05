@@ -18,11 +18,32 @@ pub struct FileChangedPayload {
     pub old_path: Option<String>,
 }
 
+/// Debouncer type alias for readability.
+pub type DesktopDebouncer = notify_debouncer_full::Debouncer<
+    RecommendedWatcher,
+    notify_debouncer_full::FileIdMap,
+>;
+
 /// Set up a file system watcher on the user's Desktop directory.
 ///
-/// Uses `notify` v9 with debouncing to avoid flooding the frontend with events
+/// Uses `notify` v7 with debouncing to avoid flooding the frontend with events
 /// during rapid file operations (e.g., extracting a ZIP).
 pub fn setup_file_watcher(handle: &AppHandle) -> Result<(), BentoDeskError> {
+    let debouncer = setup_file_watcher_inner(handle)?;
+
+    // Store the debouncer in managed state so it is not dropped
+    handle.manage(WatcherState {
+        debouncer: std::sync::Mutex::new(Some(debouncer)),
+    });
+
+    Ok(())
+}
+
+/// Create a file watcher debouncer without managing state.
+///
+/// Used by `setup_file_watcher` for initial setup, and by `power::rebuild_file_watcher`
+/// to recreate the watcher after hibernate/sleep resume.
+pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, BentoDeskError> {
     let desktop_path = dirs::desktop_dir()
         .ok_or_else(|| BentoDeskError::ConfigError("Cannot determine Desktop path".into()))?;
 
@@ -53,16 +74,11 @@ pub fn setup_file_watcher(handle: &AppHandle) -> Result<(), BentoDeskError> {
 
     debouncer.watch(&desktop_path, RecursiveMode::NonRecursive)?;
 
-    // Store the debouncer in managed state so it is not dropped
-    handle.manage(WatcherState {
-        _debouncer: std::sync::Mutex::new(Some(debouncer)),
-    });
-
     tracing::info!(
         "Desktop file watcher started on: {}",
         desktop_path.display()
     );
-    Ok(())
+    Ok(debouncer)
 }
 
 /// Convert a debounced notify event into a frontend-friendly payload.
@@ -94,13 +110,9 @@ fn map_event_to_payload(event: &DebouncedEvent) -> Option<FileChangedPayload> {
 }
 
 /// State wrapper to keep the debouncer alive for the application lifetime.
+///
+/// The `debouncer` field is public so that `power::rebuild_file_watcher` can
+/// swap it out after hibernate/sleep resume.
 pub struct WatcherState {
-    _debouncer: std::sync::Mutex<
-        Option<
-            notify_debouncer_full::Debouncer<
-                RecommendedWatcher,
-                notify_debouncer_full::FileIdMap,
-            >,
-        >,
-    >,
+    pub debouncer: std::sync::Mutex<Option<DesktopDebouncer>>,
 }

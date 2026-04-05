@@ -7,11 +7,21 @@
 //! for display changes and emits a `"resolution_changed"` Tauri event when the
 //! primary monitor's resolution or DPI changes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::persistence::{BentoZone, LayoutData};
 use crate::AppState;
+
+/// When set to `true`, the resolution monitor loop exits gracefully.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Signal the resolution monitor to stop polling and exit.
+pub fn shutdown() {
+    SHUTDOWN.store(true, Ordering::Release);
+}
 
 /// Screen resolution information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +86,11 @@ pub fn start_resolution_monitor(handle: &AppHandle) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
+
+            if SHUTDOWN.load(Ordering::Acquire) {
+                tracing::info!("Resolution monitor shutting down");
+                return;
+            }
 
             let new_res = get_current_resolution();
             let new_dpi = get_dpi_scale();
@@ -267,6 +282,7 @@ mod tests {
                 make_zone(-5.0, -5.0, 50.0, 50.0),
             ],
             last_modified: String::new(),
+            coherence_id: None,
         };
         clamp_zones_to_screen(&mut layout);
         assert!((layout.zones[0].position.x_percent - 80.0).abs() < f64::EPSILON);

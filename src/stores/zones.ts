@@ -202,8 +202,22 @@ export async function moveItem(
 ): Promise<boolean> {
   try {
     await ipc.moveItem(fromZoneId, toZoneId, itemId);
-    // Reload from backend for reliable state sync
-    await loadZones();
+    // Granular local update: move item between zones in the store.
+    // Avoids loadZones() which replaces the entire zones array and
+    // triggers full re-render of all zones (causing visual flicker).
+    setState(
+      produce((s) => {
+        const fromZone = s.zones.find((z) => z.id === fromZoneId);
+        const toZone = s.zones.find((z) => z.id === toZoneId);
+        if (fromZone && toZone) {
+          const idx = fromZone.items.findIndex((i) => i.id === itemId);
+          if (idx !== -1) {
+            const [item] = fromZone.items.splice(idx, 1);
+            toZone.items.push(item);
+          }
+        }
+      })
+    );
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -329,8 +343,19 @@ export function handleFileChanged(
     if (hasAutoGroupZones) {
       void ipc.autoGroupNewFile(path).then((added) => {
         if (added.length > 0) {
-          // Reload zones to get the updated item lists from the backend.
-          void loadZones();
+          // Granular local update: splice each returned item into its zone.
+          // Avoids loadZones() which replaces the entire zones array and
+          // triggers full re-render of all zones (causing visual flicker).
+          setState(
+            produce((s) => {
+              for (const [zoneId, item] of added) {
+                const zone = s.zones.find((z) => z.id === zoneId);
+                if (zone && !zone.items.some((i) => i.id === item.id)) {
+                  zone.items.push(item);
+                }
+              }
+            })
+          );
         }
       }).catch((err) => {
         console.warn("Auto-group new file failed:", err);

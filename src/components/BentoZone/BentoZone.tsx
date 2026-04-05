@@ -8,7 +8,7 @@
  * which enables smooth CSS transitions on width/height/border-radius/background.
  * Inner layers use opacity/visibility cross-fade to switch visible content.
  */
-import { Component, Show, createSignal, onMount, onCleanup } from "solid-js";
+import { Component, Show, batch, createSignal, onMount, onCleanup } from "solid-js";
 import type { BentoZone as BentoZoneType } from "../../types/zone";
 import { isZoneExpanded, expandZone, collapseZone } from "../../stores/ui";
 import { getExpandDelay, getCollapseDelay } from "../../stores/settings";
@@ -55,6 +55,8 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
 
   const expanded = () => isZoneExpanded(props.zone.id);
   const isDropTarget = () => activeDropZone() === props.zone.id;
+  const isHoverIntentSuspended = () =>
+    isDragRepositioning() || isResizing();
 
   /** True when a cross-zone internal drag hovers over this zone. */
   const isCrossDragHover = () => {
@@ -88,6 +90,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const handleMouseEnter = () => {
     hitTestHandlers.onPointerEnter();
     clearTimers();
+    if (isHoverIntentSuspended()) return;
     if (!expanded()) {
       expandTimer = setTimeout(() => {
         expandZone(props.zone.id);
@@ -103,6 +106,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const handleMouseLeave = () => {
     hitTestHandlers.onPointerLeave();
     clearTimers();
+    if (isHoverIntentSuspended()) return;
     if (expanded()) {
       collapseTimer = setTimeout(() => {
         collapseZone(props.zone.id);
@@ -119,6 +123,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // Zone repositioning via drag on header
   const handleHeaderDragStart = (e: MouseEvent) => {
     e.preventDefault();
+    clearTimers();
     const rect = (e.currentTarget as HTMLElement)
       .closest(".bento-zone")
       ?.getBoundingClientRect();
@@ -156,21 +161,29 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       setDragPosition({ x_percent: clampedX, y_percent: clampedY });
     };
 
-    const onMouseUp = () => {
-      // Persist final position via IPC once on mouseup
+    const onMouseUp = async () => {
+      // Remove listeners first to prevent duplicate triggers
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+
+      // Persist final position via IPC — MUST await so that the store
+      // updates props.zone.position BEFORE we clear the local signal.
+      // Without await, clearing dragPosition causes the zone to momentarily
+      // snap back to the old store position (flicker/jump bug).
       const finalPos = dragPosition();
       if (finalPos) {
-        void updateZone(props.zone.id, {
+        await updateZone(props.zone.id, {
           position: { x_percent: finalPos.x_percent, y_percent: finalPos.y_percent },
         });
       }
 
-      setIsDragRepositioning(false);
-      setDragPosition(null);
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      // Store is now synced — safe to clear local drag state
+      batch(() => {
+        setIsDragRepositioning(false);
+        setDragPosition(null);
+      });
 
-      // Release the drag lock — poller resumes normal hit-testing
+      // Release the drag lock last — zone position is stable
       releaseDrag();
     };
 
@@ -184,6 +197,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const handleResizeStart = (axis: ResizeAxis, e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    clearTimers();
 
     const rect = zoneRef?.getBoundingClientRect();
     if (!rect) return;
@@ -231,21 +245,28 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       setResizeSize({ w_percent: newW, h_percent: newH });
     };
 
-    const onMouseUp = () => {
-      // Persist final size via IPC once on mouseup
+    const onMouseUp = async () => {
+      // Remove listeners first to prevent duplicate triggers
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+
+      // Persist final size via IPC — MUST await so that the store
+      // updates props.zone.expanded_size BEFORE we clear the local signal.
+      // Same flicker/jump fix as position drag.
       const finalSize = resizeSize();
       if (finalSize) {
-        void updateZone(props.zone.id, {
+        await updateZone(props.zone.id, {
           expanded_size: { w_percent: finalSize.w_percent, h_percent: finalSize.h_percent },
         });
       }
 
-      setIsResizing(false);
-      setResizeSize(null);
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      // Store is now synced — safe to clear local resize state
+      batch(() => {
+        setIsResizing(false);
+        setResizeSize(null);
+      });
 
-      // Release drag lock — poller resumes normal hit-testing
+      // Release drag lock last — zone dimensions are stable
       releaseDrag();
     };
 

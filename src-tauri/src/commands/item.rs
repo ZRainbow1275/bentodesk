@@ -2,6 +2,7 @@
 
 use tauri::State;
 
+use crate::guardrails;
 use crate::hidden_items;
 use crate::icon::protocol::extract_and_cache_fresh;
 use crate::icon_positions;
@@ -28,6 +29,13 @@ pub async fn add_item(
                 path
             ));
         }
+    }
+
+    // Guardrail: verify item count stays within the safety envelope.
+    {
+        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        guardrails::ensure_can_add_items(&layout, &settings, &zone_id, 1)?;
     }
 
     let file_path = std::path::Path::new(&path);
@@ -219,6 +227,13 @@ pub async fn move_item(
     to_zone_id: String,
     item_id: String,
 ) -> Result<(), String> {
+    // Guardrail: verify target zone can accept one more item.
+    {
+        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        guardrails::ensure_can_move_item_into_zone(&layout, &settings, &to_zone_id)?;
+    }
+
     {
         let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
 

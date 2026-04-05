@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
+use crate::storage;
 
 /// Visual theme selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +11,17 @@ pub enum Theme {
     Dark,
     Light,
     System,
+}
+
+/// Runtime safety profile that controls guardrail limits.
+///
+/// Higher profiles allow more zones, items, and cache entries at the cost of
+/// increased memory usage. Most users should stay on `Balanced`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SafetyProfile {
+    Conservative,
+    Balanced,
+    Expanded,
 }
 
 /// Application settings.
@@ -28,6 +40,49 @@ pub struct AppSettings {
     pub portable_mode: bool,
     pub launch_at_startup: bool,
     pub show_in_taskbar: bool,
+    #[serde(default = "default_safety_profile")]
+    pub safety_profile: SafetyProfile,
+    /// Active JSON theme ID (e.g. "ocean-blue"). None means use frontend default.
+    #[serde(default)]
+    pub active_theme: Option<String>,
+    /// High-priority startup (Task Scheduler with no delay).
+    #[serde(default)]
+    pub startup_high_priority: bool,
+    /// Enable crash auto-restart via Guardian process.
+    #[serde(default)]
+    pub crash_restart_enabled: bool,
+    /// Maximum crash retries within the crash window before Guardian gives up.
+    #[serde(default = "default_crash_max_retries")]
+    pub crash_max_retries: u32,
+    /// Crash detection window in seconds.
+    #[serde(default = "default_crash_window_secs")]
+    pub crash_window_secs: u32,
+    /// Whether to perform safe recovery actions after hibernate/sleep resume.
+    #[serde(default = "default_true")]
+    pub safe_start_after_hibernation: bool,
+    /// Delay in milliseconds before performing recovery after hibernate resume.
+    #[serde(default = "default_hibernate_delay")]
+    pub hibernate_resume_delay_ms: u32,
+}
+
+fn default_safety_profile() -> SafetyProfile {
+    SafetyProfile::Balanced
+}
+
+fn default_crash_max_retries() -> u32 {
+    3
+}
+
+fn default_crash_window_secs() -> u32 {
+    10
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_hibernate_delay() -> u32 {
+    2000
 }
 
 /// Partial update for settings.
@@ -45,30 +100,43 @@ pub struct SettingsUpdate {
     pub portable_mode: Option<bool>,
     pub launch_at_startup: Option<bool>,
     pub show_in_taskbar: Option<bool>,
+    pub safety_profile: Option<SafetyProfile>,
+    pub active_theme: Option<Option<String>>,
+    pub startup_high_priority: Option<bool>,
+    pub crash_restart_enabled: Option<bool>,
+    pub crash_max_retries: Option<u32>,
+    pub crash_window_secs: Option<u32>,
+    pub safe_start_after_hibernation: Option<bool>,
+    pub hibernate_resume_delay_ms: Option<u32>,
 }
 
 impl AppSettings {
     /// Load settings from disk, or return sensible defaults.
+    ///
+    /// Uses [`storage::read_json_with_recovery`] so that a corrupt primary file
+    /// is automatically healed from the `.bak` sibling created by prior saves.
     pub fn load_or_default(handle: &AppHandle) -> Result<Self, BentoDeskError> {
         let path = Self::settings_path(handle);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let settings: AppSettings = serde_json::from_str(&content)?;
-            Ok(settings)
-        } else {
-            Ok(Self::default())
+        match storage::read_json_with_recovery::<AppSettings>(&path, "Settings") {
+            Ok(Some(settings)) => Ok(settings),
+            Ok(None) => Ok(Self::default()),
+            Err(e) => {
+                tracing::error!(
+                    "Settings load failed even after backup recovery, using defaults: {e}"
+                );
+                Ok(Self::default())
+            }
         }
     }
 
-    /// Persist settings to disk.
+    /// Atomically persist settings to disk.
+    ///
+    /// Writes to a temporary file, flushes, then swaps into place via
+    /// [`storage::write_json_atomic`]. The previous primary file is retained as
+    /// a `.bak` sibling for crash recovery.
     pub fn save(&self, handle: &AppHandle) -> Result<(), BentoDeskError> {
         let path = Self::settings_path(handle);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-        Ok(())
+        storage::write_json_atomic(&path, self)
     }
 
     /// Apply a partial update to the settings.
@@ -108,6 +176,30 @@ impl AppSettings {
         }
         if let Some(v) = update.show_in_taskbar {
             self.show_in_taskbar = v;
+        }
+        if let Some(v) = update.safety_profile {
+            self.safety_profile = v;
+        }
+        if let Some(v) = update.active_theme {
+            self.active_theme = v;
+        }
+        if let Some(v) = update.startup_high_priority {
+            self.startup_high_priority = v;
+        }
+        if let Some(v) = update.crash_restart_enabled {
+            self.crash_restart_enabled = v;
+        }
+        if let Some(v) = update.crash_max_retries {
+            self.crash_max_retries = v;
+        }
+        if let Some(v) = update.crash_window_secs {
+            self.crash_window_secs = v;
+        }
+        if let Some(v) = update.safe_start_after_hibernation {
+            self.safe_start_after_hibernation = v;
+        }
+        if let Some(v) = update.hibernate_resume_delay_ms {
+            self.hibernate_resume_delay_ms = v;
         }
     }
 
@@ -153,6 +245,14 @@ impl Default for AppSettings {
             portable_mode: false,
             launch_at_startup: false,
             show_in_taskbar: false,
+            safety_profile: SafetyProfile::Balanced,
+            active_theme: None,
+            startup_high_priority: false,
+            crash_restart_enabled: false,
+            crash_max_retries: 3,
+            crash_window_secs: 10,
+            safe_start_after_hibernation: true,
+            hibernate_resume_delay_ms: 2000,
         }
     }
 }
@@ -204,6 +304,14 @@ mod tests {
             portable_mode: None,
             launch_at_startup: None,
             show_in_taskbar: None,
+            safety_profile: None,
+            active_theme: None,
+            startup_high_priority: None,
+            crash_restart_enabled: None,
+            crash_max_retries: None,
+            crash_window_secs: None,
+            safe_start_after_hibernation: None,
+            hibernate_resume_delay_ms: None,
         };
 
         settings.apply_update(update);
@@ -233,6 +341,14 @@ mod tests {
             portable_mode: None,
             launch_at_startup: None,
             show_in_taskbar: None,
+            safety_profile: None,
+            active_theme: None,
+            startup_high_priority: None,
+            crash_restart_enabled: None,
+            crash_max_retries: None,
+            crash_window_secs: None,
+            safe_start_after_hibernation: None,
+            hibernate_resume_delay_ms: None,
         };
 
         settings.apply_update(update);

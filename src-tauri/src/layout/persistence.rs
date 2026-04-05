@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
+use crate::storage;
 
 /// Represents a zone's position as percentage of screen dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,30 +137,39 @@ pub struct LayoutData {
     pub version: String,
     pub zones: Vec<BentoZone>,
     pub last_modified: String,
+    /// Optional coherence token used by recovery bundles to verify that a
+    /// snapshot matches the layout that produced it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence_id: Option<String>,
 }
 
 impl LayoutData {
     /// Load layout from disk, or return a default empty layout.
+    ///
+    /// Uses [`storage::read_json_with_recovery`] so that a corrupt primary file
+    /// is automatically healed from the `.bak` sibling created by prior saves.
     pub fn load_or_default(handle: &AppHandle) -> Result<Self, BentoDeskError> {
         let path = Self::layout_path(handle);
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let data: LayoutData = serde_json::from_str(&content)?;
-            Ok(data)
-        } else {
-            Ok(Self::default())
+        match storage::read_json_with_recovery::<LayoutData>(&path, "Layout") {
+            Ok(Some(data)) => Ok(data),
+            Ok(None) => Ok(Self::default()),
+            Err(e) => {
+                tracing::error!(
+                    "Layout load failed even after backup recovery, using default: {e}"
+                );
+                Ok(Self::default())
+            }
         }
     }
 
-    /// Save layout data to disk.
+    /// Atomically persist layout data to disk.
+    ///
+    /// Writes to a temporary file, flushes, then swaps into place via
+    /// [`storage::write_json_atomic`]. The previous primary file is retained as
+    /// a `.bak` sibling for crash recovery.
     pub fn save(&self, handle: &AppHandle) -> Result<(), BentoDeskError> {
         let path = Self::layout_path(handle);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-        Ok(())
+        storage::write_json_atomic(&path, self)
     }
 
     /// Resolve the path where layout.json lives.
@@ -194,6 +204,7 @@ impl Default for LayoutData {
             version: "1.0.0".to_string(),
             zones: Vec::new(),
             last_modified: chrono::Utc::now().to_rfc3339(),
+            coherence_id: None,
         }
     }
 }
@@ -256,6 +267,7 @@ mod tests {
                 capsule_shape: "pill".to_string(),
             }],
             last_modified: "2026-01-01T00:00:00Z".to_string(),
+            coherence_id: None,
         };
 
         let json = serde_json::to_string(&layout).unwrap();

@@ -4,10 +4,9 @@
  * Renders a ghost card placeholder during internal reorder drags.
  * Listens for reorder-commit events to persist new item order.
  */
-import { Component, For, Show, createMemo, onMount, onCleanup } from "solid-js";
+import { Component, For, Show, createMemo } from "solid-js";
 import type { BentoZone, BentoItem } from "../../types/zone";
 import { internalDrag } from "../../services/drag";
-import { reorderItems } from "../../stores/zones";
 import { t } from "../../i18n";
 import ItemCard from "../ItemCard/ItemCard";
 import "./ItemGrid.css";
@@ -48,35 +47,6 @@ const ItemGrid: Component<ItemGridProps> = (props) => {
     result.splice(insertAt, 0, { type: "ghost", key: "drag-ghost" });
 
     return result;
-  });
-
-  // Listen for reorder-commit custom events from drag.ts
-  const handleReorderCommit = (e: Event) => {
-    const detail = (e as CustomEvent).detail as {
-      zoneId: string;
-      itemId: string;
-      targetIndex: number;
-    };
-    if (detail.zoneId !== props.zone.id) return;
-
-    // Build the new order: remove item from current position, insert at target
-    const currentIds = props.items.map((item) => item.id);
-    const filtered = currentIds.filter((id) => id !== detail.itemId);
-    const insertAt = Math.min(detail.targetIndex, filtered.length);
-    filtered.splice(insertAt, 0, detail.itemId);
-
-    void reorderItems(props.zone.id, filtered);
-  };
-
-  onMount(() => {
-    document.addEventListener("bentodesk:reorder-commit", handleReorderCommit);
-  });
-
-  onCleanup(() => {
-    document.removeEventListener(
-      "bentodesk:reorder-commit",
-      handleReorderCommit
-    );
   });
 
   return (

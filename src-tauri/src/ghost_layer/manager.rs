@@ -73,6 +73,10 @@ static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(true);
 /// Stored as `usize` because raw pointers are not `Send + Sync`.
 static MAIN_HWND: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+/// Global AppHandle storage so the WndProc subclass can dispatch power
+/// resume events to `power::handle_resume` without unsafe casts.
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
 /// When `true`, the WndProc subclass allows z-order changes.
 /// Set to `true` before our own `SetWindowPos` / `ShowWindow` calls, then
 /// immediately reset to `false`. This prevents the subclass from blocking
@@ -91,7 +95,7 @@ pub fn is_visible() -> bool {
 ///
 /// Returns a guard that restores the bypass flag on drop.
 pub fn bypass_subclass_guard() -> BypassGuard {
-    BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+    BYPASS_SUBCLASS.store(true, Ordering::Release);
     BypassGuard
 }
 
@@ -100,7 +104,7 @@ pub struct BypassGuard;
 
 impl Drop for BypassGuard {
     fn drop(&mut self) {
-        BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+        BYPASS_SUBCLASS.store(false, Ordering::Release);
     }
 }
 
@@ -114,7 +118,7 @@ pub fn show_window() {
         let hwnd = HWND(raw_hwnd as *mut std::ffi::c_void);
         unsafe {
             // Bypass the subclass so our show + z-order set are not blocked.
-            BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(true, Ordering::Release);
 
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
@@ -126,7 +130,7 @@ pub fn show_window() {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
 
-            BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(false, Ordering::Release);
         }
         WINDOW_VISIBLE.store(true, Ordering::Relaxed);
         tracing::debug!("Main window shown (NOACTIVATE, HWND_BOTTOM)");
@@ -139,9 +143,9 @@ pub fn hide_window() {
         let hwnd = HWND(raw_hwnd as *mut std::ffi::c_void);
         unsafe {
             // Bypass the subclass so hide is not blocked.
-            BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(true, Ordering::Release);
             let _ = ShowWindow(hwnd, SW_HIDE);
-            BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(false, Ordering::Release);
         }
         WINDOW_VISIBLE.store(false, Ordering::Relaxed);
         tracing::debug!("Main window hidden");
@@ -175,14 +179,14 @@ pub fn reposition_to_work_area() {
         let h = work_area.bottom - work_area.top;
 
         unsafe {
-            BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(true, Ordering::Release);
             let _ = SetWindowPos(
                 hwnd,
                 hwnd_bottom(),
                 x, y, w, h,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
-            BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(false, Ordering::Release);
         }
 
         tracing::info!("Overlay repositioned to work area: {}x{} at ({},{})", w, h, x, y);
@@ -208,6 +212,10 @@ const WM_NCCALCSIZE: u32 = 0x0083;
 const WM_NCPAINT: u32 = 0x0085;
 const WM_NCHITTEST: u32 = 0x0084;
 const WM_NCACTIVATE: u32 = 0x0086;
+
+// Power broadcast message constants
+const WM_POWERBROADCAST: u32 = 0x0218;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 
 unsafe extern "system" fn overlay_subclass_proc(
     hwnd: HWND,
@@ -264,13 +272,24 @@ unsafe extern "system" fn overlay_subclass_proc(
                 (wp.flags.0 & SWP_SHOWWINDOW_RAW) != 0
                     || (wp.flags.0 & SWP_HIDEWINDOW_RAW) != 0;
 
-            if !is_show_hide && !BYPASS_SUBCLASS.load(Ordering::Relaxed) {
+            if !is_show_hide && !BYPASS_SUBCLASS.load(Ordering::Acquire) {
                 // External z-order change (e.g. user clicked desktop) — block it.
                 wp.flags |= SWP_NOZORDER;
             }
         }
         _ if msg == WM_MOUSEACTIVATE => {
             return LRESULT(3); // MA_NOACTIVATE
+        }
+        _ if msg == WM_POWERBROADCAST => {
+            // PBT_APMRESUMEAUTOMATIC: system has resumed from sleep/hibernate.
+            // Dispatch recovery to the power module on a background thread.
+            if wparam.0 == PBT_APMRESUMEAUTOMATIC {
+                if let Some(handle) = APP_HANDLE.get() {
+                    crate::power::handle_resume(handle.clone());
+                }
+            }
+            // Return TRUE to indicate we processed the message
+            return LRESULT(1);
         }
         _ => {}
     }
@@ -305,6 +324,10 @@ impl GhostLayerManager {
 
         // Store the HWND for later show/hide/reposition calls.
         let _ = MAIN_HWND.set(hwnd.0 as usize);
+
+        // Store the AppHandle so the WndProc subclass can dispatch
+        // WM_POWERBROADCAST events to the power module.
+        let _ = APP_HANDLE.set(handle.clone());
 
         // ── Step 0: Use Tauri API to force decorations off ────────────
         //
@@ -477,7 +500,7 @@ impl GhostLayerManager {
 
         unsafe {
             // Bypass subclass so our SetWindowPos is not blocked
-            BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(true, Ordering::Release);
             let _ = SetWindowPos(
                 hwnd,
                 hwnd_bottom(),
@@ -485,7 +508,7 @@ impl GhostLayerManager {
                 w, h,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
-            BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+            BYPASS_SUBCLASS.store(false, Ordering::Release);
         }
 
         // ── Step 6: Show without activating ───────────────────────────
@@ -521,12 +544,12 @@ impl GhostLayerManager {
                     & !(WS_BORDER.0 as isize)
                     & !(WS_DLGFRAME.0 as isize);
                 SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
-                BYPASS_SUBCLASS.store(true, Ordering::Relaxed);
+                BYPASS_SUBCLASS.store(true, Ordering::Release);
                 let _ = SetWindowPos(
                     hwnd, None, 0, 0, 0, 0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                 );
-                BYPASS_SUBCLASS.store(false, Ordering::Relaxed);
+                BYPASS_SUBCLASS.store(false, Ordering::Release);
             }
             let final_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
             tracing::info!("Deferred style re-apply: style=0x{:08X}", final_style);

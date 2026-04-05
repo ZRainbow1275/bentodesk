@@ -64,6 +64,14 @@ pub enum BentoDeskError {
     #[error("Icon position error: {0}")]
     IconPositionError(String),
 
+    /// Task Scheduler or startup configuration error.
+    #[error("Startup configuration error: {0}")]
+    StartupError(String),
+
+    /// Plugin installation, loading, or management error.
+    #[error("Plugin error: {0}")]
+    PluginError(String),
+
     /// Generic application error.
     #[error("{0}")]
     Generic(String),

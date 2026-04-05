@@ -2,6 +2,7 @@
 
 use tauri::State;
 
+use crate::guardrails;
 use crate::hidden_items;
 use crate::layout::persistence::{BentoZone, RelativePosition, RelativeSize, ZoneUpdate};
 use crate::AppState;
@@ -14,6 +15,13 @@ pub async fn create_zone(
     position: RelativePosition,
     expanded_size: RelativeSize,
 ) -> Result<BentoZone, String> {
+    // Guardrail: verify zone count stays within the safety envelope.
+    {
+        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        guardrails::ensure_can_create_zone(&layout, &settings)?;
+    }
+
     let zone = BentoZone {
         id: uuid::Uuid::new_v4().to_string(),
         name,

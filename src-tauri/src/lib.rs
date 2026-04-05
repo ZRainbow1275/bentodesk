@@ -5,19 +5,27 @@
 
 mod commands;
 mod config;
+mod crash_handler;
 mod drag_drop;
 mod error;
 mod ghost_layer;
 mod grouping;
+mod guardrails;
 mod hidden_items;
 mod icon;
 mod icon_positions;
 mod layout;
+mod power;
+mod recovery_bundle;
+pub(crate) mod storage;
+mod plugins;
+mod startup;
+mod themes;
 mod tray;
 mod watcher;
 
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Shared application state managed by Tauri.
 pub struct AppState {
@@ -26,6 +34,9 @@ pub struct AppState {
     pub icon_cache: icon::cache::IconCache,
     pub icon_backup: Mutex<Option<icon_positions::SavedIconLayout>>,
     pub app_handle: AppHandle,
+    /// Serialises disk writes from `persist_layout` / `persist_settings` so
+    /// concurrent Tauri commands cannot interleave file I/O.
+    write_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -35,6 +46,13 @@ impl AppState {
     /// application restarts. Errors are logged but not propagated so that the
     /// in-memory state remains authoritative.
     pub fn persist_layout(&self) {
+        let _write = match self.write_lock.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Failed to acquire write_lock for layout persistence: {}", e);
+                return;
+            }
+        };
         let layout = match self.layout.lock() {
             Ok(l) => l,
             Err(e) => {
@@ -49,6 +67,13 @@ impl AppState {
 
     /// Persist the current settings to disk.
     pub fn persist_settings(&self) {
+        let _write = match self.write_lock.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Failed to acquire write_lock for settings persistence: {}", e);
+                return;
+            }
+        };
         let settings = match self.settings.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -64,12 +89,35 @@ impl AppState {
 
 /// Initialise and run the BentoDesk application.
 pub fn run() {
-    // Initialise structured logging
+    // Initialise structured logging.
+    // Honour RUST_LOG if set; otherwise default to "bentodesk=info".
+    use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter("bentodesk=info")
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("bentodesk=info")),
+        )
         .init();
 
     tracing::info!("BentoDesk starting...");
+
+    // --- Set process priority to ABOVE_NORMAL in release builds ---
+    // Desktop organizer should be responsive; slightly elevated priority
+    // ensures the overlay and file watcher aren't starved by background tasks.
+    #[cfg(not(debug_assertions))]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+        };
+        unsafe {
+            let process = GetCurrentProcess();
+            if let Err(e) = SetPriorityClass(process, ABOVE_NORMAL_PRIORITY_CLASS) {
+                tracing::warn!("Failed to set ABOVE_NORMAL priority: {e}");
+            } else {
+                tracing::info!("Process priority set to ABOVE_NORMAL");
+            }
+        }
+    }
 
     tauri::Builder::default()
         .setup(|app| {
@@ -81,46 +129,64 @@ pub fn run() {
             let icon_cache =
                 icon::cache::IconCache::new(settings.icon_cache_size as usize);
 
-            // Save current desktop icon positions before BentoDesk modifies anything.
-            // This runs on a background thread because COM calls must happen on an
-            // STA thread, and the setup closure may not be on one.
-            let icon_backup = match icon_positions::save_layout() {
-                Ok(layout) => {
-                    // Persist to disk as a safety net
-                    let data_dir = icon_positions::default_data_dir();
-                    if let Err(e) = icon_positions::persist_to_file(&layout, &data_dir) {
-                        tracing::warn!("Failed to persist icon layout backup to disk: {e}");
-                    }
-                    Some(layout)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to save desktop icon positions: {e}");
-                    // Try loading from a previous backup on disk
-                    let data_dir = icon_positions::default_data_dir();
-                    match icon_positions::load_from_file(&data_dir) {
-                        Ok(backup) => {
-                            if backup.is_some() {
-                                tracing::info!(
-                                    "Loaded previous icon layout backup from disk as fallback"
-                                );
-                            }
-                            backup
-                        }
-                        Err(e2) => {
-                            tracing::warn!("Failed to load fallback icon backup: {e2}");
-                            None
-                        }
-                    }
-                }
-            };
+            // --- Install crash handler (SEH) ---
+            // Must happen after settings are loaded so we know the desktop path.
+            // On unhandled exception, this restores hidden files from .bentodesk/
+            // back to the desktop, preventing invisible-file data loss.
+            crash_handler::install(std::path::PathBuf::from(&settings.desktop_path));
 
+            // Register AppState early so subsequent setup steps can access it.
+            // icon_backup starts as None — populated asynchronously below.
             app.manage(AppState {
                 layout: Mutex::new(layout_data),
                 settings: Mutex::new(settings.clone()),
                 icon_cache,
-                icon_backup: Mutex::new(icon_backup),
+                icon_backup: Mutex::new(None),
                 app_handle: app.handle().clone(),
+                write_lock: Mutex::new(()),
             });
+
+            // Save desktop icon positions on a background thread.
+            // COM calls (STA) can take 100ms-1s+ depending on icon count;
+            // doing this async avoids blocking window display and passthrough.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    match icon_positions::save_layout() {
+                        Ok(layout) => {
+                            let data_dir = icon_positions::default_data_dir();
+                            if let Err(e) =
+                                icon_positions::persist_to_file(&layout, &data_dir)
+                            {
+                                tracing::warn!(
+                                    "Failed to persist icon layout backup to disk: {e}"
+                                );
+                            }
+                            if let Some(state) = handle.try_state::<AppState>() {
+                                if let Ok(mut backup) = state.icon_backup.lock() {
+                                    *backup = Some(layout);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to save desktop icon positions: {e}");
+                            let data_dir = icon_positions::default_data_dir();
+                            if let Ok(Some(disk_backup)) =
+                                icon_positions::load_from_file(&data_dir)
+                            {
+                                tracing::info!(
+                                    "Loaded previous icon layout backup from disk as fallback"
+                                );
+                                if let Some(state) = handle.try_state::<AppState>() {
+                                    if let Ok(mut backup) = state.icon_backup.lock() {
+                                        *backup = Some(disk_backup);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
 
             // --- Ensure .bentodesk/ hidden directory exists ---
             {
@@ -194,6 +260,37 @@ pub fn run() {
                 hidden_items::reapply_hidden_on_startup(app.handle());
             }
 
+            // --- Clean up stale files on desktop root ---
+            // Older versions may have left manifest.json / .bak files directly
+            // on the desktop. These should only exist inside .bentodesk/.
+            {
+                let desktop = {
+                    let state = app.state::<AppState>();
+                    let s = state.settings.lock().expect("settings lock");
+                    std::path::PathBuf::from(&s.desktop_path)
+                };
+                for stale_name in &[
+                    "manifest.json",
+                    "manifest.json.bak",
+                    "manifest.json.tmp",
+                ] {
+                    let stale_path = desktop.join(stale_name);
+                    if stale_path.exists() {
+                        if let Err(e) = std::fs::remove_file(&stale_path) {
+                            tracing::warn!(
+                                "Failed to remove stale {}: {e}",
+                                stale_path.display()
+                            );
+                        } else {
+                            tracing::info!(
+                                "Removed stale legacy file: {}",
+                                stale_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
             // Set up the always-on-bottom overlay (ghost layer)
             if settings.ghost_layer_enabled {
                 if let Err(e) =
@@ -206,6 +303,16 @@ pub fn run() {
                 }
             }
 
+            // Enable passthrough IMMEDIATELY so the desktop stays clickable
+            // while the WebView loads. Without this, the overlay window
+            // captures all mouse events between ghost layer attach and
+            // the frontend's onMount → enablePassthrough() call.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_ignore_cursor_events(true) {
+                    tracing::warn!("Failed to set initial passthrough: {e}");
+                }
+            }
+
             // Start file system watcher on the Desktop directory
             let handle = app.handle().clone();
             watcher::desktop_watcher::setup_file_watcher(&handle)?;
@@ -215,6 +322,38 @@ pub fn run() {
 
             // Build the system tray icon and menu
             tray::menu::setup_tray(app)?;
+
+            // --- Safe mode detection ---
+            // If Guardian gave up restarting after a crash loop, it writes a
+            // safe_mode.json marker. Detect it, notify the frontend, and
+            // remove the marker so subsequent launches are normal.
+            {
+                let app_data = app
+                    .path()
+                    .app_data_dir()
+                    .expect("app_data_dir must be available");
+                let safe_mode_path = app_data.join("safe_mode.json");
+                if safe_mode_path.exists() {
+                    tracing::warn!(
+                        "Safe mode marker detected at {}",
+                        safe_mode_path.display()
+                    );
+                    // Read the marker content for logging purposes
+                    if let Ok(content) = std::fs::read_to_string(&safe_mode_path) {
+                        tracing::warn!("Safe mode reason: {}", content);
+                    }
+                    // Notify frontend
+                    if let Err(e) = app.emit("safe_mode_activated", ()) {
+                        tracing::error!("Failed to emit safe_mode_activated event: {e}");
+                    }
+                    // Remove marker so next launch is normal
+                    if let Err(e) = std::fs::remove_file(&safe_mode_path) {
+                        tracing::error!(
+                            "Failed to remove safe mode marker: {e}"
+                        );
+                    }
+                }
+            }
 
             tracing::info!("BentoDesk initialized successfully");
             Ok(())
@@ -264,16 +403,34 @@ pub fn run() {
             // Icon position commands
             commands::icon_positions::save_icon_layout,
             commands::icon_positions::restore_icon_layout,
+            // Theme commands
+            themes::list_themes,
+            themes::get_theme,
+            themes::get_active_theme,
+            themes::set_active_theme,
+            // Plugin commands
+            commands::plugins::list_plugins,
+            commands::plugins::install_plugin,
+            commands::plugins::uninstall_plugin,
+            commands::plugins::toggle_plugin,
         ])
         .build(tauri::generate_context!())
         .expect("error building BentoDesk")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 // Exit lifecycle order:
+                // 0. Flush the recovery bundle so a crash during restore has
+                //    the latest state to recover from.
                 // 1. Move all hidden files from .bentodesk/ back to their
                 //    original Desktop paths.
                 // 2. THEN restore icon positions -- the icons must be visible on
                 //    the desktop before we can set their positions via COM.
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Err(e) = recovery_bundle::refresh_from_state(&state) {
+                        tracing::error!("Failed to refresh recovery bundle on exit: {e}");
+                    }
+                }
+
                 hidden_items::restore_all_hidden(app_handle);
 
                 // Restore icon positions (items are now back on the desktop)

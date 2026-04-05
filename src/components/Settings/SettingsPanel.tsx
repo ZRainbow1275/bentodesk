@@ -18,10 +18,19 @@ import {
   getSettings,
   updateSettings as updateSettingsStore,
 } from "../../stores/settings";
+import {
+  plugins,
+  pluginsLoading,
+  loadPlugins,
+  installPluginAction,
+  uninstallPluginAction,
+  togglePluginAction,
+} from "../../stores/plugins";
 import { t, getLocale, setLocale } from "../../i18n";
 import type { Locale } from "../../i18n";
 import type { TranslationKey } from "../../i18n/locales/zh-CN";
 import type { AppSettings, SettingsUpdate } from "../../types/settings";
+import type { InstalledPlugin, PluginType } from "../../types/plugins";
 import {
   getAvailableThemes,
   getThemeId,
@@ -30,6 +39,7 @@ import {
   exportThemeAsJSON,
 } from "../../themes";
 import type { BentoTheme } from "../../themes";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
 
 const SettingsPanel: Component = () => {
@@ -46,11 +56,15 @@ const SettingsPanel: Component = () => {
     message: string;
   } | null>(null);
 
+  // Plugin uninstall confirmation
+  const [confirmingUninstall, setConfirmingUninstall] = createSignal<string | null>(null);
+
   // Sync when panel opens
   createEffect(() => {
     if (isSettingsPanelOpen()) {
       setLocalSettings(getSettings());
       setDirty(false);
+      void loadPlugins();
     }
   });
 
@@ -77,6 +91,30 @@ const SettingsPanel: Component = () => {
     setDirty(true);
   };
 
+  const pluginTypeLabelKey = (pt: PluginType): TranslationKey => {
+    const map: Record<PluginType, TranslationKey> = {
+      theme: "pluginTypeTheme",
+      widget: "pluginTypeWidget",
+      organizer: "pluginTypeOrganizer",
+    };
+    return map[pt];
+  };
+
+  const handleInstallPlugin = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "BentoDesk Plugin", extensions: ["bdplugin"] }],
+    });
+    if (selected) {
+      await installPluginAction(selected as string);
+    }
+  };
+
+  const handleUninstallPlugin = async (id: string) => {
+    await uninstallPluginAction(id);
+    setConfirmingUninstall(null);
+  };
+
   const handleSave = async () => {
     const current = localSettings();
     const updates: SettingsUpdate = {
@@ -92,6 +130,12 @@ const SettingsPanel: Component = () => {
       portable_mode: current.portable_mode,
       launch_at_startup: current.launch_at_startup,
       show_in_taskbar: current.show_in_taskbar,
+      startup_high_priority: current.startup_high_priority,
+      crash_restart_enabled: current.crash_restart_enabled,
+      crash_max_retries: current.crash_max_retries,
+      crash_window_secs: current.crash_window_secs,
+      safe_start_after_hibernation: current.safe_start_after_hibernation,
+      hibernate_resume_delay_ms: current.hibernate_resume_delay_ms,
     };
     const result = await updateSettingsStore(updates);
     if (result === null) {
@@ -374,6 +418,148 @@ const SettingsPanel: Component = () => {
                 unit=""
                 onChange={(v) => updateLocal("icon_cache_size", v)}
               />
+            </section>
+
+            {/* Startup Management */}
+            <section class="settings-group">
+              <h3 class="settings-group__title">{t("settingsGroupStartup")}</h3>
+
+              <ToggleRow
+                label={t("settingsStartupHighPriority")}
+                checked={localSettings().startup_high_priority}
+                onChange={(v) => updateLocal("startup_high_priority", v)}
+              />
+              <div class="settings-row__desc">{t("settingsStartupHighPriorityDesc")}</div>
+
+              <ToggleRow
+                label={t("settingsCrashRestart")}
+                checked={localSettings().crash_restart_enabled}
+                onChange={(v) => updateLocal("crash_restart_enabled", v)}
+              />
+              <div class="settings-row__desc">{t("settingsCrashRestartDesc")}</div>
+
+              <Show when={localSettings().crash_restart_enabled}>
+                <div class="settings-row">
+                  <span class="settings-row__label">{t("settingsCrashMaxRetries")}</span>
+                  <input
+                    class="settings-row__number-input"
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={localSettings().crash_max_retries}
+                    onInput={(e) =>
+                      updateLocal("crash_max_retries", parseInt(e.currentTarget.value, 10) || 3)
+                    }
+                  />
+                </div>
+                <div class="settings-row">
+                  <span class="settings-row__label">{t("settingsCrashWindowSecs")}</span>
+                  <input
+                    class="settings-row__number-input"
+                    type="number"
+                    min={5}
+                    max={60}
+                    value={localSettings().crash_window_secs}
+                    onInput={(e) =>
+                      updateLocal("crash_window_secs", parseInt(e.currentTarget.value, 10) || 10)
+                    }
+                  />
+                </div>
+              </Show>
+
+              <ToggleRow
+                label={t("settingsSafeStartHibernation")}
+                checked={localSettings().safe_start_after_hibernation}
+                onChange={(v) => updateLocal("safe_start_after_hibernation", v)}
+              />
+              <div class="settings-row__desc">{t("settingsSafeStartHibernationDesc")}</div>
+
+              <Show when={localSettings().safe_start_after_hibernation}>
+                <SliderRow
+                  label={t("settingsHibernateDelay")}
+                  value={localSettings().hibernate_resume_delay_ms}
+                  min={500}
+                  max={5000}
+                  step={100}
+                  unit="ms"
+                  onChange={(v) => updateLocal("hibernate_resume_delay_ms", v)}
+                />
+              </Show>
+            </section>
+
+            {/* Plugins */}
+            <section class="settings-group">
+              <h3 class="settings-group__title">{t("settingsGroupPlugins")}</h3>
+
+              <button
+                class="settings-btn settings-btn--secondary plugin-install-btn"
+                onClick={() => void handleInstallPlugin()}
+              >
+                {t("pluginInstall")}
+              </button>
+
+              <Show when={pluginsLoading()}>
+                <div class="plugin-loading">{t("pluginEmpty")}</div>
+              </Show>
+
+              <Show when={!pluginsLoading() && plugins().length === 0}>
+                <div class="plugin-empty">{t("pluginEmpty")}</div>
+              </Show>
+
+              <div class="plugin-list">
+                <For each={plugins()}>
+                  {(plugin: InstalledPlugin) => (
+                    <div class="plugin-card">
+                      <div class="plugin-card__header">
+                        <div class="plugin-card__info">
+                          <span class="plugin-card__name">{plugin.name}</span>
+                          <span class="plugin-card__version">v{plugin.version}</span>
+                          <span class={`plugin-card__badge plugin-card__badge--${plugin.plugin_type}`}>
+                            {t(pluginTypeLabelKey(plugin.plugin_type))}
+                          </span>
+                        </div>
+                        <button
+                          class={`toggle-switch ${plugin.enabled ? "toggle-switch--on" : ""}`}
+                          onClick={() => void togglePluginAction(plugin.id, !plugin.enabled)}
+                          role="switch"
+                          aria-checked={plugin.enabled}
+                          aria-label={plugin.enabled ? t("pluginDisable") : t("pluginEnable")}
+                        >
+                          <div class="toggle-switch__thumb" />
+                        </button>
+                      </div>
+                      <div class="plugin-card__author">{plugin.author}</div>
+                      <div class="plugin-card__desc">{plugin.description}</div>
+                      <div class="plugin-card__actions">
+                        <Show when={confirmingUninstall() === plugin.id} fallback={
+                          <button
+                            class="settings-btn settings-btn--danger"
+                            onClick={() => setConfirmingUninstall(plugin.id)}
+                          >
+                            {t("pluginUninstall")}
+                          </button>
+                        }>
+                          <span class="plugin-card__confirm-text">
+                            {t("pluginUninstallConfirm").replace("{name}", plugin.name)}
+                          </span>
+                          <button
+                            class="settings-btn settings-btn--danger"
+                            onClick={() => void handleUninstallPlugin(plugin.id)}
+                          >
+                            {t("pluginUninstall")}
+                          </button>
+                          <button
+                            class="settings-btn settings-btn--secondary"
+                            onClick={() => setConfirmingUninstall(null)}
+                          >
+                            {t("settingsBtnCancel")}
+                          </button>
+                        </Show>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
             </section>
           </div>
 

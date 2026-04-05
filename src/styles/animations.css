@@ -1,8 +1,19 @@
 /* Animation specifications */
 
-/* Spring expand — used for zen -> bento transition */
+/* Spring expand — used for zen -> bento transition.
+   IMPORTANT: Never include left/top in this transition list.
+   Position changes must be instant — animating them causes flicker/jump
+   when the --dragging class is removed after zone repositioning, because
+   the springy overshoot (1.56) bounces the zone past its target. */
 .spring-expand {
-  transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: width 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+              height 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-radius 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background 0.3s ease,
+              box-shadow 0.3s ease,
+              border-color 0.3s ease,
+              backdrop-filter 0.3s ease,
+              -webkit-backdrop-filter 0.3s ease;
 }
 
 /* Content reveal — delayed fade + slide for zone content */
@@ -93,7 +104,8 @@
   animation: itemEnter 0.25s ease-out forwards;
 }
 
-/* Dragging override — disable spring transition during zone repositioning */
+/* Dragging override — disable spring transition during zone repositioning.
+   Redundant with BentoZone.css .bento-zone--dragging but kept as safety net. */
 .bento-zone--dragging.spring-expand {
   transition: none !important;
 }

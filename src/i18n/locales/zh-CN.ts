@@ -155,6 +155,34 @@ const zhCN = {
   themeImportError: "主题导入失败",
   themeJsonPlaceholder: "粘贴主题 JSON...",
   developerOptions: "开发者选项",
+
+  // ─── Startup Management ─────────────────────────────────────
+  settingsGroupStartup: "启动管理",
+  settingsStartupHighPriority: "高优先级启动",
+  settingsStartupHighPriorityDesc: "登录后立即启动，无延迟",
+  settingsCrashRestart: "崩溃自动重启",
+  settingsCrashRestartDesc: "通过 Guardian 监控崩溃并自动重启",
+  settingsCrashMaxRetries: "最大重试次数",
+  settingsCrashWindowSecs: "崩溃窗口（秒）",
+  settingsSafeStartHibernation: "休眠安全恢复",
+  settingsSafeStartHibernationDesc: "从休眠恢复时延迟启动以确保稳定",
+  settingsHibernateDelay: "恢复延迟",
+  settingsHibernateDelayMs: "{value}ms",
+
+  // ─── Plugin Manager ─────────────────────────────────────────
+  settingsGroupPlugins: "插件",
+  pluginInstall: "安装插件...",
+  pluginUninstall: "卸载",
+  pluginUninstallConfirm: "确定要卸载 {name} 吗？",
+  pluginEnable: "启用",
+  pluginDisable: "禁用",
+  pluginTypeTheme: "主题",
+  pluginTypeWidget: "组件",
+  pluginTypeOrganizer: "整理器",
+  pluginEmpty: "暂无已安装插件",
+  pluginVersion: "v{version}",
+  pluginInstalledSuccess: "插件安装成功",
+  pluginUninstalledSuccess: "插件已卸载",
 } as const;
 
 /** Keys of the translation object — used for type-safe key lookups. */

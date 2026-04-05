@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Zero-interference desktop visual organizer"
 license = "MIT"
+default-run = "bentodesk"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -23,6 +24,7 @@ dirs = "6"
 urlencoding = "2"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
+zip = "2"
 
 windows-core = "0.58"
 
@@ -35,6 +37,8 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_System_Memory",
@@ -51,6 +55,10 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
 ]
+
+[[bin]]
+name = "guardian"
+path = "src/bin/guardian.rs"
 
 [dev-dependencies]
 tempfile = "3"
