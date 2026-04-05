@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'BentoDesk ${{ github.ref_name }}'
+          releaseBody: |
+            ## BentoDesk ${{ github.ref_name }}
+
+            ### 下载
+
+            | 文件 | 说明 |
+            |------|------|
+            | `BentoDesk_x.x.x_x64-setup.exe` | NSIS 安装包（推荐） |
+            | `BentoDesk_x.x.x_x64_en-US.msi` | MSI 安装包 |
+
+            ### 系统要求
+            - Windows 10 (1809+) 或 Windows 11
+            - WebView2 运行时（Windows 11 已内置）
+
+            ---
+            > 首次安装？查看 [使用指南](https://github.com/ZRainbow1275/bentodesk#使用指南)
+          releaseDraft: false
+          prerelease: false
