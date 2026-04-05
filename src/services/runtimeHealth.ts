@@ -1,16 +1,18 @@
 import { getSettings } from "../stores/settings";
 import type { SafetyProfile } from "../types/settings";
-import type { MemoryInfo } from "../types/system";
 import { getMemoryUsage } from "./ipc";
 
 export type RuntimePressureLevel = "stable" | "elevated" | "critical";
 export type RuntimeEffectsMode = "full" | "reduced" | "minimal";
 
+interface MemoryInfo {
+  working_set_bytes: number;
+  peak_working_set_bytes: number;
+}
+
 interface RuntimeBudget {
   jsHeapSoftLimitMb: number;
   jsHeapCriticalLimitMb: number;
-  privateUsageSoftLimitMb: number;
-  privateUsageCriticalLimitMb: number;
   workingSetSoftLimitMb: number;
   workingSetCriticalLimitMb: number;
   slowFrameThresholdMs: number;
@@ -38,8 +40,6 @@ export interface RuntimeHealthSnapshot {
   jsHeapUsedBytes: number | null;
   jsHeapLimitBytes: number | null;
   processWorkingSetBytes: number | null;
-  processPrivateBytes: number | null;
-  processPagefileBytes: number | null;
   frameP95Ms: number | null;
   slowFrameRatio: number;
   pressure: RuntimePressureLevel;
@@ -47,7 +47,6 @@ export interface RuntimeHealthSnapshot {
   baselineEffectsMode: RuntimeEffectsMode;
   reasons: string[];
   workingSetSeriesMb: number[];
-  privateUsageSeriesMb: number[];
   jsHeapSeriesMb: number[];
 }
 
@@ -60,8 +59,6 @@ const PROFILE_BUDGETS: Record<SafetyProfile, RuntimeBudget> = {
   Conservative: {
     jsHeapSoftLimitMb: 96,
     jsHeapCriticalLimitMb: 160,
-    privateUsageSoftLimitMb: 220,
-    privateUsageCriticalLimitMb: 320,
     workingSetSoftLimitMb: 280,
     workingSetCriticalLimitMb: 420,
     slowFrameThresholdMs: 28,
@@ -71,8 +68,6 @@ const PROFILE_BUDGETS: Record<SafetyProfile, RuntimeBudget> = {
   Balanced: {
     jsHeapSoftLimitMb: 144,
     jsHeapCriticalLimitMb: 224,
-    privateUsageSoftLimitMb: 320,
-    privateUsageCriticalLimitMb: 480,
     workingSetSoftLimitMb: 380,
     workingSetCriticalLimitMb: 560,
     slowFrameThresholdMs: 32,
@@ -82,8 +77,6 @@ const PROFILE_BUDGETS: Record<SafetyProfile, RuntimeBudget> = {
   Expanded: {
     jsHeapSoftLimitMb: 192,
     jsHeapCriticalLimitMb: 320,
-    privateUsageSoftLimitMb: 420,
-    privateUsageCriticalLimitMb: 640,
     workingSetSoftLimitMb: 500,
     workingSetCriticalLimitMb: 760,
     slowFrameThresholdMs: 36,
@@ -108,7 +101,6 @@ let sampleCount = 0;
 
 const frameDurationsMs: number[] = [];
 const workingSetSeriesMb: number[] = [];
-const privateUsageSeriesMb: number[] = [];
 const jsHeapSeriesMb: number[] = [];
 
 function resetRuntimeHealthState(): void {
@@ -119,7 +111,6 @@ function resetRuntimeHealthState(): void {
 
   frameDurationsMs.splice(0, frameDurationsMs.length);
   workingSetSeriesMb.splice(0, workingSetSeriesMb.length);
-  privateUsageSeriesMb.splice(0, privateUsageSeriesMb.length);
   jsHeapSeriesMb.splice(0, jsHeapSeriesMb.length);
 }
 
@@ -271,14 +262,6 @@ function evaluatePressure(
   }
 
   if (latestMemoryInfo !== null) {
-    if (latestMemoryInfo.private_usage_bytes >= toBytes(budget.privateUsageCriticalLimitMb)) {
-      escalate("critical", "process-private-critical");
-    } else if (
-      latestMemoryInfo.private_usage_bytes >= toBytes(budget.privateUsageSoftLimitMb)
-    ) {
-      escalate("elevated", "process-private-soft-limit");
-    }
-
     if (latestMemoryInfo.working_set_bytes >= toBytes(budget.workingSetCriticalLimitMb)) {
       escalate("critical", "working-set-critical");
     } else if (
@@ -351,8 +334,6 @@ function buildRuntimeHealthSnapshot(): RuntimeHealthSnapshot {
     jsHeapUsedBytes: latestJsHeapUsedBytes,
     jsHeapLimitBytes: latestJsHeapLimitBytes,
     processWorkingSetBytes: latestMemoryInfo?.working_set_bytes ?? null,
-    processPrivateBytes: latestMemoryInfo?.private_usage_bytes ?? null,
-    processPagefileBytes: latestMemoryInfo?.pagefile_usage_bytes ?? null,
     frameP95Ms,
     slowFrameRatio,
     pressure,
@@ -360,7 +341,6 @@ function buildRuntimeHealthSnapshot(): RuntimeHealthSnapshot {
     baselineEffectsMode,
     reasons,
     workingSetSeriesMb: [...workingSetSeriesMb],
-    privateUsageSeriesMb: [...privateUsageSeriesMb],
     jsHeapSeriesMb: [...jsHeapSeriesMb],
   };
 }
@@ -419,10 +399,6 @@ async function sampleRuntimeMemory(): Promise<void> {
     pushSeriesPoint(
       workingSetSeriesMb,
       toMegabytes(memoryInfo.working_set_bytes)
-    );
-    pushSeriesPoint(
-      privateUsageSeriesMb,
-      toMegabytes(memoryInfo.private_usage_bytes)
     );
     pushSeriesPoint(
       jsHeapSeriesMb,

@@ -1,6 +1,7 @@
 // BentoDesk Settings types — mirrors Rust data model exactly
 
 export type Theme = "Dark" | "Light" | "System";
+export type SafetyProfile = "Conservative" | "Balanced" | "Expanded";
 
 export interface AppSettings {
   version: string;
@@ -16,6 +17,7 @@ export interface AppSettings {
   portable_mode: boolean;
   launch_at_startup: boolean;
   show_in_taskbar: boolean;
+  safety_profile: SafetyProfile; // Default: Balanced
   active_theme?: string | null;  // JSON theme ID (e.g. "ocean-blue")
   startup_high_priority: boolean;
   crash_restart_enabled: boolean;
@@ -38,6 +40,7 @@ export interface SettingsUpdate {
   portable_mode?: boolean;
   launch_at_startup?: boolean;
   show_in_taskbar?: boolean;
+  safety_profile?: SafetyProfile;
   active_theme?: string | null;
   startup_high_priority?: boolean;
   crash_restart_enabled?: boolean;

@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   portable_mode: false,
   launch_at_startup: false,
   show_in_taskbar: false,
+  safety_profile: "Balanced",
   startup_high_priority: false,
   crash_restart_enabled: false,
   crash_max_retries: 3,
