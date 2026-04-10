@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! BentoDesk Guardian — lightweight watchdog process that monitors and restarts
 //! the main BentoDesk application on abnormal termination.
 //!
@@ -22,6 +24,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
+
 
 // ---------------------------------------------------------------------------
 // Configuration

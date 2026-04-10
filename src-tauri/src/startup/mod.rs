@@ -7,8 +7,14 @@
 
 use std::path::Path;
 use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use crate::error::BentoDeskError;
+
+/// Win32 `CREATE_NO_WINDOW` flag — prevents console window flash for child processes.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Crash detection settings forwarded to the Guardian process.
 #[derive(Debug, Clone)]
@@ -110,6 +116,7 @@ fn create_task(
 
     let output = Command::new("schtasks.exe")
         .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| {
             BentoDeskError::StartupError(format!("Failed to execute schtasks.exe: {e}"))
@@ -143,6 +150,7 @@ fn delete_task() -> Result<(), BentoDeskError> {
 
     let output = Command::new("schtasks.exe")
         .args(["/delete", "/tn", TASK_NAME, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| {
             BentoDeskError::StartupError(format!("Failed to execute schtasks.exe: {e}"))

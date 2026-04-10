@@ -36,6 +36,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Build Guardian binary
+        run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:

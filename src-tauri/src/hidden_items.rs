@@ -24,7 +24,13 @@
 //!   to the new subfolder-based architecture.
 
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager};
+
+/// Win32 `CREATE_NO_WINDOW` flag — prevents console window flash for child processes.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // --- Safety Manifest --------------------------------------------------------
 
@@ -206,6 +212,7 @@ fn set_hidden_attribute_on_dir(dir: &Path) {
     let dir_str = dir.to_string_lossy();
     match std::process::Command::new("attrib")
         .args(["+h", "+s", &*dir_str])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         Ok(output) => {
@@ -231,6 +238,7 @@ fn set_hidden_attribute_on_dir(dir: &Path) {
 fn remove_hidden_attribute(file_path: &str) -> bool {
     match std::process::Command::new("attrib")
         .args(["-h", "-s", file_path])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         Ok(output) => {

@@ -78,6 +78,25 @@ const App: Component = () => {
   let hotkeyCleanup: (() => void) | null = null;
 
   onMount(async () => {
+    // 0. Suppress WebView2 browser defaults in release builds:
+    //    - Block the default context menu globally (custom ContextMenu component handles it)
+    //    - Block browser accelerator keys (F5 refresh, F12 devtools, Ctrl+Shift+I, etc.)
+    document.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+    });
+    document.addEventListener("keydown", (e) => {
+      // Block F5 (refresh), F12 (devtools), Ctrl+Shift+I (devtools), Ctrl+R / Ctrl+Shift+R (reload)
+      if (
+        e.key === "F5" ||
+        e.key === "F12" ||
+        (e.ctrlKey && e.shiftKey && e.key === "I") ||
+        (e.ctrlKey && e.shiftKey && e.key === "R") ||
+        (e.ctrlKey && e.key === "r")
+      ) {
+        e.preventDefault();
+      }
+    });
+
     // 1. Enable click-through passthrough for the overlay window,
     //    start the cursor-position polling loop for hit detection,
     //    and start the OS-level drag-drop listener for Explorer file drops

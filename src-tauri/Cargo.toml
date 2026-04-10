@@ -27,6 +27,7 @@ base64 = "0.22"
 zip = "2"
 
 windows-core = "0.58"
+webview2-com = "0.38"
 
 [dependencies.windows]
 version = "0.58"

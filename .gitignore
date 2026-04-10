@@ -39,3 +39,4 @@ pnpm-debug.log*
 
 # Tauri debug artifacts
 src-tauri/gen/
+.gitnexus

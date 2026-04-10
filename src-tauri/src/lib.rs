@@ -311,6 +311,30 @@ pub fn run() {
                 if let Err(e) = window.set_ignore_cursor_events(true) {
                     tracing::warn!("Failed to set initial passthrough: {e}");
                 }
+
+                // Disable browser keyboard accelerators (F5 refresh, Ctrl+Shift+I devtools, etc.)
+                // and default context menus in release builds to prevent exposing
+                // WebView2 internals to end users.
+                #[cfg(not(debug_assertions))]
+                {
+                    let _ = window.with_webview(|webview| {
+                        // SAFETY: ICoreWebView2Settings is a well-documented COM interface.
+                        // The controller lifetime is managed by Tauri; we hold a valid
+                        // reference inside the with_webview closure.
+                        unsafe {
+                            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings;
+
+                            let core = webview.controller().CoreWebView2().unwrap();
+                            let settings: ICoreWebView2Settings = core.Settings().unwrap();
+
+                            // Disable the default WebView2 right-click context menu
+                            let _ = settings.SetAreDefaultContextMenusEnabled(false);
+
+                            // Disable DevTools (F12)
+                            let _ = settings.SetAreDevToolsEnabled(false);
+                        }
+                    });
+                }
             }
 
             // Start file system watcher on the Desktop directory

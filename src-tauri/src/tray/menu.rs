@@ -104,9 +104,10 @@ pub fn setup_tray(app: &App) -> Result<(), BentoDeskError> {
                     let _ = app_handle.emit("tray_about", ());
                 }
                 "exit" => {
-                    tracing::info!("Exit requested from tray — restoring hidden items and icon positions");
-                    hidden_items::restore_all_hidden(app_handle);
-                    restore_icons_before_exit(app_handle);
+                    tracing::info!("Exit requested from tray");
+                    // Do NOT restore here — RunEvent::Exit handler in lib.rs
+                    // performs the full restore sequence. Calling exit(0) triggers
+                    // that handler, so restoring here would cause double-restore.
                     app_handle.exit(0);
                 }
                 _ => {}
@@ -164,6 +165,7 @@ fn toggle_main_window(
 ///
 /// Falls back to the on-disk backup if the in-memory state is unavailable.
 /// Errors are logged but do not prevent the exit.
+#[allow(dead_code)]
 fn restore_icons_before_exit(app_handle: &tauri::AppHandle) {
     // Try in-memory backup first
     if let Some(state) = app_handle.try_state::<AppState>() {
