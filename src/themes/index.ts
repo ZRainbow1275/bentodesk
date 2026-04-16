@@ -92,26 +92,76 @@ const THEME_TO_CSS: ReadonlyArray<[keyof BentoTheme, string]> = [
   ["radius_expanded", "--radius-expanded"],
   ["radius_card", "--radius-card"],
   ["radius_badge", "--radius-badge"],
+  ["font_family", "--font-family-primary"],
+  ["border_width", "--border-width"],
 ];
 
 /**
+ * Parse an sRGB color string and decide whether it is a "light" color.
+ * Accepts "#rgb", "#rrggbb", "rgb(r,g,b)", "rgba(r,g,b,a)".
+ * Returns false for any unparseable input (e.g. "none", "transparent", gradients).
+ */
+function isColorLight(css: string): boolean {
+  if (typeof css !== "string" || css.length === 0) return false;
+  const trimmed = css.trim();
+
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (trimmed.startsWith("#")) {
+    const hex = trimmed.slice(1);
+    if (hex.length === 3) {
+      r = parseInt(hex[0] + hex[0], 16);
+      g = parseInt(hex[1] + hex[1], 16);
+      b = parseInt(hex[2] + hex[2], 16);
+    } else if (hex.length === 6) {
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else {
+      return false;
+    }
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return false;
+  } else {
+    const match = trimmed.match(
+      /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)$/i,
+    );
+    if (!match) return false;
+    r = Number(match[1]);
+    g = Number(match[2]);
+    b = Number(match[3]);
+  }
+
+  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luminance > 0.55;
+}
+
+/**
  * Apply a theme's CSS variables to :root.
- * Also sets data-theme attribute for any CSS that still depends on it.
+ * Also sets data-theme attribute for any CSS that still depends on it,
+ * and data-theme-effect for effect overlays (scanlines/neon/chromatic).
  */
 function applyCssVariables(theme: BentoTheme): void {
   const root = document.documentElement;
 
   for (const [field, cssVar] of THEME_TO_CSS) {
     const value = theme[field];
-    if (typeof value === "string") {
+    if (typeof value === "string" && value.length > 0) {
       root.style.setProperty(cssVar, value);
+    } else {
+      root.style.removeProperty(cssVar);
     }
   }
 
-  // Keep data-theme for backward compatibility with any direct CSS selectors
-  // Determine if the theme is "light" for data-theme attribute
-  const isLight = theme.id === "light";
+  const isLight = theme.is_light ?? isColorLight(theme.surface_zen);
   root.setAttribute("data-theme", isLight ? "light" : "dark");
+
+  if (theme.effect && theme.effect !== "none") {
+    root.dataset.themeEffect = theme.effect;
+  } else {
+    delete root.dataset.themeEffect;
+  }
 }
 
 // ─── Public API ─────────────────────────────────────────────

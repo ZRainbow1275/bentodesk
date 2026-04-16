@@ -1,0 +1,40 @@
+/**
+ * Theme visual effects — attached via data-theme-effect on <html>.
+ * Applied globally so the overlay covers the entire viewport regardless of zone state.
+ */
+
+/* ── Scanlines (terminal) ─────────────────────────────────── */
+html[data-theme-effect="scanlines"]::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  mix-blend-mode: overlay;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(0, 255, 156, 0.06) 0,
+    rgba(0, 255, 156, 0.06) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* ── Neon (cyberpunk) ─────────────────────────────────────── */
+html[data-theme-effect="neon"] .bento-zone {
+  filter: drop-shadow(0 0 6px var(--accent-blue))
+    drop-shadow(0 0 12px rgba(255, 46, 147, 0.4));
+}
+
+html[data-theme-effect="neon"] .bento-zone-expanded {
+  filter: drop-shadow(0 0 8px var(--accent-blue))
+    drop-shadow(0 0 20px rgba(255, 46, 147, 0.35));
+}
+
+/* ── Chromatic aberration (subtle, headings only) ─────────── */
+html[data-theme-effect="chromatic"] h1,
+html[data-theme-effect="chromatic"] h2 {
+  text-shadow:
+    1px 0 0 rgba(255, 0, 80, 0.45),
+    -1px 0 0 rgba(0, 200, 255, 0.45);
+}

@@ -68,6 +68,18 @@ export interface BentoTheme {
   radius_expanded: string;
   radius_card: string;
   radius_badge: string;
+
+  /** Explicit light/dark marker for data-theme attribute. Falls back to luminance inference from surface_zen. */
+  is_light?: boolean;
+
+  /** Primary font-family override. Defaults to system UI font when undefined. */
+  font_family?: string;
+
+  /** Border width override in CSS length units (brutalism uses "3px"). Defaults to "1px". */
+  border_width?: string;
+
+  /** Visual effect channel applied via data-theme-effect attribute. */
+  effect?: "scanlines" | "chromatic" | "neon" | "none";
 }
 
 /**

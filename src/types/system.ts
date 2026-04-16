@@ -12,11 +12,20 @@ export interface MemoryInfo {
   peak_working_set_bytes: number;
 }
 
+export type DesktopSourceKind = "user" | "public" | "onedrive" | "custom";
+
+export interface DesktopSourceInfo {
+  path: string;
+  kind: DesktopSourceKind;
+  watched: boolean;
+}
+
 export interface SystemInfo {
   os_version: string;
   resolution: Resolution;
   dpi: number;
   desktop_path: string;
+  desktop_sources: DesktopSourceInfo[];
   webview2_version: string | null;
   memory_usage: MemoryInfo;
 }

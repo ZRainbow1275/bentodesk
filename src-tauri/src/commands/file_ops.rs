@@ -26,9 +26,29 @@ fn strip_unc(s: &str) -> &str {
 }
 
 /// Core path-validation logic, decoupled from `AppState` for testability.
+/// Resolves the BentoDesk AppData directory via `dirs::data_dir()`; tests
+/// that need a deterministic AppData root should call
+/// [`validate_allowed_path_with_app_data`] directly.
 ///
-/// `desktop_path` is the user-configured desktop directory.
+/// `desktop_path` is the user-configured desktop directory. An empty string
+/// is treated as "no override" — earlier versions used `starts_with("")`
+/// which silently matched every path and effectively disabled validation
+/// when the setting was blank, so the explicit empty-string branch below is
+/// load-bearing for security.
 fn validate_allowed_path_inner(path: &str, desktop_path: &str) -> Result<(), String> {
+    let app_data = dirs::data_dir().map(|d| d.join("BentoDesk"));
+    validate_allowed_path_with_app_data(path, desktop_path, app_data.as_deref())
+}
+
+/// Same as [`validate_allowed_path_inner`] but with an injectable AppData
+/// root. Used directly by unit tests so the AppData allow-list can be
+/// exercised against a temporary directory rather than the user's real
+/// `%APPDATA%\BentoDesk`.
+fn validate_allowed_path_with_app_data(
+    path: &str,
+    desktop_path: &str,
+    app_data: Option<&Path>,
+) -> Result<(), String> {
     let canonical = match std::fs::canonicalize(path) {
         Ok(p) => p,
         Err(_) => {
@@ -45,29 +65,48 @@ fn validate_allowed_path_inner(path: &str, desktop_path: &str) -> Result<(), Str
         }
     };
 
+    // B5 fix: normalize BOTH separators AND the extended-length prefix before
+    // any prefix comparison, otherwise e.g. "C:/Users/.." forms slip past
+    // checks that were written with backslashes in mind.
     let canonical_lower = strip_unc(&canonical.to_string_lossy())
         .to_lowercase()
         .replace('/', "\\");
 
-    // Allow 1: Desktop directory (from settings)
-    let desktop_lower = desktop_path.to_lowercase().replace('/', "\\");
-    if canonical_lower.starts_with(&desktop_lower) {
-        return Ok(());
-    }
+    let norm = |s: &str| {
+        s.to_lowercase()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_string()
+    };
 
-    // Allow 2: System desktop dir (fallback)
-    if let Some(sys_desktop) = dirs::desktop_dir() {
-        let sys_lower = sys_desktop.to_string_lossy().to_lowercase().replace('/', "\\");
-        if canonical_lower.starts_with(&sys_lower) {
+    // Match either exact equality or "<source>\..." so that a desktop
+    // root of "c:\users\alice\desktop" cannot be bypassed by a sibling
+    // directory like "c:\users\alice\desktopbackup\evil.exe".
+    let is_inside = |root: &str, candidate: &str| -> bool {
+        if root.is_empty() {
+            return false;
+        }
+        candidate == root || candidate.starts_with(&format!("{root}\\"))
+    };
+
+    // Allow list 1: every legitimate Desktop source (user, public, OneDrive,
+    // plus the settings override).
+    let custom = if desktop_path.trim().is_empty() {
+        None
+    } else {
+        Some(desktop_path)
+    };
+    for source in crate::desktop_sources::all_desktop_dirs(custom) {
+        let source_lower = norm(&source.to_string_lossy());
+        if is_inside(&source_lower, &canonical_lower) {
             return Ok(());
         }
     }
 
-    // Allow 3: BentoDesk app data directory (icons, layout backups)
-    if let Some(data_dir) = dirs::data_dir() {
-        let app_data = data_dir.join("BentoDesk");
-        let app_data_lower = app_data.to_string_lossy().to_lowercase().replace('/', "\\");
-        if canonical_lower.starts_with(&app_data_lower) {
+    // Allow list 2: BentoDesk app data directory (icons, layout backups).
+    if let Some(app_data) = app_data {
+        let app_data_lower = norm(&app_data.to_string_lossy());
+        if is_inside(&app_data_lower, &canonical_lower) {
             return Ok(());
         }
     }
@@ -287,6 +326,66 @@ mod tests {
             r"C:\Users\TestUser\Desktop",
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn allows_file_inside_injected_appdata_dir() {
+        // Desktop set to an unrelated tempdir so the file cannot match
+        // Allow list 1; only Allow list 2 (AppData) can authorize it.
+        let desktop = tempfile::tempdir().unwrap();
+        let app_data = tempfile::tempdir().unwrap();
+        let nested = app_data.path().join("icons").join("cache");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("ok.png");
+        std::fs::write(&file, [0u8]).unwrap();
+
+        let result = validate_allowed_path_with_app_data(
+            &file.to_string_lossy(),
+            &desktop.path().to_string_lossy(),
+            Some(app_data.path()),
+        );
+        assert!(result.is_ok(), "AppData-rooted file must be allowed: {result:?}");
+    }
+
+    #[test]
+    fn rejects_appdata_sibling_via_prefix_collision() {
+        // Regression guard for the prefix-collision bug: if AppData is
+        // "c:\…\BentoDesk", a sibling "BentoDeskEvil" must NOT be allowed.
+        let desktop = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let allowed = parent.path().join("BentoDesk");
+        let evil = parent.path().join("BentoDeskEvil");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        let evil_file = evil.join("payload.bin");
+        std::fs::write(&evil_file, [0u8]).unwrap();
+
+        let result = validate_allowed_path_with_app_data(
+            &evil_file.to_string_lossy(),
+            &desktop.path().to_string_lossy(),
+            Some(&allowed),
+        );
+        assert!(result.is_err(), "Sibling directory must not bypass AppData allow-list");
+    }
+
+    #[test]
+    fn rejects_desktop_sibling_via_prefix_collision() {
+        // Same regression guard for Allow list 1: "Desktop" must not match
+        // "DesktopBackup".
+        let desktop_root = tempfile::tempdir().unwrap();
+        let desktop = desktop_root.path().join("Desktop");
+        let evil = desktop_root.path().join("DesktopBackup");
+        std::fs::create_dir_all(&desktop).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        let evil_file = evil.join("payload.bin");
+        std::fs::write(&evil_file, [0u8]).unwrap();
+
+        let result = validate_allowed_path_with_app_data(
+            &evil_file.to_string_lossy(),
+            &desktop.to_string_lossy(),
+            None,
+        );
+        assert!(result.is_err(), "Sibling directory must not bypass Desktop allow-list");
     }
 
     // ── BLOCKED_SCRIPT_EXTENSIONS (P2-6: script injection prevention) ──

@@ -96,7 +96,7 @@ impl IDataObject_Impl for BentoDataObject_Impl {
         unsafe {
             let fmt = &*pformatetcin;
             if fmt.cfFormat == CF_HDROP.0
-                && fmt.dwAspect == DVASPECT_CONTENT.0 as u32
+                && fmt.dwAspect == DVASPECT_CONTENT.0
                 && fmt.tymed & TYMED_HGLOBAL.0 as u32 != 0
             {
                 let hglobal = self.build_hdrop()?;

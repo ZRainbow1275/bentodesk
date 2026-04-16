@@ -1,0 +1,76 @@
+/**
+ * Bottom-right toast surfaces for the global error channel.
+ * Two variants: a richer "outside-desktop" toast that lists allowed sources,
+ * and a generic single-message toast for any other backend error.
+ */
+
+.app-toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  pointer-events: auto;
+  z-index: 3000;
+  max-width: 420px;
+  color: #fff;
+  font-size: var(--font-size-sm, 13px);
+  background: var(--accent-red, rgba(239, 68, 68, 0.95));
+  box-shadow: var(--shadow-expanded, 0 4px 20px rgba(0, 0, 0, 0.4));
+  border-radius: var(--radius-card, 10px);
+}
+
+.app-toast--generic {
+  padding: 12px 20px;
+  border-radius: var(--radius-card, 8px);
+}
+
+.app-toast--outside-desktop {
+  padding: 14px 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-toast__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-toast__title {
+  font-weight: var(--font-weight-semibold, 600);
+  line-height: 1.4;
+}
+
+.app-toast__close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.85;
+}
+
+.app-toast__close:hover {
+  opacity: 1;
+}
+
+.app-toast__path {
+  font-size: var(--font-size-xs, 11px);
+  opacity: 0.9;
+  font-family: var(--font-family-primary, ui-monospace, Consolas, monospace);
+  word-break: break-all;
+}
+
+.app-toast__sources {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.app-toast__source {
+  word-break: break-all;
+}

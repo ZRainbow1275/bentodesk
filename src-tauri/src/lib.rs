@@ -6,6 +6,7 @@
 mod commands;
 mod config;
 mod crash_handler;
+mod desktop_sources;
 mod drag_drop;
 mod error;
 mod ghost_layer;
@@ -422,6 +423,7 @@ pub fn run() {
             commands::settings::update_settings,
             // System commands
             commands::system::get_system_info,
+            commands::system::get_desktop_sources,
             commands::system::start_drag,
             commands::system::get_memory_usage,
             // Icon position commands

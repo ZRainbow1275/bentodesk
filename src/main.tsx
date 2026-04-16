@@ -11,6 +11,8 @@ import "./styles/variables.css";
 import "./styles/base.css";
 import "./styles/glassmorphism.css";
 import "./styles/animations.css";
+import "./styles/theme-effects.css";
+import "./styles/toast.css";
 
 import App from "./App";
 

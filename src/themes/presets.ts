@@ -561,6 +561,194 @@ export const forestGreenTheme: BentoTheme = {
   radius_badge: "10px",
 };
 
+export const brutalismTheme: BentoTheme = {
+  id: "brutalism",
+  name_key: "themeBrutalism",
+  is_builtin: true,
+  preview_colors: ["#FFD400", "#000000", "#FFFFFF", "#E63946"],
+
+  surface_zen: "#FFD400",
+  surface_expanded: "rgba(255, 255, 255, 0.98)",
+  surface_hover: "rgba(0, 0, 0, 0.08)",
+  surface_active: "rgba(0, 0, 0, 0.12)",
+  surface_subtle: "rgba(0, 0, 0, 0.04)",
+
+  border_zen: "#000000",
+  border_expanded: "#000000",
+  border_hover: "#000000",
+
+  text_primary: "#000000",
+  text_secondary: "#1a1a1a",
+  text_muted: "#4a4a4a",
+
+  accent_blue: "#0066FF",
+  accent_purple: "#7C3AED",
+  accent_green: "#00A86B",
+  accent_orange: "#FFD400",
+  accent_pink: "#FF2E93",
+  accent_red: "#E63946",
+
+  shadow_zen: "none",
+  shadow_expanded: "none",
+  shadow_item_hover: "none",
+
+  blur_zen: "none",
+  blur_expanded: "none",
+
+  badge_bg: "rgba(0, 0, 0, 0.12)",
+
+  radius_capsule: "0px",
+  radius_expanded: "0px",
+  radius_card: "0px",
+  radius_badge: "0px",
+
+  is_light: true,
+  border_width: "3px",
+  effect: "none",
+};
+
+export const terminalTheme: BentoTheme = {
+  id: "terminal",
+  name_key: "themeTerminal",
+  is_builtin: true,
+  preview_colors: ["#0A0E0C", "#00FF9C", "#050705", "#003D24"],
+
+  surface_zen: "rgba(10, 14, 12, 0.92)",
+  surface_expanded: "rgba(5, 7, 5, 0.98)",
+  surface_hover: "rgba(0, 255, 156, 0.08)",
+  surface_active: "rgba(0, 255, 156, 0.14)",
+  surface_subtle: "rgba(0, 255, 156, 0.04)",
+
+  border_zen: "rgba(0, 255, 156, 0.35)",
+  border_expanded: "rgba(0, 255, 156, 0.45)",
+  border_hover: "rgba(0, 255, 156, 0.7)",
+
+  text_primary: "#00FF9C",
+  text_secondary: "rgba(0, 255, 156, 0.78)",
+  text_muted: "rgba(0, 255, 156, 0.5)",
+
+  accent_blue: "#00D4FF",
+  accent_purple: "#B794FF",
+  accent_green: "#00FF9C",
+  accent_orange: "#FFB400",
+  accent_pink: "#FF6EC7",
+  accent_red: "#FF3366",
+
+  shadow_zen: "0 0 0 1px rgba(0, 255, 156, 0.25), 0 0 16px rgba(0, 255, 156, 0.15)",
+  shadow_expanded: "0 0 0 1px rgba(0, 255, 156, 0.4), 0 0 32px rgba(0, 255, 156, 0.2)",
+  shadow_item_hover: "0 0 12px rgba(0, 255, 156, 0.25)",
+
+  blur_zen: "none",
+  blur_expanded: "none",
+
+  badge_bg: "rgba(0, 255, 156, 0.13)",
+
+  radius_capsule: "2px",
+  radius_expanded: "2px",
+  radius_card: "2px",
+  radius_badge: "2px",
+
+  is_light: false,
+  font_family: '"JetBrains Mono", "Consolas", ui-monospace, monospace',
+  effect: "scanlines",
+};
+
+export const cyberpunkTheme: BentoTheme = {
+  id: "cyberpunk",
+  name_key: "themeCyberpunk",
+  is_builtin: true,
+  preview_colors: ["#0C0420", "#00F0FF", "#FF2E93", "#1A0B3B"],
+
+  surface_zen: "rgba(12, 4, 32, 0.78)",
+  surface_expanded: "rgba(12, 4, 32, 0.94)",
+  surface_hover: "rgba(0, 240, 255, 0.08)",
+  surface_active: "rgba(255, 46, 147, 0.1)",
+  surface_subtle: "rgba(0, 240, 255, 0.04)",
+
+  border_zen: "rgba(0, 240, 255, 0.55)",
+  border_expanded: "rgba(255, 46, 147, 0.6)",
+  border_hover: "rgba(0, 240, 255, 0.85)",
+
+  text_primary: "#E7F7FF",
+  text_secondary: "#7FD3F7",
+  text_muted: "#6B5E8E",
+
+  accent_blue: "#00F0FF",
+  accent_purple: "#B026FF",
+  accent_green: "#39FF14",
+  accent_orange: "#FFB400",
+  accent_pink: "#FF2E93",
+  accent_red: "#FF3864",
+
+  shadow_zen: "0 0 16px rgba(0, 240, 255, 0.35), 0 0 32px rgba(255, 46, 147, 0.2)",
+  shadow_expanded: "0 0 24px rgba(0, 240, 255, 0.5), 0 0 48px rgba(255, 46, 147, 0.3)",
+  shadow_item_hover: "0 0 12px rgba(0, 240, 255, 0.4), 0 0 24px rgba(255, 46, 147, 0.25)",
+
+  blur_zen: "blur(12px) saturate(180%)",
+  blur_expanded: "blur(16px) saturate(200%)",
+
+  badge_bg: "rgba(0, 240, 255, 0.16)",
+
+  radius_capsule: "3px",
+  radius_expanded: "3px",
+  radius_card: "3px",
+  radius_badge: "3px",
+
+  is_light: false,
+  border_width: "1.5px",
+  effect: "neon",
+};
+
+export const editorialTheme: BentoTheme = {
+  id: "editorial",
+  name_key: "themeEditorial",
+  is_builtin: true,
+  preview_colors: ["#FAFAFA", "#0A0A0A", "#D7263D", "#E5E5E5"],
+
+  surface_zen: "rgba(250, 250, 250, 0.96)",
+  surface_expanded: "rgba(255, 255, 255, 1)",
+  surface_hover: "rgba(0, 0, 0, 0.03)",
+  surface_active: "rgba(0, 0, 0, 0.05)",
+  surface_subtle: "rgba(0, 0, 0, 0.015)",
+
+  border_zen: "rgba(0, 0, 0, 0.1)",
+  border_expanded: "rgba(0, 0, 0, 0.12)",
+  border_hover: "rgba(0, 0, 0, 0.2)",
+
+  text_primary: "#0A0A0A",
+  text_secondary: "#3a3a3a",
+  text_muted: "#888888",
+
+  accent_blue: "#1F3A8A",
+  accent_purple: "#5B21B6",
+  accent_green: "#166534",
+  accent_orange: "#C2410C",
+  accent_pink: "#BE185D",
+  accent_red: "#D7263D",
+
+  shadow_zen: "none",
+  shadow_expanded: "none",
+  shadow_item_hover: "none",
+
+  blur_zen: "none",
+  blur_expanded: "none",
+
+  badge_bg: "rgba(215, 38, 61, 0.1)",
+
+  radius_capsule: "0px",
+  radius_expanded: "0px",
+  radius_card: "0px",
+  radius_badge: "0px",
+
+  is_light: true,
+  font_family: '"Playfair Display", Georgia, "Times New Roman", serif',
+  border_width: "1px",
+  // Subtle chromatic aberration on h1/h2 — fits the magazine/print aesthetic
+  // and exercises the `chromatic` channel defined in theme-effects.css that
+  // was previously a typed-but-unused option.
+  effect: "chromatic",
+};
+
 /** All built-in themes in display order. */
 export const BUILTIN_THEMES: readonly BentoTheme[] = [
   darkTheme,
@@ -576,4 +764,8 @@ export const BUILTIN_THEMES: readonly BentoTheme[] = [
   oceanBlueTheme,
   roseGoldTheme,
   forestGreenTheme,
+  brutalismTheme,
+  terminalTheme,
+  cyberpunkTheme,
+  editorialTheme,
 ];

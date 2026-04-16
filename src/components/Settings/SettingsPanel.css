@@ -321,11 +321,32 @@
 
 /* ─── Theme Grid Picker ──────────────────── */
 
+.theme-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md, 12px);
+  margin-top: 4px;
+}
+
+.theme-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-group__title {
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold, 600);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding-left: 2px;
+}
+
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
-  margin-top: 4px;
 }
 
 .theme-card {
@@ -593,4 +614,112 @@
 
 .settings-btn--danger:hover {
   background: rgba(239, 68, 68, 0.2);
+}
+
+/* ─── Desktop Source List ────────────────── */
+
+.desktop-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+}
+
+.desktop-source-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-zen);
+  border-radius: 8px;
+  transition: border-color var(--transition-fast, 150ms ease-out);
+}
+
+.desktop-source-card:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.desktop-source-card__icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold, 600);
+  color: white;
+}
+
+.desktop-source-card--user .desktop-source-card__icon {
+  background: rgba(59, 130, 246, 0.75);
+}
+
+.desktop-source-card--public .desktop-source-card__icon {
+  background: rgba(34, 197, 94, 0.75);
+}
+
+.desktop-source-card--onedrive .desktop-source-card__icon {
+  background: rgba(14, 165, 233, 0.75);
+}
+
+.desktop-source-card--custom .desktop-source-card__icon {
+  background: rgba(168, 85, 247, 0.75);
+}
+
+.desktop-source-card__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.desktop-source-card__label {
+  font-size: var(--font-size-sm, 13px);
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.desktop-source-card__path {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted);
+  font-family: var(--font-family, ui-monospace, Consolas, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-source-card__badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: var(--font-weight-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.18);
+  color: var(--accent-green);
+}
+
+.desktop-source-empty {
+  font-size: var(--font-size-xs, 11px);
+  color: var(--text-muted);
+  padding: 6px 4px;
+  font-style: italic;
+}
+
+.desktop-source-refresh {
+  align-self: flex-end;
+  padding: 4px 10px;
+  font-size: 14px;
+  line-height: 1;
+  min-width: 32px;
+}
+
+.desktop-source-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

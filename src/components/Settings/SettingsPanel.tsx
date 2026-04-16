@@ -31,6 +31,8 @@ import type { Locale } from "../../i18n";
 import type { TranslationKey } from "../../i18n/locales/zh-CN";
 import type { AppSettings, SettingsUpdate } from "../../types/settings";
 import type { InstalledPlugin, PluginType } from "../../types/plugins";
+import type { DesktopSourceInfo, DesktopSourceKind } from "../../types/system";
+import { getDesktopSources } from "../../services/ipc";
 import {
   getAvailableThemes,
   getThemeId,
@@ -41,6 +43,72 @@ import {
 import type { BentoTheme } from "../../themes";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./SettingsPanel.css";
+
+/**
+ * Ordered theme IDs grouped by visual family. Any ID returned by
+ * getAvailableThemes() but not listed here (custom themes) falls into a
+ * trailing "Personality" bucket so nothing is dropped from the UI.
+ */
+const THEME_GROUP_ORDER: ReadonlyArray<{ key: TranslationKey; ids: readonly string[] }> = [
+  {
+    key: "themeGroupRounded",
+    ids: ["dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue", "rose-gold", "forest-green"],
+  },
+  { key: "themeGroupSolid", ids: ["solid"] },
+  { key: "themeGroupAngular", ids: ["order", "flat", "brutalism", "editorial"] },
+  { key: "themeGroupPersonality", ids: ["neo", "terminal", "cyberpunk"] },
+];
+
+function groupThemes(all: readonly BentoTheme[]): ReadonlyArray<{ key: TranslationKey; themes: BentoTheme[] }> {
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const seen = new Set<string>();
+  const groups: Array<{ key: TranslationKey; themes: BentoTheme[] }> = THEME_GROUP_ORDER.map(
+    ({ key, ids }) => {
+      const themes = ids
+        .map((id) => byId.get(id))
+        .filter((t): t is BentoTheme => {
+          if (!t) return false;
+          seen.add(t.id);
+          return true;
+        });
+      return { key, themes };
+    }
+  );
+  const leftover = all.filter((t) => !seen.has(t.id));
+  if (leftover.length > 0) {
+    const personality = groups.find((g) => g.key === "themeGroupPersonality");
+    if (personality) {
+      personality.themes = [...personality.themes, ...leftover];
+    }
+  }
+  return groups.filter((g) => g.themes.length > 0);
+}
+
+function desktopSourceLabelKey(kind: DesktopSourceKind): TranslationKey {
+  switch (kind) {
+    case "user":
+      return "desktopSourceUser";
+    case "public":
+      return "desktopSourcePublic";
+    case "onedrive":
+      return "desktopSourceOneDrive";
+    case "custom":
+      return "desktopSourceCustom";
+  }
+}
+
+function desktopSourceInitial(kind: DesktopSourceKind): string {
+  switch (kind) {
+    case "user":
+      return "U";
+    case "public":
+      return "P";
+    case "onedrive":
+      return "O";
+    case "custom":
+      return "C";
+  }
+}
 
 const SettingsPanel: Component = () => {
   const [localSettings, setLocalSettings] = createSignal<AppSettings>(
@@ -59,12 +127,30 @@ const SettingsPanel: Component = () => {
   // Plugin uninstall confirmation
   const [confirmingUninstall, setConfirmingUninstall] = createSignal<string | null>(null);
 
+  // Desktop sources (multi-source). Populated via invoke("get_desktop_sources")
+  // when the panel opens, and on demand via the refresh button.
+  const [desktopSources, setDesktopSources] = createSignal<DesktopSourceInfo[]>([]);
+  const [desktopSourcesLoading, setDesktopSourcesLoading] = createSignal(false);
+
+  const refreshDesktopSources = async (): Promise<void> => {
+    setDesktopSourcesLoading(true);
+    try {
+      const sources = await getDesktopSources();
+      setDesktopSources(sources);
+    } catch (err) {
+      console.error("Failed to load desktop sources:", err);
+    } finally {
+      setDesktopSourcesLoading(false);
+    }
+  };
+
   // Sync when panel opens
   createEffect(() => {
     if (isSettingsPanelOpen()) {
       setLocalSettings(getSettings());
       setDirty(false);
       void loadPlugins();
+      void refreshDesktopSources();
     }
   });
 
@@ -223,6 +309,50 @@ const SettingsPanel: Component = () => {
               <h3 class="settings-group__title">{t("settingsGroupPaths")}</h3>
 
               <div class="settings-row settings-row--column">
+                <span class="settings-row__label">{t("settingsDesktopSources")}</span>
+                <div class="desktop-source-list">
+                  <Show
+                    when={desktopSources().length > 0}
+                    fallback={
+                      <div class="desktop-source-empty">
+                        {desktopSourcesLoading() ? "…" : t("settingsDesktopPathPlaceholder")}
+                      </div>
+                    }
+                  >
+                    <For each={desktopSources()}>
+                      {(src) => (
+                        <div class={`desktop-source-card desktop-source-card--${src.kind}`}>
+                          <div class="desktop-source-card__icon" aria-hidden="true">
+                            {desktopSourceInitial(src.kind)}
+                          </div>
+                          <div class="desktop-source-card__body">
+                            <div class="desktop-source-card__label">
+                              {t(desktopSourceLabelKey(src.kind))}
+                            </div>
+                            <div class="desktop-source-card__path" title={src.path}>
+                              {src.path}
+                            </div>
+                          </div>
+                          <Show when={src.watched}>
+                            <span class="desktop-source-card__badge">
+                              {t("desktopSourceWatched")}
+                            </span>
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </Show>
+                  <button
+                    class="settings-btn settings-btn--secondary desktop-source-refresh"
+                    onClick={() => void refreshDesktopSources()}
+                    disabled={desktopSourcesLoading()}
+                  >
+                    {desktopSourcesLoading() ? "…" : "↻"}
+                  </button>
+                </div>
+              </div>
+
+              <div class="settings-row settings-row--column">
                 <span class="settings-row__label">{t("settingsDesktopPath")}</span>
                 <input
                   class="settings-row__input"
@@ -259,17 +389,26 @@ const SettingsPanel: Component = () => {
 
               <div class="settings-row settings-row--column">
                 <span class="settings-row__label">{t("themePickerLabel")}</span>
-                <div class="theme-grid" role="radiogroup" aria-label={t("themePickerLabel")}>
-                  <For each={getAvailableThemes() as BentoTheme[]}>
-                    {(theme) => (
-                      <ThemeCard
-                        theme={theme}
-                        active={getThemeId() === theme.id}
-                        onSelect={() => {
-                          setTheme(theme.id);
-                          setDirty(true);
-                        }}
-                      />
+                <div class="theme-groups" role="radiogroup" aria-label={t("themePickerLabel")}>
+                  <For each={groupThemes(getAvailableThemes())}>
+                    {(group) => (
+                      <div class="theme-group">
+                        <div class="theme-group__title">{t(group.key)}</div>
+                        <div class="theme-grid">
+                          <For each={group.themes}>
+                            {(theme) => (
+                              <ThemeCard
+                                theme={theme}
+                                active={getThemeId() === theme.id}
+                                onSelect={() => {
+                                  setTheme(theme.id);
+                                  setDirty(true);
+                                }}
+                              />
+                            )}
+                          </For>
+                        </div>
+                      </div>
                     )}
                   </For>
                 </div>

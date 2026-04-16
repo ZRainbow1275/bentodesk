@@ -42,10 +42,34 @@ pub fn setup_file_watcher(handle: &AppHandle) -> Result<(), BentoDeskError> {
 /// Create a file watcher debouncer without managing state.
 ///
 /// Used by `setup_file_watcher` for initial setup, and by `power::rebuild_file_watcher`
-/// to recreate the watcher after hibernate/sleep resume.
+/// to recreate the watcher after hibernate/sleep resume. Watches every active
+/// Desktop source (user / public / OneDrive / settings override) on a single
+/// shared debouncer so events from any source flow through the same channel.
 pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, BentoDeskError> {
-    let desktop_path = dirs::desktop_dir()
-        .ok_or_else(|| BentoDeskError::ConfigError("Cannot determine Desktop path".into()))?;
+    // Read the settings override, if any — the debouncer needs to know about
+    // a user-chosen non-default Desktop path as well.
+    let custom = handle
+        .try_state::<crate::AppState>()
+        .and_then(|state| {
+            state
+                .settings
+                .lock()
+                .ok()
+                .map(|s| s.desktop_path.clone())
+        })
+        .unwrap_or_default();
+    let custom_ref = if custom.trim().is_empty() {
+        None
+    } else {
+        Some(custom.as_str())
+    };
+
+    let sources = crate::desktop_sources::all_desktop_dirs(custom_ref);
+    if sources.is_empty() {
+        return Err(BentoDeskError::ConfigError(
+            "Cannot determine any Desktop source path".into(),
+        ));
+    }
 
     let handle_clone = handle.clone();
 
@@ -72,12 +96,35 @@ pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, 
         },
     )?;
 
-    debouncer.watch(&desktop_path, RecursiveMode::NonRecursive)?;
+    let mut attached = 0usize;
+    for source in &sources {
+        match debouncer.watch(source, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                attached += 1;
+                tracing::info!("Desktop file watcher attached to: {}", source.display());
+            }
+            Err(e) => {
+                // Non-fatal: a single source failing (e.g. OneDrive path with
+                // permission quirks) should not block the remaining sources.
+                tracing::warn!(
+                    "Failed to attach file watcher to {}: {}",
+                    source.display(),
+                    e
+                );
+            }
+        }
+    }
 
-    tracing::info!(
-        "Desktop file watcher started on: {}",
-        desktop_path.display()
-    );
+    if attached == 0 {
+        // Returning the debouncer here would silently degrade to a no-op
+        // watcher — the user would never see file changes and there would be
+        // no error to diagnose. Surface the failure explicitly instead.
+        return Err(BentoDeskError::ConfigError(format!(
+            "Failed to attach file watcher to any of {} desktop source(s)",
+            sources.len()
+        )));
+    }
+
     Ok(debouncer)
 }
 

@@ -14,7 +14,7 @@ import type {
   SuggestedGroup,
 } from "../types/zone";
 import type { AppSettings, SettingsUpdate } from "../types/settings";
-import type { SystemInfo, MemoryInfo, DesktopSnapshot } from "../types/system";
+import type { SystemInfo, MemoryInfo, DesktopSnapshot, DesktopSourceInfo } from "../types/system";
 import type { JsonTheme } from "../themes/types";
 import type { InstalledPlugin } from "../types/plugins";
 
@@ -183,6 +183,10 @@ export async function updateSettings(
 
 export async function getSystemInfo(): Promise<SystemInfo> {
   return invoke<SystemInfo>("get_system_info");
+}
+
+export async function getDesktopSources(): Promise<DesktopSourceInfo[]> {
+  return invoke<DesktopSourceInfo[]>("get_desktop_sources");
 }
 
 export async function startDrag(filePaths: string[]): Promise<string> {

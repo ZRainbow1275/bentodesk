@@ -2,6 +2,7 @@
  * Solid.js store for BentoZone data with CRUD operations.
  * All mutations go through IPC to the backend, then update the local store.
  */
+import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type {
   BentoZone,
@@ -23,6 +24,46 @@ const [state, setState] = createStore<ZonesState>({
   loading: false,
   error: null,
 });
+
+/**
+ * Structured error surfaced by the backend `add_item` command.
+ * When JSON.parse(err) yields `{code: "OUTSIDE_DESKTOP", path, allowed_sources}`,
+ * this signal is populated so UI layers (toasts / inline banners) can render
+ * a friendly message listing the allowed Desktop sources.
+ */
+export interface OutsideDesktopError {
+  path: string;
+  allowed_sources: string[];
+}
+
+const [outsideDesktopError, setOutsideDesktopError] =
+  createSignal<OutsideDesktopError | null>(null);
+
+export function getOutsideDesktopError(): OutsideDesktopError | null {
+  return outsideDesktopError();
+}
+
+export function clearOutsideDesktopError(): void {
+  setOutsideDesktopError(null);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((s): s is string => typeof s === "string");
+}
+
+function parseOutsideDesktopError(message: string): OutsideDesktopError | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  if (!("code" in parsed) || parsed.code !== "OUTSIDE_DESKTOP") return null;
+  if (!("path" in parsed) || typeof parsed.path !== "string") return null;
+  if (!("allowed_sources" in parsed) || !isStringArray(parsed.allowed_sources)) return null;
+  return { path: parsed.path, allowed_sources: parsed.allowed_sources };
+}
 
 // ─── Read-only accessors ─────────────────────────────────────
 
@@ -165,7 +206,17 @@ export async function addItem(
     return item;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    setState("error", message);
+    const structured = parseOutsideDesktopError(message);
+    if (structured) {
+      setOutsideDesktopError(structured);
+      // The structured toast owns this case end-to-end. Leaving the raw
+      // JSON in state.error would surface as a literal `{"code":...}`
+      // string in the generic toast the moment the user dismisses the
+      // structured one.
+      setState("error", null);
+    } else {
+      setState("error", message);
+    }
     return null;
   }
 }

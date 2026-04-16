@@ -415,39 +415,7 @@ pub fn is_desktop_path(path: &str) -> bool {
 /// Check whether a file path is on the user's Desktop directory,
 /// also checking against a custom desktop path from settings.
 pub fn is_desktop_path_with_custom(path: &str, custom_desktop: Option<&str>) -> bool {
-    let file_parent = Path::new(path).parent().unwrap_or(Path::new(path));
-
-    // Check 1: against dirs::desktop_dir() (system Shell folder)
-    if let Some(desktop) = dirs::desktop_dir() {
-        if paths_match(file_parent, &desktop) {
-            return true;
-        }
-    }
-
-    // Check 2: against custom desktop_path from settings
-    if let Some(custom) = custom_desktop {
-        if !custom.is_empty() && paths_match(file_parent, Path::new(custom)) {
-            return true;
-        }
-    }
-
-    // Check 3: simple string comparison as fallback (case-insensitive on Windows)
-    if let Some(parent_str) = file_parent.to_str() {
-        if let Some(desktop) = dirs::desktop_dir() {
-            if let Some(desktop_str) = desktop.to_str() {
-                if parent_str.eq_ignore_ascii_case(desktop_str) {
-                    return true;
-                }
-            }
-        }
-        if let Some(custom) = custom_desktop {
-            if !custom.is_empty() && parent_str.eq_ignore_ascii_case(custom) {
-                return true;
-            }
-        }
-    }
-
-    false
+    crate::desktop_sources::is_under_any_desktop(Path::new(path), custom_desktop)
 }
 
 /// Compare two paths after canonicalization and UNC prefix stripping.
@@ -1566,6 +1534,45 @@ mod tests {
         assert!(is_desktop_path_with_custom(
             &file.to_string_lossy(),
             Some(&upper),
+        ));
+    }
+
+    #[test]
+    fn trailing_slash_in_custom_desktop_does_not_change_match() {
+        // Regression guard: the v1.0.x implementation had a string-comparison
+        // fallback that handled trailing-slash differences; the new
+        // canonicalize-then-normalize_key path must remain equivalent.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        let with_slash = format!("{}\\", tmp.path().to_string_lossy());
+        let without_slash = tmp.path().to_string_lossy().to_string();
+
+        assert!(is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&with_slash),
+        ));
+        assert!(is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&without_slash),
+        ));
+    }
+
+    #[test]
+    fn forward_slash_in_custom_desktop_matches_backslash_paths() {
+        // The v1.0.x fallback used eq_ignore_ascii_case which would NOT have
+        // treated "C:/x" and "C:\\x" as equal. The new normalize_key path
+        // converts forward to backslash, which is a correctness improvement
+        // worth pinning with a test.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        let forward = tmp.path().to_string_lossy().replace('\\', "/");
+        assert!(is_desktop_path_with_custom(
+            &file.to_string_lossy(),
+            Some(&forward),
         ));
     }
 

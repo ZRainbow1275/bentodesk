@@ -38,6 +38,8 @@ import {
   removeItem,
   createZone,
   zonesStore,
+  getOutsideDesktopError,
+  clearOutsideDesktopError,
 } from "./stores/zones";
 import { loadSettings, applySettings } from "./stores/settings";
 import {
@@ -64,6 +66,7 @@ import { openFile } from "./services/ipc";
 import { openAboutDialog, isAnyModalOpen } from "./stores/ui";
 import { applyCurrentTheme } from "./themes";
 import { t } from "./i18n";
+import { For } from "solid-js";
 import ZoneContainer from "./components/ZoneContainer";
 import ContextMenu from "./components/ContextMenu/ContextMenu";
 import SettingsPanel from "./components/Settings/SettingsPanel";
@@ -227,22 +230,32 @@ const App: Component = () => {
       <About />
       <SmartGroupSuggestor />
       <DragPreview />
-      <Show when={zonesStore.error}>
-        <div
-          style={{
-            position: "fixed",
-            bottom: "20px",
-            right: "20px",
-            background: "rgba(239, 68, 68, 0.9)",
-            color: "white",
-            padding: "12px 20px",
-            "border-radius": "8px",
-            "font-size": "13px",
-            "pointer-events": "auto",
-            "z-index": "3000",
-            "max-width": "400px",
-          }}
-        >
+      <Show when={getOutsideDesktopError()}>
+        <div class="app-toast app-toast--outside-desktop" role="alert">
+          <div class="app-toast__header">
+            <div class="app-toast__title">
+              {t("addItemErrorOutsideDesktop")}
+            </div>
+            <button
+              class="app-toast__close"
+              onClick={clearOutsideDesktopError}
+              aria-label={t("settingsCloseAriaLabel")}
+            >
+              ×
+            </button>
+          </div>
+          <div class="app-toast__path">
+            {getOutsideDesktopError()!.path}
+          </div>
+          <ul class="app-toast__sources">
+            <For each={getOutsideDesktopError()!.allowed_sources}>
+              {(src) => <li class="app-toast__source">{src}</li>}
+            </For>
+          </ul>
+        </div>
+      </Show>
+      <Show when={zonesStore.error && !getOutsideDesktopError()}>
+        <div class="app-toast app-toast--generic" role="alert">
           {zonesStore.error}
         </div>
       </Show>

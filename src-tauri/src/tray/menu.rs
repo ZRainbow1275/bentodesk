@@ -13,7 +13,6 @@ use tauri::{
 
 use crate::error::BentoDeskError;
 use crate::ghost_layer::manager as overlay;
-use crate::hidden_items;
 use crate::icon_positions;
 use crate::AppState;
 

@@ -48,9 +48,16 @@ use crate::error::BentoDeskError;
 const OVERLAY_SUBCLASS_ID: usize = 0xBE470;
 
 /// `HWND_BOTTOM` — places a window at the bottom of the z-order.
-/// Defined as HWND(1) per Win32 API documentation.
-/// Above the desktop shell (Progman) but below all application windows.
-fn hwnd_bottom() -> HWND {
+/// Defined as HWND(1) per Win32 API documentation. Above the desktop shell
+/// (Progman) but below all application windows.
+///
+/// Implemented as a `const fn` so the sentinel is computed once at compile
+/// time and the call site stays a simple identifier. Clippy's
+/// `manual_dangling_ptr` suggestion (`ptr::dangling_mut()`) would replace
+/// the documented sentinel `1` with `align_of::<c_void>()` and silently
+/// break z-ordering, so it is suppressed at the definition.
+#[allow(clippy::manual_dangling_ptr)]
+const fn hwnd_bottom() -> HWND {
     HWND(1 as *mut std::ffi::c_void)
 }
 
@@ -361,7 +368,7 @@ impl GhostLayerManager {
             );
 
             // Also check if there's a parent window that might have the frame
-            if parent.0 != std::ptr::null_mut() {
+            if !parent.0.is_null() {
                 let p_style = GetWindowLongPtrW(parent, GWL_STYLE);
                 let p_ex_style = GetWindowLongPtrW(parent, GWL_EXSTYLE);
                 let mut p_class = [0u16; 256];

@@ -1,8 +1,11 @@
 //! System info, memory, and drag commands.
 
+use std::path::{Path, PathBuf};
+
 use serde::Serialize;
 use tauri::State;
 
+use crate::desktop_sources;
 use crate::drag_drop::drag_manager;
 use crate::layout::resolution::{self, Resolution};
 use crate::AppState;
@@ -14,8 +17,24 @@ pub struct SystemInfo {
     pub resolution: Resolution,
     pub dpi: f64,
     pub desktop_path: String,
+    /// All active Desktop sources watched by BentoDesk (user / public / OneDrive
+    /// / settings override). Populated by `desktop_sources::all_desktop_dirs`.
+    pub desktop_sources: Vec<DesktopSourceInfo>,
     pub webview2_version: Option<String>,
     pub memory_usage: MemoryInfo,
+}
+
+/// A single legitimate Desktop source location, annotated with its kind so the
+/// frontend can render a meaningful label and icon.
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopSourceInfo {
+    pub path: String,
+    /// One of "user" / "public" / "onedrive" / "custom".
+    pub kind: String,
+    /// Whether the watcher is attached to this source. Currently every source
+    /// returned by `all_desktop_dirs` is watched, but the field keeps room for
+    /// future per-source disable toggles.
+    pub watched: bool,
 }
 
 /// Process memory information.
@@ -25,8 +44,82 @@ pub struct MemoryInfo {
     pub peak_working_set_bytes: usize,
 }
 
+/// Classify a canonicalized Desktop path against the well-known sources so the
+/// frontend can show a meaningful label.
+fn classify_source(path: &Path, custom: Option<&str>) -> String {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .to_lowercase()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_string()
+    };
+    let key = norm(path);
+
+    if let Some(user) = dirs::desktop_dir() {
+        if norm(&user) == key {
+            return "user".to_string();
+        }
+    }
+
+    if let Some(pub_var) = std::env::var_os("PUBLIC") {
+        let pub_desktop = PathBuf::from(pub_var).join("Desktop");
+        if norm(&pub_desktop) == key {
+            return "public".to_string();
+        }
+    }
+    // Heuristic: shared Desktop always lives under \Users\Public\ on Windows.
+    if key.contains(r"\users\public\") {
+        return "public".to_string();
+    }
+
+    for var in &["OneDrive", "OneDriveConsumer"] {
+        if let Some(val) = std::env::var_os(var) {
+            let od_desktop = PathBuf::from(val).join("Desktop");
+            if norm(&od_desktop) == key {
+                return "onedrive".to_string();
+            }
+        }
+    }
+    if key.contains(r"\onedrive") {
+        return "onedrive".to_string();
+    }
+
+    if let Some(c) = custom {
+        if !c.trim().is_empty() {
+            let c_path = PathBuf::from(c);
+            if norm(&c_path) == key {
+                return "custom".to_string();
+            }
+        }
+    }
+
+    // Reaching the fallback means the path didn't match user / public /
+    // OneDrive / settings.desktop_path. Most likely cause: dirs::desktop_dir()
+    // returned None (very rare on Windows) so the user-desktop check above
+    // silently skipped. Log a warning so this doesn't masquerade as a real
+    // "custom override" entry in the Settings UI.
+    tracing::warn!(
+        "classify_source falling back to \"custom\" for path {:?} (custom override = {:?})",
+        path,
+        custom,
+    );
+    "custom".to_string()
+}
+
+fn collect_desktop_sources(custom: Option<&str>) -> Vec<DesktopSourceInfo> {
+    desktop_sources::all_desktop_dirs(custom)
+        .into_iter()
+        .map(|p| DesktopSourceInfo {
+            kind: classify_source(&p, custom),
+            path: p.to_string_lossy().to_string(),
+            watched: true,
+        })
+        .collect()
+}
+
 #[tauri::command]
-pub async fn get_system_info() -> Result<SystemInfo, String> {
+pub async fn get_system_info(state: State<'_, AppState>) -> Result<SystemInfo, String> {
     let res = resolution::get_current_resolution();
     let dpi = resolution::get_dpi_scale();
     let desktop_path = dirs::desktop_dir()
@@ -34,14 +127,35 @@ pub async fn get_system_info() -> Result<SystemInfo, String> {
         .unwrap_or_default();
     let mem = query_memory_info();
 
+    let custom = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings.desktop_path.clone()
+    };
+    let sources = collect_desktop_sources(Some(&custom));
+
     Ok(SystemInfo {
         os_version: query_os_version(),
         resolution: res,
         dpi,
         desktop_path,
+        desktop_sources: sources,
         webview2_version: query_webview2_version(),
         memory_usage: mem,
     })
+}
+
+/// Expose the active Desktop source list to the frontend for reactive refresh
+/// (e.g. after the user toggles OneDrive Desktop backup from the Settings
+/// panel). Lighter-weight than a full `get_system_info` round-trip.
+#[tauri::command]
+pub async fn get_desktop_sources(
+    state: State<'_, AppState>,
+) -> Result<Vec<DesktopSourceInfo>, String> {
+    let custom = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings.desktop_path.clone()
+    };
+    Ok(collect_desktop_sources(Some(&custom)))
 }
 
 /// Query the Windows version string via `RtlGetVersion`.

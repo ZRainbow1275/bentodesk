@@ -14,7 +14,7 @@ body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  font-family: var(--font-family);
+  font-family: var(--font-family-primary);
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-normal);
   color: var(--text-primary);

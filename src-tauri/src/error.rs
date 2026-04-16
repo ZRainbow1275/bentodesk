@@ -72,9 +72,39 @@ pub enum BentoDeskError {
     #[error("Plugin error: {0}")]
     PluginError(String),
 
+    /// File path is outside every legitimate Desktop source. The IPC layer
+    /// transports this as a structured JSON envelope (see [`to_ipc_string`])
+    /// so the frontend can render an actionable dialog. The Display impl
+    /// keeps a human-readable form for logs and non-IPC consumers.
+    ///
+    /// [`to_ipc_string`]: BentoDeskError::to_ipc_string
+    #[error("Path is outside allowed Desktop sources: {path}")]
+    OutsideDesktop {
+        path: String,
+        allowed_sources: Vec<String>,
+    },
+
     /// Generic application error.
     #[error("{0}")]
     Generic(String),
+}
+
+impl BentoDeskError {
+    /// Produce the wire format used when this error is returned from a
+    /// `#[tauri::command]` over IPC. Most variants emit their human Display
+    /// form; structured variants (currently [`Self::OutsideDesktop`]) emit a
+    /// JSON object so the frontend can branch on a stable `code` field.
+    pub fn to_ipc_string(&self) -> String {
+        match self {
+            BentoDeskError::OutsideDesktop { path, allowed_sources } => serde_json::json!({
+                "code": "OUTSIDE_DESKTOP",
+                "path": path,
+                "allowed_sources": allowed_sources,
+            })
+            .to_string(),
+            _ => self.to_string(),
+        }
+    }
 }
 
 /// Serialize error as string for Tauri IPC transport.
@@ -162,5 +192,40 @@ mod tests {
         let err = BentoDeskError::ImageError("PNG encoding failed".into());
         let json = serde_json::to_string(&err).unwrap();
         assert_eq!(json, "\"Image encoding error: PNG encoding failed\"");
+    }
+
+    #[test]
+    fn outside_desktop_to_ipc_string_is_valid_json_with_expected_fields() {
+        let err = BentoDeskError::OutsideDesktop {
+            path: r"C:\Users\Public\Desktop\foobar2000 plus.lnk".into(),
+            allowed_sources: vec![
+                r"C:\Users\Alice\Desktop".into(),
+                r"C:\Users\Public\Desktop".into(),
+            ],
+        };
+        let wire = err.to_ipc_string();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(parsed["code"], "OUTSIDE_DESKTOP");
+        assert_eq!(parsed["path"], r"C:\Users\Public\Desktop\foobar2000 plus.lnk");
+        assert_eq!(parsed["allowed_sources"][1], r"C:\Users\Public\Desktop");
+    }
+
+    #[test]
+    fn outside_desktop_display_is_human_readable() {
+        let err = BentoDeskError::OutsideDesktop {
+            path: r"C:\Windows\System32\evil.exe".into(),
+            allowed_sources: vec![],
+        };
+        // Display is for logs / non-IPC consumers — must NOT be JSON.
+        assert_eq!(
+            err.to_string(),
+            r"Path is outside allowed Desktop sources: C:\Windows\System32\evil.exe"
+        );
+    }
+
+    #[test]
+    fn to_ipc_string_passthrough_for_non_structured_variants() {
+        let err = BentoDeskError::ConfigError("bad".into());
+        assert_eq!(err.to_ipc_string(), err.to_string());
     }
 }
