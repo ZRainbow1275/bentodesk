@@ -723,3 +723,42 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ── Stealth Mode Card (R3) ─────────────────────────────────────── */
+
+.stealth-status-pill {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding: 3px 10px;
+  border-radius: 10px;
+  cursor: help;
+}
+
+.stealth-status-pill--applied {
+  background: rgba(34, 197, 94, 0.18);
+  color: var(--accent-green, #22c55e);
+}
+
+.stealth-status-pill--pending {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--accent-amber, #f59e0b);
+}
+
+.stealth-status-pill--failed {
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--accent-red, #ef4444);
+}
+
+.stealth-onedrive-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}

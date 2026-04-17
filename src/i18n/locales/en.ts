@@ -96,6 +96,12 @@ const en: Translations = {
   smartGroupApply: "Apply",
   smartGroupNewZone: "+ New Zone",
   smartGroupCreateAsNewZone: "Create as new zone",
+  smartGroupPreviewToggle: "Preview files",
+  smartGroupPreviewHide: "Hide preview",
+  smartGroupPreviewAll: "Select all",
+  smartGroupPreviewNone: "Clear",
+  smartGroupPreviewEmpty: "No files matched this rule.",
+  smartGroupPreviewSelectedCount: "{{selected}} of {{total}} selected",
 
   // ─── Snapshot Picker ───────────────────────────────────────
   snapshotPickerTitle: "Layout Snapshots",
@@ -203,6 +209,38 @@ const en: Translations = {
   pluginVersion: "v{version}",
   pluginInstalledSuccess: "Plugin installed successfully",
   pluginUninstalledSuccess: "Plugin uninstalled",
+
+  // ─── Stealth Mode (R3) ──────────────────────────────────────
+  stealthGroupTitle: "Desktop Stealth Mode",
+  stealthStatusLabel: "Status",
+  stealthStatusApplied: "Applied",
+  stealthStatusPending: "Pending retry",
+  stealthStatusFailed: "Failed",
+  stealthSchemaVersion: "Schema version",
+  stealthMirrorHealthy: "Manifest mirror",
+  stealthMirrorHealthyYes: "In sync",
+  stealthMirrorHealthyNo: "Out of sync",
+  stealthRetryCount: "Pending retries",
+  stealthLastError: "Last error",
+  stealthReapplyBtn: "Re-apply",
+  stealthReapplyTooltip: "Re-write HIDDEN+SYSTEM+NOT_CONTENT_INDEXED attributes to .bentodesk/ and every zone subdir",
+  stealthOneDriveWarning: "Your Desktop is inside OneDrive. Consider excluding .bentodesk/ from OneDrive sync — otherwise hidden files will be uploaded to the cloud.",
+  stealthOneDriveGuideBtn: "Open OneDrive exclusion guide",
+  stealthDevTooltip: "Windows 'Hide protected operating system files' is OFF on your system — that's why you can still see .bentodesk. Because you're a developer, not because of a bug.",
+  stealthRefreshBtn: "Refresh status",
+
+  // Timeline / time-machine (R4-C1)
+  timelinePanelTitle: "Desktop Timeline",
+  timelineCloseAriaLabel: "Close timeline",
+  timelineLoading: "Loading checkpoints...",
+  timelineEmpty: "No checkpoints yet — make an edit to start the timeline",
+  timelineSaveNow: "Save now",
+  timelineHoverHint: "Hover or drag the slider to preview history",
+  timelineNoChange: "No change",
+  timelineTriggerPrefix: "Trigger:",
+  timelinePinned: "Pinned",
+  timelinePinButton: "Pin",
+  timelineDeleteButton: "Delete",
 };
 
 export default en;

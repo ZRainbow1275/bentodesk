@@ -6,7 +6,11 @@
 //!
 //! 1. Same-drive = instant `fs::rename`, no cross-drive copy needed.
 //! 2. Subfolder contents do NOT appear as desktop icons.
-//! 3. Only the `.bentodesk/` folder itself needs `attrib +h +s`.
+//! 3. Stealth attributes (`HIDDEN | SYSTEM | NOT_CONTENT_INDEXED`) are
+//!    stamped on `.bentodesk/` AND every `zone_id/` subfolder via Win32
+//!    `SetFileAttributesW`. Explorer inherits the parent's state for
+//!    visibility, but Windows Search / third-party indexers do NOT honour
+//!    that chain — so each subfolder is stamped individually.
 //! 4. Easy recovery -- files are just sitting in a known directory.
 //!
 //! Safety invariants:
@@ -23,14 +27,130 @@
 //!   directory AND files that were hidden via `attrib +h +s`, migrating them all
 //!   to the new subfolder-based architecture.
 
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
 
 /// Win32 `CREATE_NO_WINDOW` flag — prevents console window flash for child processes.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Combined stealth attributes applied to `.bentodesk/` — hidden, system,
+/// and excluded from the Windows Search index. The `SYSTEM` flag in
+/// combination with `HIDDEN` forms "superhidden" which Explorer honours as
+/// long as "Hide protected operating system files" is enabled (Win11
+/// default). `NOT_CONTENT_INDEXED` avoids Search re-surfacing the files by
+/// name, and makes the folder invisible to indexer-driven previews.
+#[cfg(windows)]
+const STEALTH_ATTRS: u32 = 0x0000_0002 // FILE_ATTRIBUTE_HIDDEN
+    | 0x0000_0004                       // FILE_ATTRIBUTE_SYSTEM
+    | 0x0000_2000; // FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+
+/// Win32 sentinel for `GetFileAttributesW` error condition.
+#[cfg(windows)]
+const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+
+// --- Stealth Status (shared state) ------------------------------------------
+
+/// Runtime snapshot of the stealth subsystem, exposed via IPC to the
+/// frontend's Settings panel. All writes go through [`stealth_state`].
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct StealthStatus {
+    /// `true` once the most recent `ensure_stealth` call succeeded and no
+    /// retries are currently queued.
+    pub applied: bool,
+    /// Last OS error message (via `GetLastError`) when an apply attempt
+    /// failed. `None` when we have no failures on record.
+    pub last_error: Option<String>,
+    /// Number of paths currently waiting for retry because a previous attempt
+    /// failed (typically OneDrive holding a lock).
+    pub retry_count: u32,
+    /// Schema version of the safety manifest as last loaded from disk.
+    pub schema_version: String,
+    /// `true` when primary and mirror manifest are byte-identical after last
+    /// write/read cycle.
+    pub mirror_healthy: bool,
+}
+
+struct StealthState {
+    status: StealthStatus,
+    /// Paths whose stealth attributes could not be applied — retried on
+    /// every subsequent `ensure_stealth` until the OneDrive/AV lock clears.
+    retry_queue: Vec<PathBuf>,
+}
+
+impl Default for StealthState {
+    fn default() -> Self {
+        Self {
+            status: StealthStatus {
+                applied: false,
+                last_error: None,
+                retry_count: 0,
+                schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+                mirror_healthy: true,
+            },
+            retry_queue: Vec::new(),
+        }
+    }
+}
+
+fn stealth_state() -> &'static Mutex<StealthState> {
+    static STATE: OnceLock<Mutex<StealthState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(StealthState::default()))
+}
+
+/// Read-only snapshot for IPC. Falls back to default on lock poisoning so
+/// the frontend is never denied a response.
+pub fn get_stealth_status() -> StealthStatus {
+    match stealth_state().lock() {
+        Ok(state) => state.status.clone(),
+        Err(poisoned) => poisoned.into_inner().status.clone(),
+    }
+}
+
+fn record_stealth_success() {
+    if let Ok(mut state) = stealth_state().lock() {
+        state.status.applied = true;
+        state.status.last_error = None;
+    }
+}
+
+fn record_stealth_failure(err: &str, path: &Path) {
+    if let Ok(mut state) = stealth_state().lock() {
+        state.status.applied = false;
+        state.status.last_error = Some(err.to_string());
+        if !state.retry_queue.iter().any(|p| p == path) {
+            state.retry_queue.push(path.to_path_buf());
+        }
+        state.status.retry_count = state.retry_queue.len() as u32;
+    }
+}
+
+fn record_retry_drained(path: &Path) {
+    if let Ok(mut state) = stealth_state().lock() {
+        state.retry_queue.retain(|p| p != path);
+        state.status.retry_count = state.retry_queue.len() as u32;
+        if state.retry_queue.is_empty() {
+            state.status.applied = true;
+        }
+    }
+}
+
+fn set_mirror_healthy(healthy: bool) {
+    if let Ok(mut state) = stealth_state().lock() {
+        state.status.mirror_healthy = healthy;
+    }
+}
+
+fn set_schema_version(version: &str) {
+    if let Ok(mut state) = stealth_state().lock() {
+        state.status.schema_version = version.to_string();
+    }
+}
 
 // --- Safety Manifest --------------------------------------------------------
 
@@ -87,10 +207,37 @@ pub struct ManifestZone {
     pub item_count: usize,
 }
 
+/// Current manifest schema version. Bumped when on-disk format changes so
+/// older installs can upgrade deterministically on first launch.
+pub const MANIFEST_SCHEMA_VERSION: &str = "3.1";
+
+/// Parse a dotted `"major.minor"` version string into a `(u32, u32)` tuple
+/// so comparisons are numeric, not lexicographic. Lexicographic compare
+/// would silently mis-order `"3.10" < "3.9"`, re-triggering migrations on
+/// a manifest that was already upgraded. Malformed input returns `(0, 0)`
+/// so the migration path treats it like a legacy (pre-3.1) manifest.
+fn parse_schema_version(v: &str) -> (u32, u32) {
+    let mut it = v.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0))
+}
+
+/// Returns `true` when the on-disk manifest version is strictly older than
+/// the current [`MANIFEST_SCHEMA_VERSION`] and therefore needs migration.
+fn needs_migration(disk: &str) -> bool {
+    if disk.is_empty() {
+        return true;
+    }
+    parse_schema_version(disk) < parse_schema_version(MANIFEST_SCHEMA_VERSION)
+}
+
 /// The safety manifest — a complete independent backup of all hidden files
 /// AND zone metadata. This provides full recovery even if layout.json is lost.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SafetyManifest {
+    /// Schema version. `"3.0"` or missing = pre-mirror; `"3.1"` = Win32 stealth
+    /// + APPDATA mirror.
+    #[serde(default)]
+    pub schema_version: String,
     pub entries: Vec<ManifestEntry>,
     /// Zone metadata snapshots — updated on every manifest_save.
     #[serde(default)]
@@ -108,6 +255,7 @@ pub struct SafetyManifest {
 impl Default for SafetyManifest {
     fn default() -> Self {
         Self {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
             entries: Vec::new(),
             zones: Vec::new(),
             screen_width: 0,
@@ -139,8 +287,10 @@ pub fn hidden_dir(app_handle: &AppHandle) -> PathBuf {
         tracing::info!("Created .bentodesk/ directory: {:?}", dir);
     }
 
-    // Ensure the folder has hidden+system attributes
-    set_hidden_attribute_on_dir(&dir);
+    // Ensure the folder has stealth attributes (HIDDEN | SYSTEM |
+    // NOT_CONTENT_INDEXED). Safe to call repeatedly — `ensure_stealth`
+    // short-circuits when the bits are already set.
+    ensure_stealth(&dir);
 
     dir
 }
@@ -154,15 +304,16 @@ pub fn zone_hidden_dir(app_handle: &AppHandle, zone_id: &str) -> PathBuf {
 
     if !dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::error!(
-                "Failed to create zone hidden dir {:?}: {}",
-                dir,
-                e
-            );
+            tracing::error!("Failed to create zone hidden dir {:?}: {}", dir, e);
             return dir;
         }
         tracing::info!("Created zone hidden dir: {:?}", dir);
     }
+
+    // Zone subdirectories inherit the parent's hidden state on Explorer,
+    // but Search/indexer and third-party tools do not respect that chain,
+    // so we stamp them individually.
+    ensure_stealth(&dir);
 
     dir
 }
@@ -207,29 +358,182 @@ pub fn cleanup_zone_dir(app_handle: &AppHandle, zone_id: &str) -> bool {
     }
 }
 
-/// Apply `attrib +h +s` to a **directory** (the `.bentodesk/` folder).
+/// Apply stealth attributes (`HIDDEN | SYSTEM | NOT_CONTENT_INDEXED`) to a
+/// path using Win32 `SetFileAttributesW` directly. This replaces the previous
+/// `attrib.exe` spawn and gains:
+///
+/// 1. No child process fork — eliminates CREATE_NO_WINDOW races and Unicode
+///    truncation in the command line.
+/// 2. Explicit `GetLastError` mapping so OneDrive / AV locks become visible
+///    to the retry queue instead of being silently warned away.
+/// 3. `NOT_CONTENT_INDEXED` so Windows Search does not enumerate zone files.
+///
+/// Pre-existing attributes (e.g. `FILE_ATTRIBUTE_DIRECTORY`) are preserved —
+/// the flags are OR-ed into the current mask, never replaced wholesale.
+#[cfg(windows)]
 fn set_hidden_attribute_on_dir(dir: &Path) {
-    let dir_str = dir.to_string_lossy();
-    match std::process::Command::new("attrib")
-        .args(["+h", "+s", &*dir_str])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+    if let Err(e) = apply_stealth_attrs(dir) {
+        tracing::warn!(
+            "Stealth apply failed for {}: {} (queued for retry)",
+            dir.display(),
+            e
+        );
+        record_stealth_failure(&e, dir);
+    } else {
+        tracing::debug!("Stealth attrs applied to {}", dir.display());
+        record_stealth_success();
+    }
+}
+
+#[cfg(not(windows))]
+fn set_hidden_attribute_on_dir(_dir: &Path) {
+    // Non-Windows: filesystem has no equivalent of the Win32 hidden/system
+    // attribute bundle. The `.bentodesk/` dot-prefix already suffices for
+    // the Unix hidden convention used by Finder / `ls`.
+}
+
+/// Encode a path as a null-terminated UTF-16 sequence for Win32 APIs.
+#[cfg(windows)]
+fn to_wide_path(path: &Path) -> Vec<u16> {
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Read current Win32 attributes for `path`. Returns `None` if the path does
+/// not exist or the call fails (caller treats this as "apply stealth anyway").
+#[cfg(windows)]
+fn read_current_attrs(path: &Path) -> Option<u32> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetFileAttributesW;
+
+    let wide = to_wide_path(path);
+    // SAFETY: `wide` is a valid null-terminated UTF-16 buffer that outlives
+    // the call; `GetFileAttributesW` has no additional invariants.
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        None
+    } else {
+        Some(attrs)
+    }
+}
+
+/// Apply the stealth attribute bundle, preserving bits that are already set
+/// on the target (e.g. `FILE_ATTRIBUTE_DIRECTORY`). Returns `Err(String)`
+/// with a human-readable Win32 error code on failure.
+#[cfg(windows)]
+fn apply_stealth_attrs(path: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::GetLastError;
+    use windows::Win32::Storage::FileSystem::SetFileAttributesW;
+
+    let wide = to_wide_path(path);
+    let existing = read_current_attrs(path).unwrap_or(0);
+    let new_attrs = existing | STEALTH_ATTRS;
+
+    // Fast-path: already has all stealth bits. `GetFileAttributesW` is cheap
+    // vs. a redundant `SetFileAttributesW` that can contend with OneDrive.
+    if existing != 0 && (existing & STEALTH_ATTRS) == STEALTH_ATTRS {
+        return Ok(());
+    }
+
+    // SAFETY: `wide` lives for the call; the flag set is a plain u32 mask.
+    // `SetFileAttributesW` returns `Ok(())` on success; `GetLastError` must
+    // be read immediately on failure without intervening Win32 calls.
+    let result = unsafe {
+        SetFileAttributesW(
+            PCWSTR(wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(new_attrs),
+        )
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // SAFETY: GetLastError has no preconditions.
+            let code = unsafe { GetLastError().0 };
+            Err(format!("SetFileAttributesW failed (GetLastError={code})"))
+        }
+    }
+}
+
+/// Ensure the stealth attributes are set on `path`. Safe to call repeatedly;
+/// no-ops when the attributes are already present. Intended to be invoked on
+/// every `hide_file` success and periodically via [`AttrGuard::sweep`].
+pub fn ensure_stealth(path: &Path) {
+    #[cfg(windows)]
     {
-        Ok(output) => {
-            if output.status.success() {
-                tracing::debug!("attrib +h +s on dir succeeded: {}", dir_str);
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        if !path.exists() {
+            return;
+        }
+        match apply_stealth_attrs(path) {
+            Ok(()) => {
+                record_stealth_success();
+                record_retry_drained(path);
+            }
+            Err(e) => {
                 tracing::warn!(
-                    "attrib +h +s on dir failed for {}: exit={}, stderr={}",
-                    dir_str,
-                    output.status,
-                    stderr.trim()
+                    "ensure_stealth: could not apply to {}: {}",
+                    path.display(),
+                    e
                 );
+                record_stealth_failure(&e, path);
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to run attrib on dir {}: {}", dir_str, e);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+    }
+}
+
+// --- AttrGuard (retry queue for OneDrive / AV locks) ------------------------
+
+/// Startup and recurring guardian that re-applies stealth attributes on the
+/// `.bentodesk/` tree. OneDrive / AV scanners sometimes hold the directory
+/// long enough that the very first apply fails; the retry queue drains on
+/// subsequent calls until every path is stealthy.
+pub struct AttrGuard;
+
+impl AttrGuard {
+    /// Initial pass immediately after `cleanup_legacy_hidden_dir`. Walks the
+    /// `.bentodesk/` root plus every zone subdirectory and primes the retry
+    /// queue with any failures.
+    pub fn startup_sweep(app_handle: &AppHandle) {
+        let root = hidden_dir(app_handle);
+        Self::sweep_root(&root);
+    }
+
+    /// Re-run the sweep on demand (invoked by the IPC `reapply_stealth`
+    /// command and by the retry timer).
+    pub fn sweep_root(root: &Path) {
+        if !root.exists() {
+            return;
+        }
+        ensure_stealth(root);
+
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    ensure_stealth(&p);
+                }
+            }
+        }
+
+        // Drain any additional queued paths (e.g. inserted via `ensure_stealth`
+        // from `hide_file`) that are not under `root`. We clone so the lock
+        // doesn't span the retry loop.
+        let queued: Vec<PathBuf> = match stealth_state().lock() {
+            Ok(state) => state.retry_queue.clone(),
+            Err(_) => Vec::new(),
+        };
+        for path in queued {
+            if path.exists() {
+                ensure_stealth(&path);
+            } else {
+                record_retry_drained(&path);
+            }
         }
     }
 }
@@ -265,31 +569,119 @@ fn remove_hidden_attribute(file_path: &str) -> bool {
 
 // --- Manifest I/O -----------------------------------------------------------
 
+/// Resolve the APPDATA mirror path for the manifest. Kept near its primary
+/// siblings so icon layout + manifest mirror share one directory for easy
+/// backup/export tooling.
+fn manifest_mirror_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("BentoDesk")
+        .join("manifest.mirror.json")
+}
+
 /// Load the safety manifest from the `.bentodesk/` directory.
 ///
+/// Primary source of truth is `{Desktop}/.bentodesk/manifest.json`. If the
+/// primary is missing **and** a mirror exists at
+/// `%APPDATA%/BentoDesk/manifest.mirror.json`, the mirror is promoted; on
+/// disagreement the primary always wins and the mirror is re-healed on the
+/// next save.
+///
 /// Uses [`storage::read_json_with_recovery`] so a corrupt primary file is
-/// automatically healed from the `.bak` sibling.
+/// automatically healed from the `.bak` sibling before we even consider the
+/// mirror.
 fn load_manifest(dir: &Path) -> SafetyManifest {
     let path = dir.join("manifest.json");
-    match crate::storage::read_json_with_recovery::<SafetyManifest>(&path, "Safety manifest") {
-        Ok(Some(manifest)) => manifest,
-        Ok(None) => SafetyManifest::default(),
+    let primary =
+        crate::storage::read_json_with_recovery::<SafetyManifest>(&path, "Safety manifest");
+
+    let mut manifest = match primary {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            // No primary — last-ditch recovery from mirror if it exists.
+            let mirror = manifest_mirror_path();
+            if mirror.exists() {
+                match crate::storage::read_json_with_recovery::<SafetyManifest>(
+                    &mirror,
+                    "Safety manifest mirror",
+                ) {
+                    Ok(Some(m)) => {
+                        tracing::warn!(
+                            "Primary manifest missing at {} — restoring from mirror {}",
+                            path.display(),
+                            mirror.display()
+                        );
+                        m
+                    }
+                    _ => SafetyManifest::default(),
+                }
+            } else {
+                SafetyManifest::default()
+            }
+        }
         Err(e) => {
             tracing::error!("Manifest load failed even after backup recovery: {e}");
             SafetyManifest::default()
         }
+    };
+
+    // v3 → v3.1 migration: stamp the new schema version on first touch.
+    if needs_migration(&manifest.schema_version) {
+        tracing::info!(
+            "Migrating safety manifest {} -> {}",
+            if manifest.schema_version.is_empty() {
+                "3.0"
+            } else {
+                &manifest.schema_version
+            },
+            MANIFEST_SCHEMA_VERSION
+        );
+        manifest.schema_version = MANIFEST_SCHEMA_VERSION.to_string();
     }
+    set_schema_version(&manifest.schema_version);
+
+    manifest
 }
 
-/// Atomically persist the safety manifest to disk.
+/// Atomically persist the safety manifest to disk, then mirror to
+/// `%APPDATA%/BentoDesk/manifest.mirror.json` so external backup tooling
+/// (and our own recovery path) have a second copy that is not inside the
+/// hidden dotfolder.
 ///
 /// Uses [`storage::write_json_atomic`] to write to a temp file, flush, then
 /// swap into place. The previous file is retained as `.bak` for crash recovery.
 fn save_manifest(dir: &Path, manifest: &SafetyManifest) {
     let path = dir.join("manifest.json");
-    if let Err(e) = crate::storage::write_json_atomic(&path, manifest) {
-        tracing::error!("Failed to save manifest atomically: {e}");
+
+    // Ensure the manifest itself carries the current schema version on every
+    // write so readers don't have to guess.
+    let mut stamped = manifest.clone();
+    if needs_migration(&stamped.schema_version) {
+        stamped.schema_version = MANIFEST_SCHEMA_VERSION.to_string();
     }
+
+    let primary_ok = match crate::storage::write_json_atomic(&path, &stamped) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!("Failed to save manifest atomically: {e}");
+            false
+        }
+    };
+
+    let mirror = manifest_mirror_path();
+    let mirror_ok = match crate::storage::write_json_atomic(&mirror, &stamped) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to write manifest mirror at {}: {e}",
+                mirror.display()
+            );
+            false
+        }
+    };
+
+    set_mirror_healthy(primary_ok && mirror_ok);
+    set_schema_version(&stamped.schema_version);
 }
 
 /// Append an entry to the safety manifest with full metadata.
@@ -464,7 +856,11 @@ fn unique_hidden_path(hidden_dir: &Path, original: &Path) -> PathBuf {
 /// Returns `(original_path, hidden_path)` on success, or `None` if the file
 /// does not exist or the move fails. On failure, the file stays visible at
 /// its original location (safe default).
-pub fn hide_file(app_handle: &AppHandle, file_path: &str, zone_id: &str) -> Option<(String, String)> {
+pub fn hide_file(
+    app_handle: &AppHandle,
+    file_path: &str,
+    zone_id: &str,
+) -> Option<(String, String)> {
     let source = Path::new(file_path);
     if !source.exists() {
         tracing::warn!("Cannot hide file -- does not exist: {}", file_path);
@@ -507,22 +903,35 @@ pub fn hide_file(app_handle: &AppHandle, file_path: &str, zone_id: &str) -> Opti
     }
 
     // Record file size
-    let file_size = std::fs::metadata(&dest)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+
+    // Re-assert stealth on the zone dir after writing into it. Explorer
+    // caches attributes per-directory; a write can race with the cache and
+    // briefly expose the dir as non-superhidden.
+    if let Some(zone_dir) = dest.parent() {
+        ensure_stealth(zone_dir);
+    }
 
     let hidden_path_str = dest.to_string_lossy().to_string();
 
     // Derive display name for manifest
-    let display_name = source.file_name()
+    let display_name = source
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
     // Track in global manifest (stored in parent .bentodesk/ dir)
     let global_dir = hidden_dir(app_handle);
     manifest_add(
-        &global_dir, file_path, &hidden_path_str, zone_id, file_size,
-        &display_name, None, None, "",
+        &global_dir,
+        file_path,
+        &hidden_path_str,
+        zone_id,
+        file_size,
+        &display_name,
+        None,
+        None,
+        "",
     );
 
     tracing::info!(
@@ -604,7 +1013,11 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> bool {
 }
 
 /// Restore a hidden file and update the safety manifest.
-pub fn restore_file_tracked(app_handle: &AppHandle, original_path: &str, hidden_path: &str) -> bool {
+pub fn restore_file_tracked(
+    app_handle: &AppHandle,
+    original_path: &str,
+    hidden_path: &str,
+) -> bool {
     let success = restore_file(original_path, hidden_path);
     if success {
         let hdir = hidden_dir(app_handle);
@@ -663,11 +1076,7 @@ pub fn restore_all_hidden(app_handle: &AppHandle) {
         }
     }
 
-    tracing::info!(
-        "  Layout tier: restored={}, failed={}",
-        restored,
-        failed
-    );
+    tracing::info!("  Layout tier: restored={}, failed={}", restored, failed);
 
     // -- Tier 2: Restore from manifest ---------------------------------------
     let manifest = load_manifest(&hdir);
@@ -748,7 +1157,10 @@ pub fn restore_all_hidden(app_handle: &AppHandle) {
 /// Restore items for a specific zone. Called before deleting a zone.
 ///
 /// Returns the number of items successfully restored.
-pub fn restore_zone_items(app_handle: &AppHandle, items: &[crate::layout::persistence::BentoItem]) -> u32 {
+pub fn restore_zone_items(
+    app_handle: &AppHandle,
+    items: &[crate::layout::persistence::BentoItem],
+) -> u32 {
     let hdir = hidden_dir(app_handle);
     let mut restored = 0u32;
 
@@ -866,7 +1278,6 @@ struct LegacyMoveManifestEntry {
     #[allow(dead_code)]
     hidden_at: String,
 }
-
 
 /// Migrate from BOTH old architectures:
 /// 1. AppData/hidden_items/ directory (old "file move" mode)
@@ -988,23 +1399,21 @@ fn migrate_old_move_dir(app_handle: &AppHandle, old_dir: &Path) -> u32 {
 
         let success = match std::fs::rename(&file_path, &dest) {
             Ok(()) => true,
-            Err(_) => {
-                match std::fs::copy(&file_path, &dest) {
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&file_path);
-                        true
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Legacy migration failed: {} -> {}: {}",
-                            file_path.display(),
-                            dest.display(),
-                            e
-                        );
-                        false
-                    }
+            Err(_) => match std::fs::copy(&file_path, &dest) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&file_path);
+                    true
                 }
-            }
+                Err(e) => {
+                    tracing::error!(
+                        "Legacy migration failed: {} -> {}: {}",
+                        file_path.display(),
+                        dest.display(),
+                        e
+                    );
+                    false
+                }
+            },
         };
 
         if success {
@@ -1083,7 +1492,10 @@ fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
 
         let source = Path::new(orig_path);
         if !source.exists() {
-            tracing::warn!("Attrib migration: file disappeared after unhide: {}", orig_path);
+            tracing::warn!(
+                "Attrib migration: file disappeared after unhide: {}",
+                orig_path
+            );
             continue;
         }
 
@@ -1093,22 +1505,16 @@ fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
 
         let success = match std::fs::rename(source, &dest) {
             Ok(()) => true,
-            Err(_) => {
-                match std::fs::copy(source, &dest) {
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(source);
-                        true
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Attrib migration failed for {}: {}",
-                            orig_path,
-                            e
-                        );
-                        false
-                    }
+            Err(_) => match std::fs::copy(source, &dest) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(source);
+                    true
                 }
-            }
+                Err(e) => {
+                    tracing::error!("Attrib migration failed for {}: {}", orig_path, e);
+                    false
+                }
+            },
         };
 
         if success {
@@ -1119,8 +1525,17 @@ fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             let global_dir = hidden_dir(app_handle);
-            manifest_add(&global_dir, orig_path, &hidden_path_str, zone_id, file_size,
-                &display_name, None, None, "");
+            manifest_add(
+                &global_dir,
+                orig_path,
+                &hidden_path_str,
+                zone_id,
+                file_size,
+                &display_name,
+                None,
+                None,
+                "",
+            );
 
             // Update layout item with new hidden_path and path
             {
@@ -1168,14 +1583,12 @@ fn load_legacy_move_manifest(hidden_dir: &Path) -> Vec<LegacyMoveManifestEntry> 
     }
 
     match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            serde_json::from_str::<LegacyManifest>(&content)
-                .map(|m| m.entries)
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Could not parse legacy manifest: {}", e);
-                    Vec::new()
-                })
-        }
+        Ok(content) => serde_json::from_str::<LegacyManifest>(&content)
+            .map(|m| m.entries)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Could not parse legacy manifest: {}", e);
+                Vec::new()
+            }),
         Err(e) => {
             tracing::warn!("Could not read legacy manifest: {}", e);
             Vec::new()
@@ -1413,11 +1826,7 @@ fn scan_and_restore_orphans(dir: &Path, desktop_path: &str) -> u32 {
             let dest = PathBuf::from(desktop_path).join(file_name);
             if !dest.exists() {
                 if let Ok(()) = std::fs::rename(&file_path, &dest) {
-                    tracing::info!(
-                        "  Scan tier: restored orphan {:?} -> {:?}",
-                        file_path,
-                        dest
-                    );
+                    tracing::info!("  Scan tier: restored orphan {:?} -> {:?}", file_path, dest);
                     count += 1;
                 }
             }
@@ -1498,10 +1907,7 @@ mod tests {
         std::fs::write(&file, "data").unwrap();
 
         // Empty custom_desktop should not match anything
-        let result = is_desktop_path_with_custom(
-            &file.to_string_lossy(),
-            Some(""),
-        );
+        let result = is_desktop_path_with_custom(&file.to_string_lossy(), Some(""));
         // Should only match if system desktop matches
         if let Some(sys) = dirs::desktop_dir() {
             if file.parent().unwrap().starts_with(&sys) {
@@ -1515,10 +1921,7 @@ mod tests {
     fn none_custom_desktop_falls_back_to_system() {
         if let Some(desktop) = dirs::desktop_dir() {
             let file = desktop.join("test.txt");
-            assert!(is_desktop_path_with_custom(
-                &file.to_string_lossy(),
-                None,
-            ));
+            assert!(is_desktop_path_with_custom(&file.to_string_lossy(), None,));
         }
     }
 

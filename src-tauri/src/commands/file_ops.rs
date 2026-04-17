@@ -15,8 +15,8 @@ use crate::AppState;
 /// File extensions that are directly executable via ShellExecuteW and must be
 /// blocked to prevent script injection from the WebView.
 const BLOCKED_SCRIPT_EXTENSIONS: &[&str] = &[
-    "bat", "cmd", "ps1", "ps2", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
-    "scr", "hta", "cpl", "inf", "reg", "pif", "com",
+    "bat", "cmd", "ps1", "ps2", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "scr", "hta",
+    "cpl", "inf", "reg", "pif", "com",
 ];
 
 /// Strip the Windows extended-length path prefix (`\\?\`) so that
@@ -56,7 +56,10 @@ fn validate_allowed_path_with_app_data(
             // raw path, but reject any path containing ".." components to
             // prevent directory traversal bypasses.
             let raw = std::path::PathBuf::from(path);
-            if raw.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if raw
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 return Err(format!(
                     "Path contains disallowed parent directory traversal (\"..\"): {path}"
                 ));
@@ -111,10 +114,7 @@ fn validate_allowed_path_with_app_data(
         }
     }
 
-    Err(format!(
-        "Path is outside allowed directories: {}",
-        path
-    ))
+    Err(format!("Path is outside allowed directories: {}", path))
 }
 
 /// Validate that a path resides within the Desktop directory or the `.bentodesk/`
@@ -278,10 +278,8 @@ mod tests {
         let file = desktop.join("test.txt");
         std::fs::write(&file, "hello").unwrap();
 
-        let result = validate_allowed_path_inner(
-            &file.to_string_lossy(),
-            &desktop.to_string_lossy(),
-        );
+        let result =
+            validate_allowed_path_inner(&file.to_string_lossy(), &desktop.to_string_lossy());
         assert!(result.is_ok());
     }
 
@@ -294,10 +292,8 @@ mod tests {
         let file = bentodesk.join("hidden.txt");
         std::fs::write(&file, "hidden").unwrap();
 
-        let result = validate_allowed_path_inner(
-            &file.to_string_lossy(),
-            &desktop.to_string_lossy(),
-        );
+        let result =
+            validate_allowed_path_inner(&file.to_string_lossy(), &desktop.to_string_lossy());
         assert!(result.is_ok());
     }
 
@@ -344,7 +340,10 @@ mod tests {
             &desktop.path().to_string_lossy(),
             Some(app_data.path()),
         );
-        assert!(result.is_ok(), "AppData-rooted file must be allowed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "AppData-rooted file must be allowed: {result:?}"
+        );
     }
 
     #[test]
@@ -365,7 +364,10 @@ mod tests {
             &desktop.path().to_string_lossy(),
             Some(&allowed),
         );
-        assert!(result.is_err(), "Sibling directory must not bypass AppData allow-list");
+        assert!(
+            result.is_err(),
+            "Sibling directory must not bypass AppData allow-list"
+        );
     }
 
     #[test]
@@ -385,7 +387,10 @@ mod tests {
             &desktop.to_string_lossy(),
             None,
         );
-        assert!(result.is_err(), "Sibling directory must not bypass Desktop allow-list");
+        assert!(
+            result.is_err(),
+            "Sibling directory must not bypass Desktop allow-list"
+        );
     }
 
     // ── BLOCKED_SCRIPT_EXTENSIONS (P2-6: script injection prevention) ──
@@ -393,9 +398,8 @@ mod tests {
     #[test]
     fn blocks_all_dangerous_script_extensions() {
         let dangerous = vec![
-            "bat", "cmd", "ps1", "ps2", "vbs", "vbe", "js", "jse",
-            "wsf", "wsh", "msi", "scr", "hta", "cpl", "inf", "reg",
-            "pif", "com",
+            "bat", "cmd", "ps1", "ps2", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "scr",
+            "hta", "cpl", "inf", "reg", "pif", "com",
         ];
         for ext in &dangerous {
             assert!(

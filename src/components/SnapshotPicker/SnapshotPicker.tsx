@@ -12,7 +12,11 @@ import {
   onMount,
   onCleanup,
 } from "solid-js";
-import { isSnapshotPickerOpen, closeSnapshotPicker } from "../../stores/ui";
+import {
+  isSnapshotPickerOpen,
+  closeSnapshotPicker,
+  openTimeline,
+} from "../../stores/ui";
 import * as ipc from "../../services/ipc";
 import { t } from "../../i18n";
 import type { DesktopSnapshot } from "../../types/system";
@@ -97,6 +101,16 @@ const SnapshotPicker: Component = () => {
           {/* Header */}
           <div class="snapshot-picker__header">
             <h2 class="snapshot-picker__title">{t("snapshotPickerTitle")}</h2>
+            <button
+              class="snapshot-btn snapshot-btn--load"
+              onClick={() => {
+                closeSnapshotPicker();
+                openTimeline();
+              }}
+              title={t("timelinePanelTitle")}
+            >
+              {t("timelinePanelTitle")}
+            </button>
             <button
               class="snapshot-picker__close"
               onClick={() => closeSnapshotPicker()}

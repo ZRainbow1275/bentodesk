@@ -19,10 +19,8 @@ pub struct FileChangedPayload {
 }
 
 /// Debouncer type alias for readability.
-pub type DesktopDebouncer = notify_debouncer_full::Debouncer<
-    RecommendedWatcher,
-    notify_debouncer_full::FileIdMap,
->;
+pub type DesktopDebouncer =
+    notify_debouncer_full::Debouncer<RecommendedWatcher, notify_debouncer_full::FileIdMap>;
 
 /// Set up a file system watcher on the user's Desktop directory.
 ///
@@ -50,13 +48,7 @@ pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, 
     // a user-chosen non-default Desktop path as well.
     let custom = handle
         .try_state::<crate::AppState>()
-        .and_then(|state| {
-            state
-                .settings
-                .lock()
-                .ok()
-                .map(|s| s.desktop_path.clone())
-        })
+        .and_then(|state| state.settings.lock().ok().map(|s| s.desktop_path.clone()))
         .unwrap_or_default();
     let custom_ref = if custom.trim().is_empty() {
         None
@@ -76,21 +68,19 @@ pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, 
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
         None,
-        move |events: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
-            match events {
-                Ok(debounced_events) => {
-                    for event in debounced_events {
-                        if let Some(payload) = map_event_to_payload(&event) {
-                            if let Err(e) = handle_clone.emit("file_changed", &payload) {
-                                tracing::warn!("Failed to emit file_changed event: {}", e);
-                            }
+        move |events: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| match events {
+            Ok(debounced_events) => {
+                for event in debounced_events {
+                    if let Some(payload) = map_event_to_payload(&event) {
+                        if let Err(e) = handle_clone.emit("file_changed", &payload) {
+                            tracing::warn!("Failed to emit file_changed event: {}", e);
                         }
                     }
                 }
-                Err(errors) => {
-                    for e in errors {
-                        tracing::warn!("File watcher error: {}", e);
-                    }
+            }
+            Err(errors) => {
+                for e in errors {
+                    tracing::warn!("File watcher error: {}", e);
                 }
             }
         },

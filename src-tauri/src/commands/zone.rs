@@ -5,6 +5,7 @@ use tauri::State;
 use crate::guardrails;
 use crate::hidden_items;
 use crate::layout::persistence::{BentoZone, RelativePosition, RelativeSize, ZoneUpdate};
+use crate::timeline::hook as timeline_hook;
 use crate::AppState;
 
 #[tauri::command]
@@ -48,6 +49,7 @@ pub async fn create_zone(
         zone
     };
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "zone_create");
 
     Ok(result)
 }
@@ -100,6 +102,7 @@ pub async fn update_zone(
         cloned
     };
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "zone_update");
 
     Ok(result)
 }
@@ -142,6 +145,7 @@ pub async fn delete_zone(state: State<'_, AppState>, id: String) -> Result<(), S
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "zone_delete");
     Ok(())
 }
 
@@ -167,5 +171,6 @@ pub async fn reorder_zones(
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "zone_reorder");
     Ok(())
 }

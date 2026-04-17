@@ -15,6 +15,8 @@ export interface HotkeyHandlers {
   onDelete: (e: KeyboardEvent) => void;
   onCtrlF: (e: KeyboardEvent) => void;
   onEscape: (e: KeyboardEvent) => void;
+  onCtrlZ: (e: KeyboardEvent) => void;
+  onCtrlShiftZ: (e: KeyboardEvent) => void;
 }
 
 let registeredHandlers: HotkeyHandlers | null = null;
@@ -34,6 +36,29 @@ export function registerHotkeys(handlers: HotkeyHandlers): () => void {
     if (e.ctrlKey && e.key === "f") {
       e.preventDefault();
       registeredHandlers.onCtrlF(e);
+      return;
+    }
+
+    // Ctrl+Shift+Z: redo checkpoint (check before Ctrl+Z so shift takes precedence)
+    if (e.ctrlKey && e.shiftKey && (e.key === "Z" || e.key === "z")) {
+      e.preventDefault();
+      registeredHandlers.onCtrlShiftZ(e);
+      return;
+    }
+
+    // Ctrl+Z: undo to previous checkpoint
+    if (e.ctrlKey && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+      // Don't swallow when the user is typing in an input / editor.
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+      e.preventDefault();
+      registeredHandlers.onCtrlZ(e);
       return;
     }
 

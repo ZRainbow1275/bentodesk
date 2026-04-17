@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use windows::Win32::System::Diagnostics::Debug::{
-    SetUnhandledExceptionFilter, EXCEPTION_POINTERS, LPTOP_LEVEL_EXCEPTION_FILTER,
+    SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
 };
 use windows::Win32::System::Diagnostics::Debug::{
-    SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    SetUnhandledExceptionFilter, EXCEPTION_POINTERS, LPTOP_LEVEL_EXCEPTION_FILTER,
 };
 
 /// The desktop path — set once at startup so the SEH handler can find
@@ -71,9 +71,7 @@ pub fn install(desktop_path: PathBuf) {
 ///
 /// We deliberately avoid: Tauri state, Mutex locks, complex allocations,
 /// logging (tracing may be corrupted), or any COM calls.
-unsafe extern "system" fn crash_exception_filter(
-    exception_info: *const EXCEPTION_POINTERS,
-) -> i32 {
+unsafe extern "system" fn crash_exception_filter(exception_info: *const EXCEPTION_POINTERS) -> i32 {
     // Attempt emergency file restoration
     emergency_restore();
 
@@ -115,12 +113,8 @@ fn emergency_restore() {
     };
 
     for entry in entries {
-        let original = entry
-            .get("original_path")
-            .and_then(|v| v.as_str());
-        let hidden = entry
-            .get("hidden_path")
-            .and_then(|v| v.as_str());
+        let original = entry.get("original_path").and_then(|v| v.as_str());
+        let hidden = entry.get("hidden_path").and_then(|v| v.as_str());
 
         if let (Some(original), Some(hidden)) = (original, hidden) {
             let hidden_path = std::path::Path::new(hidden);
@@ -145,7 +139,10 @@ fn emergency_restore() {
                 continue;
             }
             // Skip if this looks like a metadata file, not a zone dir
-            if path.file_name().is_none_or(|n| n.to_string_lossy().starts_with('.')) {
+            if path
+                .file_name()
+                .is_none_or(|n| n.to_string_lossy().starts_with('.'))
+            {
                 continue;
             }
             // Move all files in the zone dir back to the desktop

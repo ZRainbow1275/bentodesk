@@ -96,7 +96,10 @@ impl BentoDeskError {
     /// JSON object so the frontend can branch on a stable `code` field.
     pub fn to_ipc_string(&self) -> String {
         match self {
-            BentoDeskError::OutsideDesktop { path, allowed_sources } => serde_json::json!({
+            BentoDeskError::OutsideDesktop {
+                path,
+                allowed_sources,
+            } => serde_json::json!({
                 "code": "OUTSIDE_DESKTOP",
                 "path": path,
                 "allowed_sources": allowed_sources,
@@ -206,7 +209,10 @@ mod tests {
         let wire = err.to_ipc_string();
         let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(parsed["code"], "OUTSIDE_DESKTOP");
-        assert_eq!(parsed["path"], r"C:\Users\Public\Desktop\foobar2000 plus.lnk");
+        assert_eq!(
+            parsed["path"],
+            r"C:\Users\Public\Desktop\foobar2000 plus.lnk"
+        );
         assert_eq!(parsed["allowed_sources"][1], r"C:\Users\Public\Desktop");
     }
 

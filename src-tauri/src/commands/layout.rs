@@ -59,9 +59,7 @@ pub async fn load_snapshot(state: State<'_, AppState>, id: String) -> Result<(),
 
 /// List all saved snapshots, sorted by capture date (newest first).
 #[tauri::command]
-pub async fn list_snapshots(
-    _state: State<'_, AppState>,
-) -> Result<Vec<DesktopSnapshot>, String> {
+pub async fn list_snapshots(_state: State<'_, AppState>) -> Result<Vec<DesktopSnapshot>, String> {
     let snapshots_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("BentoDesk")

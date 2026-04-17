@@ -13,7 +13,7 @@ use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Shell::{
-    IFolderView, IFolderView2, IShellBrowser, IShellWindows, SWC_DESKTOP, ShellWindows,
+    IFolderView, IFolderView2, IShellBrowser, IShellWindows, ShellWindows, SWC_DESKTOP,
     SWFO_NEEDDISPATCH,
 };
 use windows_core::Interface;
@@ -39,9 +39,9 @@ impl ComGuard {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED)
                 .ok()
-                .map_err(|e| BentoDeskError::IconPositionError(format!(
-                    "COM initialization failed: {e}"
-                )))?;
+                .map_err(|e| {
+                    BentoDeskError::IconPositionError(format!("COM initialization failed: {e}"))
+                })?;
         }
         Ok(Self { _initialized: true })
     }
@@ -110,8 +110,7 @@ pub(crate) fn find_desktop_folder_view2(
 /// on this thread via [`ComGuard::new`].
 unsafe fn find_folder_view_inner() -> Result<IFolderView> {
     // Step 1: Create IShellWindows
-    let shell_windows: IShellWindows =
-        CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)?;
+    let shell_windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)?;
 
     // Step 2: FindWindowSW for the desktop
     let mut hwnd: i32 = 0;
@@ -120,18 +119,12 @@ unsafe fn find_folder_view_inner() -> Result<IFolderView> {
     let loc = windows_core::VARIANT::from(0i32);
     let empty = windows_core::VARIANT::default();
 
-    let disp = shell_windows.FindWindowSW(
-        &loc,
-        &empty,
-        SWC_DESKTOP,
-        &mut hwnd,
-        SWFO_NEEDDISPATCH,
-    )?;
+    let disp =
+        shell_windows.FindWindowSW(&loc, &empty, SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH)?;
 
     // Step 3: QI for IServiceProvider, then query SID_STopLevelBrowser → IShellBrowser
     let service_provider: IServiceProvider = disp.cast()?;
-    let browser: IShellBrowser =
-        service_provider.QueryService(&SID_S_TOP_LEVEL_BROWSER)?;
+    let browser: IShellBrowser = service_provider.QueryService(&SID_S_TOP_LEVEL_BROWSER)?;
 
     // Step 4: Get the active shell view
     let view = browser.QueryActiveShellView()?;
@@ -163,7 +156,11 @@ mod tests {
         if std::env::var("CI").is_ok() {
             println!("CI environment, skipping desktop test: {:?}", result.err());
         } else {
-            assert!(result.is_ok(), "Failed to find desktop IFolderView: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to find desktop IFolderView: {:?}",
+                result.err()
+            );
         }
     }
 }

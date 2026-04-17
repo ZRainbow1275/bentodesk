@@ -7,8 +7,7 @@ use windows::Win32::Foundation::POINT;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
 use windows::Win32::UI::Shell::{
-    IEnumIDList, IFolderView, IFolderView2, IShellFolder, SHGDN_NORMAL, SVGIO_ALLVIEW,
-    StrRetToStrW,
+    IEnumIDList, IFolderView, IFolderView2, IShellFolder, StrRetToStrW, SHGDN_NORMAL, SVGIO_ALLVIEW,
 };
 use windows_core::Interface;
 
@@ -95,10 +94,7 @@ pub(crate) fn restore_icon_positions(
             let mut fetched: u32 = 0;
 
             // SAFETY: Next() writes into our slice of 1 PIDL pointer.
-            let hr = enumerator.Next(
-                std::slice::from_mut(&mut pidl),
-                Some(&mut fetched),
-            );
+            let hr = enumerator.Next(std::slice::from_mut(&mut pidl), Some(&mut fetched));
 
             if hr.is_err() || fetched == 0 || pidl.is_null() {
                 break;
@@ -146,12 +142,7 @@ pub(crate) fn restore_icon_positions(
 
                 match hr {
                     Ok(()) => {
-                        tracing::trace!(
-                            "Restored '{}' to ({}, {})",
-                            name,
-                            target_x,
-                            target_y
-                        );
+                        tracing::trace!("Restored '{}' to ({}, {})", name, target_x, target_y);
                         result.restored += 1;
                     }
                     Err(e) => {
@@ -160,7 +151,10 @@ pub(crate) fn restore_icon_positions(
                     }
                 }
             } else {
-                tracing::trace!("Icon '{}' not in saved layout, keeping current position", name);
+                tracing::trace!(
+                    "Icon '{}' not in saved layout, keeping current position",
+                    name
+                );
                 result.skipped += 1;
             }
 
@@ -206,10 +200,7 @@ pub(crate) fn set_icon_position_by_name(
             let mut fetched: u32 = 0;
 
             // SAFETY: Next() writes into our slice of 1 PIDL pointer.
-            let hr = enumerator.Next(
-                std::slice::from_mut(&mut pidl),
-                Some(&mut fetched),
-            );
+            let hr = enumerator.Next(std::slice::from_mut(&mut pidl), Some(&mut fetched));
 
             if hr.is_err() || fetched == 0 || pidl.is_null() {
                 break;
@@ -284,7 +275,10 @@ fn is_auto_arrange_enabled(folder_view: &IFolderView) -> bool {
 }
 
 /// Enable or disable auto-arrange via `IFolderView2::SetCurrentFolderFlags`.
-fn set_auto_arrange(folder_view: &IFolderView, enable: bool) -> std::result::Result<(), BentoDeskError> {
+fn set_auto_arrange(
+    folder_view: &IFolderView,
+    enable: bool,
+) -> std::result::Result<(), BentoDeskError> {
     // SAFETY: Cast to IFolderView2 for the SetCurrentFolderFlags method.
     let view2: IFolderView2 = folder_view.cast().map_err(|e| {
         BentoDeskError::IconPositionError(format!("Failed to cast to IFolderView2: {e}"))
@@ -295,13 +289,9 @@ fn set_auto_arrange(folder_view: &IFolderView, enable: bool) -> std::result::Res
 
     // SAFETY: SetCurrentFolderFlags is a standard COM call to change view flags.
     unsafe {
-        view2
-            .SetCurrentFolderFlags(mask, flags)
-            .map_err(|e| {
-                BentoDeskError::IconPositionError(format!(
-                    "SetCurrentFolderFlags failed: {e}"
-                ))
-            })?;
+        view2.SetCurrentFolderFlags(mask, flags).map_err(|e| {
+            BentoDeskError::IconPositionError(format!("SetCurrentFolderFlags failed: {e}"))
+        })?;
     }
 
     tracing::info!(
@@ -324,20 +314,16 @@ unsafe fn get_display_name_for_restore(
     // SAFETY: GetDisplayNameOf writes into our STRRET.
     shell_folder
         .GetDisplayNameOf(pidl, SHGDN_NORMAL, &mut str_ret)
-        .map_err(|e| {
-            BentoDeskError::IconPositionError(format!("GetDisplayNameOf failed: {e}"))
-        })?;
+        .map_err(|e| BentoDeskError::IconPositionError(format!("GetDisplayNameOf failed: {e}")))?;
 
     // SAFETY: StrRetToStrW converts STRRET to a COM-allocated PWSTR.
     let mut psz_name = windows_core::PWSTR::null();
     StrRetToStrW(&mut str_ret, Some(pidl as *const _), &mut psz_name)
-        .map_err(|e| {
-            BentoDeskError::IconPositionError(format!("StrRetToStrW failed: {e}"))
-        })?;
+        .map_err(|e| BentoDeskError::IconPositionError(format!("StrRetToStrW failed: {e}")))?;
 
-    let name = psz_name.to_string().map_err(|e| {
-        BentoDeskError::IconPositionError(format!("UTF-16 conversion failed: {e}"))
-    })?;
+    let name = psz_name
+        .to_string()
+        .map_err(|e| BentoDeskError::IconPositionError(format!("UTF-16 conversion failed: {e}")))?;
 
     // SAFETY: psz_name was allocated by StrRetToStrW via CoTaskMemAlloc.
     CoTaskMemFree(Some(psz_name.as_ptr() as *const _));

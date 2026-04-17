@@ -16,10 +16,7 @@ use super::extractor;
 /// If the icon is found in the cache, serve it directly with a 1-hour
 /// cache-control header. Otherwise, return a transparent 1x1 PNG placeholder
 /// so the frontend can display a loading state without a broken image.
-pub fn handle_icon_request(
-    cache: &IconCache,
-    request: Request<Vec<u8>>,
-) -> Response<Vec<u8>> {
+pub fn handle_icon_request(cache: &IconCache, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let uri = request.uri().to_string();
 
     // Parse hash from URI: bentodesk://icon/{hash}
@@ -114,13 +111,7 @@ fn create_transparent_pixel() -> Vec<u8> {
     let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]));
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut buf);
-    image::ImageEncoder::write_image(
-        encoder,
-        img.as_raw(),
-        1,
-        1,
-        image::ExtendedColorType::Rgba8,
-    )
-    .expect("encoding 1x1 PNG should not fail");
+    image::ImageEncoder::write_image(encoder, img.as_raw(), 1, 1, image::ExtendedColorType::Rgba8)
+        .expect("encoding 1x1 PNG should not fail");
     buf
 }

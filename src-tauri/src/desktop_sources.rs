@@ -64,9 +64,7 @@ fn public_desktop_dir() -> Option<PathBuf> {
     // current process identity). On success the call writes a PWSTR that
     // owns a buffer allocated with CoTaskMemAlloc — release responsibility
     // is the caller's.
-    let result = unsafe {
-        SHGetKnownFolderPath(&FOLDERID_PublicDesktop, KF_FLAG_DEFAULT, None)
-    };
+    let result = unsafe { SHGetKnownFolderPath(&FOLDERID_PublicDesktop, KF_FLAG_DEFAULT, None) };
 
     match result {
         Ok(pwstr) => {
@@ -210,7 +208,9 @@ mod tests {
         let sources = all_desktop_dirs(Some(&custom));
         let custom_canon = canonicalize_or_raw(tmp.path());
         assert!(
-            sources.iter().any(|p| normalize_key(p) == normalize_key(&custom_canon)),
+            sources
+                .iter()
+                .any(|p| normalize_key(p) == normalize_key(&custom_canon)),
             "custom desktop path should appear in sources: {:?}",
             sources
         );

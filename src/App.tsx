@@ -61,7 +61,11 @@ import {
   isSettingsPanelOpen,
   openSettingsPanel,
   openSmartGroupDialog,
+  installViewportTracker,
+  uninstallViewportTracker,
+  bumpViewport,
 } from "./stores/ui";
+import { refreshMonitors, invalidateMonitorCache } from "./services/geometry";
 import { openFile } from "./services/ipc";
 import { openAboutDialog, isAnyModalOpen } from "./stores/ui";
 import { applyCurrentTheme } from "./themes";
@@ -74,7 +78,11 @@ import ZoneEditor from "./components/ZoneEditor/ZoneEditor";
 import SnapshotPicker from "./components/SnapshotPicker/SnapshotPicker";
 import About from "./components/About/About";
 import SmartGroupSuggestor from "./components/SmartGroup/SmartGroupSuggestor";
+import HighlightOverlay from "./components/SmartGroup/HighlightOverlay";
+import TimelinePanel from "./components/Timeline/TimelinePanel";
 import DragPreview from "./components/DragPreview";
+import { undoCheckpoint, redoCheckpoint } from "./services/ipc";
+import { openTimeline } from "./stores/ui";
 
 const App: Component = () => {
   let eventCleanup: EventCleanup | null = null;
@@ -111,7 +119,10 @@ const App: Component = () => {
     applyCurrentTheme();
 
     // 3. Load initial data from backend
-    await Promise.all([loadZones(), loadSettings()]);
+    await Promise.all([loadZones(), loadSettings(), refreshMonitors()]);
+
+    // 3a. Track viewport size reactively for anchor-flip geometry
+    installViewportTracker();
 
     // 4. Set up event listeners from backend
     const cleanups = await Promise.all([
@@ -122,6 +133,10 @@ const App: Component = () => {
         // Zones use relative coordinates, so positions auto-adjust.
         // Reload zones to get any backend-side bound corrections.
         void loadZones();
+        // Re-query monitor topology so anchor-flip uses current bounds.
+        invalidateMonitorCache();
+        void refreshMonitors();
+        bumpViewport();
       }),
       onSettingsChanged((payload) => {
         applySettings(payload);
@@ -204,6 +219,7 @@ const App: Component = () => {
     releaseModalLock?.();
     stopPolling();
     stopDragDropListener();
+    uninstallViewportTracker();
     eventCleanup?.();
     hotkeyCleanup?.();
   });
@@ -227,8 +243,10 @@ const App: Component = () => {
       <SettingsPanel />
       <ZoneEditor />
       <SnapshotPicker />
+      <TimelinePanel />
       <About />
       <SmartGroupSuggestor />
+      <HighlightOverlay />
       <DragPreview />
       <Show when={getOutsideDesktopError()}>
         <div class="app-toast app-toast--outside-desktop" role="alert">
@@ -347,6 +365,24 @@ function createHotkeyHandlers(): HotkeyHandlers {
         collapseAllZones();
         clearSelection();
       }
+    },
+
+    onCtrlZ: (_e) => {
+      // Undo to previous timeline checkpoint. Surface the timeline panel so
+      // the user can see what just happened.
+      void undoCheckpoint().then((id) => {
+        if (id) {
+          openTimeline();
+        }
+      });
+    },
+
+    onCtrlShiftZ: (_e) => {
+      void redoCheckpoint().then((id) => {
+        if (id) {
+          openTimeline();
+        }
+      });
     },
   };
 }

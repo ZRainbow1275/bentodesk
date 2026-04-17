@@ -4,9 +4,10 @@
  * Flow:
  * 1. On open, scans desktop files via ipc.scanDesktop()
  * 2. Sends file paths to ipc.suggestGroups() for backend analysis
- * 3. Displays a list of suggested groups with name, icon, confidence, file count
- * 4. "Apply" button on each suggestion calls ipc.applyAutoGroup() to add matching
- *    files to the target zone and set its auto_group rule
+ * 3. Displays suggestion cards with an expandable checkbox list of matching
+ *    files. Hovering a card pulses the matching desktop icons via the
+ *    ghost-layer highlight overlay (R4-C2).
+ * 4. "Apply" sends only the currently-checked paths to the backend.
  */
 import {
   Component,
@@ -29,6 +30,8 @@ import "./SmartGroupSuggestor.css";
 
 type LoadState = "idle" | "scanning" | "analyzing" | "done" | "error";
 
+const HIGHLIGHT_DURATION_MS = 3_000;
+
 const SmartGroupSuggestor: Component = () => {
   const zoneId = () => getSmartGroupZoneId();
 
@@ -36,6 +39,56 @@ const SmartGroupSuggestor: Component = () => {
   const [suggestions, setSuggestions] = createSignal<SuggestedGroup[]>([]);
   const [errorMsg, setErrorMsg] = createSignal("");
   const [applyingIndex, setApplyingIndex] = createSignal<number | null>(null);
+  const [expandedIndex, setExpandedIndex] = createSignal<number | null>(null);
+  /**
+   * selected[suggestionIndex] = Set of file paths the user currently has
+   * checked. Uninitialised indices default to "all matching_files checked".
+   */
+  const [selectedMap, setSelectedMap] = createSignal<
+    Record<number, Set<string>>
+  >({});
+
+  const ensureSelection = (index: number, suggestion: SuggestedGroup) => {
+    const map = selectedMap();
+    if (map[index]) return map[index];
+    const next = new Set(suggestion.matching_files);
+    setSelectedMap({ ...map, [index]: next });
+    return next;
+  };
+
+  const getSelected = (
+    index: number,
+    suggestion: SuggestedGroup
+  ): Set<string> => selectedMap()[index] ?? new Set(suggestion.matching_files);
+
+  const toggleSelection = (
+    index: number,
+    suggestion: SuggestedGroup,
+    path: string
+  ) => {
+    const current = new Set(ensureSelection(index, suggestion));
+    if (current.has(path)) {
+      current.delete(path);
+    } else {
+      current.add(path);
+    }
+    setSelectedMap({ ...selectedMap(), [index]: current });
+  };
+
+  const selectAll = (index: number, suggestion: SuggestedGroup) => {
+    setSelectedMap({
+      ...selectedMap(),
+      [index]: new Set(suggestion.matching_files),
+    });
+  };
+
+  const selectNone = (index: number) => {
+    setSelectedMap({ ...selectedMap(), [index]: new Set() });
+  };
+
+  const toggleExpanded = (index: number) => {
+    setExpandedIndex(expandedIndex() === index ? null : index);
+  };
 
   // Trigger scan + suggest when dialog opens
   createEffect(() => {
@@ -44,6 +97,8 @@ const SmartGroupSuggestor: Component = () => {
       setSuggestions([]);
       setErrorMsg("");
       setApplyingIndex(null);
+      setExpandedIndex(null);
+      setSelectedMap({});
       void runAnalysis();
     }
   });
@@ -74,15 +129,37 @@ const SmartGroupSuggestor: Component = () => {
     }
   }
 
+  const handleHoverEnter = (index: number, suggestion: SuggestedGroup) => {
+    const selected = getSelected(index, suggestion);
+    // Preview every matching file; the backend highlights only those with a
+    // known icon position. If the user has trimmed the selection, prefer the
+    // trimmed set so the preview tracks their intent.
+    const paths =
+      selected.size > 0
+        ? Array.from(selected)
+        : suggestion.matching_files;
+    void ipc.highlightDesktopFiles(paths, HIGHLIGHT_DURATION_MS).catch((err) => {
+      console.warn("highlightDesktopFiles failed", err);
+    });
+  };
+
+  const handleHoverLeave = () => {
+    void ipc.clearDesktopHighlights().catch((err) => {
+      console.warn("clearDesktopHighlights failed", err);
+    });
+  };
+
   const handleApply = async (index: number, suggestion: SuggestedGroup) => {
     const id = zoneId();
     if (!id) return;
 
+    const selected = getSelected(index, suggestion);
+    if (selected.size === 0) return;
+
     setApplyingIndex(index);
     try {
-      await ipc.applyAutoGroup(id, suggestion.rule);
-      // Reload zones so the frontend store reflects the newly added items
-      // (items were hidden from desktop and added to the zone by the backend).
+      await ipc.applyAutoGroup(id, suggestion.rule, Array.from(selected));
+      await ipc.clearDesktopHighlights();
       await loadZonesFromStore();
       closeSmartGroupDialog();
     } catch (err) {
@@ -95,9 +172,11 @@ const SmartGroupSuggestor: Component = () => {
     index: number,
     suggestion: SuggestedGroup
   ) => {
+    const selected = getSelected(index, suggestion);
+    if (selected.size === 0) return;
+
     setApplyingIndex(index);
     try {
-      // Create a new zone with the suggestion's name and icon at a default position
       const newZone = await createZone(
         suggestion.name,
         suggestion.icon,
@@ -105,8 +184,12 @@ const SmartGroupSuggestor: Component = () => {
         { w_percent: 25, h_percent: 45 }
       );
       if (newZone) {
-        await ipc.applyAutoGroup(newZone.id, suggestion.rule);
-        // Reload zones so the frontend store reflects all newly added items
+        await ipc.applyAutoGroup(
+          newZone.id,
+          suggestion.rule,
+          Array.from(selected)
+        );
+        await ipc.clearDesktopHighlights();
         await loadZonesFromStore();
       }
       closeSmartGroupDialog();
@@ -119,6 +202,9 @@ const SmartGroupSuggestor: Component = () => {
   // Escape to close
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape" && zoneId()) {
+      void ipc.clearDesktopHighlights().catch((err) => {
+        console.warn("Failed to clear desktop highlights on Escape:", err);
+      });
       closeSmartGroupDialog();
     }
   };
@@ -129,6 +215,9 @@ const SmartGroupSuggestor: Component = () => {
 
   onCleanup(() => {
     document.removeEventListener("keydown", handleKeyDown);
+    void ipc.clearDesktopHighlights().catch((err) => {
+      console.warn("Failed to clear desktop highlights on unmount:", err);
+    });
   });
 
   const confidenceLabel = (score: number): string => {
@@ -141,6 +230,17 @@ const SmartGroupSuggestor: Component = () => {
     if (score >= 0.8) return "smart-group__confidence--high";
     if (score >= 0.5) return "smart-group__confidence--medium";
     return "smart-group__confidence--low";
+  };
+
+  const selectedCountLabel = (selected: number, total: number): string => {
+    return t("smartGroupPreviewSelectedCount")
+      .replace("{{selected}}", String(selected))
+      .replace("{{total}}", String(total));
+  };
+
+  const fileBasename = (p: string): string => {
+    const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+    return idx >= 0 ? p.slice(idx + 1) : p;
   };
 
   return (
@@ -170,7 +270,6 @@ const SmartGroupSuggestor: Component = () => {
 
           {/* Body */}
           <div class="smart-group__body">
-            {/* Loading states */}
             <Show when={loadState() === "scanning"}>
               <div class="smart-group__status pulse">
                 {t("smartGroupScanning")}
@@ -195,61 +294,155 @@ const SmartGroupSuggestor: Component = () => {
               </div>
             </Show>
 
-            {/* Suggestion list */}
             <Show when={loadState() === "done" && suggestions().length > 0}>
               <div class="smart-group__list">
                 <For each={suggestions()}>
-                  {(suggestion, index) => (
-                    <div class="smart-group__item">
-                      <div class="smart-group__item-icon">
-                        {suggestion.icon}
-                      </div>
-                      <div class="smart-group__item-info">
-                        <span class="smart-group__item-name">
-                          {suggestion.name}
-                        </span>
-                        <span class="smart-group__item-meta">
-                          {suggestion.matching_files.length} {t("smartGroupFiles")}
-                          {" \u{2022} "}
-                          {suggestion.rule.rule_type === "Extension" &&
-                            suggestion.rule.extensions
-                            ? suggestion.rule.extensions.join(", ")
-                            : suggestion.rule.rule_type}
-                        </span>
-                      </div>
-                      <span
-                        class={`smart-group__confidence ${confidenceClass(suggestion.confidence)}`}
+                  {(suggestion, index) => {
+                    const idx = index();
+                    return (
+                      <div
+                        class="smart-group__item"
+                        onMouseEnter={() => handleHoverEnter(idx, suggestion)}
+                        onMouseLeave={handleHoverLeave}
                       >
-                        {confidenceLabel(suggestion.confidence)}
-                        {" "}
-                        ({Math.round(suggestion.confidence * 100)}%)
-                      </span>
-                      <div class="smart-group__item-actions">
-                        <button
-                          class="smart-group__apply-btn"
-                          onClick={() =>
-                            void handleApply(index(), suggestion)
-                          }
-                          disabled={applyingIndex() !== null}
-                          title={t("smartGroupApplyToZone")}
-                        >
-                          {applyingIndex() === index()
-                            ? t("smartGroupApplying")
-                            : t("smartGroupApply")}
-                        </button>
-                        <button
-                          class="smart-group__new-zone-btn"
-                          onClick={() =>
-                            void handleCreateAsNewZone(index(), suggestion)
-                          }
-                          disabled={applyingIndex() !== null}
-                          title={t("smartGroupCreateAsNewZone")}
-                        >
-                          {t("smartGroupNewZone")}
-                        </button>
+                        <div class="smart-group__item-row">
+                          <div class="smart-group__item-icon">
+                            {suggestion.icon}
+                          </div>
+                          <div class="smart-group__item-info">
+                            <span class="smart-group__item-name">
+                              {suggestion.name}
+                            </span>
+                            <span class="smart-group__item-meta">
+                              {suggestion.matching_files.length} {t("smartGroupFiles")}
+                              {" \u{2022} "}
+                              {suggestion.rule.rule_type === "Extension" &&
+                                suggestion.rule.extensions
+                                ? suggestion.rule.extensions.join(", ")
+                                : suggestion.rule.rule_type}
+                            </span>
+                          </div>
+                          <span
+                            class={`smart-group__confidence ${confidenceClass(suggestion.confidence)}`}
+                          >
+                            {confidenceLabel(suggestion.confidence)}
+                            {" "}
+                            ({Math.round(suggestion.confidence * 100)}%)
+                          </span>
+                          <div class="smart-group__item-actions">
+                            <button
+                              class="smart-group__preview-btn"
+                              onClick={() => toggleExpanded(idx)}
+                              title={
+                                expandedIndex() === idx
+                                  ? t("smartGroupPreviewHide")
+                                  : t("smartGroupPreviewToggle")
+                              }
+                            >
+                              {expandedIndex() === idx
+                                ? t("smartGroupPreviewHide")
+                                : t("smartGroupPreviewToggle")}
+                            </button>
+                            <button
+                              class="smart-group__apply-btn"
+                              onClick={() =>
+                                void handleApply(idx, suggestion)
+                              }
+                              disabled={
+                                applyingIndex() !== null ||
+                                getSelected(idx, suggestion).size === 0
+                              }
+                              title={t("smartGroupApplyToZone")}
+                            >
+                              {applyingIndex() === idx
+                                ? t("smartGroupApplying")
+                                : t("smartGroupApply")}
+                            </button>
+                            <button
+                              class="smart-group__new-zone-btn"
+                              onClick={() =>
+                                void handleCreateAsNewZone(idx, suggestion)
+                              }
+                              disabled={
+                                applyingIndex() !== null ||
+                                getSelected(idx, suggestion).size === 0
+                              }
+                              title={t("smartGroupCreateAsNewZone")}
+                            >
+                              {t("smartGroupNewZone")}
+                            </button>
+                          </div>
+                        </div>
+
+                        <Show when={expandedIndex() === idx}>
+                          <div class="smart-group__preview">
+                            <div class="smart-group__preview-toolbar">
+                              <span class="smart-group__preview-count">
+                                {selectedCountLabel(
+                                  getSelected(idx, suggestion).size,
+                                  suggestion.matching_files.length
+                                )}
+                              </span>
+                              <div class="smart-group__preview-toolbar-actions">
+                                <button
+                                  class="smart-group__preview-action"
+                                  onClick={() => selectAll(idx, suggestion)}
+                                >
+                                  {t("smartGroupPreviewAll")}
+                                </button>
+                                <button
+                                  class="smart-group__preview-action"
+                                  onClick={() => selectNone(idx)}
+                                >
+                                  {t("smartGroupPreviewNone")}
+                                </button>
+                              </div>
+                            </div>
+                            <Show
+                              when={suggestion.matching_files.length > 0}
+                              fallback={
+                                <div class="smart-group__preview-empty">
+                                  {t("smartGroupPreviewEmpty")}
+                                </div>
+                              }
+                            >
+                              <ul class="smart-group__preview-list">
+                                <For each={suggestion.matching_files}>
+                                  {(filePath) => (
+                                    <li class="smart-group__preview-item">
+                                      <label class="smart-group__preview-label">
+                                        <input
+                                          type="checkbox"
+                                          class="smart-group__preview-checkbox"
+                                          checked={getSelected(
+                                            idx,
+                                            suggestion
+                                          ).has(filePath)}
+                                          onChange={() =>
+                                            toggleSelection(
+                                              idx,
+                                              suggestion,
+                                              filePath
+                                            )
+                                          }
+                                        />
+                                        <span
+                                          class="smart-group__preview-name"
+                                          title={filePath}
+                                        >
+                                          {fileBasename(filePath)}
+                                        </span>
+                                      </label>
+                                    </li>
+                                  )}
+                                </For>
+                              </ul>
+                            </Show>
+                          </div>
+                        </Show>
                       </div>
-                    </div>
-                  )}
+                    );
+                  }}
                 </For>
               </div>
             </Show>

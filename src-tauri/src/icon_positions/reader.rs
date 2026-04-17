@@ -7,7 +7,7 @@
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
 use windows::Win32::UI::Shell::{
-    IEnumIDList, IFolderView, IShellFolder, SHGDN_NORMAL, SVGIO_ALLVIEW, StrRetToStrW,
+    IEnumIDList, IFolderView, IShellFolder, StrRetToStrW, SHGDN_NORMAL, SVGIO_ALLVIEW,
 };
 
 use super::IconPosition;
@@ -28,11 +28,9 @@ pub(crate) fn read_all_icon_positions(
 
     unsafe {
         // Get the item count for pre-allocation hint
-        let count = folder_view
-            .ItemCount(SVGIO_ALLVIEW)
-            .map_err(|e| BentoDeskError::IconPositionError(format!(
-                "Failed to get item count: {e}"
-            )))?;
+        let count = folder_view.ItemCount(SVGIO_ALLVIEW).map_err(|e| {
+            BentoDeskError::IconPositionError(format!("Failed to get item count: {e}"))
+        })?;
 
         tracing::debug!("Desktop has {} icons", count);
         icons.reserve(count as usize);
@@ -52,10 +50,7 @@ pub(crate) fn read_all_icon_positions(
             let mut fetched: u32 = 0;
 
             // SAFETY: Next() writes into our slice of 1 PIDL pointer.
-            let hr = enumerator.Next(
-                std::slice::from_mut(&mut pidl),
-                Some(&mut fetched),
-            );
+            let hr = enumerator.Next(std::slice::from_mut(&mut pidl), Some(&mut fetched));
 
             // S_FALSE or error means no more items
             if hr.is_err() || fetched == 0 || pidl.is_null() {
@@ -118,16 +113,12 @@ unsafe fn get_display_name(
     // SAFETY: GetDisplayNameOf writes into our STRRET.
     shell_folder
         .GetDisplayNameOf(pidl, SHGDN_NORMAL, &mut str_ret)
-        .map_err(|e| {
-            BentoDeskError::IconPositionError(format!("GetDisplayNameOf failed: {e}"))
-        })?;
+        .map_err(|e| BentoDeskError::IconPositionError(format!("GetDisplayNameOf failed: {e}")))?;
 
     // SAFETY: StrRetToStrW converts STRRET to a COM-allocated PWSTR.
     let mut psz_name = windows_core::PWSTR::null();
     StrRetToStrW(&mut str_ret, Some(pidl as *const _), &mut psz_name)
-        .map_err(|e| {
-            BentoDeskError::IconPositionError(format!("StrRetToStrW failed: {e}"))
-        })?;
+        .map_err(|e| BentoDeskError::IconPositionError(format!("StrRetToStrW failed: {e}")))?;
 
     // Convert the wide string to a Rust String
     let name = psz_name.to_string().map_err(|e| {

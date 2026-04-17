@@ -162,9 +162,7 @@ pub async fn get_desktop_sources(
 ///
 /// Returns e.g. "Windows 10.0.22631" instead of the vague "OS" env var.
 fn query_os_version() -> String {
-    use windows::Win32::System::SystemInformation::{
-        GetVersionExW, OSVERSIONINFOW,
-    };
+    use windows::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
 
     let mut info = OSVERSIONINFOW {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
@@ -188,11 +186,9 @@ fn query_os_version() -> String {
 /// WebView2 stores its version at:
 /// `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`
 fn query_webview2_version() -> Option<String> {
-    use windows::Win32::System::Registry::{
-        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
-    };
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
     let subkey: Vec<u16> = OsStr::new(
         r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
@@ -260,9 +256,7 @@ pub async fn get_memory_usage() -> Result<MemoryInfo, String> {
 
 /// Query current process memory via Win32 `GetProcessMemoryInfo`.
 fn query_memory_info() -> MemoryInfo {
-    use windows::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
 
     let mut pmc = PROCESS_MEMORY_COUNTERS::default();

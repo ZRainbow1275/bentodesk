@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
-
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -97,10 +96,7 @@ impl Config {
         let main_exe = main_exe.ok_or("--main-exe is required")?;
 
         if !main_exe.exists() {
-            return Err(format!(
-                "main executable not found: {}",
-                main_exe.display()
-            ));
+            return Err(format!("main executable not found: {}", main_exe.display()));
         }
 
         Ok(Config {
@@ -366,9 +362,6 @@ mod tests {
     #[test]
     fn log_path_resolution_returns_guardian_log() {
         let path = resolve_log_path();
-        assert_eq!(
-            path.file_name().unwrap().to_string_lossy(),
-            "guardian.log"
-        );
+        assert_eq!(path.file_name().unwrap().to_string_lossy(), "guardian.log");
     }
 }

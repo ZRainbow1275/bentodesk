@@ -182,9 +182,7 @@ impl LayoutData {
     fn data_dir(handle: &AppHandle) -> PathBuf {
         // Check portable mode: if a `data` directory exists next to the executable
         if let Ok(exe_path) = std::env::current_exe() {
-            let portable_dir = exe_path
-                .parent()
-                .map(|p| p.join("data"));
+            let portable_dir = exe_path.parent().map(|p| p.join("data"));
             if let Some(ref dir) = portable_dir {
                 if dir.exists() {
                     return dir.clone();

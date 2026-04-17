@@ -159,7 +159,11 @@ pub fn load_from_file(
 ///
 /// Returns `Some((x, y))` if the icon was found in the saved layout.
 pub fn lookup_icon_position(saved: &SavedIconLayout, name: &str) -> Option<(i32, i32)> {
-    saved.icons.iter().find(|i| i.name == name).map(|i| (i.x, i.y))
+    saved
+        .icons
+        .iter()
+        .find(|i| i.name == name)
+        .map(|i| (i.x, i.y))
 }
 
 /// Set a single desktop icon's position by display name.

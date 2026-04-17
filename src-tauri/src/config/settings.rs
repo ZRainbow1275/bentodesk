@@ -235,7 +235,7 @@ impl Default for AppSettings {
             version: "1.0.0".to_string(),
             ghost_layer_enabled: true,
             expand_delay_ms: 150,
-            collapse_delay_ms: 300,
+            collapse_delay_ms: 400,
             icon_cache_size: 500,
             auto_group_enabled: true,
             theme: Theme::Dark,
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(settings.version, "1.0.0");
         assert!(settings.ghost_layer_enabled);
         assert_eq!(settings.expand_delay_ms, 150);
-        assert_eq!(settings.collapse_delay_ms, 300);
+        assert_eq!(settings.collapse_delay_ms, 400);
         assert_eq!(settings.icon_cache_size, 500);
         assert!(settings.auto_group_enabled);
         assert!(matches!(settings.theme, Theme::Dark));
@@ -318,7 +318,7 @@ mod tests {
 
         assert!(!settings.ghost_layer_enabled);
         assert_eq!(settings.expand_delay_ms, 200);
-        assert_eq!(settings.collapse_delay_ms, 300); // Unchanged
+        assert_eq!(settings.collapse_delay_ms, 400); // Unchanged
         assert!(matches!(settings.theme, Theme::Light));
         assert_eq!(settings.accent_color, "#ff0000");
         assert_eq!(settings.icon_cache_size, 500); // Unchanged

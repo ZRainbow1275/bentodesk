@@ -1,0 +1,67 @@
+/*
+ * highlight.css — Rule preview pulse animation (R4-C2).
+ *
+ * Drawn inside the ghost-layer webview as absolutely-positioned SVG circles.
+ * Animation uses transform + opacity only so the compositor can GPU-accelerate
+ * it without triggering layout or paint on every frame.
+ */
+
+.desktop-highlight-layer {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 9999;
+  overflow: visible;
+}
+
+.desktop-highlight-circle {
+  position: absolute;
+  pointer-events: none;
+  will-change: transform, opacity;
+
+  /* Base disc: 48x48 centered on (left,top). Glow uses box-shadow for
+     cheap-to-composite soft edges. */
+  width: 48px;
+  height: 48px;
+  margin-left: -24px;
+  margin-top: -24px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(99, 178, 255, 0.65) 0%,
+    rgba(99, 178, 255, 0.28) 45%,
+    rgba(99, 178, 255, 0) 72%
+  );
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow:
+    0 0 12px 4px rgba(99, 178, 255, 0.55),
+    0 0 32px 12px rgba(99, 178, 255, 0.25);
+
+  animation: desktop-highlight-pulse 1400ms ease-in-out infinite;
+}
+
+@keyframes desktop-highlight-pulse {
+  0% {
+    transform: scale(0.72);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.72);
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-highlight-circle {
+    animation: none;
+    transform: scale(1);
+    opacity: 0.85;
+  }
+}

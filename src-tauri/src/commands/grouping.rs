@@ -6,6 +6,7 @@ use tauri::State;
 use crate::grouping::scanner::{self, FileInfo};
 use crate::grouping::suggestions::{self, SuggestedGroup};
 use crate::layout::persistence::{AutoGroupRule, BentoItem, GridPosition, ItemType};
+use crate::timeline::hook as timeline_hook;
 use crate::AppState;
 
 #[tauri::command]
@@ -46,6 +47,7 @@ pub async fn apply_auto_group(
     state: State<'_, AppState>,
     zone_id: String,
     rule: AutoGroupRule,
+    selected_paths: Option<Vec<String>>,
 ) -> Result<Vec<BentoItem>, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?;
     let desktop_path_str = settings.desktop_path.clone();
@@ -54,10 +56,16 @@ pub async fn apply_auto_group(
     let desktop_path = Path::new(&desktop_path_str);
     let files = scanner::scan_desktop_files(desktop_path).map_err(|e| e.to_string())?;
 
-    // Filter files matching the rule
+    // Filter files matching the rule. When `selected_paths` is provided the
+    // user has manually narrowed the set via checkbox UI — respect that
+    // exact list (after confirming each path still matches the rule).
     let matching: Vec<&FileInfo> = files
         .iter()
         .filter(|f| matches_rule(f, &rule))
+        .filter(|f| match &selected_paths {
+            Some(allow) => allow.iter().any(|p| p == &f.path),
+            None => true,
+        })
         .collect();
 
     // Collect paths that are already in the zone so we can skip them before
@@ -103,17 +111,12 @@ pub async fn apply_auto_group(
     let mut prepared: Vec<PreparedItem> = Vec::new();
     for file in &matching {
         // Skip if already in this zone (by current path or original path)
-        if existing_paths.contains(&file.path)
-            || existing_original_paths.contains(&file.path)
-        {
+        if existing_paths.contains(&file.path) || existing_original_paths.contains(&file.path) {
             continue;
         }
 
         let file_path = std::path::Path::new(&file.path);
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let item_type = if file.is_directory {
             ItemType::Folder
@@ -149,11 +152,9 @@ pub async fn apply_auto_group(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             match backup.as_ref().and_then(|b| b.as_ref()) {
-                Some(layout) => {
-                    crate::icon_positions::lookup_icon_position(layout, &display_name)
-                        .map(|(x, y)| (Some(x), Some(y)))
-                        .unwrap_or((None, None))
-                }
+                Some(layout) => crate::icon_positions::lookup_icon_position(layout, &display_name)
+                    .map(|(x, y)| (Some(x), Some(y)))
+                    .unwrap_or((None, None)),
                 None => (None, None),
             }
         };
@@ -221,6 +222,7 @@ pub async fn apply_auto_group(
         added
     };
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "grouping_apply");
 
     Ok(added_items)
 }
@@ -251,9 +253,7 @@ pub async fn auto_group_new_file(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let extension = p
-        .extension()
-        .map(|e| e.to_string_lossy().to_string());
+    let extension = p.extension().map(|e| e.to_string_lossy().to_string());
 
     let file_info = FileInfo {
         name: file_name.clone(),
@@ -281,8 +281,7 @@ pub async fn auto_group_new_file(
                     if matches_rule(&file_info, rule) {
                         // Check if the file is already in the zone (by path or original_path)
                         let already_exists = z.items.iter().any(|i| {
-                            i.path == file_path
-                                || i.original_path.as_deref() == Some(&file_path)
+                            i.path == file_path || i.original_path.as_deref() == Some(&file_path)
                         });
                         if already_exists {
                             None
@@ -302,10 +301,7 @@ pub async fn auto_group_new_file(
     }
 
     // Determine item type
-    let ext = p
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
     let item_type = if metadata.is_dir() {
         ItemType::Folder
     } else {
@@ -317,28 +313,23 @@ pub async fn auto_group_new_file(
     };
 
     let display_name = if ext == "lnk" || ext == "url" {
-        p.file_stem()
-            .map(|s| s.to_string_lossy().to_string())
+        p.file_stem().map(|s| s.to_string_lossy().to_string())
     } else {
-        p.file_name()
-            .map(|n| n.to_string_lossy().to_string())
+        p.file_name().map(|n| n.to_string_lossy().to_string())
     }
     .unwrap_or_else(|| file_name.clone());
 
     // Extract icon
-    let icon_hash =
-        crate::icon::protocol::extract_and_cache_fresh(&state.icon_cache, &file_path)
-            .map_err(|e| e.to_string())?;
+    let icon_hash = crate::icon::protocol::extract_and_cache_fresh(&state.icon_cache, &file_path)
+        .map_err(|e| e.to_string())?;
 
     // Look up icon desktop position before hiding
     let (icon_x, icon_y) = {
         let backup = state.icon_backup.lock().ok();
         match backup.as_ref().and_then(|b| b.as_ref()) {
-            Some(layout) => {
-                crate::icon_positions::lookup_icon_position(layout, &file_name)
-                    .map(|(x, y)| (Some(x), Some(y)))
-                    .unwrap_or((None, None))
-            }
+            Some(layout) => crate::icon_positions::lookup_icon_position(layout, &file_name)
+                .map(|(x, y)| (Some(x), Some(y)))
+                .unwrap_or((None, None)),
             None => (None, None),
         }
     };
@@ -396,12 +387,42 @@ pub async fn auto_group_new_file(
             display_name,
             added.len()
         );
+        timeline_hook::record_change(&state.app_handle, "grouping_auto_new_file");
     }
 
     Ok(added)
 }
 
 /// Check whether a file matches an auto-group rule.
+fn matches_rule(file: &FileInfo, rule: &AutoGroupRule) -> bool {
+    use crate::layout::persistence::GroupRuleType;
+
+    match &rule.rule_type {
+        GroupRuleType::Extension => {
+            if let (Some(exts), Some(file_ext)) = (&rule.extensions, &file.extension) {
+                exts.iter().any(|e| e == file_ext)
+            } else {
+                false
+            }
+        }
+        GroupRuleType::NamePattern => {
+            if let Some(pattern) = &rule.pattern {
+                // Patterns from suggestions use a `^` prefix to indicate
+                // "starts with" semantics (e.g. `^projecta`).  Strip the
+                // anchor and perform a case-insensitive prefix match.
+                let pat = pattern.strip_prefix('^').unwrap_or(pattern);
+                file.name.to_lowercase().starts_with(&pat.to_lowercase())
+            } else {
+                false
+            }
+        }
+        GroupRuleType::ModifiedDate => {
+            // Date-based grouping matches all files (they are then sub-grouped by date)
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,34 +467,5 @@ mod tests {
         // Without ^, still uses starts_with (graceful fallback)
         assert!(matches_rule(&test_file("report_final.pdf"), &rule));
         assert!(!matches_rule(&test_file("my_report.pdf"), &rule));
-    }
-}
-
-fn matches_rule(file: &FileInfo, rule: &AutoGroupRule) -> bool {
-    use crate::layout::persistence::GroupRuleType;
-
-    match &rule.rule_type {
-        GroupRuleType::Extension => {
-            if let (Some(exts), Some(file_ext)) = (&rule.extensions, &file.extension) {
-                exts.iter().any(|e| e == file_ext)
-            } else {
-                false
-            }
-        }
-        GroupRuleType::NamePattern => {
-            if let Some(pattern) = &rule.pattern {
-                // Patterns from suggestions use a `^` prefix to indicate
-                // "starts with" semantics (e.g. `^projecta`).  Strip the
-                // anchor and perform a case-insensitive prefix match.
-                let pat = pattern.strip_prefix('^').unwrap_or(pattern);
-                file.name.to_lowercase().starts_with(&pat.to_lowercase())
-            } else {
-                false
-            }
-        }
-        GroupRuleType::ModifiedDate => {
-            // Date-based grouping matches all files (they are then sub-grouped by date)
-            true
-        }
     }
 }

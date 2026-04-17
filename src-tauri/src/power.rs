@@ -40,9 +40,11 @@ pub fn handle_resume(app_handle: tauri::AppHandle) {
             app_handle
                 .try_state::<crate::AppState>()
                 .and_then(|state| {
-                    state.settings.lock().ok().map(|s| {
-                        (s.hibernate_resume_delay_ms, s.safe_start_after_hibernation)
-                    })
+                    state
+                        .settings
+                        .lock()
+                        .ok()
+                        .map(|s| (s.hibernate_resume_delay_ms, s.safe_start_after_hibernation))
                 })
                 .unwrap_or((2000, true))
         };
@@ -57,7 +59,10 @@ pub fn handle_resume(app_handle: tauri::AppHandle) {
 
         // Configurable delay to let the system stabilize after resume.
         // Display drivers, USB devices, and network may still be initializing.
-        tracing::info!("Power resume: waiting {}ms for system stabilization", delay_ms);
+        tracing::info!(
+            "Power resume: waiting {}ms for system stabilization",
+            delay_ms
+        );
         std::thread::sleep(std::time::Duration::from_millis(u64::from(delay_ms)));
 
         // 1. Re-assert ghost layer z-order and position

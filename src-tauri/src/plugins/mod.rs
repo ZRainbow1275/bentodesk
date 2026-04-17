@@ -8,7 +8,7 @@ pub mod loader;
 pub mod manifest;
 pub mod registry;
 
-pub use manifest::PluginType;
 #[allow(unused_imports)]
 pub use manifest::PluginManifest;
+pub use manifest::PluginType;
 pub use registry::{InstalledPlugin, PluginRegistry};

@@ -8,10 +8,11 @@
  * which enables smooth CSS transitions on width/height/border-radius/background.
  * Inner layers use opacity/visibility cross-fade to switch visible content.
  */
-import { Component, Show, batch, createSignal, onMount, onCleanup } from "solid-js";
+import { Component, Show, batch, createMemo, createSignal, onMount, onCleanup } from "solid-js";
 import type { BentoZone as BentoZoneType } from "../../types/zone";
-import { isZoneExpanded, expandZone, collapseZone } from "../../stores/ui";
+import { isZoneExpanded, expandZone, collapseZone, getViewportSize } from "../../stores/ui";
 import { getExpandDelay, getCollapseDelay } from "../../stores/settings";
+import { monitorForClientRect, cachedMonitors } from "../../services/geometry";
 import {
   createHitTestHandlers,
   registerZoneElement,
@@ -41,6 +42,18 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   let zoneRef: HTMLDivElement | undefined;
   const [isDragRepositioning, setIsDragRepositioning] = createSignal(false);
   const [dragOffset, setDragOffset] = createSignal({ x: 0, y: 0 });
+  // R2 hover-lock: timestamp (Date.now-style) before which we must not
+  // collapse. Populated when the expand timer fires so the overshoot
+  // spring can't race mouseleave.
+  const [expandLockUntil, setExpandLockUntil] = createSignal(0);
+  // R1 anchor snapshot: recomputed only on collapse→expand transition
+  // so the panel never jumps between `left` and `right` mid-animation.
+  const [anchorSnapshot, setAnchorSnapshot] = createSignal<{
+    x: "left" | "right";
+    y: "top" | "bottom";
+    flipOffsetX: number;
+    flipOffsetY: number;
+  } | null>(null);
 
   // ─── Resize state ────────────────────────────────────────────
   const [isResizing, setIsResizing] = createSignal(false);
@@ -87,13 +100,89 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     }
   };
 
+  /**
+   * R1: compute expand-time anchor snapshot. Uses the capsule's current
+   * bounding rect + its containing monitor work-area (when available)
+   * to decide whether growing rightward / downward would overflow. The
+   * snapshot is frozen for the lifetime of the expanded state so
+   * animation doesn't flip mid-transition.
+   */
+  const captureAnchorSnapshot = () => {
+    if (!zoneRef) {
+      setAnchorSnapshot(null);
+      return;
+    }
+    const rect = zoneRef.getBoundingClientRect();
+    const vp = getViewportSize();
+
+    // Panel expanded dims in CSS pixels (match CSS min/max + stored size)
+    const cfgW = props.zone.expanded_size.w_percent;
+    const cfgH = props.zone.expanded_size.h_percent;
+    const panelW = cfgW > 0 ? (cfgW / 100) * vp.width : 360;
+    const panelH = cfgH > 0 ? (cfgH / 100) * vp.height : 420;
+
+    // Margin from the edge at which we flip (account for shadow/ring)
+    const MARGIN = 8;
+
+    // Default to viewport-based overflow test — works for primary-only.
+    let workLeft = 0;
+    let workTop = 0;
+    let workRight = vp.width;
+    let workBottom = vp.height;
+
+    // Multi-monitor: prefer the capsule's monitor work-area, translated
+    // into viewport (logical) coordinates via devicePixelRatio.
+    const cached = cachedMonitors();
+    if (cached && cached.length > 1) {
+      const mon = monitorForClientRect(rect);
+      if (mon) {
+        const dpr = window.devicePixelRatio || 1;
+        workLeft = mon.rect_work.x / dpr;
+        workTop = mon.rect_work.y / dpr;
+        workRight = (mon.rect_work.x + mon.rect_work.width) / dpr;
+        workBottom = (mon.rect_work.y + mon.rect_work.height) / dpr;
+      }
+    }
+
+    const wouldOverflowX = rect.left + panelW + MARGIN > workRight;
+    const wouldOverflowY = rect.top + panelH + MARGIN > workBottom;
+    // Also avoid flipping if flipping would itself push the LEFT edge
+    // off the work-area — in that case the capsule is simply too wide
+    // and the CSS max-width clamp handles it.
+    const flipStillFitsX = rect.right - panelW - MARGIN >= workLeft;
+    const flipStillFitsY = rect.bottom - panelH - MARGIN >= workTop;
+
+    const anchorX: "left" | "right" =
+      wouldOverflowX && flipStillFitsX ? "right" : "left";
+    const anchorY: "top" | "bottom" =
+      wouldOverflowY && flipStillFitsY ? "bottom" : "top";
+
+    // When anchored right/bottom, `right:` / `bottom:` is measured from
+    // the viewport edge, which equals (viewport - rect.right/bottom).
+    const flipOffsetX = Math.max(0, vp.width - rect.right);
+    const flipOffsetY = Math.max(0, vp.height - rect.bottom);
+
+    setAnchorSnapshot({
+      x: anchorX,
+      y: anchorY,
+      flipOffsetX,
+      flipOffsetY,
+    });
+  };
+
   const handleMouseEnter = () => {
     hitTestHandlers.onPointerEnter();
     clearTimers();
     if (isHoverIntentSuspended()) return;
     if (!expanded()) {
       expandTimer = setTimeout(() => {
+        // Freeze the anchor direction before flipping state → expanded
+        // so `zoneStyle()` observes a stable snapshot on first paint.
+        captureAnchorSnapshot();
         expandZone(props.zone.id);
+        // R2: block collapse scheduling for 550ms so the spring settles
+        // before we honour a transient mouseleave caused by animation.
+        setExpandLockUntil(Date.now() + 550);
         // Preload icons for items in this zone so they render immediately
         const paths = props.zone.items.map((i) => i.path);
         if (paths.length > 0) {
@@ -108,9 +197,22 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     clearTimers();
     if (isHoverIntentSuspended()) return;
     if (expanded()) {
+      // R2: if we're still inside the post-expand lock window, defer
+      // the collapse until after the spring settles. We schedule a
+      // single timer; the lock window is short so this doesn't feel
+      // laggy in practice.
+      const now = Date.now();
+      const lockRemain = expandLockUntil() - now;
+      const baseDelay = getCollapseDelay();
+      const effectiveDelay = lockRemain > 0
+        ? Math.max(baseDelay, lockRemain)
+        : baseDelay;
       collapseTimer = setTimeout(() => {
         collapseZone(props.zone.id);
-      }, getCollapseDelay());
+        // Drop the snapshot so the next expand re-evaluates against
+        // current capsule position / viewport.
+        setAnchorSnapshot(null);
+      }, effectiveDelay);
     }
   };
 
@@ -228,9 +330,16 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     const minH = (200 / window.innerHeight) * 100;
     const maxH = (600 / window.innerHeight) * 100;
 
+    // R1: when anchored right/bottom the grow direction is mirrored —
+    // moving the handle left/up grows the panel. Invert delta signs to
+    // preserve the "drag handle outward grows the panel" invariant.
+    const anchorAtStart = currentAnchor();
+    const xSign = anchorAtStart.x === "right" ? -1 : 1;
+    const ySign = anchorAtStart.y === "bottom" ? -1 : 1;
+
     const onMouseMove = (ev: MouseEvent) => {
-      const deltaXPercent = ((ev.clientX - startX) / window.innerWidth) * 100;
-      const deltaYPercent = ((ev.clientY - startY) / window.innerHeight) * 100;
+      const deltaXPercent = xSign * ((ev.clientX - startX) / window.innerWidth) * 100;
+      const deltaYPercent = ySign * ((ev.clientY - startY) / window.innerHeight) * 100;
 
       let newW = startWPercent;
       let newH = startHPercent;
@@ -317,6 +426,17 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     return dims;
   };
 
+  /**
+   * Current anchor in use. When expanded & snapshot exists we use the
+   * frozen snapshot; while collapsed we default to top-left so the
+   * capsule follows its stored position.
+   */
+  const currentAnchor = createMemo(() => {
+    const snap = anchorSnapshot();
+    if (expanded() && snap) return snap;
+    return { x: "left" as const, y: "top" as const, flipOffsetX: 0, flipOffsetY: 0 };
+  });
+
   // Compute inline position + animated dimensions
   const zoneStyle = () => {
     const isExp = expanded();
@@ -324,16 +444,30 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     // During drag, use local signal for instant visual feedback; otherwise use store
     const pos = dragPosition() ?? props.zone.position;
     const zen = zenDimensions();
+    const anchor = currentAnchor();
     const base: Record<string, string> = {
       position: "absolute",
-      left: `${pos.x_percent}%`,
-      top: `${pos.y_percent}%`,
       "pointer-events": "auto",
       "z-index": isExp ? "100" : String(props.zone.sort_order + 10),
       // Dimensions driven by state — CSS transition animates the change
       width: isExp ? expandedWidth() : zen.w,
       height: isExp ? expandedHeight() : zen.h,
     };
+    // R1: emit `right:` / `bottom:` when the anchor flipped so the
+    // panel grows leftward / upward away from the overflow edge. The
+    // offset is absolute pixels measured at expand-time; we avoid a
+    // mid-animation jump that would occur if we mixed percentage
+    // left + pixel right.
+    if (isExp && anchor.x === "right") {
+      base.right = `${anchor.flipOffsetX}px`;
+    } else {
+      base.left = `${pos.x_percent}%`;
+    }
+    if (isExp && anchor.y === "bottom") {
+      base.bottom = `${anchor.flipOffsetY}px`;
+    } else {
+      base.top = `${pos.y_percent}%`;
+    }
     // Inject zone accent as CSS custom property for child consumption
     if (accent) {
       base["--zone-accent"] = accent;
@@ -350,7 +484,10 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     const dragHover = isCrossDragHover() ? "bento-zone--drag-hover" : "";
     // Apply capsule shape to the OUTER container so border-radius works with overflow:hidden
     const shape = !expanded() ? `bento-zone--shape-${props.zone.capsule_shape || "pill"}` : "";
-    return `${base} ${state} ${drop} ${drag} ${resize} ${dragHover} ${shape}`;
+    const anchor = currentAnchor();
+    const anchorX = expanded() && anchor.x === "right" ? "bento-zone--anchor-right" : "";
+    const anchorY = expanded() && anchor.y === "bottom" ? "bento-zone--anchor-bottom" : "";
+    return `${base} ${state} ${drop} ${drag} ${resize} ${dragHover} ${shape} ${anchorX} ${anchorY}`;
   };
 
   return (

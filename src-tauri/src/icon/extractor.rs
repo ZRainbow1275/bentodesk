@@ -42,8 +42,10 @@ pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
         let persist_file: windows::Win32::System::Com::IPersistFile =
             windows::core::Interface::cast(&shell_link).ok()?;
 
-        let wide_path: Vec<u16> =
-            OsStr::new(lnk_path).encode_wide().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = OsStr::new(lnk_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         // SAFETY: IPersistFile::Load with a valid null-terminated wide path.
         // Load the .lnk file in read-only mode (STGM_READ = 0).
@@ -68,7 +70,10 @@ pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
         }
 
         let target_path = String::from_utf16_lossy(
-            &target_buf[..target_buf.iter().position(|&c| c == 0).unwrap_or(target_buf.len())],
+            &target_buf[..target_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(target_buf.len())],
         );
 
         if !target_path.is_empty() && std::path::Path::new(&target_path).exists() {
@@ -149,7 +154,10 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, BentoDeskError> {
         match extract_icon_via_shgetfileinfo(path) {
             Ok(png) if !is_icon_all_transparent(&png) => return Ok(png),
             Ok(_) => {
-                tracing::debug!("SHGetFileInfoW returned transparent icon for .lnk: {}", path);
+                tracing::debug!(
+                    "SHGetFileInfoW returned transparent icon for .lnk: {}",
+                    path
+                );
             }
             Err(e) => {
                 tracing::debug!("SHGetFileInfoW failed for .lnk {}: {}", path, e);
@@ -302,8 +310,8 @@ fn hicon_to_png(
     _path: &str,
 ) -> Result<Vec<u8>, BentoDeskError> {
     use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW,
-        BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, DIB_RGB_COLORS,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
 

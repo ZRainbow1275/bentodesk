@@ -5,10 +5,10 @@
 //! Also provides [`cleanup_legacy_registry`] to remove old registry entries
 //! during migration.
 
-use std::path::Path;
-use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::path::Path;
+use std::process::Command;
 
 use crate::error::BentoDeskError;
 
@@ -109,10 +109,7 @@ fn create_task(
         args.push("0000:00:30".to_string());
     }
 
-    tracing::info!(
-        "Creating Task Scheduler task: schtasks {}",
-        args.join(" ")
-    );
+    tracing::info!("Creating Task Scheduler task: schtasks {}", args.join(" "));
 
     let output = Command::new("schtasks.exe")
         .args(&args)
@@ -165,10 +162,7 @@ fn delete_task() -> Result<(), BentoDeskError> {
         if stderr.to_lowercase().contains("cannot find")
             || stderr.to_lowercase().contains("does not exist")
         {
-            tracing::info!(
-                "Task '{}' did not exist, nothing to delete",
-                TASK_NAME
-            );
+            tracing::info!("Task '{}' did not exist, nothing to delete", TASK_NAME);
             Ok(())
         } else {
             tracing::error!(
@@ -191,10 +185,10 @@ fn delete_task() -> Result<(), BentoDeskError> {
 /// Task Scheduler approach. Errors are logged as warnings but do not fail the
 /// operation, since the legacy key may already be absent.
 pub fn cleanup_legacy_registry() -> Result<(), BentoDeskError> {
+    use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY_CURRENT_USER, KEY_WRITE,
     };
-    use windows::core::PCWSTR;
 
     let sub_key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
         .encode_utf16()

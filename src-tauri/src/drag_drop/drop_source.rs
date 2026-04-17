@@ -7,10 +7,7 @@ use windows::{
     core::*,
     Win32::{
         Foundation::*,
-        System::{
-            Ole::*,
-            SystemServices::MODIFIERKEYS_FLAGS,
-        },
+        System::{Ole::*, SystemServices::MODIFIERKEYS_FLAGS},
     },
 };
 

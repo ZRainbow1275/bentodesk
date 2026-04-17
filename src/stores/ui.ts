@@ -3,6 +3,68 @@
  * selected items, settings panel visibility, and focused zone/item tracking.
  */
 import { createSignal } from "solid-js";
+import { refreshMonitors, invalidateMonitorCache } from "../services/geometry";
+
+// ─── Viewport size (reactive) ────────────────────────────────
+
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
+const [viewportSize, setViewportSizeSignal] = createSignal<ViewportSize>({
+  width: typeof window !== "undefined" ? window.innerWidth : 0,
+  height: typeof window !== "undefined" ? window.innerHeight : 0,
+});
+
+export function getViewportSize(): ViewportSize {
+  return viewportSize();
+}
+
+let viewportInstalled = false;
+let viewportListener: (() => void) | null = null;
+
+/**
+ * Install the `window.resize` listener once. BentoZone reads
+ * `viewportSize()` so its anchor-flip memo re-runs when the overlay
+ * is resized (DPI change, display hot-plug reflow, etc.).
+ */
+export function installViewportTracker(): void {
+  if (viewportInstalled) return;
+  viewportInstalled = true;
+  const handler = () => {
+    setViewportSizeSignal({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    // Monitor topology can change when the overlay reflows (e.g.
+    // primary-monitor swap). Invalidate + refresh lazily.
+    invalidateMonitorCache();
+    void refreshMonitors();
+  };
+  window.addEventListener("resize", handler);
+  viewportListener = () => window.removeEventListener("resize", handler);
+}
+
+export function uninstallViewportTracker(): void {
+  if (viewportListener) {
+    viewportListener();
+    viewportListener = null;
+  }
+  viewportInstalled = false;
+}
+
+/**
+ * Bump the viewport signal without changing dimensions. Used when the
+ * backend reports `resolution_changed` so all dependents (anchor memos)
+ * recompute against the updated monitor cache.
+ */
+export function bumpViewport(): void {
+  setViewportSizeSignal({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+}
 
 // ─── Expanded zones ──────────────────────────────────────────
 
@@ -200,6 +262,26 @@ export function closeSnapshotPicker(): void {
   setSnapshotPickerOpen(false);
 }
 
+// ─── Timeline (Time-machine, R4-C1) ─────────────────────────
+
+const [timelineOpen, setTimelineOpen] = createSignal(false);
+
+export function isTimelineOpen(): boolean {
+  return timelineOpen();
+}
+
+export function openTimeline(): void {
+  setTimelineOpen(true);
+}
+
+export function closeTimeline(): void {
+  setTimelineOpen(false);
+}
+
+export function toggleTimeline(): void {
+  setTimelineOpen((prev) => !prev);
+}
+
 // ─── About dialog ───────────────────────────────────────────
 
 const [aboutDialogOpen, setAboutDialogOpen] = createSignal(false);
@@ -257,6 +339,7 @@ export function isAnyModalOpen(): boolean {
     settingsPanelOpen() ||
     editingZoneId() !== null ||
     snapshotPickerOpen() ||
+    timelineOpen() ||
     aboutDialogOpen() ||
     smartGroupZoneId() !== null ||
     contextMenu() !== null ||

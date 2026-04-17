@@ -14,7 +14,14 @@ import type {
   SuggestedGroup,
 } from "../types/zone";
 import type { AppSettings, SettingsUpdate } from "../types/settings";
-import type { SystemInfo, MemoryInfo, DesktopSnapshot, DesktopSourceInfo } from "../types/system";
+import type {
+  SystemInfo,
+  MemoryInfo,
+  DesktopSnapshot,
+  DesktopSourceInfo,
+  Checkpoint,
+  CheckpointMeta,
+} from "../types/system";
 import type { JsonTheme } from "../themes/types";
 import type { InstalledPlugin } from "../types/plugins";
 
@@ -137,6 +144,39 @@ export async function deleteSnapshot(id: string): Promise<void> {
   return invoke<void>("delete_snapshot", { id });
 }
 
+// ─── Timeline (Time-machine, R4-C1) ──────────────────────────
+
+export async function listCheckpoints(): Promise<CheckpointMeta[]> {
+  return invoke<CheckpointMeta[]>("list_checkpoints");
+}
+
+export async function getCheckpoint(id: string): Promise<Checkpoint> {
+  return invoke<Checkpoint>("get_checkpoint", { id });
+}
+
+export async function restoreCheckpoint(id: string): Promise<void> {
+  return invoke<void>("restore_checkpoint", { id });
+}
+
+export async function undoCheckpoint(): Promise<string | null> {
+  return invoke<string | null>("undo_checkpoint");
+}
+
+export async function redoCheckpoint(): Promise<string | null> {
+  return invoke<string | null>("redo_checkpoint");
+}
+
+export async function deleteCheckpoint(id: string): Promise<void> {
+  return invoke<void>("delete_checkpoint", { id });
+}
+
+export async function saveCheckpointPermanent(
+  id: string | null,
+  label: string | null
+): Promise<CheckpointMeta> {
+  return invoke<CheckpointMeta>("save_checkpoint_permanent", { id, label });
+}
+
 // ─── Smart Grouping ──────────────────────────────────────────
 
 export async function scanDesktop(): Promise<FileInfo[]> {
@@ -151,9 +191,53 @@ export async function suggestGroups(
 
 export async function applyAutoGroup(
   zoneId: string,
-  rule: AutoGroupRule
+  rule: AutoGroupRule,
+  selectedPaths?: string[]
 ): Promise<BentoItem[]> {
-  return invoke<BentoItem[]>("apply_auto_group", { zoneId, rule });
+  return invoke<BentoItem[]>("apply_auto_group", {
+    zoneId,
+    rule,
+    selectedPaths: selectedPaths ?? null,
+  });
+}
+
+// ─── Rule Preview (R4-C2) ───────────────────────────────────
+
+/**
+ * A single desktop-icon highlight target resolved from a file path.
+ * Mirrors the Rust `HighlightTarget` in
+ * `src-tauri/src/ghost_layer/highlight_overlay.rs`.
+ */
+export interface HighlightTarget {
+  name: string;
+  x: number;
+  y: number;
+  monitor_index: number | null;
+}
+
+export interface HighlightPayload {
+  targets: HighlightTarget[];
+  duration_ms: number;
+}
+
+/**
+ * Ask the backend to pulse-highlight the given desktop files. Returns the
+ * number of targets actually resolved (paths without a known icon position
+ * are silently skipped).
+ */
+export async function highlightDesktopFiles(
+  paths: string[],
+  durationMs?: number
+): Promise<number> {
+  return invoke<number>("highlight_desktop_files", {
+    paths,
+    durationMs: durationMs ?? null,
+  });
+}
+
+/** Clear any live highlight overlays immediately. */
+export async function clearDesktopHighlights(): Promise<void> {
+  return invoke<void>("clear_desktop_highlights");
 }
 
 /**
@@ -231,4 +315,33 @@ export async function uninstallPlugin(id: string): Promise<void> {
 
 export async function togglePlugin(id: string, enabled: boolean): Promise<InstalledPlugin> {
   return invoke<InstalledPlugin>("toggle_plugin", { id, enabled });
+}
+
+// ─── Stealth / Dotfolder Visibility (R3) ────────────────────
+
+export interface StealthStatus {
+  applied: boolean;
+  last_error: string | null;
+  retry_count: number;
+  schema_version: string;
+  mirror_healthy: boolean;
+}
+
+export interface OneDriveExclusionCheck {
+  needed: boolean;
+  desktop_path: string | null;
+  exclusion_hint: string;
+  guide_url: string;
+}
+
+export async function getStealthStatus(): Promise<StealthStatus> {
+  return invoke<StealthStatus>("get_stealth_status");
+}
+
+export async function reapplyStealth(): Promise<StealthStatus> {
+  return invoke<StealthStatus>("reapply_stealth");
+}
+
+export async function checkOneDriveExclusionNeeded(): Promise<OneDriveExclusionCheck> {
+  return invoke<OneDriveExclusionCheck>("check_onedrive_exclusion_needed");
 }

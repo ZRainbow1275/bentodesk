@@ -94,6 +94,12 @@ const zhCN = {
   smartGroupApply: "应用",
   smartGroupNewZone: "+ 新区域",
   smartGroupCreateAsNewZone: "创建为新区域",
+  smartGroupPreviewToggle: "预览文件",
+  smartGroupPreviewHide: "隐藏预览",
+  smartGroupPreviewAll: "全选",
+  smartGroupPreviewNone: "清除",
+  smartGroupPreviewEmpty: "没有匹配此规则的文件。",
+  smartGroupPreviewSelectedCount: "已选 {{selected}} / {{total}}",
 
   // ─── Snapshot Picker ───────────────────────────────────────
   snapshotPickerTitle: "布局快照",
@@ -201,6 +207,38 @@ const zhCN = {
   pluginVersion: "v{version}",
   pluginInstalledSuccess: "插件安装成功",
   pluginUninstalledSuccess: "插件已卸载",
+
+  // ─── Stealth Mode (R3) ──────────────────────────────────────
+  stealthGroupTitle: "桌面隐形模式",
+  stealthStatusLabel: "状态",
+  stealthStatusApplied: "已应用",
+  stealthStatusPending: "待重试",
+  stealthStatusFailed: "失败",
+  stealthSchemaVersion: "架构版本",
+  stealthMirrorHealthy: "镜像备份",
+  stealthMirrorHealthyYes: "同步",
+  stealthMirrorHealthyNo: "待修复",
+  stealthRetryCount: "待重试项",
+  stealthLastError: "最近错误",
+  stealthReapplyBtn: "重新应用",
+  stealthReapplyTooltip: "重新将 HIDDEN+SYSTEM+不索引 属性写入 .bentodesk/ 及其子目录",
+  stealthOneDriveWarning: "检测到您的桌面在 OneDrive 内。建议在 OneDrive 设置中排除 .bentodesk/，否则隐藏文件会被上传到云端。",
+  stealthOneDriveGuideBtn: "查看 OneDrive 排除指南",
+  stealthDevTooltip: "Windows 的「隐藏受保护的操作系统文件」在你的系统上是关闭的——这就是你仍然能看见 .bentodesk 的原因。这是因为你是开发者，不是 bug。",
+  stealthRefreshBtn: "刷新状态",
+
+  // Timeline / time-machine (R4-C1)
+  timelinePanelTitle: "桌面时间线",
+  timelineCloseAriaLabel: "关闭时间线",
+  timelineLoading: "加载检查点...",
+  timelineEmpty: "暂无检查点 — 进行编辑即可自动创建",
+  timelineSaveNow: "立即保存",
+  timelineHoverHint: "悬停或拖动滑块查看历史状态",
+  timelineNoChange: "无变更",
+  timelineTriggerPrefix: "来源：",
+  timelinePinned: "已固定",
+  timelinePinButton: "固定",
+  timelineDeleteButton: "删除",
 } as const;
 
 /** Keys of the translation object — used for type-safe key lookups. */

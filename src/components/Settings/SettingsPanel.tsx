@@ -42,6 +42,7 @@ import {
 } from "../../themes";
 import type { BentoTheme } from "../../themes";
 import { open } from "@tauri-apps/plugin-dialog";
+import StealthModeCard from "./StealthModeCard";
 import "./SettingsPanel.css";
 
 /**
@@ -625,6 +626,9 @@ const SettingsPanel: Component = () => {
                 />
               </Show>
             </section>
+
+            {/* Stealth / Dotfolder Visibility (R3) */}
+            <StealthModeCard />
 
             {/* Plugins */}
             <section class="settings-group">

@@ -23,22 +23,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, SetWindowPos,
-    GWL_EXSTYLE, GWL_STYLE,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_LAYERED,
-    WS_POPUP, WS_CAPTION, WS_THICKFRAME, WS_SYSMENU,
-    WS_MINIMIZEBOX, WS_MAXIMIZEBOX, WS_BORDER, WS_DLGFRAME,
-    SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
-    SW_SHOWNOACTIVATE, SW_HIDE,
-    WM_WINDOWPOSCHANGING, WM_MOUSEACTIVATE, WINDOWPOS,
-};
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
-    DWMWA_NCRENDERING_POLICY,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_NCRENDERING_POLICY,
 };
 use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WM_MOUSEACTIVATE, WM_WINDOWPOSCHANGING, WS_BORDER, WS_CAPTION,
+    WS_DLGFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+};
 
 use tauri::AppHandle;
 
@@ -133,7 +129,10 @@ pub fn show_window() {
             let _ = SetWindowPos(
                 hwnd,
                 hwnd_bottom(),
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
 
@@ -167,8 +166,8 @@ pub fn reposition_to_work_area() {
     if let Some(&raw_hwnd) = MAIN_HWND.get() {
         let hwnd = HWND(raw_hwnd as *mut std::ffi::c_void);
 
-        use windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
         use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
 
         let mut work_area = RECT::default();
         unsafe {
@@ -190,13 +189,22 @@ pub fn reposition_to_work_area() {
             let _ = SetWindowPos(
                 hwnd,
                 hwnd_bottom(),
-                x, y, w, h,
+                x,
+                y,
+                w,
+                h,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
             BYPASS_SUBCLASS.store(false, Ordering::Release);
         }
 
-        tracing::info!("Overlay repositioned to work area: {}x{} at ({},{})", w, h, x, y);
+        tracing::info!(
+            "Overlay repositioned to work area: {}x{} at ({},{})",
+            w,
+            h,
+            x,
+            y
+        );
     }
 }
 
@@ -276,8 +284,7 @@ unsafe extern "system" fn overlay_subclass_proc(
             // Check if this is a show or hide operation — these must always pass
             // through unmodified so ShowWindow(SW_HIDE/SW_SHOWNOACTIVATE) works.
             let is_show_hide =
-                (wp.flags.0 & SWP_SHOWWINDOW_RAW) != 0
-                    || (wp.flags.0 & SWP_HIDEWINDOW_RAW) != 0;
+                (wp.flags.0 & SWP_SHOWWINDOW_RAW) != 0 || (wp.flags.0 & SWP_HIDEWINDOW_RAW) != 0;
 
             if !is_show_hide && !BYPASS_SUBCLASS.load(Ordering::Acquire) {
                 // External z-order change (e.g. user clicked desktop) — block it.
@@ -323,9 +330,9 @@ impl GhostLayerManager {
             .get_webview_window("main")
             .ok_or_else(|| BentoDeskError::GhostLayerError("Main window not found".into()))?;
 
-        let hwnd = window.hwnd().map_err(|e| {
-            BentoDeskError::GhostLayerError(format!("Failed to get HWND: {e}"))
-        })?;
+        let hwnd = window
+            .hwnd()
+            .map_err(|e| BentoDeskError::GhostLayerError(format!("Failed to get HWND: {e}")))?;
 
         let hwnd = HWND(hwnd.0);
 
@@ -346,7 +353,7 @@ impl GhostLayerManager {
         // ── Diagnostics: log HWND, styles, parent, class name ─────────
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
-                GetParent, GetClassNameW, GetWindowTextW, IsWindowVisible,
+                GetClassNameW, GetParent, GetWindowTextW, IsWindowVisible,
             };
             let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
             let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -379,7 +386,11 @@ impl GhostLayerManager {
                 let p_title_str = String::from_utf16_lossy(&p_title[..p_tlen as usize]);
                 tracing::info!(
                     "DIAG PARENT: hwnd={:?} class='{}' title='{}' style=0x{:08X} exstyle=0x{:08X}",
-                    parent.0, p_class_name, p_title_str, p_style, p_ex_style
+                    parent.0,
+                    p_class_name,
+                    p_title_str,
+                    p_style,
+                    p_ex_style
                 );
             }
         }
@@ -395,12 +406,7 @@ impl GhostLayerManager {
         //
         // SAFETY: SetWindowSubclass with valid HWND and function pointer.
         unsafe {
-            let ok = SetWindowSubclass(
-                hwnd,
-                Some(overlay_subclass_proc),
-                OVERLAY_SUBCLASS_ID,
-                0,
-            );
+            let ok = SetWindowSubclass(hwnd, Some(overlay_subclass_proc), OVERLAY_SUBCLASS_ID, 0);
             if !ok.as_bool() {
                 tracing::warn!("Failed to install overlay WndProc subclass");
             }
@@ -428,7 +434,12 @@ impl GhostLayerManager {
             // Force immediate frame recalculation — triggers WM_NCCALCSIZE
             // which our subclass intercepts to return 0 (no non-client area).
             let _ = SetWindowPos(
-                hwnd, None, 0, 0, 0, 0,
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
@@ -487,8 +498,8 @@ impl GhostLayerManager {
         // (Progman/WorkerW) but below all application windows.
         //
         // SAFETY: SystemParametersInfoW + SetWindowPos with valid HWND.
-        use windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
         use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
 
         let mut work_area = RECT::default();
         unsafe {
@@ -511,8 +522,10 @@ impl GhostLayerManager {
             let _ = SetWindowPos(
                 hwnd,
                 hwnd_bottom(),
-                x, y,
-                w, h,
+                x,
+                y,
+                w,
+                h,
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
             BYPASS_SUBCLASS.store(false, Ordering::Release);
@@ -553,7 +566,12 @@ impl GhostLayerManager {
                 SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
                 BYPASS_SUBCLASS.store(true, Ordering::Release);
                 let _ = SetWindowPos(
-                    hwnd, None, 0, 0, 0, 0,
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                 );
                 BYPASS_SUBCLASS.store(false, Ordering::Release);

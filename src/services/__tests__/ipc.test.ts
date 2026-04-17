@@ -219,7 +219,11 @@ describe("ipc service", () => {
       mockInvoke.mockResolvedValue([]);
       const rule = { rule_type: "Extension" as const, pattern: null, extensions: [".txt"] };
       const result = await ipc.applyAutoGroup("z1", rule);
-      expect(mockInvoke).toHaveBeenCalledWith("apply_auto_group", { zoneId: "z1", rule });
+      expect(mockInvoke).toHaveBeenCalledWith("apply_auto_group", {
+        zoneId: "z1",
+        rule,
+        selectedPaths: null,
+      });
       expect(result).toEqual([]);
     });
 

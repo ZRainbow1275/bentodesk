@@ -142,10 +142,7 @@ pub fn load_all_themes(themes_dir: &PathBuf) -> Result<Vec<Theme>, BentoDeskErro
                         themes.push(theme);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to load theme from {}: {e}",
-                            path.display()
-                        );
+                        tracing::warn!("Failed to load theme from {}: {e}", path.display());
                     }
                 }
             }
@@ -164,11 +161,7 @@ pub fn load_all_themes(themes_dir: &PathBuf) -> Result<Vec<Theme>, BentoDeskErro
 /// Load theme.json from each enabled Theme-type plugin and append to the list.
 ///
 /// Plugin themes that collide with built-in or already-loaded theme IDs are skipped.
-fn load_plugin_themes(
-    app_data: &std::path::Path,
-    themes: &mut Vec<Theme>,
-    builtin_ids: &[String],
-) {
+fn load_plugin_themes(app_data: &std::path::Path, themes: &mut Vec<Theme>, builtin_ids: &[String]) {
     let registry = match PluginRegistry::load(app_data) {
         Ok(r) => r,
         Err(e) => {
@@ -199,10 +192,7 @@ fn load_plugin_themes(
                 themes.push(theme);
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load theme from plugin '{}': {e}",
-                    plugin.id
-                );
+                tracing::warn!("Failed to load theme from plugin '{}': {e}", plugin.id);
             }
         }
     }

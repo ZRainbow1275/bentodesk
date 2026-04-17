@@ -8,6 +8,7 @@ use crate::hidden_items;
 use crate::icon::protocol::extract_and_cache_fresh;
 use crate::icon_positions;
 use crate::layout::persistence::{BentoItem, GridPosition, ItemType};
+use crate::timeline::hook as timeline_hook;
 use crate::AppState;
 
 #[tauri::command]
@@ -50,10 +51,7 @@ pub async fn add_item(
 
     let file_path = std::path::Path::new(&path);
 
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let item_type = if file_path.is_dir() {
         ItemType::Folder
@@ -79,8 +77,7 @@ pub async fn add_item(
 
     // Extract and cache the icon (before hiding, so the file is still accessible).
     // Use fresh extraction to invalidate any stale generic icon from a prior cache.
-    let icon_hash =
-        extract_and_cache_fresh(&state.icon_cache, &path).map_err(|e| e.to_string())?;
+    let icon_hash = extract_and_cache_fresh(&state.icon_cache, &path).map_err(|e| e.to_string())?;
 
     // Look up the icon's current desktop position before hiding.
     // The display name shown on the desktop matches the file_name (without
@@ -152,6 +149,8 @@ pub async fn add_item(
     // Sync zone metadata to manifest for complete backup
     hidden_items::sync_zone_metadata(&state.app_handle);
 
+    timeline_hook::record_change(&state.app_handle, "item_add");
+
     Ok(item)
 }
 
@@ -172,17 +171,15 @@ pub async fn remove_item(
         zone.items
             .iter()
             .find(|i| i.id == item_id)
-            .and_then(|item| {
-                match (&item.original_path, &item.hidden_path) {
-                    (Some(orig), Some(hidden)) => Some((
-                        orig.clone(),
-                        hidden.clone(),
-                        item.icon_x,
-                        item.icon_y,
-                        item.file_missing,
-                    )),
-                    _ => None,
-                }
+            .and_then(|item| match (&item.original_path, &item.hidden_path) {
+                (Some(orig), Some(hidden)) => Some((
+                    orig.clone(),
+                    hidden.clone(),
+                    item.icon_x,
+                    item.icon_y,
+                    item.file_missing,
+                )),
+                _ => None,
             })
     };
 
@@ -204,7 +201,10 @@ pub async fn remove_item(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if let Err(e) = icon_positions::set_single_icon_position(&display_name, x, y) {
-                    tracing::warn!("Failed to restore icon position for '{}': {e}", display_name);
+                    tracing::warn!(
+                        "Failed to restore icon position for '{}': {e}",
+                        display_name
+                    );
                 }
             }
         }
@@ -227,6 +227,7 @@ pub async fn remove_item(
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "item_remove");
     Ok(())
 }
 
@@ -318,6 +319,7 @@ pub async fn move_item(
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "item_move");
 
     Ok(())
 }
@@ -364,6 +366,7 @@ pub async fn reorder_items(
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
     state.persist_layout();
+    timeline_hook::record_change(&state.app_handle, "item_reorder");
 
     Ok(())
 }

@@ -204,6 +204,7 @@ mod tests {
                 ..AppSettings::default()
             },
             manifest: Some(SafetyManifest {
+                schema_version: crate::hidden_items::MANIFEST_SCHEMA_VERSION.to_string(),
                 entries: vec![ManifestEntry {
                     original_path: "D:/Desktop/example.txt".to_string(),
                     hidden_path: "D:/Desktop/.bentodesk/zone-a/example.txt".to_string(),

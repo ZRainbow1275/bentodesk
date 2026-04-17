@@ -105,7 +105,9 @@ fn is_valid_semver(version: &str) -> bool {
     if parts.len() != 3 {
         return false;
     }
-    parts.iter().all(|p| !p.is_empty() && p.parse::<u64>().is_ok())
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.parse::<u64>().is_ok())
 }
 
 #[cfg(test)]

@@ -16,7 +16,9 @@ pub const EXTENSION_GROUPS: &[(&str, &str, &[&str])] = &[
     (
         "Images",
         "\u{1F5BC}\u{FE0F}",
-        &["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "tiff"],
+        &[
+            "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "tiff",
+        ],
     ),
     (
         "Videos",
@@ -32,8 +34,8 @@ pub const EXTENSION_GROUPS: &[(&str, &str, &[&str])] = &[
         "Code",
         "\u{1F4BB}",
         &[
-            "rs", "js", "ts", "tsx", "jsx", "py", "go", "java", "cpp", "c", "h", "cs", "rb",
-            "php", "html", "css",
+            "rs", "js", "ts", "tsx", "jsx", "py", "go", "java", "cpp", "c", "h", "cs", "rb", "php",
+            "html", "css",
         ],
     ),
     (
@@ -46,11 +48,7 @@ pub const EXTENSION_GROUPS: &[(&str, &str, &[&str])] = &[
         "\u{2699}\u{FE0F}",
         &["exe", "msi", "bat", "cmd", "ps1", "sh"],
     ),
-    (
-        "Shortcuts",
-        "\u{1F517}",
-        &["lnk", "url"],
-    ),
+    ("Shortcuts", "\u{1F517}", &["lnk", "url"]),
 ];
 
 /// Return a human-readable date group name based on the file's modification time.

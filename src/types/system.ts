@@ -38,3 +38,33 @@ export interface DesktopSnapshot {
   zones: BentoZone[];
   captured_at: string; // ISO 8601
 }
+
+// ─── Timeline / Time-machine (R4-C1) ─────────────────────────
+
+export interface DeltaSummary {
+  items_added: number;
+  items_removed: number;
+  items_moved: number;
+  zones_added: number;
+  zones_removed: number;
+  zones_updated: number;
+}
+
+export interface CheckpointMeta {
+  id: string;
+  captured_at: string; // ISO 8601
+  trigger: string;
+  delta_summary: string;
+  pinned: boolean;
+  zone_count: number;
+  item_count: number;
+}
+
+export interface Checkpoint {
+  id: string;
+  snapshot: DesktopSnapshot;
+  delta: DeltaSummary;
+  delta_summary: string;
+  trigger: string;
+  pinned: boolean;
+}

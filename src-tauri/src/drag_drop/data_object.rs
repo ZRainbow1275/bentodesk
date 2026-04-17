@@ -7,11 +7,7 @@ use windows::{
     core::*,
     Win32::{
         Foundation::*,
-        System::{
-            Com::*,
-            Memory::*,
-            Ole::*,
-        },
+        System::{Com::*, Memory::*, Ole::*},
     },
 };
 
@@ -58,19 +54,11 @@ impl BentoDataObject {
         // Write DROPFILES header manually (20 bytes)
         // pFiles: offset to file list
         let p_files: u32 = header_size as u32;
-        std::ptr::copy_nonoverlapping(
-            &p_files as *const u32 as *const u8,
-            ptr,
-            4,
-        );
+        std::ptr::copy_nonoverlapping(&p_files as *const u32 as *const u8, ptr, 4);
         // pt.x = 0, pt.y = 0, fNC = 0 (already zeroed by GMEM_ZEROINIT)
         // fWide = 1 (Unicode)
         let f_wide: u32 = 1;
-        std::ptr::copy_nonoverlapping(
-            &f_wide as *const u32 as *const u8,
-            ptr.add(16),
-            4,
-        );
+        std::ptr::copy_nonoverlapping(&f_wide as *const u32 as *const u8, ptr.add(16), 4);
 
         // Write file paths sequentially after the header
         let mut offset = header_size;

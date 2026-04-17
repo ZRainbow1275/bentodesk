@@ -101,8 +101,12 @@ pub fn start_resolution_monitor(handle: &AppHandle) {
             if res_changed || dpi_changed {
                 tracing::info!(
                     "Display change detected: {}x{} @ {:.2}x -> {}x{} @ {:.2}x",
-                    last_res.width, last_res.height, last_dpi,
-                    new_res.width, new_res.height, new_dpi,
+                    last_res.width,
+                    last_res.height,
+                    last_dpi,
+                    new_res.width,
+                    new_res.height,
+                    new_dpi,
                 );
 
                 let payload = ResolutionChangedPayload {

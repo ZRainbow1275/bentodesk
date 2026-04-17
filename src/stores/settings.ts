@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   version: "1.0.0",
   ghost_layer_enabled: true,
   expand_delay_ms: 150,
-  collapse_delay_ms: 300,
+  collapse_delay_ms: 400,
   icon_cache_size: 500,
   auto_group_enabled: true,
   theme: "Dark",

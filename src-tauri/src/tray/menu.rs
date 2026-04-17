@@ -24,18 +24,13 @@ use crate::AppState;
 /// - Dynamic menu text that reflects current window visibility state
 pub fn setup_tray(app: &App) -> Result<(), BentoDeskError> {
     // Window starts visible (per tauri.conf.json), so initial text is "Hide"
-    let show_item =
-        MenuItem::with_id(app, "show_hide", "隐藏 BentoDesk", true, None::<&str>)
-            .map_err(|e| {
-                BentoDeskError::ConfigError(format!("Failed to create menu item: {e}"))
-            })?;
+    let show_item = MenuItem::with_id(app, "show_hide", "隐藏 BentoDesk", true, None::<&str>)
+        .map_err(|e| BentoDeskError::ConfigError(format!("Failed to create menu item: {e}")))?;
     let new_zone_item = MenuItem::with_id(app, "new_zone", "新建区域", true, None::<&str>)
         .map_err(|e| BentoDeskError::ConfigError(format!("Failed to create menu item: {e}")))?;
     let auto_organize_item =
         MenuItem::with_id(app, "auto_organize", "智能整理桌面", true, None::<&str>)
-            .map_err(|e| {
-                BentoDeskError::ConfigError(format!("Failed to create menu item: {e}"))
-            })?;
+            .map_err(|e| BentoDeskError::ConfigError(format!("Failed to create menu item: {e}")))?;
     let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)
         .map_err(|e| BentoDeskError::ConfigError(format!("Failed to create menu item: {e}")))?;
     let about_item = MenuItem::with_id(app, "about", "关于", true, None::<&str>)
@@ -139,10 +134,7 @@ pub fn setup_tray(app: &App) -> Result<(), BentoDeskError> {
 /// Show uses `ShowWindow(SW_SHOWNOACTIVATE)` to prevent the overlay from
 /// stealing focus and triggering Windows Focus Assist.
 /// Hide uses `ShowWindow(SW_HIDE)` directly.
-fn toggle_main_window(
-    _app_handle: &tauri::AppHandle,
-    show_hide_item: &MenuItem<tauri::Wry>,
-) {
+fn toggle_main_window(_app_handle: &tauri::AppHandle, show_hide_item: &MenuItem<tauri::Wry>) {
     let now_visible = if overlay::is_visible() {
         overlay::hide_window();
         false

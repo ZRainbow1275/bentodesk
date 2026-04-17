@@ -11,5 +11,7 @@ pub mod item;
 pub mod layout;
 pub mod plugins;
 pub mod settings;
+pub mod stealth;
 pub mod system;
+pub mod timeline;
 pub mod zone;

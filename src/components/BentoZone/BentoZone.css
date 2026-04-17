@@ -217,6 +217,53 @@
   opacity: 1;
 }
 
+/* ─── Anchor-flip: mirror resize handles when growing leftward/upward ── */
+/* When the expanded panel anchored to the right edge, the east (growth)
+   handle lives on the LEFT side visually. Bottom-anchor mirrors the
+   south handle to the top. SE corner moves to the NW corner. */
+
+.bento-zone--anchor-right .bento-zone__resize-handle--e {
+  right: auto;
+  left: 0;
+}
+
+.bento-zone--anchor-bottom .bento-zone__resize-handle--s {
+  bottom: auto;
+  top: 0;
+}
+
+/* Corner handle swaps position + mirror border radius */
+.bento-zone--anchor-right.bento-zone--anchor-bottom .bento-zone__resize-handle--se {
+  right: auto;
+  bottom: auto;
+  left: 0;
+  top: 0;
+  border-right: none;
+  border-bottom: none;
+  border-left: 2px solid var(--zone-accent, var(--accent-blue));
+  border-top: 2px solid var(--zone-accent, var(--accent-blue));
+  border-bottom-right-radius: 0;
+  border-top-left-radius: var(--radius-expanded, 12px);
+}
+
+.bento-zone--anchor-right:not(.bento-zone--anchor-bottom) .bento-zone__resize-handle--se {
+  right: auto;
+  left: 0;
+  border-right: none;
+  border-left: 2px solid var(--zone-accent, var(--accent-blue));
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: var(--radius-expanded, 12px);
+}
+
+.bento-zone--anchor-bottom:not(.bento-zone--anchor-right) .bento-zone__resize-handle--se {
+  bottom: auto;
+  top: 0;
+  border-bottom: none;
+  border-top: 2px solid var(--zone-accent, var(--accent-blue));
+  border-bottom-right-radius: 0;
+  border-top-right-radius: var(--radius-expanded, 12px);
+}
+
 /* ─── Ghost Card (drag placeholder during reorder) ──────── */
 .bento-zone__ghost-card {
   background: var(--surface-hover);

@@ -42,8 +42,8 @@ fn validate_desktop_path(desktop_path: &str) -> Result<(), String> {
     }
 
     // Canonicalize to resolve symlinks / junctions, then compare lowercase.
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|e| format!("Cannot resolve desktop path: {e}"))?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("Cannot resolve desktop path: {e}"))?;
     let canonical_lower = strip_unc(&canonical.to_string_lossy())
         .to_lowercase()
         .replace('/', "\\");
@@ -181,8 +181,7 @@ fn apply_launch_at_startup(state: &AppState) -> Result<(), String> {
         tracing::warn!("Legacy registry cleanup failed: {e}");
     }
 
-    let app_exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot get exe path: {e}"))?;
+    let app_exe = std::env::current_exe().map_err(|e| format!("Cannot get exe path: {e}"))?;
 
     let guardian_exe = app_exe
         .parent()
@@ -220,8 +219,8 @@ fn apply_launch_at_startup(state: &AppState) -> Result<(), String> {
 fn apply_show_in_taskbar(handle: &tauri::AppHandle, show: bool) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow,
-        GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
+        GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_HIDE, SW_SHOWNOACTIVATE,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     let window = handle

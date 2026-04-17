@@ -131,9 +131,9 @@ pub fn install_from_zip(
 pub fn uninstall(id: &str, app_data: &Path) -> Result<(), BentoDeskError> {
     let mut registry = PluginRegistry::load(app_data)?;
 
-    let plugin = registry.find(id).ok_or_else(|| {
-        BentoDeskError::PluginError(format!("Plugin '{id}' is not installed"))
-    })?;
+    let plugin = registry
+        .find(id)
+        .ok_or_else(|| BentoDeskError::PluginError(format!("Plugin '{id}' is not installed")))?;
 
     // Remove plugin directory
     let install_path = PathBuf::from(&plugin.install_path);
@@ -162,9 +162,9 @@ pub fn toggle_enabled(
 ) -> Result<InstalledPlugin, BentoDeskError> {
     let mut registry = PluginRegistry::load(app_data)?;
 
-    let plugin = registry.find_mut(id).ok_or_else(|| {
-        BentoDeskError::PluginError(format!("Plugin '{id}' is not installed"))
-    })?;
+    let plugin = registry
+        .find_mut(id)
+        .ok_or_else(|| BentoDeskError::PluginError(format!("Plugin '{id}' is not installed")))?;
 
     plugin.enabled = enabled;
     let updated = plugin.clone();
@@ -190,17 +190,14 @@ fn extract_zip_safely(
     })?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| {
-            BentoDeskError::PluginError(format!("Cannot read ZIP entry {i}: {e}"))
-        })?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| BentoDeskError::PluginError(format!("Cannot read ZIP entry {i}: {e}")))?;
 
         let entry_name = entry
             .enclosed_name()
             .ok_or_else(|| {
-                BentoDeskError::PluginError(format!(
-                    "ZIP entry has unsafe path: {}",
-                    entry.name()
-                ))
+                BentoDeskError::PluginError(format!("ZIP entry has unsafe path: {}", entry.name()))
             })?
             .to_owned();
 
@@ -215,15 +212,13 @@ fn extract_zip_safely(
             }
 
             // Verify the resolved path is within the destination.
-            let canonical_parent = std::fs::canonicalize(
-                target.parent().unwrap_or(dest_dir),
-            )
-            .map_err(|e| {
-                BentoDeskError::PluginError(format!(
-                    "Cannot canonicalize path for '{}': {e}",
-                    entry_name.display()
-                ))
-            })?;
+            let canonical_parent = std::fs::canonicalize(target.parent().unwrap_or(dest_dir))
+                .map_err(|e| {
+                    BentoDeskError::PluginError(format!(
+                        "Cannot canonicalize path for '{}': {e}",
+                        entry_name.display()
+                    ))
+                })?;
             if !canonical_parent.starts_with(&canonical_dest) {
                 return Err(BentoDeskError::PluginError(format!(
                     "Zip-slip detected: entry '{}' escapes destination directory",
@@ -247,13 +242,11 @@ fn read_and_validate_manifest(path: &Path) -> Result<PluginManifest, BentoDeskEr
         ));
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        BentoDeskError::PluginError(format!("Cannot read manifest.json: {e}"))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| BentoDeskError::PluginError(format!("Cannot read manifest.json: {e}")))?;
 
-    let manifest: PluginManifest = serde_json::from_str(&content).map_err(|e| {
-        BentoDeskError::PluginError(format!("Invalid manifest.json: {e}"))
-    })?;
+    let manifest: PluginManifest = serde_json::from_str(&content)
+        .map_err(|e| BentoDeskError::PluginError(format!("Invalid manifest.json: {e}")))?;
 
     manifest.validate()?;
     Ok(manifest)
