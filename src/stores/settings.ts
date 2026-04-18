@@ -7,6 +7,7 @@ import * as ipc from "../services/ipc";
 
 // Default settings used before backend responds
 const DEFAULT_SETTINGS: AppSettings = {
+  schema_version: 2,
   version: "1.0.0",
   ghost_layer_enabled: true,
   expand_delay_ms: 150,
@@ -27,6 +28,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   crash_window_secs: 10,
   safe_start_after_hibernation: true,
   hibernate_resume_delay_ms: 2000,
+  updates: {
+    check_frequency: "Weekly",
+    auto_download: true,
+    skipped_version: null,
+  },
+  encryption: { mode: "None" },
+  debug_overlay: false,
+  zone_display_mode: "hover",
 };
 
 const [settings, setSettings] = createSignal<AppSettings>(DEFAULT_SETTINGS);
@@ -98,4 +107,18 @@ export function getCollapseDelay(): number {
 
 export function getAccentColor(): string {
   return settings().accent_color;
+}
+
+export function getDebugOverlayEnabled(): boolean {
+  return settings().debug_overlay;
+}
+
+/**
+ * v1.2.1 — How zones wake from their collapsed capsule state.
+ * - "hover"  → mouse-over expands (default, v1.x behaviour)
+ * - "always" → zones mount expanded, never auto-collapse (Fences-style)
+ * - "click"  → single click expands; mouse-leave still collapses
+ */
+export function getZoneDisplayMode(): "hover" | "always" | "click" {
+  return settings().zone_display_mode ?? "hover";
 }

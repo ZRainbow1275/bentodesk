@@ -1,0 +1,39 @@
+.debug-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.debug-overlay__rect {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed rgba(255, 99, 132, 0.85);
+  background: rgba(255, 99, 132, 0.08);
+  font-family: "Menlo", "Consolas", monospace;
+  font-size: 10px;
+  color: rgba(255, 99, 132, 0.95);
+  mix-blend-mode: screen;
+}
+
+.debug-overlay__rect--expanded {
+  border-color: rgba(59, 130, 246, 0.85);
+  background: rgba(59, 130, 246, 0.08);
+  color: rgba(59, 130, 246, 0.95);
+}
+
+.debug-overlay__label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  padding: 1px 4px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 2px;
+  white-space: nowrap;
+  line-height: 14px;
+}
+
+.debug-overlay__label-inflate {
+  opacity: 0.75;
+  margin-left: 2px;
+}

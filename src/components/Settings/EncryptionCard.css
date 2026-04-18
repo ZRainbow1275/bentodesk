@@ -1,0 +1,98 @@
+.encryption-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.encryption-card-description {
+  font-size: 12px;
+  color: var(--color-text-secondary, #a0a0b0);
+  margin: 0;
+}
+
+.encryption-current {
+  font-size: 13px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.encryption-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.encryption-mode-btn {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  gap: 4px;
+}
+
+.encryption-mode-btn:hover:not(:disabled) {
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.encryption-mode-btn.active {
+  border-color: #60a5fa;
+  background: rgba(96, 165, 250, 0.18);
+}
+
+.encryption-mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.encryption-mode-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.encryption-mode-sub {
+  font-size: 11px;
+  color: var(--color-text-muted, #6c7080);
+  line-height: 1.3;
+}
+
+.encryption-passphrase-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.encryption-passphrase-row input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.encryption-hint {
+  font-size: 11px;
+  color: var(--color-text-muted, #6c7080);
+  margin: 0;
+}
+
+.encryption-error {
+  color: #f87171;
+  font-size: 12px;
+  margin: 0;
+}
+
+.encryption-info {
+  color: #34d399;
+  font-size: 12px;
+  margin: 0;
+}

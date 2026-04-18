@@ -42,6 +42,49 @@ const [internalDrag, setInternalDrag] = createSignal<InternalDragState | null>(
 
 export { internalDrag };
 
+// ─── Multi-drag state (Theme C) ─────────────────────────────
+
+/**
+ * Additional items fanned out behind the primary drag ghost when the user
+ * picked up a selection larger than one. `primary` is still `internalDrag`;
+ * this stores the *passenger* items so the ghost can render a deck + the
+ * commit path can move them all under a single IPC.
+ */
+export interface InternalDragPassenger {
+  itemId: string;
+  sourceZoneId: string;
+  filePath: string;
+  itemName: string;
+}
+
+const [internalDragMulti, setInternalDragMulti] = createSignal<
+  InternalDragPassenger[] | null
+>(null);
+/**
+ * `true` when Alt is held at mousedown → multi-drag copies instead of moves.
+ * Reset on mouseup.
+ */
+let multiDragCopyMode = false;
+
+export { internalDragMulti };
+
+export function getMultiDragCopyMode(): boolean {
+  return multiDragCopyMode;
+}
+
+export function setMultiDragPassengers(
+  passengers: InternalDragPassenger[] | null,
+  copy: boolean
+): void {
+  setInternalDragMulti(passengers);
+  multiDragCopyMode = copy;
+}
+
+export function clearMultiDrag(): void {
+  setInternalDragMulti(null);
+  multiDragCopyMode = false;
+}
+
 export function updateInternalDragTarget(
   targetZoneId: string,
   targetIndex: number
@@ -62,6 +105,11 @@ export function updateInternalDragCursor(x: number, y: number): void {
 /**
  * Complete the internal drag — reorder within zone or move across zones.
  * MUST be awaited so the store is updated before the ghost card is removed.
+ *
+ * When `internalDragMulti()` is non-empty, passenger items follow the
+ * primary into the target zone. Alt-held multi-drag is accepted by the
+ * copy flag but v1.2.0 still performs a move (copy semantics land with a
+ * backend `duplicate_items` IPC in a follow-up).
  */
 async function commitInternalDrag(state: InternalDragState): Promise<void> {
   if (state.sourceZoneId === state.targetZoneId) {
@@ -76,6 +124,20 @@ async function commitInternalDrag(state: InternalDragState): Promise<void> {
   } else {
     // Cross-zone: move item
     await moveItem(state.sourceZoneId, state.targetZoneId, state.itemId);
+  }
+
+  const passengers = internalDragMulti();
+  if (passengers && passengers.length > 0) {
+    for (const p of passengers) {
+      if (p.itemId === state.itemId) continue;
+      if (p.sourceZoneId === state.targetZoneId) continue;
+      try {
+        await moveItem(p.sourceZoneId, state.targetZoneId, p.itemId);
+      } catch (err) {
+        console.warn("multi-drag passenger failed:", err);
+      }
+    }
+    clearMultiDrag();
   }
 }
 

@@ -8,17 +8,20 @@
  * which enables smooth CSS transitions on width/height/border-radius/background.
  * Inner layers use opacity/visibility cross-fade to switch visible content.
  */
-import { Component, Show, batch, createMemo, createSignal, onMount, onCleanup } from "solid-js";
+import { Component, Show, batch, createEffect, createMemo, createSignal, onMount, onCleanup } from "solid-js";
 import type { BentoZone as BentoZoneType } from "../../types/zone";
 import { isZoneExpanded, expandZone, collapseZone, getViewportSize } from "../../stores/ui";
-import { getExpandDelay, getCollapseDelay } from "../../stores/settings";
+import { getExpandDelay, getCollapseDelay, getZoneDisplayMode } from "../../stores/settings";
 import { monitorForClientRect, cachedMonitors } from "../../services/geometry";
 import {
   createHitTestHandlers,
   registerZoneElement,
   unregisterZoneElement,
+  updateZoneInflate,
   acquireDragLock,
+  computeInflateForPosition,
 } from "../../services/hitTest";
+import { getDebugOverlayEnabled } from "../../stores/settings";
 import {
   createDropHandlers,
   activeDropZone,
@@ -27,13 +30,40 @@ import {
 } from "../../services/dropTarget";
 import { internalDrag } from "../../services/drag";
 import { preloadIcons } from "../../services/ipc";
-import { updateZone } from "../../stores/zones";
+import { updateZone, zonesStore } from "../../stores/zones";
+import { suggestStack } from "../../services/stack";
+import { stackZonesAction } from "../../stores/stacks";
 import ZenCapsule from "./ZenCapsule";
 import BentoPanel from "./BentoPanel";
 import "./BentoZone.css";
 
 interface BentoZoneProps {
   zone: BentoZoneType;
+}
+
+/** Batch size for idle-scheduled icon preload. Matches the tokio
+ * extractor's thread-pool depth so batches don't queue behind each
+ * other during the expand animation. */
+const PRELOAD_BATCH = 8;
+
+type IdleSchedule = (cb: () => void) => void;
+
+const scheduleIdle: IdleSchedule =
+  typeof window !== "undefined" && typeof window.requestIdleCallback === "function"
+    ? (cb) => {
+        window.requestIdleCallback(() => cb(), { timeout: 200 });
+      }
+    : (cb) => {
+        window.setTimeout(cb, 1);
+      };
+
+function schedulePreloadBatches(paths: string[]) {
+  for (let i = 0; i < paths.length; i += PRELOAD_BATCH) {
+    const slice = paths.slice(i, i + PRELOAD_BATCH);
+    scheduleIdle(() => {
+      void preloadIcons(slice);
+    });
+  }
 }
 
 const BentoZone: Component<BentoZoneProps> = (props) => {
@@ -84,8 +114,31 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // Register this zone's DOM element for cursor position hit-testing and drop targeting
   onMount(() => {
     if (zoneRef) {
-      registerZoneElement(zoneRef);
+      registerZoneElement(zoneRef, { inflate: computeInflateForPosition(props.zone.position) });
       registerDropZoneElement(zoneRef, props.zone.id);
+    }
+    // v1.2.1 — `always` mode: mount the zone already expanded so the user
+    // sees a Fences-style persistent panel without any hover trigger.
+    if (getZoneDisplayMode() === "always") {
+      expandZone(props.zone.id);
+    }
+  });
+
+  // v1.2.1 — react to runtime display-mode switches. Flipping into `always`
+  // immediately pops every zone open; flipping out leaves the current state
+  // alone (next hover-leave / re-click will collapse naturally).
+  createEffect(() => {
+    if (getZoneDisplayMode() === "always" && !expanded()) {
+      expandZone(props.zone.id);
+    }
+  });
+
+  // D1: refresh inflate when zone position changes (user drags capsule).
+  createEffect(() => {
+    // Touch position to subscribe the effect; computeInflateForPosition reads it internally.
+     void props.zone.position;
+    if (zoneRef) {
+      updateZoneInflate(zoneRef, computeInflateForPosition(props.zone.position));
     }
   });
 
@@ -136,7 +189,13 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     if (cached && cached.length > 1) {
       const mon = monitorForClientRect(rect);
       if (mon) {
-        const dpr = window.devicePixelRatio || 1;
+        // D1.3 fix: use per-monitor dpi_scale when available so secondary
+        // displays with different DPI resolve work-area correctly. Falls back
+        // to window.devicePixelRatio (which always reflects the primary) when
+        // MonitorInfo didn't provide a scale value.
+        const dpr = mon.dpi_scale && mon.dpi_scale > 0
+          ? mon.dpi_scale
+          : (window.devicePixelRatio || 1);
         workLeft = mon.rect_work.x / dpr;
         workTop = mon.rect_work.y / dpr;
         workRight = (mon.rect_work.x + mon.rect_work.width) / dpr;
@@ -144,18 +203,40 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       }
     }
 
-    const wouldOverflowX = rect.left + panelW + MARGIN > workRight;
-    const wouldOverflowY = rect.top + panelH + MARGIN > workBottom;
+    // Clamp against CSS max (600px) so overflow test matches actual render size.
+    const MAX_PANEL_PX = 600;
+    const effPanelW = Math.min(panelW, MAX_PANEL_PX);
+    const effPanelH = Math.min(panelH, MAX_PANEL_PX);
+
+    const wouldOverflowX = rect.left + effPanelW + MARGIN > workRight;
+    const wouldOverflowY = rect.top + effPanelH + MARGIN > workBottom;
     // Also avoid flipping if flipping would itself push the LEFT edge
     // off the work-area — in that case the capsule is simply too wide
     // and the CSS max-width clamp handles it.
-    const flipStillFitsX = rect.right - panelW - MARGIN >= workLeft;
-    const flipStillFitsY = rect.bottom - panelH - MARGIN >= workTop;
+    const flipStillFitsX = rect.right - effPanelW - MARGIN >= workLeft;
+    const flipStillFitsY = rect.bottom - effPanelH - MARGIN >= workTop;
+    // D1.1 fix: flip only if space on the natural side cannot fit the panel
+    // AND the flipped side can. The old "workBottom - rect.bottom < panelH + MARGIN"
+    // was too eager — it flipped whenever the capsule was merely close to the edge,
+    // even if the natural side had enough room, which made panels grow upward
+    // from any y_percent > ~60%.
+    const spaceBelow = workBottom - rect.bottom;
+    const spaceAbove = rect.bottom - workTop;
+    const spaceRight = workRight - rect.right;
+    const spaceLeft = rect.right - workLeft;
+    const nearBottomEdge =
+      spaceBelow < effPanelH + MARGIN &&
+      spaceAbove >= effPanelH + MARGIN &&
+      flipStillFitsY;
+    const nearRightEdge =
+      spaceRight < effPanelW + MARGIN &&
+      spaceLeft >= effPanelW + MARGIN &&
+      flipStillFitsX;
 
     const anchorX: "left" | "right" =
-      wouldOverflowX && flipStillFitsX ? "right" : "left";
+      (wouldOverflowX || nearRightEdge) && flipStillFitsX ? "right" : "left";
     const anchorY: "top" | "bottom" =
-      wouldOverflowY && flipStillFitsY ? "bottom" : "top";
+      (wouldOverflowY || nearBottomEdge) && flipStillFitsY ? "bottom" : "top";
 
     // When anchored right/bottom, `right:` / `bottom:` is measured from
     // the viewport edge, which equals (viewport - rect.right/bottom).
@@ -170,32 +251,101 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     });
   };
 
-  const handleMouseEnter = () => {
+  // D1: velocity tracker for fast-path hover trigger.
+  // Last seen cursor coords + timestamp, reset on enter.
+  let lastPosX = 0;
+  let lastPosY = 0;
+  let lastPosTime = 0;
+  const VELOCITY_THRESHOLD_PX_PER_SEC = 800;
+
+  const triggerExpand = (fastPath: boolean) => {
+    // Freeze the anchor direction before flipping state → expanded
+    // so `zoneStyle()` observes a stable snapshot on first paint.
+    captureAnchorSnapshot();
+    expandZone(props.zone.id);
+    // R2: block collapse scheduling so the spring settles before honouring
+    // a transient mouseleave caused by animation. Shorter window for
+    // fast-path so lock doesn't feel like "stickiness".
+    setExpandLockUntil(Date.now() + (fastPath ? 300 : 550));
+    // Preload icons in idle batches so the tokio extractor can't
+    // saturate while the spring animation is still running.
+    // Each batch is 8 paths — small enough to finish in one idle
+    // slot on a cold machine, large enough that 30-item zones
+    // complete within ~2 frames worth of idle time.
+    const paths = props.zone.items.map((i) => i.path);
+    if (paths.length > 0) {
+      schedulePreloadBatches(paths);
+    }
+  };
+
+  const handleMouseEnter = (e: MouseEvent) => {
     hitTestHandlers.onPointerEnter();
     clearTimers();
     if (isHoverIntentSuspended()) return;
+    // v1.2.1 — only `hover` mode schedules an expand on pointer entry.
+    // `always` is already expanded at mount; `click` only reacts to a
+    // deliberate click so hovering alone must not flicker the capsule.
+    if (getZoneDisplayMode() !== "hover") return;
+    // Seed velocity baseline at enter so the first onMouseMove computes from a
+    // stable reference (movementX/Y is unreliable on first frame).
+    lastPosX = e.clientX;
+    lastPosY = e.clientY;
+    lastPosTime = performance.now();
     if (!expanded()) {
       expandTimer = setTimeout(() => {
-        // Freeze the anchor direction before flipping state → expanded
-        // so `zoneStyle()` observes a stable snapshot on first paint.
-        captureAnchorSnapshot();
-        expandZone(props.zone.id);
-        // R2: block collapse scheduling for 550ms so the spring settles
-        // before we honour a transient mouseleave caused by animation.
-        setExpandLockUntil(Date.now() + 550);
-        // Preload icons for items in this zone so they render immediately
-        const paths = props.zone.items.map((i) => i.path);
-        if (paths.length > 0) {
-          void preloadIcons(paths);
-        }
+        triggerExpand(false);
       }, getExpandDelay());
     }
+  };
+
+  // D1: on every mousemove inside the zone, sample cursor velocity.
+  // If > VELOCITY_THRESHOLD_PX_PER_SEC the user is "slashing through" — fire the
+  // expand immediately so the interaction feels responsive on fast flicks.
+  const handleMouseMove = (e: MouseEvent) => {
+    if (expanded() || isHoverIntentSuspended()) return;
+    // Velocity fast-path only applies to `hover` mode — `click` mode must
+    // never expand on movement alone, even a "slashing" gesture.
+    if (getZoneDisplayMode() !== "hover") return;
+    const now = performance.now();
+    const dt = now - lastPosTime;
+    if (dt > 0 && dt < 200) {
+      const dx = e.clientX - lastPosX;
+      const dy = e.clientY - lastPosY;
+      const dist = Math.hypot(dx, dy);
+      const velocity = (dist / dt) * 1000;
+      if (velocity > VELOCITY_THRESHOLD_PX_PER_SEC && expandTimer !== null) {
+        clearTimeout(expandTimer);
+        expandTimer = null;
+        triggerExpand(true);
+      }
+    }
+    lastPosX = e.clientX;
+    lastPosY = e.clientY;
+    lastPosTime = now;
+  };
+
+  // v1.2.1 — `click` mode: a single left-click on the collapsed capsule
+  // expands the zone. Once expanded, mouse-leave still auto-collapses, so
+  // the interaction feels like a launcher pop-over rather than a mode toggle.
+  const handleZoneClick = (e: MouseEvent) => {
+    if (getZoneDisplayMode() !== "click") return;
+    if (expanded()) return;
+    if (e.button !== 0) return;
+    // Fire only when the user clicked the zen (capsule) surface; clicks on
+    // resize handles or header-drag are already gated by !expanded(), but an
+    // explicit target check prevents accidentally swallowing a click on any
+    // overlaid tooltip portal that happens to sit above the capsule.
+    const target = e.target as HTMLElement | null;
+    if (target && target.closest(".bento-zone__resize-handle")) return;
+    triggerExpand(false);
   };
 
   const handleMouseLeave = () => {
     hitTestHandlers.onPointerLeave();
     clearTimers();
     if (isHoverIntentSuspended()) return;
+    // `always` mode: zones are persistently expanded — mouse leave is a no-op.
+    if (getZoneDisplayMode() === "always") return;
     if (expanded()) {
       // R2: if we're still inside the post-expand lock window, defer
       // the collapse until after the spring settles. We schedule a
@@ -255,9 +405,16 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       const yPercent =
         ((ev.clientY - offsetY) / window.innerHeight) * 100;
 
-      // Clamp to viewport
-      const clampedX = Math.max(0, Math.min(95, xPercent));
-      const clampedY = Math.max(0, Math.min(95, yPercent));
+      // Clamp to viewport — the max is 100% minus capsule dimension so the capsule
+      // never extends past the screen edge. Old hard-coded 95% was too restrictive
+      // on 1080p (capsule only occupies ~4.4%), preventing users from dragging zones
+      // all the way to the bottom/right edge.
+      const capsuleH = rect.height || 48;
+      const capsuleW = rect.width || 160;
+      const maxXPct = Math.max(0, 100 - (capsuleW / window.innerWidth) * 100);
+      const maxYPct = Math.max(0, 100 - (capsuleH / window.innerHeight) * 100);
+      const clampedX = Math.max(0, Math.min(maxXPct, xPercent));
+      const clampedY = Math.max(0, Math.min(maxYPct, yPercent));
 
       // Update local signal only — no IPC call
       setDragPosition({ x_percent: clampedX, y_percent: clampedY });
@@ -277,6 +434,27 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
         await updateZone(props.zone.id, {
           position: { x_percent: finalPos.x_percent, y_percent: finalPos.y_percent },
         });
+      }
+
+      // D2: after drag settles, scan neighbours for substantial overlap.
+      // If this zone joined (or created) a new cluster that's not already
+      // a single stack, promote it via `stack_zones`. Done *after*
+      // persistence so rects reflect the new position.
+      try {
+        const clusters = suggestStack(zonesStore.zones);
+        for (const cluster of clusters) {
+          if (!cluster.includes(props.zone.id)) continue;
+          // Skip if the cluster already shares one stack_id.
+          const firstSid = zonesStore.zones.find((z) => z.id === cluster[0])?.stack_id;
+          const allSame = firstSid && cluster.every(
+            (id) => zonesStore.zones.find((z) => z.id === id)?.stack_id === firstSid,
+          );
+          if (allSame) continue;
+          await stackZonesAction(cluster);
+          break;
+        }
+      } catch (err) {
+        console.warn("suggestStack failed:", err);
       }
 
       // Store is now synced — safe to clear local drag state
@@ -472,6 +650,12 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     if (accent) {
       base["--zone-accent"] = accent;
     }
+    // D1: bind transform-origin to the anchor direction so the spring-expand
+    // animation grows from the snapshot anchor corner (e.g. bottom-right)
+    // instead of the default center — matches the visual "emerge from capsule"
+    // expected when expanding near a screen edge.
+    base["--origin-x"] = anchor.x === "right" ? "right" : "left";
+    base["--origin-y"] = anchor.y === "bottom" ? "bottom" : "top";
     return base;
   };
 
@@ -496,7 +680,9 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       class={zoneClasses()}
       style={zoneStyle()}
       onMouseEnter={handleMouseEnter}
+      onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
+      onClick={handleZoneClick}
       onDragEnter={dropHandlers.onDragEnter}
       onDragOver={dropHandlers.onDragOver}
       onDragLeave={dropHandlers.onDragLeave}

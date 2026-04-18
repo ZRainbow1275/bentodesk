@@ -1,0 +1,23 @@
+{
+  "version": "1.1.0",
+  "ghost_layer_enabled": true,
+  "expand_delay_ms": 150,
+  "collapse_delay_ms": 400,
+  "icon_cache_size": 500,
+  "auto_group_enabled": true,
+  "theme": "Dark",
+  "accent_color": "#3b82f6",
+  "desktop_path": "C:/Users/tester/Desktop",
+  "watch_paths": ["C:/Users/tester/Downloads"],
+  "portable_mode": false,
+  "launch_at_startup": true,
+  "show_in_taskbar": false,
+  "safety_profile": "Balanced",
+  "active_theme": "ocean-blue",
+  "startup_high_priority": false,
+  "crash_restart_enabled": true,
+  "crash_max_retries": 5,
+  "crash_window_secs": 15,
+  "safe_start_after_hibernation": true,
+  "hibernate_resume_delay_ms": 2500
+}

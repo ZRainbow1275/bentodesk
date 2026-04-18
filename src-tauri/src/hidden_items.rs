@@ -158,8 +158,10 @@ fn set_schema_version(version: &str) {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ManifestEntry {
     /// The original file path on the Desktop.
+    #[serde(default)]
     pub original_path: String,
     /// The current path inside `.bentodesk/{zone_id}/`.
+    #[serde(default)]
     pub hidden_path: String,
     /// The zone that owns this hidden file.
     #[serde(default)]
@@ -168,6 +170,7 @@ pub struct ManifestEntry {
     #[serde(default)]
     pub file_size_bytes: u64,
     /// ISO 8601 timestamp when the file was hidden.
+    #[serde(default)]
     pub hidden_at: String,
     /// Display name shown in the zone.
     #[serde(default)]

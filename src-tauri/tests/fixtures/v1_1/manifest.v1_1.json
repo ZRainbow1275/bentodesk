@@ -1,0 +1,117 @@
+{
+  "version": "1.1.0",
+  "zones": [
+    {
+      "id": "zone-docs",
+      "name": "Documents",
+      "icon": "D",
+      "position": { "x_percent": 10.0, "y_percent": 20.0 },
+      "expanded_size": { "w_percent": 30.0, "h_percent": 40.0 },
+      "items": [
+        {
+          "id": "item-doc-1",
+          "zone_id": "zone-docs",
+          "item_type": "File",
+          "name": "readme.md",
+          "path": "C:/Users/tester/Desktop/.bentodesk/readme.md",
+          "icon_hash": "hash-readme",
+          "grid_position": { "col": 0, "row": 0, "col_span": 1 },
+          "is_wide": false,
+          "added_at": "2026-01-10T10:00:00Z",
+          "original_path": "C:/Users/tester/Desktop/readme.md",
+          "hidden_path": "C:/Users/tester/Desktop/.bentodesk/readme.md"
+        },
+        {
+          "id": "item-doc-2",
+          "zone_id": "zone-docs",
+          "item_type": "File",
+          "name": "notes.txt",
+          "path": "C:/Users/tester/Desktop/.bentodesk/notes.txt",
+          "icon_hash": "hash-notes",
+          "grid_position": { "col": 1, "row": 0, "col_span": 1 },
+          "is_wide": false,
+          "added_at": "2026-01-10T10:05:00Z"
+        },
+        {
+          "id": "item-doc-3",
+          "zone_id": "zone-docs",
+          "item_type": "Shortcut",
+          "name": "Project.lnk",
+          "path": "C:/Users/tester/Desktop/.bentodesk/Project.lnk",
+          "icon_hash": "hash-shortcut",
+          "grid_position": { "col": 2, "row": 0, "col_span": 1 },
+          "is_wide": false,
+          "added_at": "2026-01-10T10:10:00Z"
+        }
+      ],
+      "accent_color": "#ff6b6b",
+      "sort_order": 0,
+      "auto_group": null,
+      "grid_columns": 4,
+      "created_at": "2026-01-10T09:00:00Z",
+      "updated_at": "2026-01-10T10:10:00Z",
+      "capsule_size": "medium",
+      "capsule_shape": "pill"
+    },
+    {
+      "id": "zone-media",
+      "name": "Media",
+      "icon": "M",
+      "position": { "x_percent": 50.0, "y_percent": 20.0 },
+      "expanded_size": { "w_percent": 30.0, "h_percent": 40.0 },
+      "items": [
+        {
+          "id": "item-media-1",
+          "zone_id": "zone-media",
+          "item_type": "File",
+          "name": "vacation.jpg",
+          "path": "C:/Users/tester/Desktop/.bentodesk/vacation.jpg",
+          "icon_hash": "hash-photo",
+          "grid_position": { "col": 0, "row": 0, "col_span": 2 },
+          "is_wide": true,
+          "added_at": "2026-01-11T12:00:00Z",
+          "original_path": "C:/Users/tester/Desktop/vacation.jpg",
+          "hidden_path": "C:/Users/tester/Desktop/.bentodesk/vacation.jpg",
+          "icon_x": 120,
+          "icon_y": 240
+        },
+        {
+          "id": "item-media-2",
+          "zone_id": "zone-media",
+          "item_type": "File",
+          "name": "song.mp3",
+          "path": "C:/Users/tester/Desktop/.bentodesk/song.mp3",
+          "icon_hash": "hash-song",
+          "grid_position": { "col": 2, "row": 0, "col_span": 1 },
+          "is_wide": false,
+          "added_at": "2026-01-11T12:05:00Z"
+        },
+        {
+          "id": "item-media-3",
+          "zone_id": "zone-media",
+          "item_type": "File",
+          "name": "clip.mp4",
+          "path": "C:/Users/tester/Desktop/.bentodesk/clip.mp4",
+          "icon_hash": "hash-clip",
+          "grid_position": { "col": 0, "row": 1, "col_span": 1 },
+          "is_wide": false,
+          "added_at": "2026-01-11T12:10:00Z",
+          "file_missing": true
+        }
+      ],
+      "accent_color": "#4ecdc4",
+      "sort_order": 1,
+      "auto_group": {
+        "rule_type": "Extension",
+        "pattern": null,
+        "extensions": ["jpg", "mp3", "mp4"]
+      },
+      "grid_columns": 3,
+      "created_at": "2026-01-11T11:00:00Z",
+      "updated_at": "2026-01-11T12:10:00Z",
+      "capsule_size": "large",
+      "capsule_shape": "rounded"
+    }
+  ],
+  "last_modified": "2026-01-11T12:10:00Z"
+}

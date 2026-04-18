@@ -9,6 +9,10 @@
   overflow: hidden;
   /* GPU layer promotion for smooth compositing */
   transform: translateZ(0);
+  /* D1: anchor-aware transform-origin so spring-expand animation grows from
+     the same corner as the anchor snapshot. Defaults to top-left (matches
+     the default capsule position pre-flip). */
+  transform-origin: var(--origin-x, left) var(--origin-y, top);
 }
 
 /* ─── Dragging State (zone repositioning) ────────────── */

@@ -298,6 +298,42 @@ export function closeAboutDialog(): void {
   setAboutDialogOpen(false);
 }
 
+// ─── Bulk manager panel (Theme C) ───────────────────────────
+
+const [bulkManagerOpen, setBulkManagerOpen] = createSignal(false);
+
+export function isBulkManagerOpen(): boolean {
+  return bulkManagerOpen();
+}
+
+export function openBulkManager(): void {
+  setBulkManagerOpen(true);
+}
+
+export function closeBulkManager(): void {
+  setBulkManagerOpen(false);
+}
+
+export function toggleBulkManager(): void {
+  setBulkManagerOpen((prev) => !prev);
+}
+
+// ─── Keybindings panel (Theme C) ───────────────────────────
+
+const [keybindingsPanelOpen, setKeybindingsPanelOpen] = createSignal(false);
+
+export function isKeybindingsPanelOpen(): boolean {
+  return keybindingsPanelOpen();
+}
+
+export function openKeybindingsPanel(): void {
+  setKeybindingsPanelOpen(true);
+}
+
+export function closeKeybindingsPanel(): void {
+  setKeybindingsPanelOpen(false);
+}
+
 // ─── Smart Grouping dialog ──────────────────────────────────
 
 const [smartGroupZoneId, setSmartGroupZoneId] = createSignal<string | null>(
@@ -343,6 +379,8 @@ export function isAnyModalOpen(): boolean {
     aboutDialogOpen() ||
     smartGroupZoneId() !== null ||
     contextMenu() !== null ||
-    confirmDialogOpen()
+    confirmDialogOpen() ||
+    bulkManagerOpen() ||
+    keybindingsPanelOpen()
   );
 }

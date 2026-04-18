@@ -276,6 +276,10 @@ mod tests {
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                     capsule_size: "medium".to_string(),
                     capsule_shape: "pill".to_string(),
+                    stack_id: None,
+                    stack_order: 0,
+                    alias: None,
+                    live_folder_path: None,
                 })
                 .collect(),
             last_modified: "2026-01-01T00:00:00Z".to_string(),

@@ -107,6 +107,28 @@ pub struct BentoZone {
     /// Capsule shape variant: "pill", "rounded", "circle", or "minimal". Defaults to "pill".
     #[serde(default = "default_capsule_shape")]
     pub capsule_shape: String,
+    /// D2: stack identifier — zones sharing the same `stack_id` form a visual
+    /// stack (macOS-Dock-style). `None` = free-standing, not part of any stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_id: Option<String>,
+    /// D2: position within the owning stack (0 = bottom, N-1 = top). Ignored
+    /// when `stack_id` is `None`. Omitted from the on-disk payload when 0 to
+    /// keep the layout file clean for the common free-standing case.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub stack_order: u32,
+    /// D3: user-defined display alias. Zones render `alias ?? name`; fuzzy
+    /// search remains against `name` so typing the original still matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// E2-e: when set, the zone's items list is a live read-only mirror of
+    /// this folder. The `live_folder` watcher re-emits a refresh event on
+    /// every debounced filesystem change under this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_folder_path: Option<String>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn default_capsule_size() -> String {
@@ -129,6 +151,9 @@ pub struct ZoneUpdate {
     pub auto_group: Option<AutoGroupRule>,
     pub capsule_size: Option<String>,
     pub capsule_shape: Option<String>,
+    /// D3: `Some(Some("…"))` sets alias, `Some(None)` clears, `None` unchanged.
+    #[serde(default)]
+    pub alias: Option<Option<String>>,
 }
 
 /// Top-level layout data persisted to disk.
@@ -263,6 +288,10 @@ mod tests {
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 capsule_size: "medium".to_string(),
                 capsule_shape: "pill".to_string(),
+                stack_id: None,
+                stack_order: 0,
+                alias: None,
+                live_folder_path: None,
             }],
             last_modified: "2026-01-01T00:00:00Z".to_string(),
             coherence_id: None,
@@ -293,6 +322,7 @@ mod tests {
             auto_group: None,
             capsule_size: None,
             capsule_shape: None,
+            alias: None,
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: ZoneUpdate = serde_json::from_str(&json).unwrap();
@@ -328,5 +358,115 @@ mod tests {
     fn corrupt_json_returns_serde_error() {
         let result = serde_json::from_str::<LayoutData>("{ not valid json }");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn v1_1_manifest_fixture_loads_with_defaults_for_new_v1_2_fields() {
+        // Read the committed v1.1 manifest fixture and deserialize it into
+        // the current `LayoutData` shape. Every v1.2-new zone field
+        // (`stack_id`, `stack_order`, `alias`, `live_folder_path`) must
+        // default to its empty value — no data loss, no hard serde error.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/v1_1/manifest.v1_1.json");
+        let bytes = std::fs::read(&fixture)
+            .unwrap_or_else(|e| panic!("fixture {} missing: {e}", fixture.display()));
+
+        let layout: LayoutData = serde_json::from_slice(&bytes).expect(
+            "v1.1 manifest fixture must deserialize into v1.2 LayoutData without migration",
+        );
+
+        assert_eq!(layout.version, "1.1.0");
+        assert_eq!(layout.zones.len(), 2);
+
+        for zone in &layout.zones {
+            assert!(
+                zone.stack_id.is_none(),
+                "zone {} should have stack_id=None by default",
+                zone.id
+            );
+            assert_eq!(
+                zone.stack_order, 0,
+                "zone {} should have stack_order=0 by default",
+                zone.id
+            );
+            assert!(
+                zone.alias.is_none(),
+                "zone {} should have alias=None by default",
+                zone.id
+            );
+            assert!(
+                zone.live_folder_path.is_none(),
+                "zone {} should have live_folder_path=None by default",
+                zone.id
+            );
+            assert_eq!(
+                zone.items.len(),
+                3,
+                "zone {} should preserve all 3 items from v1.1",
+                zone.id
+            );
+        }
+
+        // Spot-check that v1.1 field values survived intact.
+        let docs = &layout.zones[0];
+        assert_eq!(docs.id, "zone-docs");
+        assert_eq!(docs.name, "Documents");
+        assert_eq!(docs.capsule_size, "medium");
+        assert_eq!(docs.capsule_shape, "pill");
+        assert_eq!(docs.accent_color.as_deref(), Some("#ff6b6b"));
+
+        let media = &layout.zones[1];
+        assert_eq!(media.id, "zone-media");
+        assert_eq!(media.capsule_size, "large");
+        assert_eq!(media.capsule_shape, "rounded");
+        assert!(matches!(
+            media.auto_group.as_ref().map(|r| &r.rule_type),
+            Some(GroupRuleType::Extension)
+        ));
+
+        // File-level survivors.
+        let vacation = &media.items[0];
+        assert_eq!(vacation.name, "vacation.jpg");
+        assert!(vacation.is_wide);
+        assert_eq!(vacation.icon_x, Some(120));
+        assert_eq!(vacation.icon_y, Some(240));
+
+        let missing_clip = &media.items[2];
+        assert!(
+            missing_clip.file_missing,
+            "file_missing flag from v1.1 must round-trip"
+        );
+    }
+
+    #[test]
+    fn v1_1_manifest_roundtrip_adds_no_stray_fields() {
+        // After loading the v1.1 fixture, serializing it back should not
+        // emit `stack_id`/`stack_order`/`alias`/`live_folder_path` keys
+        // because they default to empty (guarded by `skip_serializing_if`).
+        // This keeps a freshly upgraded layout.json visually identical to
+        // the pre-upgrade file for keys the user never touched.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/v1_1/manifest.v1_1.json");
+        let bytes = std::fs::read(&fixture).unwrap();
+        let layout: LayoutData = serde_json::from_slice(&bytes).unwrap();
+
+        let reserialized = serde_json::to_string(&layout).unwrap();
+
+        assert!(
+            !reserialized.contains("\"stack_id\""),
+            "stack_id=None must be skipped on serialize, got: {reserialized}"
+        );
+        assert!(
+            !reserialized.contains("\"stack_order\""),
+            "stack_order=0 must be skipped on serialize, got: {reserialized}"
+        );
+        assert!(
+            !reserialized.contains("\"alias\""),
+            "alias=None must be skipped on serialize, got: {reserialized}"
+        );
+        assert!(
+            !reserialized.contains("\"live_folder_path\""),
+            "live_folder_path=None must be skipped on serialize, got: {reserialized}"
+        );
     }
 }

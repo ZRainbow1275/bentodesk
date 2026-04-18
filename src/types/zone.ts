@@ -60,6 +60,13 @@ export interface BentoZone {
   updated_at: string;               // ISO 8601
   capsule_size: CapsuleSize;        // Zen capsule size variant (default "medium")
   capsule_shape: CapsuleShape;      // Zen capsule shape variant (default "pill")
+  // D2/D3 additive (Theme D v1.2.0) — all optional for zero-migration back-compat.
+  /** ID of the stack this zone belongs to; null/undefined = not stacked. */
+  stack_id?: string | null;
+  /** Z-order within the stack (0 = bottom, N-1 = top). */
+  stack_order?: number;
+  /** Optional user-defined display alias. Display priority: alias ?? name. */
+  alias?: string | null;
 }
 
 export interface ZoneUpdate {
@@ -72,6 +79,7 @@ export interface ZoneUpdate {
   auto_group?: AutoGroupRule;
   capsule_size?: CapsuleSize;
   capsule_shape?: CapsuleShape;
+  alias?: string | null;
 }
 
 export interface FileInfo {

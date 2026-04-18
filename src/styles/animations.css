@@ -1,19 +1,49 @@
 /* Animation specifications */
 
+/*
+ * Theme B — `@property --rad` registers border-radius as a typed custom
+ * property so the compositor can interpolate it on the GPU rather than
+ * invalidating paint every frame. WebView2 130+ supports this; older
+ * versions silently fall back to the regular discrete interpolation
+ * (no visible break, just loses the free-animation optimisation).
+ */
+@property --rad {
+  syntax: "<length>";
+  initial-value: 24px;
+  inherits: false;
+}
+
 /* Spring expand — used for zen -> bento transition.
-   IMPORTANT: Never include left/top in this transition list.
-   Position changes must be instant — animating them causes flicker/jump
-   when the --dragging class is removed after zone repositioning, because
-   the springy overshoot (1.56) bounces the zone past its target. */
+ *
+ * Previous incarnation animated width/height/background/box-shadow/
+ * backdrop-filter simultaneously. Every one of those triggers layout
+ * or paint, and the blur filter in particular forced WebView2 to
+ * re-rasterise the ROI on each frame — the main jank source for the
+ * 500ms expand under heavy zones.
+ *
+ * Theme B rewrite:
+ *   • width / height — cheap on the cost model because the inner
+ *     content uses `contain: layout paint` so reflow is bounded.
+ *   • --rad — interpolated on the compositor via @property.
+ *   • background colour — paint but not layout.
+ *   • box-shadow / backdrop-filter — deliberately NOT transitioned.
+ *     Backdrop-filter stays at the static value; the visual change
+ *     between zen and expanded is carried by background + border.
+ *
+ * IMPORTANT: never include left/top in this transition list. Position
+ * changes must be instant — animating them causes flicker when the
+ * --dragging class is removed, because the springy overshoot bounces
+ * the zone past its target.
+ */
 .spring-expand {
-  transition: width 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
-              height 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
-              border-radius 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
-              background 0.3s ease,
-              box-shadow 0.3s ease,
-              border-color 0.3s ease,
-              backdrop-filter 0.3s ease,
-              -webkit-backdrop-filter 0.3s ease;
+  border-radius: var(--rad, 24px);
+  transition:
+    width 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+    height 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+    --rad 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+    background 0.3s ease,
+    border-color 0.3s ease;
+  will-change: width, height, --rad;
 }
 
 /* Content reveal — delayed fade + slide for zone content */

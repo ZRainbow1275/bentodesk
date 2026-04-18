@@ -87,6 +87,24 @@ pub fn suggest_groups(files: &[FileInfo]) -> Vec<SuggestedGroup> {
         }
     }
 
+    // 3. AI cluster signal (Theme E2-b): hierarchical clustering over feature
+    //    vectors catches groupings that simple prefix / extension heuristics
+    //    miss (e.g. mixed extensions sharing a project name).
+    let ai_suggestions = super::ai_recommender::clusters_to_suggestions(files);
+    for ai in ai_suggestions {
+        // Dedupe: skip if an existing signal already covers every file.
+        let covered = suggestions.iter().any(|s| {
+            s.matching_files.len() >= ai.matching_files.len()
+                && ai
+                    .matching_files
+                    .iter()
+                    .all(|f| s.matching_files.contains(f))
+        });
+        if !covered {
+            suggestions.push(ai);
+        }
+    }
+
     // Sort by confidence descending
     suggestions.sort_by(|a, b| {
         b.confidence

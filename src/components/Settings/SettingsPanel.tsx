@@ -43,6 +43,9 @@ import {
 import type { BentoTheme } from "../../themes";
 import { open } from "@tauri-apps/plugin-dialog";
 import StealthModeCard from "./StealthModeCard";
+import UpdaterCard from "./UpdaterCard";
+import BackupCard from "./BackupCard";
+import EncryptionCard from "./EncryptionCard";
 import "./SettingsPanel.css";
 
 /**
@@ -223,6 +226,7 @@ const SettingsPanel: Component = () => {
       crash_window_secs: current.crash_window_secs,
       safe_start_after_hibernation: current.safe_start_after_hibernation,
       hibernate_resume_delay_ms: current.hibernate_resume_delay_ms,
+      zone_display_mode: current.zone_display_mode ?? "hover",
     };
     const result = await updateSettingsStore(updates);
     if (result === null) {
@@ -527,6 +531,49 @@ const SettingsPanel: Component = () => {
               </div>
             </section>
 
+            {/* Zone display mode — v1.2.1 */}
+            <section class="settings-group">
+              <h3 class="settings-group__title">{t("settingsGroupDisplayMode")}</h3>
+              <div class="settings-row">
+                <div class="settings-row__label">
+                  <div>{t("settingsDisplayModeLabel")}</div>
+                  <div class="settings-row__hint">{t("settingsDisplayModeHint")}</div>
+                </div>
+                <div class="settings-row__control settings-display-mode">
+                  <label class="settings-display-mode__option">
+                    <input
+                      type="radio"
+                      name="zone_display_mode"
+                      value="hover"
+                      checked={(localSettings().zone_display_mode ?? "hover") === "hover"}
+                      onChange={() => updateLocal("zone_display_mode", "hover")}
+                    />
+                    <span>{t("settingsDisplayModeHover")}</span>
+                  </label>
+                  <label class="settings-display-mode__option">
+                    <input
+                      type="radio"
+                      name="zone_display_mode"
+                      value="always"
+                      checked={localSettings().zone_display_mode === "always"}
+                      onChange={() => updateLocal("zone_display_mode", "always")}
+                    />
+                    <span>{t("settingsDisplayModeAlways")}</span>
+                  </label>
+                  <label class="settings-display-mode__option">
+                    <input
+                      type="radio"
+                      name="zone_display_mode"
+                      value="click"
+                      checked={localSettings().zone_display_mode === "click"}
+                      onChange={() => updateLocal("zone_display_mode", "click")}
+                    />
+                    <span>{t("settingsDisplayModeClick")}</span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
             {/* Performance */}
             <section class="settings-group">
               <h3 class="settings-group__title">{t("settingsGroupPerformance")}</h3>
@@ -629,6 +676,11 @@ const SettingsPanel: Component = () => {
 
             {/* Stealth / Dotfolder Visibility (R3) */}
             <StealthModeCard />
+
+            {/* Theme A — Updater + Settings safe storage */}
+            <UpdaterCard />
+            <BackupCard />
+            <EncryptionCard />
 
             {/* Plugins */}
             <section class="settings-group">

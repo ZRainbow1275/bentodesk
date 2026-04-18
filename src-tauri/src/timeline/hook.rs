@@ -23,6 +23,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::checkpoint::{self, compute_delta, Checkpoint, CheckpointStore, DeltaSummary};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
+/// Upper bound on how long a coalesced window can grow. Bulk operations
+/// (layout algorithms applied to 200 zones) can keep re-arming the debounce
+/// for longer than the base 500 ms; without a hard ceiling they would never
+/// flush. Once the window age exceeds this, we flush regardless of activity.
+const COALESCE_MAX_WINDOW: Duration = Duration::from_millis(2_500);
 /// Threshold used by `on_significant_change` — below this, the coalesced
 /// checkpoint is skipped to avoid noise.
 pub const SIGNIFICANT_ITEM_THRESHOLD: i32 = 3;
@@ -38,8 +43,15 @@ struct HookState {
     pending_trigger: String,
     /// When the current debounce window started.
     window_started: Option<Instant>,
+    /// Earliest timestamp this window saw activity — used by
+    /// `COALESCE_MAX_WINDOW` to bound coalesced-burst duration.
+    window_opened_at: Option<Instant>,
     /// `true` when a background timer is currently armed.
     timer_running: bool,
+    /// When `true`, the debounce timer allows `window_started` to re-arm
+    /// within a single checkpoint; used by bulk operations whose duration
+    /// can exceed the base 500 ms window.
+    coalesce_in_progress: bool,
 }
 
 fn state() -> &'static Mutex<HookState> {
@@ -92,7 +104,23 @@ pub fn init_baseline(app: &AppHandle) {
 /// noticeable overhead (lock + clone of current zones). The actual checkpoint
 /// is persisted asynchronously once the debounce window elapses.
 pub fn record_change(app: &AppHandle, trigger: &str) {
+    record_internal(app, trigger, false);
+}
+
+/// Bulk-mode variant of [`record_change`].
+///
+/// Sets the sliding `coalesce_in_progress` flag so concurrent single-zone
+/// updates triggered by the same bulk IPC don't each produce their own
+/// checkpoint — they all fold into a single delta against the pre-bulk
+/// baseline. Bounded by [`COALESCE_MAX_WINDOW`] so pathological bursts
+/// still flush.
+pub fn record_change_coalesced(app: &AppHandle, trigger: &str) {
+    record_internal(app, trigger, true);
+}
+
+fn record_internal(app: &AppHandle, trigger: &str, coalesce: bool) {
     let snap = capture_current_snapshot(app);
+    let now = Instant::now();
     let mut s = match state().lock() {
         Ok(s) => s,
         Err(e) => {
@@ -105,7 +133,13 @@ pub fn record_change(app: &AppHandle, trigger: &str) {
     // the baseline (which hasn't moved yet during the debounce window).
     s.pending_delta = delta;
     s.pending_trigger = trigger.to_string();
-    s.window_started = Some(Instant::now());
+    s.window_started = Some(now);
+    if s.window_opened_at.is_none() {
+        s.window_opened_at = Some(now);
+    }
+    if coalesce {
+        s.coalesce_in_progress = true;
+    }
 
     if !s.timer_running {
         s.timer_running = true;
@@ -123,10 +157,17 @@ fn debounce_loop(app: AppHandle) {
                 Ok(s) => s,
                 Err(_) => return,
             };
+            let window_open_long_enough = s
+                .window_opened_at
+                .is_some_and(|t| t.elapsed() >= COALESCE_MAX_WINDOW);
             match s.window_started {
-                Some(started) if started.elapsed() >= DEBOUNCE_WINDOW => {
+                Some(started)
+                    if started.elapsed() >= DEBOUNCE_WINDOW || window_open_long_enough =>
+                {
                     // Window closed — flush.
                     s.window_started = None;
+                    s.window_opened_at = None;
+                    s.coalesce_in_progress = false;
                     s.timer_running = false;
                     Some((
                         std::mem::take(&mut s.pending_delta),
@@ -244,5 +285,18 @@ mod tests {
             ..Default::default()
         };
         assert!(!on_significant_change(&d));
+    }
+
+    #[test]
+    fn coalesce_max_window_bounds_bursts() {
+        // Sanity check the bound itself — prevents silent drift.
+        assert!(
+            COALESCE_MAX_WINDOW >= DEBOUNCE_WINDOW,
+            "coalesce cap must exceed debounce window"
+        );
+        assert!(
+            COALESCE_MAX_WINDOW.as_millis() <= 5_000,
+            "coalesce cap must stay tight enough for UX"
+        );
     }
 }

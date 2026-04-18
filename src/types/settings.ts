@@ -2,8 +2,22 @@
 
 export type Theme = "Dark" | "Light" | "System";
 export type SafetyProfile = "Conservative" | "Balanced" | "Expanded";
+export type UpdateCheckFrequency = "Daily" | "Weekly" | "Manual";
+export type EncryptionMode = "None" | "Dpapi" | "Passphrase";
+
+export interface UpdatesConfig {
+  check_frequency: UpdateCheckFrequency;
+  auto_download: boolean;
+  skipped_version: string | null;
+}
+
+export interface EncryptionConfig {
+  mode: EncryptionMode;
+}
 
 export interface AppSettings {
+  /** Numeric settings schema version — bumped every time the on-disk shape changes. */
+  schema_version: number;
   version: string;
   ghost_layer_enabled: boolean;
   expand_delay_ms: number;       // Default: 150
@@ -25,6 +39,19 @@ export interface AppSettings {
   crash_window_secs: number;
   safe_start_after_hibernation: boolean;
   hibernate_resume_delay_ms: number;
+  /** Theme A — auto-update preferences. */
+  updates: UpdatesConfig;
+  /** Theme A — settings encryption preferences. */
+  encryption: EncryptionConfig;
+  /** D1: show debug overlay with hit-rect / anchor / state visualization. */
+  debug_overlay: boolean;
+  /**
+   * v1.2.1 — how zones reveal from their capsule state.
+   *   "hover"  mouse hover triggers expand (default, v1.x behaviour)
+   *   "always" zones mount expanded and never auto-collapse (Fences-style)
+   *   "click"  single click expands; mouse-leave still collapses
+   */
+  zone_display_mode?: "hover" | "always" | "click";
 }
 
 export interface SettingsUpdate {
@@ -48,4 +75,8 @@ export interface SettingsUpdate {
   crash_window_secs?: number;
   safe_start_after_hibernation?: boolean;
   hibernate_resume_delay_ms?: number;
+  updates?: Partial<UpdatesConfig>;
+  encryption?: Partial<EncryptionConfig>;
+  debug_overlay?: boolean;
+  zone_display_mode?: "hover" | "always" | "click";
 }

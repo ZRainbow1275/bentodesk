@@ -35,3 +35,36 @@
 .glass-shadow--expanded {
   box-shadow: var(--shadow-expanded);
 }
+
+/*
+ * Theme B — prefers-reduced-transparency override.
+ *
+ * Respect both the OS-level media query (Windows 11 22H2+, macOS 14+)
+ * and the runtime-applied `data-reduced-transparency` attribute which
+ * the runtimeHealth service sets when the user toggles the setting
+ * manually (useful on older OS versions that ignore the media query).
+ *
+ * Using `!important` here because the dynamically-generated theme
+ * custom properties otherwise win the specificity contest.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  .glass-surface,
+  .glass-surface--expanded,
+  .bento-zone,
+  .bento-zone--expanded,
+  .bento-zone--zen {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: rgba(18, 18, 30, 0.96) !important;
+  }
+}
+
+[data-reduced-transparency="true"] .glass-surface,
+[data-reduced-transparency="true"] .glass-surface--expanded,
+[data-reduced-transparency="true"] .bento-zone,
+[data-reduced-transparency="true"] .bento-zone--expanded,
+[data-reduced-transparency="true"] .bento-zone--zen {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: rgba(18, 18, 30, 0.96) !important;
+}

@@ -1,8 +1,18 @@
 /**
- * ItemIcon — Displays file icon from bentodesk://icon/{encoded_path}.
- * Shows a loading pulse while the icon loads and a fallback emoji on error.
+ * ItemIcon — Displays file icon via the `bentodesk://icon/{hash}` protocol.
+ *
+ * Theme B changes:
+ * - Directly uses `bentodesk://icon/{iconHash}` as `<img src>` — no more
+ *   base64 data URL round-trip through JS. The WebView2 fetches the PNG
+ *   streaming bytes from the custom protocol handler, which consults the
+ *   hot-tier LRU (or warm-tier disk) without any JS-side buffering.
+ * - IntersectionObserver gates both the first extract IPC and the image
+ *   src assignment. When the card is scrolled out of view we never pay
+ *   for an extract or a texture upload.
+ * - On extract failure (HICON returns transparent, file missing, etc.)
+ *   we fall back to the emoji heuristic.
  */
-import { Component, createSignal, createEffect, Show } from "solid-js";
+import { Component, createSignal, onMount, onCleanup, Show } from "solid-js";
 import { getIconUrl } from "../../services/ipc";
 import "./ItemIcon.css";
 
@@ -12,59 +22,96 @@ interface ItemIconProps {
   isWide: boolean;
 }
 
+/** Margin outside the viewport at which we start warming up the icon. */
+const PRELOAD_ROOT_MARGIN = "200px";
+
 const ItemIcon: Component<ItemIconProps> = (props) => {
-  const [iconSrc, setIconSrc] = createSignal<string | null>(null);
-  const [loading, setLoading] = createSignal(true);
+  let containerEl: HTMLDivElement | undefined;
+  let observer: IntersectionObserver | null = null;
+  let cancelled = false;
+
+  const [visible, setVisible] = createSignal(false);
+  const [primed, setPrimed] = createSignal(false);
   const [error, setError] = createSignal(false);
 
-  createEffect(() => {
-    // Track reactive dependencies so the effect re-runs when path/hash change.
-    const _path = props.path;
-    const _hash = props.iconHash;
-    void (async () => {
-      setLoading(true);
-      setError(false);
-      try {
-        // Always call getIconUrl which now returns a data: URL with the PNG
-        // bytes base64-encoded. This bypasses WebView2 caching issues with
-        // the custom bentodesk:// protocol that caused wrong icons to render.
-        const url = await getIconUrl(_path);
-        setIconSrc(url);
-      } catch {
-        setError(true);
-      } finally {
-        setLoading(false);
-      }
-    })();
+  const iconSrc = () => {
+    if (!props.iconHash) return null;
+    return `bentodesk://icon/${encodeURIComponent(props.iconHash)}`;
+  };
+
+  const prime = async () => {
+    if (primed() || cancelled) return;
+    try {
+      // Fire-and-forget: the backend primes hot+warm tier. We rely on
+      // iconHash being correct (add_item already hashed) so we don't
+      // need the returned URL — the <img src> is deterministic.
+      await getIconUrl(props.path);
+    } catch {
+      if (!cancelled) setError(true);
+      return;
+    }
+    if (!cancelled) setPrimed(true);
+  };
+
+  onMount(() => {
+    if (!containerEl || typeof IntersectionObserver === "undefined") {
+      // No IO support (e.g. jsdom in tests) — prime immediately.
+      setVisible(true);
+      void prime();
+      return;
+    }
+
+    observer = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            setVisible(true);
+            observer?.disconnect();
+            observer = null;
+            void prime();
+            break;
+          }
+        }
+      },
+      { rootMargin: PRELOAD_ROOT_MARGIN, threshold: 0.01 },
+    );
+    observer.observe(containerEl);
   });
 
-  // Icon render size — smaller than the raw 32x32 PNG for visual breathing room.
-  // 24px in a 36px container = 6px margin each side — clear, not cropped.
+  onCleanup(() => {
+    cancelled = true;
+    observer?.disconnect();
+    observer = null;
+  });
+
   const renderSize = () => (props.isWide ? 20 : 24);
-  // Container provides the breathing room around the icon
   const containerSize = () => (props.isWide ? 28 : 36);
 
   return (
     <div
-      class={`item-icon ${loading() ? "pulse" : ""}`}
+      ref={containerEl}
+      class={`item-icon ${!primed() && !error() ? "pulse" : ""}`}
       style={{
         width: `${containerSize()}px`,
         height: `${containerSize()}px`,
         "flex-shrink": "0",
       }}
     >
-      <Show when={!loading() && !error() && iconSrc()}>
+      <Show when={visible() && iconSrc() && !error()}>
         <img
           class="item-icon__img"
           src={iconSrc()!}
           alt=""
           width={renderSize()}
           height={renderSize()}
+          loading="lazy"
+          decoding="async"
           onError={() => setError(true)}
+          onLoad={() => setPrimed(true)}
           draggable={false}
         />
       </Show>
-      <Show when={error() || (!loading() && !iconSrc())}>
+      <Show when={error() || !iconSrc()}>
         <span class="item-icon__fallback" style={{ "font-size": `${renderSize() - 4}px` }}>
           {getFallbackEmoji(props.path)}
         </span>
@@ -73,38 +120,29 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
   );
 };
 
-/** Determine a fallback emoji based on file extension */
 function getFallbackEmoji(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
-    // Documents
     doc: "\u{1F4C4}", docx: "\u{1F4C4}", pdf: "\u{1F4C4}",
     txt: "\u{1F4C3}", md: "\u{1F4C3}", rtf: "\u{1F4C3}",
     xlsx: "\u{1F4CA}", xls: "\u{1F4CA}", csv: "\u{1F4CA}",
     pptx: "\u{1F4CA}", ppt: "\u{1F4CA}",
-    // Images
     png: "\u{1F5BC}", jpg: "\u{1F5BC}", jpeg: "\u{1F5BC}",
     gif: "\u{1F5BC}", svg: "\u{1F5BC}", webp: "\u{1F5BC}",
     bmp: "\u{1F5BC}", ico: "\u{1F5BC}",
-    // Videos
     mp4: "\u{1F3AC}", avi: "\u{1F3AC}", mkv: "\u{1F3AC}",
     mov: "\u{1F3AC}", wmv: "\u{1F3AC}", webm: "\u{1F3AC}",
-    // Audio
     mp3: "\u{1F3B5}", wav: "\u{1F3B5}", flac: "\u{1F3B5}",
     aac: "\u{1F3B5}", ogg: "\u{1F3B5}", m4a: "\u{1F3B5}",
-    // Code
     rs: "\u{1F4BB}", js: "\u{1F4BB}", ts: "\u{1F4BB}",
     tsx: "\u{1F4BB}", jsx: "\u{1F4BB}", py: "\u{1F4BB}",
     go: "\u{1F4BB}", java: "\u{1F4BB}", cpp: "\u{1F4BB}",
     c: "\u{1F4BB}", h: "\u{1F4BB}", cs: "\u{1F4BB}",
     html: "\u{1F4BB}", css: "\u{1F4BB}",
-    // Archives
     zip: "\u{1F4E6}", rar: "\u{1F4E6}", "7z": "\u{1F4E6}",
     tar: "\u{1F4E6}", gz: "\u{1F4E6}",
-    // Executables
     exe: "\u{2699}", msi: "\u{2699}", bat: "\u{2699}",
     cmd: "\u{2699}", ps1: "\u{2699}",
-    // Shortcuts
     lnk: "\u{1F517}", url: "\u{1F517}",
   };
   return map[ext] ?? "\u{1F4C1}";

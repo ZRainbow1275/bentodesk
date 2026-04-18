@@ -1,0 +1,87 @@
+name: Release (signed / updater)
+
+# Use this workflow when cutting a release that should be picked up by
+# the Tauri v2 updater plugin. Unlike `release.yml`, this build:
+#   1. injects the minisign signing key from GitHub Secrets;
+#   2. lets `tauri-action` generate a `.sig` for the NSIS installer and
+#      publishes a `latest.json` manifest alongside the binaries;
+#   3. the updater plugin on end-user machines reads `latest.json` from
+#      the "Latest" release URL and verifies `.sig` against the embedded
+#      `pubkey`.
+#
+# Required secrets:
+#   TAURI_SIGNING_PRIVATE_KEY          — base64 minisign private key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the private key
+#
+# Trigger by pushing a tag like `v1.2.0-updater` or by running manually
+# via workflow_dispatch.
+
+on:
+  push:
+    tags:
+      - 'v*-updater'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to cut the signed release against (e.g. v1.2.0)"
+        required: true
+        type: string
+
+jobs:
+  build-and-sign:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build Guardian binary
+        run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
+
+      - name: Build + sign Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'BentoDesk ${{ inputs.tag || github.ref_name }} (updater)'
+          releaseBody: |
+            Signed release for the Tauri updater flow.
+
+            Artifacts:
+            - `BentoDesk_x.x.x_x64-setup.exe` — NSIS installer
+            - `BentoDesk_x.x.x_x64-setup.exe.sig` — minisign signature
+            - `latest.json` — updater manifest
+
+            End users on 1.2.0+ will receive this update automatically
+            (silent background download + toast notification). To opt
+            out temporarily, set Settings → App Updates → Check
+            frequency → Manual.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

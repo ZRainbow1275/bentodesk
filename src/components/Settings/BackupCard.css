@@ -1,0 +1,98 @@
+.backup-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.backup-card-description {
+  font-size: 12px;
+  color: var(--color-text-secondary, #a0a0b0);
+  margin: 0;
+}
+
+.backup-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.backup-actions button {
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(96, 165, 250, 0.18);
+  color: #60a5fa;
+  cursor: pointer;
+}
+
+.backup-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.backup-error {
+  color: #f87171;
+  font-size: 12px;
+  margin: 0;
+}
+
+.backup-info {
+  color: #34d399;
+  font-size: 12px;
+  margin: 0;
+}
+
+.backup-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backup-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.backup-entry-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.backup-entry-timestamp {
+  font-family: var(--font-mono, monospace);
+}
+
+.backup-entry-size {
+  font-size: 11px;
+  color: var(--color-text-muted, #6c7080);
+}
+
+.backup-restore {
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.backup-restore:hover {
+  background: rgba(96, 165, 250, 0.2);
+}
+
+.backup-empty {
+  color: var(--color-text-muted, #6c7080);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}

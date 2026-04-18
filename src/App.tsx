@@ -81,8 +81,19 @@ import SmartGroupSuggestor from "./components/SmartGroup/SmartGroupSuggestor";
 import HighlightOverlay from "./components/SmartGroup/HighlightOverlay";
 import TimelinePanel from "./components/Timeline/TimelinePanel";
 import DragPreview from "./components/DragPreview";
+import DebugOverlay from "./components/DebugOverlay/DebugOverlay";
+import BulkManagerPanel from "./components/BulkManager/BulkManagerPanel";
+import KeybindingsSection from "./components/Settings/KeybindingsSection";
 import { undoCheckpoint, redoCheckpoint } from "./services/ipc";
-import { openTimeline } from "./stores/ui";
+import {
+  openTimeline,
+  toggleBulkManager,
+  openKeybindingsPanel,
+} from "./stores/ui";
+import { initKeybindings } from "./stores/keybindings";
+import { applyLayout } from "./services/autoLayout";
+import { clearMultiSelection } from "./stores/selection";
+import { clearAll as clearGlobalHotkeys } from "./services/globalHotkeys";
 
 const App: Component = () => {
   let eventCleanup: EventCleanup | null = null;
@@ -190,6 +201,11 @@ const App: Component = () => {
     // 5. Register keyboard shortcuts
     hotkeyCleanup = registerHotkeys(createHotkeyHandlers());
 
+    // 5b. Register OS-level global shortcuts (Tauri plugin-global-shortcut).
+    //     These fire regardless of webview focus; conflicts are stored in
+    //     `keybindingsState` so the Keybindings panel can show them inline.
+    void initKeybindings(getGlobalHotkeyHandler);
+
     // 6. Preload icons for all visible zone items
     const allPaths = zonesStore.zones.flatMap((z) =>
       z.items.map((i) => i.path)
@@ -222,6 +238,7 @@ const App: Component = () => {
     uninstallViewportTracker();
     eventCleanup?.();
     hotkeyCleanup?.();
+    void clearGlobalHotkeys();
   });
 
   return (
@@ -248,6 +265,9 @@ const App: Component = () => {
       <SmartGroupSuggestor />
       <HighlightOverlay />
       <DragPreview />
+      <DebugOverlay />
+      <BulkManagerPanel />
+      <KeybindingsSection handlerFor={getGlobalHotkeyHandler} />
       <Show when={getOutsideDesktopError()}>
         <div class="app-toast app-toast--outside-desktop" role="alert">
           <div class="app-toast__header">
@@ -364,6 +384,7 @@ function createHotkeyHandlers(): HotkeyHandlers {
         hideContextMenu();
         collapseAllZones();
         clearSelection();
+        clearMultiSelection();
       }
     },
 
@@ -425,5 +446,98 @@ function navigateGrid(dx: number, dy: number): void {
     selectItem(focusedZone, zone.items[newIndex].id);
   }
 }
+
+/**
+ * Resolve a handler for a keybindings action id. Used by the Tauri
+ * plugin-global-shortcut registrar and the Keybindings panel's record UI
+ * so the same callback fires whether the binding originated from defaults,
+ * user override, or a runtime rebind.
+ */
+function getGlobalHotkeyHandler(action: string): (() => void) | undefined {
+  switch (action) {
+    case "app.toggle":
+      // Ask the main window to toggle focus/visibility. A full OS-level
+      // minimize is owned by the tray; for now we just bring the overlay
+      // to front and expand the first zone if any.
+      return () => {
+        const first = zonesStore.zones[0];
+        if (first) toggleZoneExpanded(first.id);
+      };
+    case "zone.new":
+      return () => {
+        const existingNames = new Set(zonesStore.zones.map((z) => z.name));
+        let name = t("appNewZonePrefix");
+        let counter = 2;
+        while (existingNames.has(name)) {
+          name = `${t("appNewZonePrefix")} ${counter}`;
+          counter++;
+        }
+        const offset = zonesStore.zones.length * 3;
+        void createZone(
+          name,
+          "folder",
+          { x_percent: 35 + offset, y_percent: 30 + offset },
+          { w_percent: 25, h_percent: 40 }
+        );
+      };
+    case "zone.duplicate":
+      return () => {
+        const focused = getFocusedZoneId();
+        const zone = focused
+          ? zonesStore.zones.find((z) => z.id === focused)
+          : zonesStore.zones[0];
+        if (!zone) return;
+        void createZone(
+          `${zone.name} *`,
+          zone.icon,
+          {
+            x_percent: Math.min(zone.position.x_percent + 5, 90),
+            y_percent: Math.min(zone.position.y_percent + 5, 90),
+          },
+          zone.expanded_size
+        );
+      };
+    case "zone.lock-toggle":
+      // Locked-zone persistence lands with Theme D's alias/locked fields.
+      // Until then this is a no-op the record UI still binds cleanly to.
+      return () => {};
+    case "zone.hide-all":
+      return () => collapseAllZones();
+    case "layout.auto-organize":
+    case "layout.reflow":
+      return () => {
+        void applyLayout("grid", zonesStore.zones);
+      };
+    case "bulk.open-manager":
+      return () => toggleBulkManager();
+    case "zone.focus.next":
+      return () => {
+        const zones = zonesStore.zones;
+        if (zones.length === 0) return;
+        const current = getFocusedZoneId();
+        const idx = current
+          ? (zones.findIndex((z) => z.id === current) + 1) % zones.length
+          : 0;
+        setFocusedZone(zones[idx].id);
+      };
+    case "zone.focus.prev":
+      return () => {
+        const zones = zonesStore.zones;
+        if (zones.length === 0) return;
+        const current = getFocusedZoneId();
+        const idx = current
+          ? (zones.findIndex((z) => z.id === current) - 1 + zones.length) %
+            zones.length
+          : zones.length - 1;
+        setFocusedZone(zones[idx].id);
+      };
+    default:
+      return undefined;
+  }
+}
+
+// `openKeybindingsPanel` is re-exported from stores/ui so other files (tray
+// menu, settings card) can open the panel without importing Theme C internals.
+export { openKeybindingsPanel };
 
 export default App;

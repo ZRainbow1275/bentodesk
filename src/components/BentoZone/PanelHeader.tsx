@@ -2,12 +2,14 @@
  * PanelHeader — Header bar for expanded BentoZone.
  * Contains: zone icon, title, item count badge, search toggle, close button.
  */
-import { Component } from "solid-js";
+import { Component, createSignal, createMemo, onMount, onCleanup } from "solid-js";
 import type { BentoZone } from "../../types/zone";
 import { openSearch, isSearchActive } from "../../stores/ui";
 import { showContextMenu } from "../../stores/ui";
 import { t } from "../../i18n";
 import ZoneIcon from "../Icons/ZoneIcon";
+import Tooltip from "../shared/Tooltip";
+import { smartAbbreviate, getFontCtx } from "../../services/textAbbr";
 import "./PanelHeader.css";
 
 interface PanelHeaderProps {
@@ -31,6 +33,32 @@ const PanelHeader: Component<PanelHeaderProps> = (props) => {
     });
   };
 
+  const fullName = () => props.zone.alias ?? props.zone.name;
+
+  const [titleEl, setTitleEl] = createSignal<HTMLElement | undefined>();
+  const [maxPx, setMaxPx] = createSignal(0);
+  const [fontCtx, setFontCtx] = createSignal<{ font: string }>({ font: "12px sans-serif" });
+
+  onMount(() => {
+    const el = titleEl();
+    if (!el) return;
+    setFontCtx(getFontCtx(el));
+    const measure = () => setMaxPx(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  });
+
+  const abbreviated = createMemo(() => {
+    const w = maxPx();
+    const name = fullName();
+    if (w <= 0) return name;
+    return smartAbbreviate(name, w, fontCtx());
+  });
+
+  const tooltipDisabled = createMemo(() => abbreviated() === fullName());
+
   return (
     <div
       class="panel-header"
@@ -40,7 +68,15 @@ const PanelHeader: Component<PanelHeaderProps> = (props) => {
       <span class="panel-header__icon">
           <ZoneIcon icon={props.zone.icon} size={16} />
         </span>
-      <span class="panel-header__title">{props.zone.name}</span>
+      <span
+        class="panel-header__title"
+        ref={setTitleEl}
+        aria-label={fullName()}
+      >
+        <Tooltip content={fullName()} disabled={tooltipDisabled()}>
+          {abbreviated()}
+        </Tooltip>
+      </span>
       <span class="panel-header__badge">{props.zone.items.length}</span>
       <div class="panel-header__actions">
         <button

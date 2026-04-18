@@ -60,6 +60,35 @@ export async function reorderZones(zoneIds: string[]): Promise<void> {
   return invoke<void>("reorder_zones", { zoneIds });
 }
 
+// ─── D2/D3: Stack + alias commands ──────────────────────────
+
+/** Group zones into a new stack. Returns the allocated stack_id. */
+export async function stackZones(zoneIds: string[]): Promise<string> {
+  return invoke<string>("stack_zones", { zoneIds });
+}
+
+/** Dissolve a stack so all its members become free-standing again. */
+export async function unstackZones(stackId: string): Promise<void> {
+  return invoke<void>("unstack_zones", { stackId });
+}
+
+/** Set (or clear with `null`) a zone's display alias. */
+export async function setZoneAlias(
+  zoneId: string,
+  alias: string | null
+): Promise<void> {
+  return invoke<void>("set_zone_alias", { zoneId, alias });
+}
+
+/** Move a zone to a new order within its stack. */
+export async function reorderStack(
+  stackId: string,
+  zoneId: string,
+  newOrder: number
+): Promise<void> {
+  return invoke<void>("reorder_stack", { stackId, zoneId, newOrder });
+}
+
 // ─── Item Management ─────────────────────────────────────────
 
 export async function addItem(
@@ -281,6 +310,42 @@ export async function getMemoryUsage(): Promise<MemoryInfo> {
   return invoke<MemoryInfo>("get_memory_usage");
 }
 
+// Theme B — process-group memory including WebView2 children.
+export interface WebView2ProcessSample {
+  pid: number;
+  name: string;
+  kind: string;
+  working_set_bytes: number;
+  peak_working_set_bytes: number;
+}
+
+export interface WebView2MemoryInfo {
+  host_pid: number;
+  processes: WebView2ProcessSample[];
+  total_working_set_bytes: number;
+  total_peak_working_set_bytes: number;
+}
+
+export async function getWebView2Memory(): Promise<WebView2MemoryInfo> {
+  return invoke<WebView2MemoryInfo>("get_webview2_memory");
+}
+
+// Theme B — icon cache hit/miss/eviction counters.
+export interface IconCacheStatsSnapshot {
+  hot_hits: number;
+  warm_hits: number;
+  misses: number;
+  evictions: number;
+  warm_writes: number;
+  warm_write_failures: number;
+  total_lookups: number;
+  hit_rate: number;
+}
+
+export async function getIconCacheStats(): Promise<IconCacheStatsSnapshot> {
+  return invoke<IconCacheStatsSnapshot>("get_icon_cache_stats");
+}
+
 // ─── JSON Theme Plugin ──────────────────────────────────────
 
 export async function listThemes(): Promise<JsonTheme[]> {
@@ -344,4 +409,34 @@ export async function reapplyStealth(): Promise<StealthStatus> {
 
 export async function checkOneDriveExclusionNeeded(): Promise<OneDriveExclusionCheck> {
   return invoke<OneDriveExclusionCheck>("check_onedrive_exclusion_needed");
+}
+
+// ─── Bulk operations (Theme C) ──────────────────────────────
+
+export interface BulkZoneUpdate {
+  id: string;
+  position?: RelativePosition;
+  size?: RelativeSize;
+  accent_color?: string;
+  locked?: boolean;
+  alias?: string;
+}
+
+export type LayoutAlgorithm = "grid" | "row" | "column" | "spiral" | "organic";
+
+export async function bulkUpdateZones(
+  updates: BulkZoneUpdate[]
+): Promise<number> {
+  return invoke<number>("bulk_update_zones", { updates });
+}
+
+export async function bulkDeleteZones(ids: string[]): Promise<number> {
+  return invoke<number>("bulk_delete_zones", { ids });
+}
+
+export async function applyLayoutAlgorithm(
+  algo: LayoutAlgorithm,
+  zoneIds: string[]
+): Promise<number> {
+  return invoke<number>("apply_layout_algorithm", { algo, zoneIds });
 }

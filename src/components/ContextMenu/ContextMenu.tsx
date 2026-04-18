@@ -24,9 +24,11 @@ import {
   openSearch,
   openZoneEditor,
   openSmartGroupDialog,
+  openBulkManager,
 } from "../../stores/ui";
 import { t } from "../../i18n";
 import ZoneIcon from "../Icons/ZoneIcon";
+import PromptModal from "../shared/PromptModal";
 import "./ContextMenu.css";
 
 interface MenuItem {
@@ -46,15 +48,30 @@ interface ConfirmState {
   action: () => void;
 }
 
+/** Prompt dialog state (replaces native `window.prompt`). */
+interface PromptState {
+  title: string;
+  defaultValue: string;
+  placeholder?: string;
+  onSubmit: (value: string) => void;
+}
+
 const ContextMenu: Component = () => {
   let menuRef: HTMLDivElement | undefined;
   let confirmOverlayRef: HTMLDivElement | undefined;
   const [hoveredSubmenu, setHoveredSubmenu] = createSignal<string | null>(null);
   const [confirm, setConfirmRaw] = createSignal<ConfirmState | null>(null);
+  const [prompt, setPromptRaw] = createSignal<PromptState | null>(null);
 
   /** Wrapper that syncs confirm dialog state with ui store for hit-test awareness. */
   const setConfirm = (state: ConfirmState | null) => {
     setConfirmRaw(state);
+    setConfirmDialogOpen(state !== null);
+  };
+
+  /** Wrapper that piggybacks on the confirm-dialog modal lock for hit-test awareness. */
+  const setPrompt = (state: PromptState | null) => {
+    setPromptRaw(state);
     setConfirmDialogOpen(state !== null);
   };
 
@@ -66,7 +83,7 @@ const ContextMenu: Component = () => {
 
     switch (m.target.type) {
       case "zone":
-        return buildZoneMenuItems(m.target);
+        return buildZoneMenuItems(m.target, setPrompt);
       case "item":
         return buildItemMenuItems(m.target, setConfirm);
       default:
@@ -77,6 +94,12 @@ const ContextMenu: Component = () => {
   // Close on click outside
   const handleClickOutside = (e: MouseEvent) => {
     const target = e.target as Node;
+
+    // If the prompt dialog is open, let PromptModal's backdrop click handler
+    // manage dismissal — we must not auto-hide the context menu here.
+    if (prompt()) {
+      return;
+    }
 
     // If the confirm dialog is open, only close it when clicking outside the
     // confirm overlay. Clicks inside the dialog (e.g. the Delete button) must
@@ -98,6 +121,9 @@ const ContextMenu: Component = () => {
   // Close on Escape
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
+      // Prompt dialog has its own Escape handler; let it manage dismissal
+      // and swallow this event so we don't also close the context menu.
+      if (prompt()) return;
       if (confirm()) {
         setConfirm(null);
         hideContextMenu();
@@ -223,6 +249,26 @@ const ContextMenu: Component = () => {
         </div>
       </Show>
 
+      {/* Text input dialog (replaces native window.prompt) */}
+      <PromptModal
+        open={prompt() !== null}
+        title={prompt()?.title ?? ""}
+        defaultValue={prompt()?.defaultValue ?? ""}
+        placeholder={prompt()?.placeholder}
+        okLabel={t("contextMenuBtnOk") || "OK"}
+        cancelLabel={t("contextMenuBtnCancel") || "Cancel"}
+        onSubmit={(value) => {
+          const p = prompt();
+          setPrompt(null);
+          hideContextMenu();
+          p?.onSubmit(value);
+        }}
+        onCancel={() => {
+          setPrompt(null);
+          hideContextMenu();
+        }}
+      />
+
       {/* Delete / destructive action confirmation dialog */}
       <Show when={confirm()}>
         {(confirmState) => (
@@ -263,7 +309,10 @@ const ContextMenu: Component = () => {
 
 // ─── Menu builders ───────────────────────────────────────────
 
-function buildZoneMenuItems(target: { type: "zone"; zoneId: string }): MenuItem[] {
+function buildZoneMenuItems(
+  target: { type: "zone"; zoneId: string },
+  setPrompt: (state: PromptState | null) => void
+): MenuItem[] {
   return [
     {
       icon: "edit",
@@ -271,6 +320,25 @@ function buildZoneMenuItems(target: { type: "zone"; zoneId: string }): MenuItem[
       action: () => {
         openZoneEditor(target.zoneId);
       },
+    },
+    {
+      icon: "edit",
+      label: t("contextMenuSetAlias"),
+      action: () => {
+        const zone = zonesStore.getZoneById(target.zoneId);
+        if (!zone) return;
+        setPrompt({
+          title: t("contextMenuSetAliasPrompt"),
+          defaultValue: zone.alias ?? "",
+          onSubmit: (input) => {
+            const trimmed = input.trim();
+            void ipc
+              .setZoneAlias(target.zoneId, trimmed === "" ? null : trimmed)
+              .then(() => zonesStore.loadZones());
+          },
+        });
+      },
+      keepMenuOpen: true,
     },
     {
       icon: "grid",
@@ -323,6 +391,71 @@ function buildZoneMenuItems(target: { type: "zone"; zoneId: string }): MenuItem[
               err instanceof Error ? err.message : String(err);
             console.error("Snapshot save failed:", message);
           });
+      },
+      separator: true,
+    },
+    // Theme E2-c — Pin zone as a floating Mini Bar. Backend enforces a
+    // hard cap of 3 active minibars because each spawns its own WebView2
+    // process.
+    {
+      icon: "pin",
+      label: t("contextMenuPinMinibar") || "Pin as Mini Bar",
+      action: () => {
+        void import("@tauri-apps/api/core").then(({ invoke }) =>
+          invoke("pin_zone_as_minibar", { zoneId: target.zoneId })
+            .catch((e) => console.error("pin_zone_as_minibar failed:", e))
+        );
+      },
+    },
+    // Theme E2-e — Bind zone to a folder. Once bound, the folder's
+    // contents mirror into the zone (read-only, one-way).
+    {
+      icon: "folder",
+      label: t("contextMenuBindFolder") || "Bind Folder…",
+      action: () => {
+        void import("@tauri-apps/plugin-dialog").then(async ({ open }) => {
+          const selected = await open({ directory: true, multiple: false });
+          if (typeof selected !== "string") return;
+          const { invoke } = await import("@tauri-apps/api/core");
+          try {
+            await invoke("bind_zone_to_folder", {
+              zoneId: target.zoneId,
+              folderPath: selected,
+            });
+            await zonesStore.loadZones();
+          } catch (e) {
+            console.error("bind_zone_to_folder failed:", e);
+          }
+        });
+      },
+    },
+    // Theme E2-a — Capture current foreground-window layout. The capsule
+    // is app-scope (not zone-scope) but exposed here for discoverability.
+    {
+      icon: "camera",
+      label: t("contextMenuSaveCapsule") || "Save as Context Capsule",
+      action: () => {
+        setPrompt({
+          title: t("contextMenuSaveCapsulePrompt") || "Capsule name?",
+          defaultValue: `Capsule ${new Date().toLocaleString()}`,
+          onSubmit: (input) => {
+            const name = input.trim();
+            if (!name) return;
+            void import("@tauri-apps/api/core").then(({ invoke }) =>
+              invoke("capture_context", { name })
+                .catch((e) => console.error("capture_context failed:", e))
+            );
+          },
+        });
+      },
+      keepMenuOpen: true,
+      separator: true,
+    },
+    {
+      icon: "settings",
+      label: t("bulkManagerContextEntry"),
+      action: () => {
+        openBulkManager();
       },
       separator: true,
     },

@@ -55,8 +55,21 @@ const IDLE_FRAME_THRESHOLD = 150;
 /** Current state machine state. */
 let state: HitTestState = "PASSTHROUGH";
 
+/** Hit-zone inflate values (CSS pixels) — expands the hit rect directionally. */
+export interface RegisterZoneInflate {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
+/** Options accepted when registering a zone element for hit-testing. */
+export interface RegisterZoneOpts {
+  inflate?: RegisterZoneInflate;
+}
+
 /** Registered zone bounding rects, keyed by zone element reference. */
-const zoneElements = new Set<HTMLElement>();
+const zoneElements = new Map<HTMLElement, RegisterZoneInflate>();
 
 /** When > 0, passthrough is force-disabled (modal/overlay captures events). */
 let modalLockCount = 0;
@@ -143,9 +156,50 @@ export function isPassthroughEnabled(): boolean {
 /**
  * Register a zone DOM element for cursor hit-testing.
  * The polling loop will check the cursor against this element's bounding rect.
+ * `opts.inflate` directionally enlarges the hit rect in CSS pixels — useful
+ * for capsules sitting near screen edges where the user mouse path approaches
+ * from outside the capsule bounds.
  */
-export function registerZoneElement(el: HTMLElement): void {
-  zoneElements.add(el);
+export function registerZoneElement(
+  el: HTMLElement,
+  opts?: RegisterZoneOpts,
+): void {
+  zoneElements.set(el, opts?.inflate ?? {});
+}
+
+/**
+ * Update the inflate values for an already-registered zone element.
+ * No-op if the element was not previously registered.
+ */
+export function updateZoneInflate(
+  el: HTMLElement,
+  inflate: RegisterZoneInflate,
+): void {
+  if (zoneElements.has(el)) {
+    zoneElements.set(el, inflate);
+  }
+}
+
+/**
+ * Compute directional hit-zone inflate based on a zone's percentage position.
+ * Zones within 10%/90% of either axis get 12px inflate outward (toward the
+ * nearest screen edge) so the capsule "pulls in" cursors approaching from
+ * off-edge taskbar territory.
+ *
+ * Single source of truth for both BentoZone's runtime registration and
+ * DebugOverlay's visualization.
+ */
+export function computeInflateForPosition(
+  pos: { x_percent: number; y_percent: number },
+): RegisterZoneInflate {
+  const EDGE_THRESHOLD = 90;
+  const EXPAND_PX = 12;
+  const inflate: RegisterZoneInflate = {};
+  if (pos.y_percent > EDGE_THRESHOLD) inflate.bottom = EXPAND_PX;
+  if (pos.y_percent < 10) inflate.top = EXPAND_PX;
+  if (pos.x_percent > EDGE_THRESHOLD) inflate.right = EXPAND_PX;
+  if (pos.x_percent < 10) inflate.left = EXPAND_PX;
+  return inflate;
 }
 
 /**
@@ -271,15 +325,20 @@ function isPointInElement(
   screenX: number,
   screenY: number,
   el: HTMLElement,
+  inflate?: RegisterZoneInflate,
 ): boolean {
   const rect = el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
+  const inT = (inflate?.top ?? 0) * dpr;
+  const inR = (inflate?.right ?? 0) * dpr;
+  const inB = (inflate?.bottom ?? 0) * dpr;
+  const inL = (inflate?.left ?? 0) * dpr;
   // Convert viewport-relative CSS pixels to physical screen coordinates
   // by scaling by DPR and adding the cached window screen position.
-  const elLeft = rect.left * dpr + windowScreenX;
-  const elTop = rect.top * dpr + windowScreenY;
-  const elRight = rect.right * dpr + windowScreenX;
-  const elBottom = rect.bottom * dpr + windowScreenY;
+  const elLeft = rect.left * dpr + windowScreenX - inL;
+  const elTop = rect.top * dpr + windowScreenY - inT;
+  const elRight = rect.right * dpr + windowScreenX + inR;
+  const elBottom = rect.bottom * dpr + windowScreenY + inB;
 
   return (
     screenX >= elLeft &&
@@ -335,8 +394,8 @@ async function pollCursorPosition(): Promise<void> {
 
     let foundZone: HTMLElement | null = null;
 
-    for (const el of zoneElements) {
-      if (isPointInElement(pos.x, pos.y, el)) {
+    for (const [el, inflate] of zoneElements) {
+      if (isPointInElement(pos.x, pos.y, el, inflate)) {
         foundZone = el;
         break;
       }

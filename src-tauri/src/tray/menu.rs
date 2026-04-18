@@ -66,7 +66,7 @@ pub fn setup_tray(app: &App) -> Result<(), BentoDeskError> {
         tauri::image::Image::new_owned(rgba.into_raw(), w, h)
     };
 
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main")
         .icon(tray_icon)
         .menu(&menu)
         .show_menu_on_left_click(false)

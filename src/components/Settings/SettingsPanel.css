@@ -1,5 +1,37 @@
 /* SettingsPanel — full overlay settings panel */
 
+/* v1.2.1 — zone display mode segmented radio */
+.settings-display-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+}
+.settings-display-mode__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+  font-size: 13px;
+  color: var(--text-primary, #e4e4e7);
+  border: 1px solid transparent;
+}
+.settings-display-mode__option:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.settings-display-mode__option input[type="radio"] {
+  margin: 0;
+  accent-color: var(--accent, #3b82f6);
+}
+.settings-display-mode__option:has(input[type="radio"]:checked) {
+  background: rgba(59, 130, 246, 0.10);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+
 .settings-overlay {
   position: fixed;
   top: 0;

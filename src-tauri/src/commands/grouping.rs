@@ -42,6 +42,27 @@ pub async fn suggest_groups(
     Ok(suggestions::suggest_groups(&filtered))
 }
 
+/// AI-powered recommendations (Theme E2-b). Runs the hierarchical clustering
+/// signal on scanned desktop files, filtering by confidence threshold.
+#[tauri::command]
+pub async fn get_ai_recommendations(
+    state: State<'_, AppState>,
+    min_confidence: f64,
+) -> Result<Vec<SuggestedGroup>, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let desktop_path_str = settings.desktop_path.clone();
+    drop(settings);
+    let desktop_path = Path::new(&desktop_path_str);
+
+    let files = scanner::scan_desktop_files(desktop_path).map_err(|e| e.to_string())?;
+    let ai = crate::grouping::ai_recommender::clusters_to_suggestions(&files);
+    let threshold = min_confidence.clamp(0.0, 1.0);
+    Ok(ai
+        .into_iter()
+        .filter(|s| s.confidence >= threshold)
+        .collect())
+}
+
 #[tauri::command]
 pub async fn apply_auto_group(
     state: State<'_, AppState>,

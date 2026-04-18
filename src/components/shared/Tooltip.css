@@ -1,0 +1,46 @@
+.tooltip-trigger {
+  display: inline;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 100000;
+  background: rgba(20, 20, 22, 0.95);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 16px;
+  max-width: 320px;
+  white-space: pre-wrap;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transform: translateY(-4px);
+  animation: tooltip-fade 150ms ease-out forwards;
+}
+
+.tooltip--below {
+  transform: translateY(4px);
+  animation-name: tooltip-fade-below;
+}
+
+@keyframes tooltip-fade {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes tooltip-fade-below {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tooltip {
+    animation-duration: 40ms;
+  }
+}

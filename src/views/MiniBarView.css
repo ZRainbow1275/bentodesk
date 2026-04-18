@@ -1,0 +1,116 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  overflow: hidden;
+}
+
+.minibar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100vw;
+  height: 100vh;
+  padding: 4px 6px;
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(18, 22, 34, 0.82),
+    rgba(14, 16, 26, 0.72)
+  );
+  backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  color: #e5e7eb;
+  box-sizing: border-box;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.minibar__grab {
+  width: 18px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.minibar__grab:active {
+  cursor: grabbing;
+}
+
+.minibar__items {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+  scrollbar-width: none;
+}
+
+.minibar__items::-webkit-scrollbar {
+  display: none;
+}
+
+.minibar__item {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.14s ease-out, background 0.14s ease-out;
+  flex-shrink: 0;
+}
+
+.minibar__item:hover {
+  background: rgba(255, 255, 255, 0.09);
+  transform: translateY(-2px);
+}
+
+.minibar__close {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.minibar__close:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fca5a5;
+}
+
+.minibar__empty,
+.minibar__loading {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  padding: 0 8px;
+}
+
+.minibar__error {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: #fca5a5;
+  font-size: 11px;
+  padding: 2px 4px;
+  background: rgba(239, 68, 68, 0.12);
+}

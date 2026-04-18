@@ -1,0 +1,110 @@
+.keybindings-panel__scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1001;
+}
+
+.keybindings-panel__card {
+  width: min(560px, 92vw);
+  max-height: 76vh;
+  overflow: auto;
+  background: var(--surface-expanded, rgba(20, 20, 28, 0.96));
+  color: var(--text-primary, #f0f0f5);
+  border: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-expanded, 16px);
+  backdrop-filter: var(--blur-expanded, blur(24px) saturate(170%));
+  box-shadow: var(--shadow-expanded, 0 16px 48px rgba(0, 0, 0, 0.4));
+}
+
+.keybindings-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.12));
+}
+
+.keybindings-panel__header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.keybindings-panel__close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+
+.keybindings-panel__close:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+}
+
+.keybindings-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 0;
+}
+
+.keybindings-panel__row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 20px;
+}
+
+.keybindings-panel__label {
+  font-size: 0.92rem;
+}
+
+.keybindings-panel__chip {
+  font-family: "SF Mono", Consolas, ui-monospace, monospace;
+  font-size: 0.85rem;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--border-zen, rgba(255, 255, 255, 0.15));
+  border-radius: 6px;
+  padding: 3px 10px;
+  min-width: 130px;
+  text-align: center;
+}
+
+.keybindings-panel__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.keybindings-panel__btn {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  color: inherit;
+  border: 1px solid var(--border-zen, rgba(255, 255, 255, 0.1));
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.keybindings-panel__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.keybindings-panel__btn:hover:not(:disabled) {
+  background: var(--surface-active, rgba(255, 255, 255, 0.14));
+}
+
+.keybindings-panel__conflict {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+  color: var(--accent-red, #ef4444);
+  padding: 0 2px;
+  margin-top: 4px;
+}

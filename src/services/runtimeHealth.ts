@@ -1,6 +1,6 @@
 import { getSettings } from "../stores/settings";
 import type { SafetyProfile } from "../types/settings";
-import { getMemoryUsage } from "./ipc";
+import { getMemoryUsage, getWebView2Memory } from "./ipc";
 
 export type RuntimePressureLevel = "stable" | "elevated" | "critical";
 export type RuntimeEffectsMode = "full" | "reduced" | "minimal";
@@ -40,20 +40,31 @@ export interface RuntimeHealthSnapshot {
   jsHeapUsedBytes: number | null;
   jsHeapLimitBytes: number | null;
   processWorkingSetBytes: number | null;
+  /**
+   * Theme B — total working set across the host process plus every
+   * WebView2 child (renderer / gpu / utility). Null when the sampler
+   * has not yet completed its first pass.
+   */
+  processGroupWorkingSetBytes: number | null;
   frameP95Ms: number | null;
   slowFrameRatio: number;
   pressure: RuntimePressureLevel;
   effectsMode: RuntimeEffectsMode;
   baselineEffectsMode: RuntimeEffectsMode;
+  prefersReducedTransparency: boolean;
   reasons: string[];
   workingSetSeriesMb: number[];
   jsHeapSeriesMb: number[];
+  processGroupSeriesMb: number[];
 }
 
 const MAX_SERIES_POINTS = 36;
 const FRAME_WINDOW_SIZE = 120;
 const MEMORY_POLL_INTERVAL_MS = 5000;
 const FRAME_BROADCAST_INTERVAL_MS = 1500;
+/** How often to poll the WebView2 process-group aggregate (tokens are
+ * cheap but the Toolhelp snapshot is not — keep it at 30s). */
+const WEBVIEW2_POLL_INTERVAL_MS = 30_000;
 
 const PROFILE_BUDGETS: Record<SafetyProfile, RuntimeBudget> = {
   Conservative: {
@@ -89,29 +100,38 @@ const runtimeHealthListeners = new Set<RuntimeHealthListener>();
 
 let monitoringActive = false;
 let memoryPollHandle: number | null = null;
+let webview2PollHandle: number | null = null;
 let animationFrameHandle: number | null = null;
 let frameBroadcastTimestamp = 0;
 let lastFrameTimestamp: number | null = null;
 let memoryPollInFlight = false;
+let webview2PollInFlight = false;
+let reducedTransparencyMql: MediaQueryList | null = null;
+let reducedTransparencyListener: ((e: MediaQueryListEvent) => void) | null = null;
 
 let latestMemoryInfo: MemoryInfo | null = null;
 let latestJsHeapUsedBytes: number | null = null;
 let latestJsHeapLimitBytes: number | null = null;
+let latestProcessGroupBytes: number | null = null;
+let latestPrefersReducedTransparency: boolean = false;
 let sampleCount = 0;
 
 const frameDurationsMs: number[] = [];
 const workingSetSeriesMb: number[] = [];
 const jsHeapSeriesMb: number[] = [];
+const processGroupSeriesMb: number[] = [];
 
 function resetRuntimeHealthState(): void {
   latestMemoryInfo = null;
   latestJsHeapUsedBytes = null;
   latestJsHeapLimitBytes = null;
+  latestProcessGroupBytes = null;
   sampleCount = 0;
 
   frameDurationsMs.splice(0, frameDurationsMs.length);
   workingSetSeriesMb.splice(0, workingSetSeriesMb.length);
   jsHeapSeriesMb.splice(0, jsHeapSeriesMb.length);
+  processGroupSeriesMb.splice(0, processGroupSeriesMb.length);
 }
 
 function toMegabytes(bytes: number): number {
@@ -313,6 +333,11 @@ function applyRuntimeEffects(snapshot: RuntimeHealthSnapshot): void {
 
   document.documentElement.dataset.runtimeEffects = snapshot.effectsMode;
   document.documentElement.dataset.runtimePressure = snapshot.pressure;
+  if (snapshot.prefersReducedTransparency) {
+    document.documentElement.dataset.reducedTransparency = "true";
+  } else {
+    delete document.documentElement.dataset.reducedTransparency;
+  }
 }
 
 function buildRuntimeHealthSnapshot(): RuntimeHealthSnapshot {
@@ -334,14 +359,17 @@ function buildRuntimeHealthSnapshot(): RuntimeHealthSnapshot {
     jsHeapUsedBytes: latestJsHeapUsedBytes,
     jsHeapLimitBytes: latestJsHeapLimitBytes,
     processWorkingSetBytes: latestMemoryInfo?.working_set_bytes ?? null,
+    processGroupWorkingSetBytes: latestProcessGroupBytes,
     frameP95Ms,
     slowFrameRatio,
     pressure,
     effectsMode: resolveEffectsMode(baselineEffectsMode, pressure),
     baselineEffectsMode,
+    prefersReducedTransparency: latestPrefersReducedTransparency,
     reasons,
     workingSetSeriesMb: [...workingSetSeriesMb],
     jsHeapSeriesMb: [...jsHeapSeriesMb],
+    processGroupSeriesMb: [...processGroupSeriesMb],
   };
 }
 
@@ -412,6 +440,47 @@ async function sampleRuntimeMemory(): Promise<void> {
   }
 }
 
+async function sampleWebView2Memory(): Promise<void> {
+  if (webview2PollInFlight) {
+    return;
+  }
+  webview2PollInFlight = true;
+  try {
+    const info = await getWebView2Memory();
+    latestProcessGroupBytes = info.total_working_set_bytes;
+    pushSeriesPoint(processGroupSeriesMb, toMegabytes(info.total_working_set_bytes));
+  } catch (error) {
+    // Non-fatal — WebView2 sampling may legitimately fail before the
+    // WebView2 manager has spawned (early in startup).
+    console.debug("WebView2 memory sample failed", error);
+  } finally {
+    webview2PollInFlight = false;
+    broadcastRuntimeHealth();
+  }
+}
+
+function initReducedTransparencyListener(): void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return;
+  }
+  reducedTransparencyMql = window.matchMedia("(prefers-reduced-transparency: reduce)");
+  latestPrefersReducedTransparency = reducedTransparencyMql.matches;
+  reducedTransparencyListener = (e) => {
+    latestPrefersReducedTransparency = e.matches;
+    broadcastRuntimeHealth();
+  };
+  reducedTransparencyMql.addEventListener("change", reducedTransparencyListener);
+}
+
+function teardownReducedTransparencyListener(): void {
+  if (reducedTransparencyMql && reducedTransparencyListener) {
+    reducedTransparencyMql.removeEventListener("change", reducedTransparencyListener);
+  }
+  reducedTransparencyMql = null;
+  reducedTransparencyListener = null;
+  latestPrefersReducedTransparency = false;
+}
+
 export function startRuntimeHealthMonitoring(): void {
   if (monitoringActive) {
     return;
@@ -421,11 +490,16 @@ export function startRuntimeHealthMonitoring(): void {
   frameBroadcastTimestamp = 0;
   lastFrameTimestamp = null;
   resetRuntimeHealthState();
+  initReducedTransparencyListener();
 
   if (typeof window !== "undefined") {
     memoryPollHandle = window.setInterval(() => {
       void sampleRuntimeMemory();
     }, MEMORY_POLL_INTERVAL_MS);
+
+    webview2PollHandle = window.setInterval(() => {
+      void sampleWebView2Memory();
+    }, WEBVIEW2_POLL_INTERVAL_MS);
 
     if (typeof window.requestAnimationFrame === "function") {
       animationFrameHandle = window.requestAnimationFrame(queueFrameSample);
@@ -433,6 +507,7 @@ export function startRuntimeHealthMonitoring(): void {
   }
 
   void sampleRuntimeMemory();
+  void sampleWebView2Memory();
   broadcastRuntimeHealth();
 }
 
@@ -444,6 +519,11 @@ export function stopRuntimeHealthMonitoring(): void {
   }
   memoryPollHandle = null;
 
+  if (webview2PollHandle !== null && typeof window !== "undefined") {
+    window.clearInterval(webview2PollHandle);
+  }
+  webview2PollHandle = null;
+
   if (animationFrameHandle !== null && typeof window !== "undefined") {
     window.cancelAnimationFrame(animationFrameHandle);
   }
@@ -451,11 +531,14 @@ export function stopRuntimeHealthMonitoring(): void {
   lastFrameTimestamp = null;
   frameBroadcastTimestamp = 0;
   memoryPollInFlight = false;
+  webview2PollInFlight = false;
+  teardownReducedTransparencyListener();
   resetRuntimeHealthState();
 
   if (typeof document !== "undefined") {
     delete document.documentElement.dataset.runtimeEffects;
     delete document.documentElement.dataset.runtimePressure;
+    delete document.documentElement.dataset.reducedTransparency;
   }
 }
 

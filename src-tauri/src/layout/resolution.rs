@@ -240,6 +240,10 @@ mod tests {
             capsule_shape: "pill".to_string(),
             created_at: String::new(),
             updated_at: String::new(),
+            stack_id: None,
+            stack_order: 0,
+            alias: None,
+            live_folder_path: None,
         }
     }
 

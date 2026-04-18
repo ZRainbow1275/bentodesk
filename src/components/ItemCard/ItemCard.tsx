@@ -10,6 +10,7 @@ import { showContextMenu, selectItem, isItemSelected } from "../../stores/ui";
 import { openFile } from "../../services/ipc";
 import { beginDragTracking, internalDrag } from "../../services/drag";
 import ItemIcon from "./ItemIcon";
+import Tooltip from "../shared/Tooltip";
 import "./ItemCard.css";
 
 /** Strip .lnk / .url extensions from display names for shortcut files. */
@@ -80,12 +81,13 @@ const ItemCard: Component<ItemCardProps> = (props) => {
         iconHash={props.item.icon_hash}
         isWide={props.item.is_wide}
       />
-      <span
-        class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
-        title={displayName(props.item.name)}
-      >
-        {displayName(props.item.name)}
-      </span>
+      <Tooltip content={displayName(props.item.name)}>
+        <span
+          class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
+        >
+          {displayName(props.item.name)}
+        </span>
+      </Tooltip>
     </div>
   );
 };

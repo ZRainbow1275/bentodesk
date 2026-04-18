@@ -1,6 +1,6 @@
 [package]
 name = "bentodesk"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Zero-interference desktop visual organizer"
 license = "AGPL-3.0-or-later"
@@ -17,7 +17,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.12"
 thiserror = "2"
 anyhow = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 notify = "7"
 notify-debouncer-full = "0.4"
 dirs = "6"
@@ -28,6 +28,24 @@ zip = "2"
 
 windows-core = "0.58"
 webview2-com = "0.38"
+
+# Theme A: Updater + Settings safe storage
+tauri-plugin-updater = "2"
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1.8", features = ["derive"] }
+rand = "0.8"
+
+# Theme B: Performance & Memory Discipline
+mimalloc = { version = "0.1", default-features = false }
+bytes = "1"
+
+# Theme C: Hotkeys + Bulk Operations
+tauri-plugin-global-shortcut = "2"
+
+# Theme E: Icons + Differentiation
+regex = "1"
+tauri-plugin-dialog = "2"
 
 [dependencies.windows]
 version = "0.58"
@@ -45,6 +63,7 @@ features = [
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_Controls",
@@ -55,6 +74,7 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
+    "Win32_Security_Cryptography",
 ]
 
 [[bin]]
