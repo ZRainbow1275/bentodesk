@@ -35,7 +35,7 @@
     "updater": {
       "active": true,
       "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQzM5OUQzMDc5NDIzMzcKUldRM0k1UUgwNW5EMFJQUnI5cVpJWUhwQzBxalorQytqb1lXQytjMkE3WWxwMWpQd0c0SFJrMTUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk1NzBGRDQ1Njk0NTlGQ0MKUldUTW4wVnBSZjF3bFowM3ZLRkprNE9JbHpIbTdsNjNxUDUrcm5ERXk4bFA4aUJLUUliVS9NYVoK",
       "endpoints": [
         "https://github.com/ZRainbow1275/bentodesk/releases/latest/download/latest.json"
       ],
