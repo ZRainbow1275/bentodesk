@@ -62,7 +62,7 @@ jobs:
         run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
 
       - name: Build + sign Tauri app
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -167,6 +167,5 @@ jobs:
             - `pnpm test` (vitest): **115 passed** / 9 files
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
