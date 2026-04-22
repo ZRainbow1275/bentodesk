@@ -59,14 +59,10 @@ fn state() -> &'static Mutex<HookState> {
     STATE.get_or_init(|| Mutex::new(HookState::default()))
 }
 
-/// Compute the timeline storage directory: `%APPDATA%/BentoDesk/timeline/`.
+/// Compute the timeline storage directory under the resolved BentoDesk state
+/// root.
 pub fn timeline_dir(app: &AppHandle) -> std::path::PathBuf {
-    match app.path().app_data_dir() {
-        Ok(p) => p.join("timeline"),
-        Err(_) => std::path::PathBuf::from(".")
-            .join("BentoDesk")
-            .join("timeline"),
-    }
+    crate::storage::state_data_dir(app).join("timeline")
 }
 
 fn capture_current_snapshot(app: &AppHandle) -> crate::layout::snapshot::DesktopSnapshot {

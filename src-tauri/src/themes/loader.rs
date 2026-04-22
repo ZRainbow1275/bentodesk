@@ -107,9 +107,7 @@ fn builtin_themes() -> Vec<Theme> {
 
 /// Resolve the directory where user-installed theme JSON files live.
 pub fn themes_dir(handle: &tauri::AppHandle) -> PathBuf {
-    let base = tauri::Manager::path(handle)
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let base = crate::storage::state_data_dir(handle);
     base.join("themes")
 }
 

@@ -24,6 +24,7 @@ pub(crate) mod writer;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
 use crate::layout::resolution;
@@ -250,12 +251,15 @@ pub fn backup_file_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Resolve the BentoDesk data directory for icon layout persistence.
+pub fn data_dir(handle: &AppHandle) -> std::path::PathBuf {
+    crate::storage::state_data_dir(handle)
+}
+
+/// Resolve the fallback BentoDesk data directory for icon layout persistence.
 ///
-/// Uses `dirs::data_dir()` / "BentoDesk" as the base path.
+/// Use this only when no live [`AppHandle`] is available.
 pub fn default_data_dir() -> std::path::PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("BentoDesk")
+    crate::storage::fallback_state_data_dir()
 }
 
 #[cfg(test)]

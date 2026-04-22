@@ -8,12 +8,11 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 
 use crate::plugins::{self, InstalledPlugin};
+use crate::storage;
 
 /// Resolve the app data directory from the Tauri app handle.
 fn app_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    tauri::Manager::path(app_handle)
-        .app_data_dir()
-        .map_err(|e| format!("Cannot resolve app data directory: {e}"))
+    Ok(storage::state_data_dir(app_handle))
 }
 
 /// List all installed plugins.

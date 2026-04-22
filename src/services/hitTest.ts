@@ -78,6 +78,26 @@ export interface ComputeInflateOpts {
   maxInflatePx?: number;
 }
 
+export function getCapsuleBoxPx(
+  capsuleShape?: string | null,
+  capsuleSize?: string | null,
+): { width: number; height: number } {
+  const shape = capsuleShape ?? "pill";
+  const size = capsuleSize ?? "medium";
+
+  if (shape === "circle") {
+    const px = size === "small" ? 42 : size === "large" ? 64 : 52;
+    return { width: px, height: px };
+  }
+
+  const dims: Record<string, { width: number; height: number }> = {
+    small: { width: 120, height: 36 },
+    medium: { width: 160, height: 48 },
+    large: { width: 200, height: 56 },
+  };
+  return dims[size] ?? dims.medium;
+}
+
 /** Options accepted when registering a zone element for hit-testing. */
 export interface RegisterZoneOpts {
   inflate?: RegisterZoneInflate;

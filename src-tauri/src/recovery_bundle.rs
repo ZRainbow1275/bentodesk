@@ -44,18 +44,7 @@ pub fn load_bundle(data_root: &Path) -> Result<Option<RecoveryBundle>, BentoDesk
 }
 
 pub fn data_root_from_handle(handle: &tauri::AppHandle) -> PathBuf {
-    if let Ok(exe_path) = std::env::current_exe() {
-        let portable_dir = exe_path.parent().map(|p| p.join("data"));
-        if let Some(ref dir) = portable_dir {
-            if dir.exists() {
-                return dir.clone();
-            }
-        }
-    }
-
-    tauri::Manager::path(handle)
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    storage::state_data_dir(handle)
 }
 
 pub fn write_bundle(data_root: &Path, bundle: &RecoveryBundle) -> Result<(), BentoDeskError> {

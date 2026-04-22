@@ -37,10 +37,7 @@ pub async fn save_snapshot(
     };
 
     // Save to disk (best-effort: log errors but return the snapshot)
-    let snapshots_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("BentoDesk")
-        .join("snapshots");
+    let snapshots_dir = crate::storage::state_data_dir(&state.app_handle).join("snapshots");
     let manager = SnapshotManager::new(snapshots_dir);
     if let Err(e) = manager.save(&snapshot) {
         tracing::warn!("Failed to persist snapshot: {}", e);
@@ -52,10 +49,7 @@ pub async fn save_snapshot(
 /// Load a snapshot by ID, replacing the current layout.
 #[tauri::command]
 pub async fn load_snapshot(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let snapshots_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("BentoDesk")
-        .join("snapshots");
+    let snapshots_dir = crate::storage::state_data_dir(&state.app_handle).join("snapshots");
     let manager = SnapshotManager::new(snapshots_dir);
     let snapshot = manager.load(&id).map_err(|e| e.to_string())?;
 
@@ -71,10 +65,7 @@ pub async fn load_snapshot(state: State<'_, AppState>, id: String) -> Result<(),
 /// List all saved snapshots, sorted by capture date (newest first).
 #[tauri::command]
 pub async fn list_snapshots(_state: State<'_, AppState>) -> Result<Vec<DesktopSnapshot>, String> {
-    let snapshots_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("BentoDesk")
-        .join("snapshots");
+    let snapshots_dir = crate::storage::state_data_dir(&_state.app_handle).join("snapshots");
     let manager = SnapshotManager::new(snapshots_dir);
     manager.list().map_err(|e| e.to_string())
 }
@@ -82,10 +73,7 @@ pub async fn list_snapshots(_state: State<'_, AppState>) -> Result<Vec<DesktopSn
 /// Delete a snapshot by ID.
 #[tauri::command]
 pub async fn delete_snapshot(_state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let snapshots_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("BentoDesk")
-        .join("snapshots");
+    let snapshots_dir = crate::storage::state_data_dir(&_state.app_handle).join("snapshots");
     let manager = SnapshotManager::new(snapshots_dir);
     manager.delete(&id).map_err(|e| e.to_string())
 }

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SW_MAXIMIZE, SW_RESTORE,
@@ -58,10 +58,7 @@ pub struct RestoreResult {
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn capsules_dir(handle: &AppHandle) -> PathBuf {
-    let base = handle
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let base = crate::storage::state_data_dir(handle);
     let dir = base.join("capsules");
     if !dir.exists() {
         let _ = fs::create_dir_all(&dir);

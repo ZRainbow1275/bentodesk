@@ -116,7 +116,7 @@ export function getAccentColor(): string {
 }
 
 export function getDebugOverlayEnabled(): boolean {
-  return settings().debug_overlay;
+  return import.meta.env.DEV && settings().debug_overlay;
 }
 
 /**

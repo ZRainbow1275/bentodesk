@@ -297,7 +297,9 @@ const App: Component = () => {
       <SmartGroupSuggestor />
       <HighlightOverlay />
       <DragPreview />
-      <DebugOverlay />
+      <Show when={import.meta.env.DEV}>
+        <DebugOverlay />
+      </Show>
       <BulkManagerPanel />
       <KeybindingsSection handlerFor={getGlobalHotkeyHandler} />
       <Show when={getOutsideDesktopError()} keyed>

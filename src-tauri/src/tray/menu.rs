@@ -176,7 +176,7 @@ fn restore_icons_before_exit(app_handle: &tauri::AppHandle) {
     }
 
     // Fallback: try loading from disk
-    let data_dir = icon_positions::default_data_dir();
+    let data_dir = icon_positions::data_dir(app_handle);
     match icon_positions::load_from_file(&data_dir) {
         Ok(Some(layout)) => {
             if let Err(e) = icon_positions::restore_layout(&layout) {

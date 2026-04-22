@@ -11,7 +11,7 @@ pub async fn save_icon_layout(state: State<'_, AppState>) -> Result<(), String> 
     let layout = icon_positions::save_layout().map_err(|e| e.to_string())?;
 
     // Persist to disk
-    let data_dir = icon_positions::default_data_dir();
+    let data_dir = icon_positions::data_dir(&state.app_handle);
     icon_positions::persist_to_file(&layout, &data_dir).map_err(|e| e.to_string())?;
 
     // Update in-memory backup
@@ -30,7 +30,7 @@ pub async fn restore_icon_layout(state: State<'_, AppState>) -> Result<(), Strin
         Some(l) => l.clone(),
         None => {
             // Try loading from disk as fallback
-            let data_dir = icon_positions::default_data_dir();
+            let data_dir = icon_positions::data_dir(&state.app_handle);
             match icon_positions::load_from_file(&data_dir) {
                 Ok(Some(l)) => l,
                 Ok(None) => return Err("No icon layout backup available".to_string()),

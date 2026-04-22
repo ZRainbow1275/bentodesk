@@ -13,7 +13,7 @@ import { Component, For, Show, createSignal, onCleanup, onMount } from "solid-js
 import { getDebugOverlayEnabled } from "../../stores/settings";
 import { zonesStore } from "../../stores/zones";
 import { isZoneExpanded } from "../../stores/ui";
-import { computeInflateForPosition } from "../../services/hitTest";
+import { computeInflateForPosition, getCapsuleBoxPx } from "../../services/hitTest";
 import "./DebugOverlay.css";
 
 interface HitRect {
@@ -45,7 +45,10 @@ const DebugOverlay: Component = () => {
       );
       if (!el) continue;
       const rect = el.getBoundingClientRect();
-      const raw = computeInflateForPosition(zone.position);
+      const raw = computeInflateForPosition(zone.position, {
+        kind: zone.stack_id ? "stack" : "zone",
+        boxPx: getCapsuleBoxPx(zone.capsule_shape, zone.capsule_size),
+      });
       const inflate = {
         top: raw.top ?? 0,
         right: raw.right ?? 0,

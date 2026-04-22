@@ -165,11 +165,7 @@ pub fn run() {
             // the in-memory tier doesn't cost us another ExtractIconExW on
             // the next request. Warm dir lives next to the app data dir so
             // it's cleared alongside user settings on uninstall.
-            let icon_warm_dir = app
-                .path()
-                .app_data_dir()
-                .map(|p| p.join("icon_cache"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("icon_cache"));
+            let icon_warm_dir = crate::storage::state_data_dir(app.handle()).join("icon_cache");
             let icon_cache = icon::cache::IconCache::with_warm_dir(
                 settings.icon_cache_size as usize,
                 icon_warm_dir,
@@ -217,7 +213,7 @@ pub fn run() {
                 std::thread::spawn(move || {
                     match icon_positions::save_layout() {
                         Ok(layout) => {
-                            let data_dir = icon_positions::default_data_dir();
+                            let data_dir = icon_positions::data_dir(&handle);
                             if let Err(e) =
                                 icon_positions::persist_to_file(&layout, &data_dir)
                             {
@@ -233,7 +229,7 @@ pub fn run() {
                         }
                         Err(e) => {
                             tracing::warn!("Failed to save desktop icon positions: {e}");
-                            let data_dir = icon_positions::default_data_dir();
+                            let data_dir = icon_positions::data_dir(&handle);
                             if let Ok(Some(disk_backup)) =
                                 icon_positions::load_from_file(&data_dir)
                             {
@@ -472,32 +468,27 @@ pub fn run() {
             // If Guardian gave up restarting after a crash loop, it writes a
             // safe_mode.json marker. Detect it, notify the frontend, and
             // remove the marker so subsequent launches are normal.
-            if let Ok(app_data) = app.path().app_data_dir() {
-                let safe_mode_path = app_data.join("safe_mode.json");
-                if safe_mode_path.exists() {
-                    tracing::warn!(
-                        "Safe mode marker detected at {}",
-                        safe_mode_path.display()
-                    );
-                    // Read the marker content for logging purposes
-                    if let Ok(content) = std::fs::read_to_string(&safe_mode_path) {
-                        tracing::warn!("Safe mode reason: {}", content);
-                    }
-                    // Notify frontend
-                    if let Err(e) = app.emit("safe_mode_activated", ()) {
-                        tracing::error!("Failed to emit safe_mode_activated event: {e}");
-                    }
-                    // Remove marker so next launch is normal
-                    if let Err(e) = std::fs::remove_file(&safe_mode_path) {
-                        tracing::error!(
-                            "Failed to remove safe mode marker: {e}"
-                        );
-                    }
-                }
-            } else {
+            let app_data = crate::storage::state_data_dir(app.handle());
+            let safe_mode_path = app_data.join("safe_mode.json");
+            if safe_mode_path.exists() {
                 tracing::warn!(
-                    "app_data_dir unavailable, skipping safe-mode detection"
+                    "Safe mode marker detected at {}",
+                    safe_mode_path.display()
                 );
+                // Read the marker content for logging purposes
+                if let Ok(content) = std::fs::read_to_string(&safe_mode_path) {
+                    tracing::warn!("Safe mode reason: {}", content);
+                }
+                // Notify frontend
+                if let Err(e) = app.emit("safe_mode_activated", ()) {
+                    tracing::error!("Failed to emit safe_mode_activated event: {e}");
+                }
+                // Remove marker so next launch is normal
+                if let Err(e) = std::fs::remove_file(&safe_mode_path) {
+                    tracing::error!(
+                        "Failed to remove safe mode marker: {e}"
+                    );
+                }
             }
 
             // --- Theme E2-d: Rules scheduler ---

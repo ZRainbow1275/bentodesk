@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
 
@@ -126,10 +126,7 @@ pub struct ExecutionReport {
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
 fn rules_dir(handle: &AppHandle) -> PathBuf {
-    handle
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    crate::storage::state_data_dir(handle)
 }
 
 fn rules_path(handle: &AppHandle) -> PathBuf {

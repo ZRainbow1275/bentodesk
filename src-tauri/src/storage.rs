@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
 
@@ -17,6 +18,51 @@ use std::os::windows::ffi::OsStrExt;
 
 pub(crate) const MAX_JSON_STATE_BYTES: u64 = 128 * 1024 * 1024;
 const JSON_STATE_LIMIT_ERROR_MESSAGE: &str = "json_state_limit_exceeded";
+
+/// Resolve the shared BentoDesk state directory.
+///
+/// Rules:
+/// - Prefer `./data` beside the executable when running in portable mode.
+/// - Otherwise use the Tauri app-data directory.
+/// - In debug/dev builds, suffix the directory so dev sessions do not mutate
+///   the installed release's persisted state.
+pub fn state_data_dir(handle: &AppHandle) -> PathBuf {
+    if let Ok(exe_path) = std::env::current_exe() {
+        let portable_dir = exe_path.parent().map(|p| p.join("data"));
+        if let Some(ref dir) = portable_dir {
+            if dir.exists() {
+                return dir.clone();
+            }
+        }
+    }
+
+    let base = tauri::Manager::path(handle)
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_state_data_dir());
+    isolate_debug_data_dir(base)
+}
+
+/// Fallback state directory for paths that do not have a live `AppHandle`.
+pub fn fallback_state_data_dir() -> PathBuf {
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    let folder = if cfg!(debug_assertions) {
+        "BentoDesk-Dev"
+    } else {
+        "BentoDesk"
+    };
+    base.join(folder)
+}
+
+fn isolate_debug_data_dir(base: PathBuf) -> PathBuf {
+    if !cfg!(debug_assertions) {
+        return base;
+    }
+
+    let Some(name) = base.file_name().and_then(|part| part.to_str()) else {
+        return base.join("dev");
+    };
+    base.with_file_name(format!("{name}-dev"))
+}
 
 /// Return the backup file path used for the given JSON file.
 pub fn backup_path(path: &Path) -> PathBuf {
@@ -393,6 +439,16 @@ mod tests {
                 count: 1,
             }
         );
+    }
+
+    #[test]
+    fn fallback_state_data_dir_reflects_current_build_flavor() {
+        let path_text = fallback_state_data_dir().to_string_lossy().to_string();
+        if cfg!(debug_assertions) {
+            assert!(path_text.contains("BentoDesk-Dev"));
+        } else {
+            assert!(path_text.contains("BentoDesk"));
+        }
     }
 
     #[test]

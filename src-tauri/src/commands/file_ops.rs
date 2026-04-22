@@ -26,7 +26,8 @@ fn strip_unc(s: &str) -> &str {
 }
 
 /// Core path-validation logic, decoupled from `AppState` for testability.
-/// Resolves the BentoDesk AppData directory via `dirs::data_dir()`; tests
+/// Resolves the BentoDesk state directory via
+/// [`crate::storage::fallback_state_data_dir`]; tests
 /// that need a deterministic AppData root should call
 /// [`validate_allowed_path_with_app_data`] directly.
 ///
@@ -36,7 +37,7 @@ fn strip_unc(s: &str) -> &str {
 /// when the setting was blank, so the explicit empty-string branch below is
 /// load-bearing for security.
 fn validate_allowed_path_inner(path: &str, desktop_path: &str) -> Result<(), String> {
-    let app_data = dirs::data_dir().map(|d| d.join("BentoDesk"));
+    let app_data = Some(crate::storage::fallback_state_data_dir());
     validate_allowed_path_with_app_data(path, desktop_path, app_data.as_deref())
 }
 
@@ -125,7 +126,8 @@ fn validate_allowed_path(path: &str, state: &AppState) -> Result<(), String> {
         let settings = state.settings.lock().map_err(|e| e.to_string())?;
         settings.desktop_path.clone()
     };
-    validate_allowed_path_inner(path, &desktop_path)
+    let app_data = crate::storage::state_data_dir(&state.app_handle);
+    validate_allowed_path_with_app_data(path, &desktop_path, Some(&app_data))
 }
 
 #[tauri::command]

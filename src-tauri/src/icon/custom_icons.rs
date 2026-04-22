@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::error::BentoDeskError;
 
@@ -47,10 +47,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 /// Resolve `%APPDATA%/BentoDesk/custom_icons/`, creating it on demand.
 pub fn custom_icons_dir(handle: &AppHandle) -> PathBuf {
-    let base = match handle.path().app_data_dir() {
-        Ok(p) => p,
-        Err(_) => PathBuf::from("."),
-    };
+    let base = crate::storage::state_data_dir(handle);
     let dir = base.join("custom_icons");
     if !dir.exists() {
         let _ = fs::create_dir_all(&dir);

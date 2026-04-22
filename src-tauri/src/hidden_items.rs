@@ -576,10 +576,7 @@ fn remove_hidden_attribute(file_path: &str) -> bool {
 /// siblings so icon layout + manifest mirror share one directory for easy
 /// backup/export tooling.
 fn manifest_mirror_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("BentoDesk")
-        .join("manifest.mirror.json")
+    crate::storage::fallback_state_data_dir().join("manifest.mirror.json")
 }
 
 /// Load the safety manifest from the `.bentodesk/` directory.
@@ -1267,9 +1264,7 @@ pub fn verify_references(app_handle: &AppHandle) -> Vec<String> {
 
 /// Resolve the old `hidden_items/` storage directory under the app data dir.
 fn legacy_hidden_items_dir(app_handle: &AppHandle) -> PathBuf {
-    let base = tauri::Manager::path(app_handle)
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let base = crate::storage::state_data_dir(app_handle);
     base.join("hidden_items")
 }
 
@@ -1302,9 +1297,7 @@ pub fn cleanup_legacy_hidden_dir(app_handle: &AppHandle) -> u32 {
 
     // --- Phase 3: Clean old manifest.json from app data dir -----------------
     let app_data_manifest = {
-        let base = tauri::Manager::path(app_handle)
-            .app_data_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let base = crate::storage::state_data_dir(app_handle);
         base.join("manifest.json")
     };
     if app_data_manifest.exists() {

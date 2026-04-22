@@ -20,6 +20,7 @@ import {
   updateZoneInflate,
   acquireDragLock,
   computeInflateForPosition,
+  getCapsuleBoxPx,
 } from "../../services/hitTest";
 import { getDebugOverlayEnabled } from "../../stores/settings";
 import {
@@ -77,24 +78,6 @@ function schedulePreloadBatches(paths: string[]) {
   }
 }
 
-function getCapsulePixelSize(zone: BentoZoneType): { width: number; height: number } {
-  const shape = zone.capsule_shape || "pill";
-  const size = zone.capsule_size || "medium";
-
-  if (shape === "circle") {
-    const px =
-      size === "small" ? 42 : size === "large" ? 64 : 52;
-    return { width: px, height: px };
-  }
-
-  const dims: Record<string, { width: number; height: number }> = {
-    small: { width: 120, height: 36 },
-    medium: { width: 160, height: 48 },
-    large: { width: 200, height: 56 },
-  };
-  return dims[size] ?? dims.medium;
-}
-
 const BentoZone: Component<BentoZoneProps> = (props) => {
   let expandTimer: ReturnType<typeof setTimeout> | null = null;
   let collapseTimer: ReturnType<typeof setTimeout> | null = null;
@@ -125,7 +108,8 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const hitTestHandlers = createHitTestHandlers();
   const dropHandlers = createDropHandlers(props.zone.id);
   const isStackMember = () => props.interactionMode === "stack-member";
-  const capsulePixels = () => getCapsulePixelSize(props.zone);
+  const capsulePixels = () =>
+    getCapsuleBoxPx(props.zone.capsule_shape, props.zone.capsule_size);
   const zoneDisplayMode = () => props.zone.display_mode ?? getZoneDisplayMode();
   const zoneLocked = () => props.zone.locked === true;
   const zoneSelected = () => !isStackMember() && isZoneMultiSelected(props.zone.id);

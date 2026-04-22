@@ -177,9 +177,7 @@ fn apply_launch_at_startup(state: &AppState) -> Result<(), String> {
         .map(|p| p.join("guardian.exe"))
         .unwrap_or_else(|| std::path::PathBuf::from("guardian.exe"));
 
-    let app_data = tauri::Manager::path(&state.app_handle)
-        .app_data_dir()
-        .map_err(|e| format!("Cannot determine app data dir: {e}"))?;
+    let app_data = crate::storage::state_data_dir(&state.app_handle);
 
     let crash_settings = crate::startup::CrashSettings {
         max_retries: crash_max,
