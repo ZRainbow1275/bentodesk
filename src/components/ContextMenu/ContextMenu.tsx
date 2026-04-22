@@ -12,6 +12,8 @@ import {
   createMemo,
   createSignal,
 } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   getContextMenu,
   hideContextMenu,
@@ -401,10 +403,8 @@ function buildZoneMenuItems(
       icon: "pin",
       label: t("contextMenuPinMinibar") || "Pin as Mini Bar",
       action: () => {
-        void import("@tauri-apps/api/core").then(({ invoke }) =>
-          invoke("pin_zone_as_minibar", { zoneId: target.zoneId })
-            .catch((e) => console.error("pin_zone_as_minibar failed:", e))
-        );
+        void invoke("pin_zone_as_minibar", { zoneId: target.zoneId })
+          .catch((e) => console.error("pin_zone_as_minibar failed:", e));
       },
     },
     // Theme E2-e — Bind zone to a folder. Once bound, the folder's
@@ -413,10 +413,9 @@ function buildZoneMenuItems(
       icon: "folder",
       label: t("contextMenuBindFolder") || "Bind Folder…",
       action: () => {
-        void import("@tauri-apps/plugin-dialog").then(async ({ open }) => {
-          const selected = await open({ directory: true, multiple: false });
+        void (async () => {
+          const selected = await openDialog({ directory: true, multiple: false });
           if (typeof selected !== "string") return;
-          const { invoke } = await import("@tauri-apps/api/core");
           try {
             await invoke("bind_zone_to_folder", {
               zoneId: target.zoneId,
@@ -426,7 +425,7 @@ function buildZoneMenuItems(
           } catch (e) {
             console.error("bind_zone_to_folder failed:", e);
           }
-        });
+        })();
       },
     },
     // Theme E2-a — Capture current foreground-window layout. The capsule
@@ -441,10 +440,8 @@ function buildZoneMenuItems(
           onSubmit: (input) => {
             const name = input.trim();
             if (!name) return;
-            void import("@tauri-apps/api/core").then(({ invoke }) =>
-              invoke("capture_context", { name })
-                .catch((e) => console.error("capture_context failed:", e))
-            );
+            void invoke("capture_context", { name })
+              .catch((e) => console.error("capture_context failed:", e));
           },
         });
       },
