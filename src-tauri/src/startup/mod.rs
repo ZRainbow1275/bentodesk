@@ -5,6 +5,8 @@
 //! Also provides [`cleanup_legacy_registry`] to remove old registry entries
 //! during migration.
 
+use std::fs::File;
+use std::io::Read;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -27,6 +29,7 @@ pub struct CrashSettings {
 
 /// Task Scheduler task name used by BentoDesk.
 const TASK_NAME: &str = "BentoDesk";
+const TASK_SCHEDULER_TR_MAX_LEN: usize = 261;
 
 /// Configure the Windows Task Scheduler entry for BentoDesk startup.
 ///
@@ -67,6 +70,80 @@ pub fn configure(
     }
 }
 
+fn guardian_binary_is_usable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    let mut signature = [0_u8; 2];
+    match File::open(path).and_then(|mut file| file.read_exact(&mut signature)) {
+        Ok(()) => signature == *b"MZ",
+        Err(_) => false,
+    }
+}
+
+fn task_scheduler_path(path: &Path) -> String {
+    fn replace_with_env_var(path: &Path, env_var: &str) -> Option<String> {
+        let prefix = std::env::var(env_var).ok()?.replace('/', "\\");
+        let raw = path.display().to_string().replace('/', "\\");
+        if raw.len() < prefix.len() || !raw[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+            return None;
+        }
+
+        let suffix = raw[prefix.len()..].trim_start_matches('\\');
+        Some(if suffix.is_empty() {
+            format!("%{env_var}%")
+        } else {
+            format!("%{env_var}%\\{suffix}")
+        })
+    }
+
+    replace_with_env_var(path, "LOCALAPPDATA")
+        .or_else(|| replace_with_env_var(path, "APPDATA"))
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn startup_command_value(
+    use_guardian: bool,
+    app_exe: &Path,
+    guardian_exe: &Path,
+    app_data: &Path,
+    crash_settings: &CrashSettings,
+) -> String {
+    let app_command = format!("\"{}\"", task_scheduler_path(app_exe));
+
+    if use_guardian {
+        if guardian_binary_is_usable(guardian_exe) {
+            let safe_mode_flag = app_data.join("safe_mode.json");
+            let guardian_command = format!(
+                "\"{}\" --main-exe \"{}\" --max-crashes {} --window {} --safe-mode-flag \"{}\"",
+                task_scheduler_path(guardian_exe),
+                task_scheduler_path(app_exe),
+                crash_settings.max_retries,
+                crash_settings.window_secs,
+                task_scheduler_path(&safe_mode_flag),
+            );
+
+            if guardian_command.len() <= TASK_SCHEDULER_TR_MAX_LEN {
+                return guardian_command;
+            }
+
+            tracing::warn!(
+                "Guardian startup command is {} chars (> {}); falling back to main executable",
+                guardian_command.len(),
+                TASK_SCHEDULER_TR_MAX_LEN
+            );
+        } else {
+            tracing::warn!(
+                "Guardian requested for startup, but binary is missing or invalid at {}; falling back to main executable",
+                guardian_exe.display()
+            );
+        }
+    }
+
+    app_command
+}
+
 /// Create or replace the Task Scheduler task for BentoDesk startup.
 fn create_task(
     high_priority: bool,
@@ -76,26 +153,20 @@ fn create_task(
     app_data: &Path,
     crash_settings: &CrashSettings,
 ) -> Result<(), BentoDeskError> {
-    let tr_value = if use_guardian {
-        let safe_mode_flag = app_data.join("safe_mode.json");
-        format!(
-            "\"{}\" --main-exe \"{}\" --max-crashes {} --window {} --safe-mode-flag \"{}\"",
-            guardian_exe.display(),
-            app_exe.display(),
-            crash_settings.max_retries,
-            crash_settings.window_secs,
-            safe_mode_flag.display(),
-        )
-    } else {
-        format!("\"{}\"", app_exe.display())
-    };
+    let tr_value = startup_command_value(
+        use_guardian,
+        app_exe,
+        guardian_exe,
+        app_data,
+        crash_settings,
+    );
 
     let mut args = vec![
         "/create".to_string(),
         "/tn".to_string(),
         TASK_NAME.to_string(),
         "/tr".to_string(),
-        tr_value,
+        tr_value.clone(),
         "/sc".to_string(),
         "onlogon".to_string(),
         "/rl".to_string(),
@@ -106,7 +177,7 @@ fn create_task(
     // Normal priority: add 30-second delay to reduce boot contention.
     if !high_priority {
         args.push("/delay".to_string());
-        args.push("0000:00:30".to_string());
+        args.push("0000:30".to_string());
     }
 
     tracing::info!("Creating Task Scheduler task: schtasks {}", args.join(" "));
@@ -134,10 +205,17 @@ fn create_task(
             output.status.code().unwrap_or(-1),
             stderr.trim(),
         );
-        Err(BentoDeskError::StartupError(format!(
-            "schtasks /create failed: {}",
-            stderr.trim()
-        )))
+        match set_registry_run_fallback(&tr_value) {
+            Ok(()) => {
+                tracing::warn!("Task Scheduler creation failed; applied HKCU Run fallback instead");
+                Ok(())
+            }
+            Err(registry_err) => Err(BentoDeskError::StartupError(format!(
+                "schtasks /create failed: {}; registry fallback failed: {}",
+                stderr.trim(),
+                registry_err
+            ))),
+        }
     }
 }
 
@@ -229,9 +307,48 @@ pub fn cleanup_legacy_registry() -> Result<(), BentoDeskError> {
     Ok(())
 }
 
+fn set_registry_run_fallback(command_line: &str) -> Result<(), BentoDeskError> {
+    tracing::info!(
+        "Applying HKCU Run startup fallback for '{}' with command: {}",
+        TASK_NAME,
+        command_line
+    );
+
+    let output = Command::new("reg.exe")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            TASK_NAME,
+            "/t",
+            "REG_EXPAND_SZ",
+            "/d",
+            command_line,
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| BentoDeskError::StartupError(format!("Failed to execute reg.exe add: {e}")))?;
+
+    if output.status.success() {
+        tracing::info!("HKCU Run fallback applied for '{}'", TASK_NAME);
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(BentoDeskError::StartupError(format!(
+            "reg.exe add failed: {}",
+            stderr.trim()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn crash_settings_defaults() {
@@ -246,5 +363,156 @@ mod tests {
     #[test]
     fn task_name_is_bentodesk() {
         assert_eq!(TASK_NAME, "BentoDesk");
+    }
+
+    #[test]
+    fn task_scheduler_path_uses_localappdata_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempdir().unwrap();
+        let local_app_data = tmp.path().join("local");
+        let app_data = tmp.path().join("roaming");
+        let app_exe = local_app_data
+            .join("Programs")
+            .join("BentoDesk")
+            .join("BentoDesk.exe");
+        let original_local = std::env::var_os("LOCALAPPDATA");
+        let original_appdata = std::env::var_os("APPDATA");
+
+        std::fs::create_dir_all(app_exe.parent().unwrap()).unwrap();
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+        std::env::set_var("APPDATA", &app_data);
+
+        let shortened = task_scheduler_path(&app_exe);
+
+        match original_local {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+
+        assert_eq!(
+            shortened,
+            r"%LOCALAPPDATA%\Programs\BentoDesk\BentoDesk.exe"
+        );
+    }
+
+    #[test]
+    fn task_scheduler_path_falls_back_to_appdata_env_var() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempdir().unwrap();
+        let roaming_app_data = tmp.path().join("roaming");
+        let safe_mode_flag = roaming_app_data.join("BentoDesk").join("safe_mode.json");
+        let original_local = std::env::var_os("LOCALAPPDATA");
+        let original_appdata = std::env::var_os("APPDATA");
+
+        std::fs::create_dir_all(safe_mode_flag.parent().unwrap()).unwrap();
+        std::env::remove_var("LOCALAPPDATA");
+        std::env::set_var("APPDATA", &roaming_app_data);
+
+        let shortened = task_scheduler_path(&safe_mode_flag);
+
+        match original_local {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        match original_appdata {
+            Some(value) => std::env::set_var("APPDATA", value),
+            None => std::env::remove_var("APPDATA"),
+        }
+
+        assert_eq!(shortened, r"%APPDATA%\BentoDesk\safe_mode.json");
+    }
+
+    #[test]
+    fn guardian_binary_is_usable_accepts_pe_signature() {
+        let tmp = tempdir().unwrap();
+        let guardian = tmp.path().join("guardian.exe");
+        std::fs::write(&guardian, b"MZ\x90\x00").unwrap();
+
+        assert!(guardian_binary_is_usable(&guardian));
+    }
+
+    #[test]
+    fn guardian_binary_is_usable_rejects_placeholder_file() {
+        let tmp = tempdir().unwrap();
+        let guardian = tmp.path().join("guardian.exe");
+        std::fs::write(&guardian, b"placeholder").unwrap();
+
+        assert!(!guardian_binary_is_usable(&guardian));
+    }
+
+    #[test]
+    fn startup_command_value_falls_back_to_app_when_guardian_invalid() {
+        let tmp = tempdir().unwrap();
+        let app_exe = tmp.path().join("bentodesk.exe");
+        let guardian_exe = tmp.path().join("guardian.exe");
+        let app_data = tmp.path().join("appdata");
+        std::fs::write(&guardian_exe, b"placeholder").unwrap();
+
+        let tr_value = startup_command_value(
+            true,
+            &app_exe,
+            &guardian_exe,
+            &app_data,
+            &CrashSettings {
+                max_retries: 3,
+                window_secs: 10,
+            },
+        );
+
+        assert_eq!(tr_value, format!("\"{}\"", task_scheduler_path(&app_exe)));
+    }
+
+    #[test]
+    fn startup_command_value_uses_guardian_when_valid() {
+        let tmp = tempdir().unwrap();
+        let app_exe = tmp.path().join("bentodesk.exe");
+        let guardian_exe = tmp.path().join("guardian.exe");
+        let app_data = tmp.path().join("appdata");
+        std::fs::write(&guardian_exe, b"MZ\x90\x00").unwrap();
+
+        let tr_value = startup_command_value(
+            true,
+            &app_exe,
+            &guardian_exe,
+            &app_data,
+            &CrashSettings {
+                max_retries: 5,
+                window_secs: 12,
+            },
+        );
+
+        assert!(tr_value.contains(&task_scheduler_path(&guardian_exe)));
+        assert!(tr_value.contains("--main-exe"));
+        assert!(tr_value.contains("--max-crashes 5"));
+        assert!(tr_value.contains("--window 12"));
+        assert!(tr_value.contains("safe_mode.json"));
+    }
+
+    #[test]
+    fn startup_command_value_falls_back_when_guardian_command_exceeds_scheduler_limit() {
+        let tmp = tempdir().unwrap();
+        let app_exe = tmp.path().join("bentodesk.exe");
+        let guardian_exe = tmp.path().join("guardian.exe");
+        let very_long_app_data = Path::new(
+            r"C:\very\long\path\segment\segment\segment\segment\segment\segment\segment\segment\segment\segment",
+        );
+        std::fs::write(&guardian_exe, b"MZ\x90\x00").unwrap();
+
+        let tr_value = startup_command_value(
+            true,
+            &app_exe,
+            &guardian_exe,
+            very_long_app_data,
+            &CrashSettings {
+                max_retries: 3,
+                window_secs: 10,
+            },
+        );
+
+        assert_eq!(tr_value, format!("\"{}\"", task_scheduler_path(&app_exe)));
     }
 }

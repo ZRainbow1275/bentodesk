@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 jobs:
   build-and-release:
@@ -45,22 +45,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'BentoDesk ${{ github.ref_name }}'
+          releaseName: "BentoDesk ${{ github.ref_name }}"
           releaseBody: |
             ## BentoDesk ${{ github.ref_name }}
 
-            ### 下载
+            自动构建的 Windows 发布包。
 
-            | 文件 | 说明 |
-            |------|------|
-            | `BentoDesk_x.x.x_x64-setup.exe` | NSIS 安装包（推荐） |
-            | `BentoDesk_x.x.x_x64_en-US.msi` | MSI 安装包 |
+            ### 下载内容
 
-            ### 系统要求
-            - Windows 10 (1809+) 或 Windows 11
-            - WebView2 运行时（Windows 11 已内置）
+            - `BentoDesk_*_x64-setup.exe`：NSIS 安装包，推荐普通用户使用
+            - `BentoDesk_*_x64_en-US.msi`：MSI 安装包，适合需要企业分发的场景
 
-            ---
-            > 首次安装？查看 [使用指南](https://github.com/ZRainbow1275/bentodesk#使用指南)
+            ### 安装说明
+
+            - 安装前请先退出正在运行的 BentoDesk
+            - 如从旧版本手动升级，可直接运行安装包覆盖安装
+            - 详细变更请查看 `CHANGELOG.md`
           releaseDraft: false
           prerelease: false

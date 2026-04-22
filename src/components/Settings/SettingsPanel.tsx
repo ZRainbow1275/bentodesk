@@ -16,6 +16,8 @@ import {
 import { isSettingsPanelOpen, closeSettingsPanel } from "../../stores/ui";
 import {
   getSettings,
+  getSettingsError,
+  clearSettingsError,
   updateSettings as updateSettingsStore,
 } from "../../stores/settings";
 import {
@@ -151,6 +153,7 @@ const SettingsPanel: Component = () => {
   // Sync when panel opens
   createEffect(() => {
     if (isSettingsPanelOpen()) {
+      clearSettingsError();
       setLocalSettings(getSettings());
       setDirty(false);
       void loadPlugins();
@@ -206,6 +209,7 @@ const SettingsPanel: Component = () => {
   };
 
   const handleSave = async () => {
+    clearSettingsError();
     const current = localSettings();
     const updates: SettingsUpdate = {
       ghost_layer_enabled: current.ghost_layer_enabled,
@@ -757,6 +761,14 @@ const SettingsPanel: Component = () => {
               </div>
             </section>
           </div>
+
+          <Show when={getSettingsError()}>
+            {(message) => (
+              <div class="settings-panel__error" role="alert">
+                {message()}
+              </div>
+            )}
+          </Show>
 
           <div class="settings-panel__footer">
             <button

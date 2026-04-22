@@ -70,29 +70,12 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     updates: SettingsUpdate,
 ) -> Result<AppSettings, String> {
-    // Capture which toggles changed so we can fire side effects after the lock
-    // is released.
-    let (
-        old_launch,
-        old_taskbar,
-        old_cache_size,
-        old_ghost,
-        old_high_priority,
-        old_guardian,
-        old_crash_max,
-        old_crash_window,
-    ) = {
+    // Snapshot the full settings object so a startup-task failure can roll the
+    // save back atomically instead of leaving the backend on a partial state
+    // while the frontend still sees a failed save.
+    let previous_settings = {
         let s = state.settings.lock().map_err(|e| e.to_string())?;
-        (
-            s.launch_at_startup,
-            s.show_in_taskbar,
-            s.icon_cache_size,
-            s.ghost_layer_enabled,
-            s.startup_high_priority,
-            s.crash_restart_enabled,
-            s.crash_max_retries,
-            s.crash_window_secs,
-        )
+        s.clone()
     };
 
     // Validate desktop_path before applying the update.
@@ -111,32 +94,38 @@ pub async fn update_settings(
 
     // 1. Launch at Startup — Task Scheduler
     //    Reconfigure whenever any startup-related setting changes.
-    let startup_changed = result.launch_at_startup != old_launch
-        || result.startup_high_priority != old_high_priority
-        || result.crash_restart_enabled != old_guardian
-        || result.crash_max_retries != old_crash_max
-        || result.crash_window_secs != old_crash_window;
+    let startup_changed = result.launch_at_startup != previous_settings.launch_at_startup
+        || result.startup_high_priority != previous_settings.startup_high_priority
+        || result.crash_restart_enabled != previous_settings.crash_restart_enabled
+        || result.crash_max_retries != previous_settings.crash_max_retries
+        || result.crash_window_secs != previous_settings.crash_window_secs;
     if startup_changed {
         if let Err(e) = apply_launch_at_startup(&state) {
-            tracing::error!("Failed to update launch-at-startup: {e}");
+            tracing::error!("Failed to update launch-at-startup: {e}; reverting settings update");
+            {
+                let mut settings = state.settings.lock().map_err(|err| err.to_string())?;
+                *settings = previous_settings.clone();
+            }
+            state.persist_settings();
+            return Err(format!("Failed to update launch-at-startup: {e}"));
         }
     }
 
     // 2. Show in Taskbar — toggle WS_EX_APPWINDOW / WS_EX_TOOLWINDOW
-    if result.show_in_taskbar != old_taskbar {
+    if result.show_in_taskbar != previous_settings.show_in_taskbar {
         if let Err(e) = apply_show_in_taskbar(&state.app_handle, result.show_in_taskbar) {
             tracing::error!("Failed to update show-in-taskbar: {e}");
         }
     }
 
     // 3. Icon Cache Size — resize the LRU cache
-    if result.icon_cache_size != old_cache_size {
+    if result.icon_cache_size != previous_settings.icon_cache_size {
         state.icon_cache.resize(result.icon_cache_size as usize);
         tracing::info!("Icon cache resized to {}", result.icon_cache_size);
     }
 
     // 4. Ghost Layer — attach / detach overlay
-    if result.ghost_layer_enabled != old_ghost {
+    if result.ghost_layer_enabled != previous_settings.ghost_layer_enabled {
         if result.ghost_layer_enabled {
             if let Err(e) =
                 crate::ghost_layer::manager::GhostLayerManager::attach(&state.app_handle)

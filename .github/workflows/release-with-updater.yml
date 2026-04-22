@@ -10,20 +10,20 @@ name: Release (signed / updater)
 #      `pubkey`.
 #
 # Required secrets:
-#   TAURI_SIGNING_PRIVATE_KEY          — base64 minisign private key
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD — passphrase for the private key
+#   TAURI_SIGNING_PRIVATE_KEY          - base64 minisign private key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - passphrase for the private key
 #
-# Trigger by pushing a tag like `v1.2.0-updater` or by running manually
+# Trigger by pushing a tag like `v1.2.1-updater` or by running manually
 # via workflow_dispatch.
 
 on:
   push:
     tags:
-      - 'v*-updater'
+      - "v*-updater"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to cut the signed release against (e.g. v1.2.0)"
+        description: "Tag to cut the signed release against (e.g. v1.2.1)"
         required: true
         type: string
 
@@ -69,102 +69,29 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'BentoDesk ${{ inputs.tag || github.ref_name }}'
+          releaseName: "BentoDesk ${{ inputs.tag || github.ref_name }}"
           releaseBody: |
-            # BentoDesk v1.2.0 — Silent Power + Bulk Elegance + Memory Discipline
+            ## BentoDesk ${{ inputs.tag || github.ref_name }}
 
-            ## 下载
+            签名版发布，用于 GitHub Release 分发与 Tauri Updater 自动更新。
 
-            | 文件 | 用途 |
-            |---|---|
-            | `BentoDesk_1.2.0_x64-setup.exe` | **主安装包** (NSIS, 推荐) |
-            | `BentoDesk_1.2.0_x64-setup.exe.sig` | minisign 签名文件（updater 验证用） |
-            | `latest.json` | Updater 版本 manifest |
+            ### 下载内容
 
-            ## 升级说明
+            - `BentoDesk_*_x64-setup.exe`：Windows NSIS 安装包
+            - `*.sig`：对应安装包的 minisign 签名文件
+            - `latest.json`：Updater 使用的版本清单
 
-            > ⚠️ **v1.1.0 → v1.2.0 首次升级需手动安装一次**
-            > 关闭正在运行的 BentoDesk → 下载 `BentoDesk_1.2.0_x64-setup.exe` → 双击安装。
-            > 安装器静默卸载 v1.1.0 再装 v1.2.0，**settings / zones / 图标位置全部保留**。
-            > **安装 v1.2.0 后，未来所有版本 (v1.2.1+) 自动丝滑更新。**
+            ### 升级说明
 
-            ## 🛡️ 升级安全保证
+            - 已安装较新版本的用户，可通过应用内更新或直接下载安装包覆盖安装
+            - 安装前请先退出正在运行的 BentoDesk
+            - 详细修复和变更请查看 `CHANGELOG.md`
 
-            - ✅ 所有 zones / items / 布局原封保留（schema 向后兼容）
-            - ✅ settings.json 自动迁移（pre-migration 备份 + `_legacy` 命名空间保留未知字段）
-            - ✅ 破坏性迁移自动回滚（`.bak` + rotated `settings.backup.<ts>.json` 保留最新 3 份）
-            - ✅ Time-machine 历史保留（ring buffer 格式未变）
-            - ✅ icon cache 保留（hot/warm 分层 cache 向后兼容）
-            - ✅ 升级流程**不会**触发卸载弹窗或删除 `%LOCALAPPDATA%\com.bentodesk.app` 数据（NSIS hook 用 `/UPDATE` 判据）
+            ### 校验说明
 
-            ## ✨ Added
-
-            ### A · 丝滑更新 + 设置安全存储
-            - **Tauri Updater 集成** — `tauri-plugin-updater@2` + minisign 签名验证，静默下载、重启安装、跳过版本、手动/每日/每周检查频率
-            - **设置备份与恢复** — `%APPDATA%\BentoDesk\settings.backup.<ts>.json` 滚动保留最新 3 份
-            - **Schema additive migration** — v1.1 残留字段移入 `_legacy` 命名空间而非删除
-            - **可选加密存储** — DPAPI (Windows 原生) / AES-256-GCM+Argon2id (跨机便携) / None
-            - **`zeroize` 敏感数据擦除**
-
-            ### B · 性能与内存纪律
-            - **胶囊伸缩 GPU 加速动画** (P95 FPS ≥ 55)
-            - **分层图标缓存** (hot LRU / warm 磁盘 / cold 提取)
-            - **Zone 虚拟滚动** (item > 20 启用 IntersectionObserver)
-            - **空闲 GC** + **WebView2 内存监控** (200MB 托盘提示)
-            - **DPI-adaptive 图标** (16/24/32/48/64 档按需提取)
-            - **`prefers-reduced-motion` / `prefers-reduced-transparency`** 支持
-
-            ### C · 快捷键 + 批量操作
-            - **6 个全局快捷键** (`Ctrl+Shift+N/D/R/L/H` + `Ctrl+[/]`)
-            - **12 个场景快捷键** (`Del/F2/Ctrl+D/Alt+方向键/Enter/Shift+Del`)
-            - **冲突检测 + 可视化重绑定面板**
-            - **多选**: `Shift+Click` 连选 / `Ctrl+Click` 加选 / 空桌面拖选框
-            - **批量拖拽**（保持相对位置平移；`Alt+drag` 复制）
-            - **4 种自动排布**: Grid / Row-Column / Spiral / Organic
-            - **批量 undo checkpoint** + **BulkZoneManager 表格视图**
-
-            ### D · UX 打磨
-            - **Hover 唤醒方向修复**（胶囊位于屏幕边缘时展开方向动态贴边）
-            - **方向性 hit zone 扩展**（屏幕边缘外扩 12px）
-            - **速度快通道**（鼠标速度 > 800 px/s 跳过意图判定）
-            - **Zone Stack Mode**（两 zone 重叠 > 60% 自动堆叠）
-            - **智能名称缩写** + **Zone 别名**
-
-            ### E · 图标库 + 差异化
-            - **Lucide Icons 1600+** (MIT, 分类/搜索/最近使用/自定义 SVG)
-            - **Context Capsule** (`Ctrl+Alt+C/V` 工作流快照切换)
-            - **AI Zone 推荐** (本地规则引擎 / 可选 Ollama)
-            - **Pin-to-Top Mini Bar**（半透明 + 屏幕边吸附）
-            - **规则化自动归档**（Outlook 风格条件链 + Time-machine 撤回）
-            - **Live Folder Sync**（Zone 镜像任意磁盘文件夹）
-
-            ## 🔧 Fixed
-
-            ### 核心显示
-            - Zone 边缘展开方向错位（翻转判定从激进阈值改为自然侧判定）
-            - 胶囊拖拽无法贴屏幕底边（drag clamp 动态计算胶囊实际尺寸）
-            - 多显示器混合 DPI 定位错位（优先 `MonitorInfo.dpi_scale`）
-
-            ### Stack Mode
-            - StackWrapper CSS 坐标覆盖（用 `--stack-x/y/w/h` CSS vars）
-            - 双击栈顶只弹顶部（之前整组解散）
-            - Shift+drag 协同移动不解散 stack
-
-            ### 数据安全
-            - Settings migration 追加 `debug_overlay` + `zone_display_mode` 到 `KNOWN_1_2_FIELDS`
-            - 布局算法 bump `updated_at`（layout time-machine 正确捕获）
-            - 规则批处理可撤销（`timeline_hook::record_change` 移到 post-mutation）
-
-            ### 代码质量
-            - `BentoZone` `createMemo` 副作用反模式 → `createEffect`
-            - `computeInflate` 抽到 `hitTest.ts` 单一来源
-            - `ContextMenu` `window.prompt()` → `PromptModal`（Portal + focus trap）
-
-            ## ✅ Quality Gates
-            - `cargo clippy --all-targets`: **0 warnings**
-            - `cargo test --lib`: **271 passed**
-            - `pnpm tsc --noEmit`: 0 errors
-            - `pnpm test` (vitest): **115 passed** / 9 files
+            - 本 workflow 会在构建产物时生成签名与 `latest.json`
+            - Tauri Updater 会使用内置公钥校验下载内容完整性
+            - 如需人工分发，也可直接使用发布页中的安装包
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

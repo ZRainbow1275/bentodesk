@@ -56,6 +56,10 @@ export function getSettingsError(): string | null {
   return settingsError();
 }
 
+export function clearSettingsError(): void {
+  setSettingsError(null);
+}
+
 // ─── Data loading ────────────────────────────────────────────
 
 export async function loadSettings(): Promise<void> {
@@ -80,6 +84,7 @@ export async function updateSettings(
   try {
     const updated = await ipc.updateSettings(updates);
     setSettings(updated);
+    setSettingsError(null);
     return updated;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -93,6 +98,7 @@ export async function updateSettings(
  */
 export function applySettings(incoming: AppSettings): void {
   setSettings(incoming);
+  setSettingsError(null);
 }
 
 // ─── Convenience getters ─────────────────────────────────────

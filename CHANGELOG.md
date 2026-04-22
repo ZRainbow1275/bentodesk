@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.1] - 2026-04-22
+
+补丁版，面向已经安装 `v1.2.0` 但遇到启动闪退或开机自启失效的用户。
+
+### Fixed
+
+- 修复 Windows 安装包在启动阶段因异步运行时上下文不正确而直接闪退的问题。
+- 修复开机自启在以下场景下失效的问题：`guardian.exe` 非有效可执行文件、Task Scheduler `/tr` 命令过长、`/delay` 参数格式错误、当前用户上下文下 `schtasks` 被拒绝访问。
+- 当 Task Scheduler 创建失败时，自动回退写入 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`，避免“设置已保存但实际上未生效”。
+- 设置页保存开机自启失败时，后端会回滚本次设置改动，前端会显示错误提示，而不再表现为假成功。
+
 ## [1.2.0] — 2026-04-18 · **Silent Power + Bulk Elegance + Memory Discipline**
 
 v1.2.0 把 v1.1 打磨到生产级日用，并用 5 个差异化杀手功能拉开与 Fences 的代差。

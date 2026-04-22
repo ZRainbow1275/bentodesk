@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use tauri::async_runtime;
 use tauri::AppHandle;
 use tokio::time::interval;
 
@@ -10,7 +11,7 @@ use super::executor;
 
 /// Start the background scheduler. Idempotent — spawns exactly once.
 pub fn spawn(handle: AppHandle) {
-    tokio::spawn(async move {
+    async_runtime::spawn(async move {
         let mut ticker = interval(Duration::from_secs(60));
         loop {
             ticker.tick().await;

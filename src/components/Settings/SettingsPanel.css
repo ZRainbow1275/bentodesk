@@ -122,6 +122,18 @@
   flex-shrink: 0;
 }
 
+.settings-panel__error {
+  margin: 0 var(--spacing-xl) var(--spacing-md);
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.1);
+  color: #fecaca;
+  font-size: var(--font-size-xs, 12px);
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 /* ─── Settings Group ──────────────────────── */
 
 .settings-group {
