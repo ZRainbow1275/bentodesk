@@ -12,7 +12,7 @@
  * - On extract failure (HICON returns transparent, file missing, etc.)
  *   we fall back to the emoji heuristic.
  */
-import { Component, createSignal, onMount, onCleanup, Show } from "solid-js";
+import { Component, createEffect, createSignal, onMount, onCleanup, Show, untrack } from "solid-js";
 import { getIconUrl } from "../../services/ipc";
 import "./ItemIcon.css";
 
@@ -29,23 +29,20 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
   let containerEl: HTMLDivElement | undefined;
   let observer: IntersectionObserver | null = null;
   let cancelled = false;
+  let hasRetried = false;
 
   const [visible, setVisible] = createSignal(false);
   const [primed, setPrimed] = createSignal(false);
   const [error, setError] = createSignal(false);
+  const [resolvedSrc, setResolvedSrc] = createSignal<string | null>(null);
 
-  const iconSrc = () => {
-    if (!props.iconHash) return null;
-    return `bentodesk://icon/${encodeURIComponent(props.iconHash)}`;
-  };
-
-  const prime = async () => {
-    if (primed() || cancelled) return;
+  const prime = async (force = false) => {
+    if ((!force && primed()) || cancelled || !props.path) return;
     try {
-      // Fire-and-forget: the backend primes hot+warm tier. We rely on
-      // iconHash being correct (add_item already hashed) so we don't
-      // need the returned URL — the <img src> is deterministic.
-      await getIconUrl(props.path);
+      const nextUrl = await getIconUrl(props.path);
+      if (cancelled) return;
+      setResolvedSrc(nextUrl);
+      setError(false);
     } catch {
       if (!cancelled) setError(true);
       return;
@@ -53,11 +50,27 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
     if (!cancelled) setPrimed(true);
   };
 
+  createEffect(() => {
+    props.path;
+    props.iconHash;
+    hasRetried = false;
+    setResolvedSrc(
+      props.iconHash
+        ? `bentodesk://icon/${encodeURIComponent(props.iconHash)}`
+        : null,
+    );
+    setPrimed(false);
+    setError(false);
+    if (untrack(visible)) {
+      void prime(true);
+    }
+  });
+
   onMount(() => {
     if (!containerEl || typeof IntersectionObserver === "undefined") {
       // No IO support (e.g. jsdom in tests) — prime immediately.
       setVisible(true);
-      void prime();
+      void prime(true);
       return;
     }
 
@@ -68,7 +81,7 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
             setVisible(true);
             observer?.disconnect();
             observer = null;
-            void prime();
+            void prime(true);
             break;
           }
         }
@@ -97,21 +110,31 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
         "flex-shrink": "0",
       }}
     >
-      <Show when={visible() && iconSrc() && !error()}>
-        <img
-          class="item-icon__img"
-          src={iconSrc()!}
-          alt=""
-          width={renderSize()}
-          height={renderSize()}
-          loading="lazy"
-          decoding="async"
-          onError={() => setError(true)}
-          onLoad={() => setPrimed(true)}
-          draggable={false}
-        />
+      <Show when={visible() && primed() && !error() ? resolvedSrc() : null} keyed>
+        {(currentSrc) => (
+          <img
+            class="item-icon__img"
+            src={currentSrc}
+            alt=""
+            width={renderSize()}
+            height={renderSize()}
+            loading="lazy"
+            decoding="async"
+            onError={() => {
+              if (hasRetried || cancelled) {
+                setError(true);
+                return;
+              }
+              hasRetried = true;
+              setPrimed(false);
+              void prime(true);
+            }}
+            onLoad={() => setPrimed(true)}
+            draggable={false}
+          />
+        )}
       </Show>
-      <Show when={error() || !iconSrc()}>
+      <Show when={error()}>
         <span class="item-icon__fallback" style={{ "font-size": `${renderSize() - 4}px` }}>
           {getFallbackEmoji(props.path)}
         </span>

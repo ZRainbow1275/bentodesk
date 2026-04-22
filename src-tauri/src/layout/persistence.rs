@@ -107,6 +107,9 @@ pub struct BentoZone {
     /// Capsule shape variant: "pill", "rounded", "circle", or "minimal". Defaults to "pill".
     #[serde(default = "default_capsule_shape")]
     pub capsule_shape: String,
+    /// When true, the zone is read-only for layout gestures.
+    #[serde(default, skip_serializing_if = "is_false_bool")]
+    pub locked: bool,
     /// D2: stack identifier — zones sharing the same `stack_id` form a visual
     /// stack (macOS-Dock-style). `None` = free-standing, not part of any stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +123,10 @@ pub struct BentoZone {
     /// search remains against `name` so typing the original still matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// Optional per-zone override for reveal behaviour. `None` falls back to
+    /// the global settings display mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_mode: Option<String>,
     /// E2-e: when set, the zone's items list is a live read-only mirror of
     /// this folder. The `live_folder` watcher re-emits a refresh event on
     /// every debounced filesystem change under this path.
@@ -129,6 +136,10 @@ pub struct BentoZone {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_false_bool(v: &bool) -> bool {
+    !*v
 }
 
 fn default_capsule_size() -> String {
@@ -151,9 +162,13 @@ pub struct ZoneUpdate {
     pub auto_group: Option<AutoGroupRule>,
     pub capsule_size: Option<String>,
     pub capsule_shape: Option<String>,
+    pub locked: Option<bool>,
     /// D3: `Some(Some("…"))` sets alias, `Some(None)` clears, `None` unchanged.
     #[serde(default)]
     pub alias: Option<Option<String>>,
+    /// `Some(Some("hover"))` sets mode, `Some(None)` clears to inherit global settings.
+    #[serde(default)]
+    pub display_mode: Option<Option<String>>,
 }
 
 /// Top-level layout data persisted to disk.
@@ -288,9 +303,11 @@ mod tests {
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 capsule_size: "medium".to_string(),
                 capsule_shape: "pill".to_string(),
+                locked: false,
                 stack_id: None,
                 stack_order: 0,
                 alias: None,
+                display_mode: None,
                 live_folder_path: None,
             }],
             last_modified: "2026-01-01T00:00:00Z".to_string(),
@@ -322,7 +339,9 @@ mod tests {
             auto_group: None,
             capsule_size: None,
             capsule_shape: None,
+            locked: None,
             alias: None,
+            display_mode: None,
         };
         let json = serde_json::to_string(&update).unwrap();
         let parsed: ZoneUpdate = serde_json::from_str(&json).unwrap();

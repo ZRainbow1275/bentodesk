@@ -147,11 +147,11 @@ describe("ipc service", () => {
 
   describe("Icon Management", () => {
     it("getIconUrl calls invoke with correct command", async () => {
-      mockInvoke.mockResolvedValue("data:image/png;base64,...");
+      mockInvoke.mockResolvedValue("bentodesk://icon/hash-1");
 
       const result = await ipc.getIconUrl("C:\\app.exe");
       expect(mockInvoke).toHaveBeenCalledWith("get_icon_url", { path: "C:\\app.exe" });
-      expect(result).toBe("data:image/png;base64,...");
+      expect(result).toBe("bentodesk://icon/hash-1");
     });
 
     it("preloadIcons calls invoke with correct command and args", async () => {
@@ -164,6 +164,24 @@ describe("ipc service", () => {
     it("clearIconCache calls invoke with correct command", async () => {
       await ipc.clearIconCache();
       expect(mockInvoke).toHaveBeenCalledWith("clear_icon_cache");
+    });
+
+    it("repairItemIconHashes calls invoke with correct command", async () => {
+      const report = { repaired_count: 2, repairs: [] };
+      mockInvoke.mockResolvedValue(report);
+
+      const result = await ipc.repairItemIconHashes();
+      expect(mockInvoke).toHaveBeenCalledWith("repair_item_icon_hashes");
+      expect(result).toBe(report);
+    });
+
+    it("normalizeZoneLayout calls invoke with correct command", async () => {
+      const report = { normalized_zone_ids: ["z1"] };
+      mockInvoke.mockResolvedValue(report);
+
+      const result = await ipc.normalizeZoneLayout();
+      expect(mockInvoke).toHaveBeenCalledWith("normalize_zone_layout");
+      expect(result).toBe(report);
     });
   });
 

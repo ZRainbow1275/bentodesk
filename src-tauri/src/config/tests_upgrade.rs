@@ -37,8 +37,7 @@ fn write_value(path: &Path, value: &Value) {
 /// loader so a regression there shows up here too.
 fn simulate_load(path: &Path) -> AppSettings {
     let raw_bytes = fs::read(path).expect("fixture copy should be readable");
-    let mut value: Value =
-        serde_json::from_slice(&raw_bytes).expect("fixture must be valid JSON");
+    let mut value: Value = serde_json::from_slice(&raw_bytes).expect("fixture must be valid JSON");
 
     // Pre-migration backup — exactly as production does it.
     backup::create_backup(path).expect("pre-migration backup must succeed");

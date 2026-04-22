@@ -1,44 +1,62 @@
 /**
- * BulkManagerPanel — Theme C bulk operations UI.
+ * BulkManagerPanel - Bulk operations UI backed by the shared selection store.
  *
- * Opens via `Ctrl+Shift+M` or ContextMenu "Manage all zones". Shows a
- * sortable table of every zone with checkbox selection, inline summary,
- * and a toolbar for palette / auto-layout / delete operations. All
- * mutations funnel through `bulk_update_zones` so Ctrl+Z restores the
- * entire bulk change in one step.
+ * The panel no longer owns a second "selected zones" state. Canvas selection
+ * and table selection both read/write `stores/selection.ts`, and every bulk
+ * mutation reloads zones afterwards so the UI reflects persisted truth.
  */
 import {
   Component,
-  Show,
   For,
+  Show,
+  createEffect,
   createMemo,
   createSignal,
-  onMount,
   onCleanup,
+  onMount,
 } from "solid-js";
 import { isBulkManagerOpen, closeBulkManager } from "../../stores/ui";
-import { zonesStore } from "../../stores/zones";
+import { loadZones, zonesStore } from "../../stores/zones";
 import {
-  bulkUpdateZones,
   bulkDeleteZones,
+  bulkUpdateZones,
   type BulkZoneUpdate,
 } from "../../services/ipc";
 import { applyLayout, type LayoutAlgorithm } from "../../services/autoLayout";
+import {
+  selectedZoneIds,
+  setZoneSelection,
+} from "../../stores/selection";
+import type { CapsuleSize, ZoneDisplayMode } from "../../types/zone";
 import PalettePicker from "./PalettePicker";
 import AutoLayoutMenu from "./AutoLayoutMenu";
 import { t } from "../../i18n";
 import "./BulkManagerPanel.css";
 
 type SortKey = "name" | "items" | "accent" | "size";
+type LockedBulkValue = "unchanged" | "locked" | "unlocked";
 
 const BulkManagerPanel: Component = () => {
-  const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
   const [sortKey, setSortKey] = createSignal<SortKey>("name");
   const [sortAsc, setSortAsc] = createSignal(true);
   const [search, setSearch] = createSignal("");
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [layoutOpen, setLayoutOpen] = createSignal(false);
   const [applying, setApplying] = createSignal(false);
+
+  const [aliasValue, setAliasValue] = createSignal("");
+  const [aliasDirty, setAliasDirty] = createSignal(false);
+  const [capsuleSizeValue, setCapsuleSizeValue] = createSignal<"" | CapsuleSize>("");
+  const [displayModeValue, setDisplayModeValue] = createSignal<"" | ZoneDisplayMode>("");
+  const [lockedValue, setLockedValue] = createSignal<LockedBulkValue>("unchanged");
+
+  const resetBulkFields = (): void => {
+    setAliasValue("");
+    setAliasDirty(false);
+    setCapsuleSizeValue("");
+    setDisplayModeValue("");
+    setLockedValue("unchanged");
+  };
 
   const sortedZones = createMemo(() => {
     const list = [...zonesStore.zones];
@@ -48,7 +66,7 @@ const BulkManagerPanel: Component = () => {
       let cmp = 0;
       switch (key) {
         case "name":
-          cmp = a.name.localeCompare(b.name);
+          cmp = (a.alias ?? a.name).localeCompare(b.alias ?? b.name);
           break;
         case "items":
           cmp = a.items.length - b.items.length;
@@ -66,45 +84,58 @@ const BulkManagerPanel: Component = () => {
     });
     const term = search().trim().toLowerCase();
     if (!term) return list;
-    return list.filter((z) => z.name.toLowerCase().includes(term));
+    return list.filter((zone) =>
+      `${zone.alias ?? ""} ${zone.name}`.toLowerCase().includes(term),
+    );
   });
+
+  const selectedCount = createMemo(() => selectedZoneIds().size);
 
   const allChecked = createMemo(() => {
     const visible = sortedZones();
     if (visible.length === 0) return false;
-    const sel = selected();
-    return visible.every((z) => sel.has(z.id));
+    const selected = selectedZoneIds();
+    return visible.every((zone) => selected.has(zone.id));
+  });
+
+  const hasBulkFieldChanges = createMemo(() => {
+    return (
+      aliasDirty() ||
+      capsuleSizeValue() !== "" ||
+      displayModeValue() !== "" ||
+      lockedValue() !== "unchanged"
+    );
   });
 
   function toggle(id: string): void {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set(selectedZoneIds());
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setZoneSelection(next);
   }
 
   function toggleAll(): void {
+    const next = new Set(selectedZoneIds());
+    const visibleIds = sortedZones().map((zone) => zone.id);
     if (allChecked()) {
-      setSelected(new Set<string>());
+      for (const id of visibleIds) next.delete(id);
     } else {
-      setSelected(new Set<string>(sortedZones().map((z) => z.id)));
+      for (const id of visibleIds) next.add(id);
     }
+    setZoneSelection(next);
   }
 
   function invert(): void {
-    setSelected((prev) => {
-      const next = new Set<string>();
-      for (const z of sortedZones()) {
-        if (!prev.has(z.id)) next.add(z.id);
-      }
-      return next;
-    });
+    const next = new Set(selectedZoneIds());
+    for (const zone of sortedZones()) {
+      if (next.has(zone.id)) next.delete(zone.id);
+      else next.add(zone.id);
+    }
+    setZoneSelection(next);
   }
 
   function setSort(key: SortKey): void {
-    if (sortKey() === key) setSortAsc((p) => !p);
+    if (sortKey() === key) setSortAsc((prev) => !prev);
     else {
       setSortKey(key);
       setSortAsc(true);
@@ -112,7 +143,7 @@ const BulkManagerPanel: Component = () => {
   }
 
   async function applyAccent(color: string): Promise<void> {
-    const ids = [...selected()];
+    const ids = [...selectedZoneIds()];
     if (ids.length === 0) return;
     setApplying(true);
     try {
@@ -121,6 +152,7 @@ const BulkManagerPanel: Component = () => {
         accent_color: color,
       }));
       await bulkUpdateZones(updates);
+      await loadZones();
       setPaletteOpen(false);
     } finally {
       setApplying(false);
@@ -128,28 +160,77 @@ const BulkManagerPanel: Component = () => {
   }
 
   async function applyAutoLayout(algo: LayoutAlgorithm): Promise<void> {
-    const ids = [...selected()];
+    const ids = [...selectedZoneIds()];
     const targets =
       ids.length > 0
-        ? sortedZones().filter((z) => ids.includes(z.id))
+        ? sortedZones().filter((zone) => ids.includes(zone.id))
         : sortedZones();
     if (targets.length === 0) return;
     setApplying(true);
     try {
       await applyLayout(algo, targets);
+      await loadZones();
       setLayoutOpen(false);
     } finally {
       setApplying(false);
     }
   }
 
+  async function applyBulkFields(): Promise<void> {
+    const ids = [...selectedZoneIds()];
+    if (ids.length === 0) return;
+
+    const updates = ids
+      .map((id) => {
+        const update: BulkZoneUpdate = { id };
+        let changed = false;
+
+        if (aliasDirty()) {
+          update.alias = aliasValue().trim();
+          changed = true;
+        }
+
+        const capsuleSize = capsuleSizeValue();
+        if (capsuleSize !== "") {
+          update.capsule_size = capsuleSize;
+          changed = true;
+        }
+
+        const displayMode = displayModeValue();
+        if (displayMode !== "") {
+          update.display_mode = displayMode;
+          changed = true;
+        }
+
+        if (lockedValue() !== "unchanged") {
+          update.locked = lockedValue() === "locked";
+          changed = true;
+        }
+
+        return changed ? update : null;
+      })
+      .filter((update): update is BulkZoneUpdate => update !== null);
+
+    if (updates.length === 0) return;
+
+    setApplying(true);
+    try {
+      await bulkUpdateZones(updates);
+      await loadZones();
+      resetBulkFields();
+    } finally {
+      setApplying(false);
+    }
+  }
+
   async function deleteSelected(): Promise<void> {
-    const ids = [...selected()];
+    const ids = [...selectedZoneIds()];
     if (ids.length === 0) return;
     setApplying(true);
     try {
       await bulkDeleteZones(ids);
-      setSelected(new Set<string>());
+      setZoneSelection([]);
+      await loadZones();
     } finally {
       setApplying(false);
     }
@@ -159,6 +240,14 @@ const BulkManagerPanel: Component = () => {
     if (!isBulkManagerOpen()) return;
     if (e.key === "Escape") closeBulkManager();
   }
+
+  createEffect(() => {
+    if (isBulkManagerOpen()) return;
+    setPaletteOpen(false);
+    setLayoutOpen(false);
+    setSearch("");
+    resetBulkFields();
+  });
 
   onMount(() => document.addEventListener("keydown", handleKey));
   onCleanup(() => document.removeEventListener("keydown", handleKey));
@@ -186,7 +275,7 @@ const BulkManagerPanel: Component = () => {
               onClick={closeBulkManager}
               aria-label={t("settingsCloseAriaLabel")}
             >
-              ×
+              x
             </button>
           </header>
 
@@ -206,29 +295,114 @@ const BulkManagerPanel: Component = () => {
             <div class="bulk-manager__divider" />
             <button
               class="bulk-manager__btn bulk-manager__btn--primary"
-              disabled={selected().size === 0 || applying()}
-              onClick={() => setPaletteOpen((p) => !p)}
+              disabled={selectedCount() === 0 || applying()}
+              onClick={() => setPaletteOpen((prev) => !prev)}
             >
               {t("bulkManagerApplyPalette")}
             </button>
             <button
               class="bulk-manager__btn bulk-manager__btn--primary"
               disabled={applying()}
-              onClick={() => setLayoutOpen((p) => !p)}
+              onClick={() => setLayoutOpen((prev) => !prev)}
             >
               {t("bulkManagerAutoLayout")}
             </button>
             <button
               class="bulk-manager__btn bulk-manager__btn--danger"
-              disabled={selected().size === 0 || applying()}
-              onClick={deleteSelected}
+              disabled={selectedCount() === 0 || applying()}
+              onClick={() => void deleteSelected()}
             >
               {t("bulkManagerDeleteSelected")}
             </button>
             <div class="bulk-manager__counter">
-              {t("bulkManagerSelectedLabel")} {selected().size}/
+              {t("bulkManagerSelectedLabel")} {selectedCount()}/
               {sortedZones().length}
             </div>
+          </div>
+
+          <div class="bulk-manager__bulk-form">
+            <label class="bulk-manager__field">
+              <span class="bulk-manager__field-label">
+                {t("bulkManagerAliasLabel")}
+              </span>
+              <input
+                class="bulk-manager__input"
+                type="text"
+                value={aliasValue()}
+                placeholder={t("bulkManagerAliasPlaceholder")}
+                onInput={(e) => {
+                  setAliasValue(e.currentTarget.value);
+                  setAliasDirty(true);
+                }}
+              />
+            </label>
+
+            <label class="bulk-manager__field">
+              <span class="bulk-manager__field-label">
+                {t("bulkManagerCapsuleSizeLabel")}
+              </span>
+              <select
+                class="bulk-manager__select"
+                value={capsuleSizeValue()}
+                onChange={(e) =>
+                  setCapsuleSizeValue(e.currentTarget.value as "" | CapsuleSize)
+                }
+              >
+                <option value="">{t("bulkManagerKeepCurrent")}</option>
+                <option value="small">{t("zoneEditorCapsuleSizeSmall")}</option>
+                <option value="medium">{t("zoneEditorCapsuleSizeMedium")}</option>
+                <option value="large">{t("zoneEditorCapsuleSizeLarge")}</option>
+              </select>
+            </label>
+
+            <label class="bulk-manager__field">
+              <span class="bulk-manager__field-label">
+                {t("bulkManagerDisplayModeLabel")}
+              </span>
+              <select
+                class="bulk-manager__select"
+                value={displayModeValue()}
+                onChange={(e) =>
+                  setDisplayModeValue(
+                    e.currentTarget.value as "" | ZoneDisplayMode,
+                  )
+                }
+              >
+                <option value="">{t("bulkManagerKeepCurrent")}</option>
+                <option value="hover">{t("settingsDisplayModeHover")}</option>
+                <option value="always">{t("settingsDisplayModeAlways")}</option>
+                <option value="click">{t("settingsDisplayModeClick")}</option>
+              </select>
+            </label>
+
+            <label class="bulk-manager__field">
+              <span class="bulk-manager__field-label">
+                {t("bulkManagerLockedLabel")}
+              </span>
+              <select
+                class="bulk-manager__select"
+                value={lockedValue()}
+                onChange={(e) =>
+                  setLockedValue(e.currentTarget.value as LockedBulkValue)
+                }
+              >
+                <option value="unchanged">{t("bulkManagerKeepCurrent")}</option>
+                <option value="locked">{t("bulkManagerLockedOn")}</option>
+                <option value="unlocked">{t("bulkManagerLockedOff")}</option>
+              </select>
+            </label>
+
+            <button
+              class="bulk-manager__btn bulk-manager__btn--primary bulk-manager__apply-btn"
+              disabled={
+                selectedCount() === 0 ||
+                !hasBulkFieldChanges() ||
+                applying()
+              }
+              onClick={() => void applyBulkFields()}
+            >
+              {t("bulkManagerApplyFields")}
+            </button>
           </div>
 
           <Show when={paletteOpen()}>
@@ -286,36 +460,36 @@ const BulkManagerPanel: Component = () => {
               </thead>
               <tbody>
                 <For each={sortedZones()}>
-                  {(z) => (
-                    <tr class={selected().has(z.id) ? "is-selected" : ""}>
+                  {(zone) => (
+                    <tr class={selectedZoneIds().has(zone.id) ? "is-selected" : ""}>
                       <td>
                         <input
                           type="checkbox"
-                          checked={selected().has(z.id)}
-                          onChange={() => toggle(z.id)}
+                          checked={selectedZoneIds().has(zone.id)}
+                          onChange={() => toggle(zone.id)}
                         />
                       </td>
-                      <td class="bulk-manager__name">{z.name}</td>
-                      <td>{z.items.length}</td>
+                      <td class="bulk-manager__name">{zone.alias ?? zone.name}</td>
+                      <td>{zone.items.length}</td>
                       <td>
                         <span
                           class="bulk-manager__swatch"
                           style={{
                             "background-color":
-                              z.accent_color ?? "transparent",
+                              zone.accent_color ?? "transparent",
                           }}
                         />
                         <span class="bulk-manager__swatchlabel">
-                          {z.accent_color ?? "—"}
+                          {zone.accent_color ?? "-"}
                         </span>
                       </td>
                       <td>
-                        {Math.round(z.expanded_size.w_percent)}×
-                        {Math.round(z.expanded_size.h_percent)}%
+                        {Math.round(zone.expanded_size.w_percent)} x{" "}
+                        {Math.round(zone.expanded_size.h_percent)}%
                       </td>
                       <td>
-                        {Math.round(z.position.x_percent)},
-                        {Math.round(z.position.y_percent)}
+                        {Math.round(zone.position.x_percent)},
+                        {Math.round(zone.position.y_percent)}
                       </td>
                     </tr>
                   )}

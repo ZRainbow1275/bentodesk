@@ -12,6 +12,10 @@ import type {
   AutoGroupRule,
   FileInfo,
   SuggestedGroup,
+  CapsuleSize,
+  ZoneDisplayMode,
+  ItemIconRepairReport,
+  LayoutNormalizeReport,
 } from "../types/zone";
 import type { AppSettings, SettingsUpdate } from "../types/settings";
 import type {
@@ -153,6 +157,14 @@ export async function preloadIcons(paths: string[]): Promise<void> {
 
 export async function clearIconCache(): Promise<void> {
   return invoke<void>("clear_icon_cache");
+}
+
+export async function repairItemIconHashes(): Promise<ItemIconRepairReport> {
+  return invoke<ItemIconRepairReport>("repair_item_icon_hashes");
+}
+
+export async function normalizeZoneLayout(): Promise<LayoutNormalizeReport> {
+  return invoke<LayoutNormalizeReport>("normalize_zone_layout");
 }
 
 // ─── Layout / Snapshot Management ────────────────────────────
@@ -420,6 +432,8 @@ export interface BulkZoneUpdate {
   accent_color?: string;
   locked?: boolean;
   alias?: string;
+  capsule_size?: CapsuleSize;
+  display_mode?: ZoneDisplayMode | null;
 }
 
 export type LayoutAlgorithm = "grid" | "row" | "column" | "spiral" | "organic";

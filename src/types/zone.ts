@@ -32,6 +32,7 @@ export interface BentoItem {
   hidden_path?: string | null;    // Path in hidden_items/ storage
   icon_x?: number | null;         // Desktop icon X position when hidden
   icon_y?: number | null;         // Desktop icon Y position when hidden
+  file_missing?: boolean;         // Hidden file was deleted externally
 }
 
 export type GroupRuleType = "Extension" | "ModifiedDate" | "NamePattern";
@@ -44,6 +45,7 @@ export interface AutoGroupRule {
 
 export type CapsuleSize = "small" | "medium" | "large";
 export type CapsuleShape = "pill" | "rounded" | "circle" | "minimal";
+export type ZoneDisplayMode = "hover" | "always" | "click";
 
 export interface BentoZone {
   id: string;                        // UUID v4
@@ -60,6 +62,7 @@ export interface BentoZone {
   updated_at: string;               // ISO 8601
   capsule_size: CapsuleSize;        // Zen capsule size variant (default "medium")
   capsule_shape: CapsuleShape;      // Zen capsule shape variant (default "pill")
+  locked?: boolean;                 // When true, zone cannot be repositioned/resized
   // D2/D3 additive (Theme D v1.2.0) — all optional for zero-migration back-compat.
   /** ID of the stack this zone belongs to; null/undefined = not stacked. */
   stack_id?: string | null;
@@ -67,6 +70,8 @@ export interface BentoZone {
   stack_order?: number;
   /** Optional user-defined display alias. Display priority: alias ?? name. */
   alias?: string | null;
+  /** Optional per-zone override for reveal behaviour. */
+  display_mode?: ZoneDisplayMode | null;
 }
 
 export interface ZoneUpdate {
@@ -79,7 +84,9 @@ export interface ZoneUpdate {
   auto_group?: AutoGroupRule;
   capsule_size?: CapsuleSize;
   capsule_shape?: CapsuleShape;
+  locked?: boolean;
   alias?: string | null;
+  display_mode?: ZoneDisplayMode | null;
 }
 
 export interface FileInfo {
@@ -99,4 +106,19 @@ export interface SuggestedGroup {
   rule: AutoGroupRule;
   matching_files: string[];
   confidence: number; // 0.0-1.0
+}
+
+export interface IconHashRepairEntry {
+  item_id: string;
+  old_icon_hash: string;
+  new_icon_hash: string;
+}
+
+export interface ItemIconRepairReport {
+  repaired_count: number;
+  repairs: IconHashRepairEntry[];
+}
+
+export interface LayoutNormalizeReport {
+  normalized_zone_ids: string[];
 }

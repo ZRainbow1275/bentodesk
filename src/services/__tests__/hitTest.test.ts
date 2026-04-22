@@ -31,6 +31,7 @@ import {
   startPolling,
   stopPolling,
   createHitTestHandlers,
+  computeInflateForPosition,
 } from "../hitTest";
 
 // ─── Helpers ────────────────────────────────────────────────
@@ -107,6 +108,45 @@ describe("hitTest state machine", () => {
     it("should handle unregistering an element that was never registered", () => {
       const el = document.createElement("div");
       unregisterZoneElement(el);
+    });
+  });
+
+  describe("computeInflateForPosition", () => {
+    it("inflates outward near the bottom-right edge", () => {
+      expect(
+        computeInflateForPosition(
+          { x_percent: 92, y_percent: 90 },
+          {
+            viewport: { width: 1000, height: 1000 },
+            boxPx: { width: 160, height: 48 },
+          },
+        ),
+      ).toEqual({ right: 14, bottom: 11 });
+    });
+
+    it("does not inflate interior zones", () => {
+      expect(
+        computeInflateForPosition(
+          { x_percent: 40, y_percent: 45 },
+          {
+            viewport: { width: 1000, height: 1000 },
+            boxPx: { width: 160, height: 48 },
+          },
+        ),
+      ).toEqual({});
+    });
+
+    it("uses the stack profile when requested", () => {
+      expect(
+        computeInflateForPosition(
+          { x_percent: 85, y_percent: 88 },
+          {
+            kind: "stack",
+            viewport: { width: 1000, height: 1000 },
+            boxPx: { width: 184, height: 56 },
+          },
+        ),
+      ).toEqual({ right: 18, bottom: 13 });
     });
   });
 

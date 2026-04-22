@@ -38,9 +38,11 @@ pub async fn create_zone(
         updated_at: chrono::Utc::now().to_rfc3339(),
         capsule_size: "medium".to_string(),
         capsule_shape: "pill".to_string(),
+        locked: false,
         stack_id: None,
         stack_order: 0,
         alias: None,
+        display_mode: None,
         live_folder_path: None,
     };
 
@@ -99,9 +101,22 @@ pub async fn update_zone(
         if let Some(capsule_shape) = updates.capsule_shape {
             zone.capsule_shape = capsule_shape;
         }
+        if let Some(locked) = updates.locked {
+            zone.locked = locked;
+        }
         if let Some(alias_opt) = updates.alias {
             // Inner None clears the alias; inner Some("…") sets it.
             zone.alias = alias_opt.and_then(|s| if s.is_empty() { None } else { Some(s) });
+        }
+        if let Some(mode_opt) = updates.display_mode {
+            zone.display_mode = mode_opt.and_then(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
         }
         zone.updated_at = chrono::Utc::now().to_rfc3339();
         let cloned = zone.clone();
@@ -337,9 +352,11 @@ mod stack_tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             capsule_size: "medium".to_string(),
             capsule_shape: "pill".to_string(),
+            locked: false,
             stack_id: None,
             stack_order: 0,
             alias: None,
+            display_mode: None,
             live_folder_path: None,
         }
     }

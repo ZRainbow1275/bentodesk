@@ -130,6 +130,8 @@ const en: Translations = {
 
   // ─── Item Grid ─────────────────────────────────────────────
   itemGridEmptyDropHere: "Drop files here",
+  itemCardMissingBadge: "Missing",
+  itemCardMissingTooltip: "This hidden desktop item is missing from BentoDesk storage.",
 
   // ─── About Dialog ──────────────────────────────────────────
   aboutAppName: "BentoDesk",
@@ -261,6 +263,15 @@ const en: Translations = {
   bulkManagerAutoLayout: "Auto-layout",
   bulkManagerDeleteSelected: "Delete selected",
   bulkManagerSelectedLabel: "Selected:",
+  bulkManagerAliasLabel: "Alias",
+  bulkManagerAliasPlaceholder: "Leave blank to clear alias",
+  bulkManagerCapsuleSizeLabel: "Capsule size",
+  bulkManagerDisplayModeLabel: "Display mode",
+  bulkManagerLockedLabel: "Locked",
+  bulkManagerKeepCurrent: "Keep current",
+  bulkManagerLockedOn: "Locked",
+  bulkManagerLockedOff: "Unlocked",
+  bulkManagerApplyFields: "Apply fields",
   bulkManagerColName: "Name",
   bulkManagerColItems: "Items",
   bulkManagerColAccent: "Accent",
@@ -351,6 +362,11 @@ const en: Translations = {
   // ─── Zone Stack ────────────────────────────────────────────
   stackAriaLabel: "Stacked zones group ({n} zones)",
   stackDissolve: "Dissolve stack",
+  stackMembersLabel: "Members",
+  stackShowPreview: "Preview",
+  stackHidePreview: "Hide",
+  stackDetachMember: "Detach",
+  stackPreviewActive: "Preview open",
 
   // ─── Theme E — Icons + Differentiation ──────────────────────
   iconPickerSearch: "Search icons…",

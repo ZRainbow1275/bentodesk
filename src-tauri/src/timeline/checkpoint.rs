@@ -298,9 +298,11 @@ mod tests {
             updated_at: String::new(),
             capsule_size: "medium".to_string(),
             capsule_shape: "pill".to_string(),
+            locked: false,
             stack_id: None,
             stack_order: 0,
             alias: None,
+            display_mode: None,
             live_folder_path: None,
         }
     }

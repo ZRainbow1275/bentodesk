@@ -62,8 +62,8 @@ pub fn resolve_paths(paths: &[String], backup: &SavedIconLayout) -> Vec<Highligh
         .iter()
         .filter_map(|p| {
             let path = std::path::Path::new(p);
-            let display_name = path.file_name().map(|n| n.to_string_lossy().to_string())?;
-            let (x, y) = crate::icon_positions::lookup_icon_position(backup, &display_name)?;
+            let display_name = crate::icon_positions::display_name_from_path(path)?;
+            let (x, y) = crate::icon_positions::lookup_icon_position_for_path(backup, path)?;
             let monitor_index: Option<u32> =
                 crate::display::monitors::monitor_for_point(x, y).map(|m: MonitorInfo| m.index);
             Some(HighlightTarget {

@@ -63,6 +63,21 @@ export interface RegisterZoneInflate {
   left?: number;
 }
 
+export interface ComputeInflateOpts {
+  kind?: "zone" | "stack";
+  viewport?: {
+    width: number;
+    height: number;
+  };
+  boxPx?: {
+    width: number;
+    height: number;
+  };
+  edgeThresholdPx?: number;
+  minInflatePx?: number;
+  maxInflatePx?: number;
+}
+
 /** Options accepted when registering a zone element for hit-testing. */
 export interface RegisterZoneOpts {
   inflate?: RegisterZoneInflate;
@@ -191,14 +206,53 @@ export function updateZoneInflate(
  */
 export function computeInflateForPosition(
   pos: { x_percent: number; y_percent: number },
+  opts: ComputeInflateOpts = {},
 ): RegisterZoneInflate {
-  const EDGE_THRESHOLD = 90;
-  const EXPAND_PX = 12;
+  const kind = opts.kind ?? "zone";
+  const viewport = opts.viewport ?? {
+    width: window.innerWidth || 1920,
+    height: window.innerHeight || 1080,
+  };
+  const defaultBox =
+    kind === "stack"
+      ? { width: 184, height: 56 }
+      : { width: 160, height: 48 };
+  const boxPx = opts.boxPx ?? defaultBox;
+  const edgeThresholdPx =
+    opts.edgeThresholdPx ?? (kind === "stack" ? 132 : 120);
+  const minInflatePx =
+    opts.minInflatePx ?? (kind === "stack" ? 8 : 6);
+  const maxInflatePx =
+    opts.maxInflatePx ?? (kind === "stack" ? 18 : 14);
   const inflate: RegisterZoneInflate = {};
-  if (pos.y_percent > EDGE_THRESHOLD) inflate.bottom = EXPAND_PX;
-  if (pos.y_percent < 10) inflate.top = EXPAND_PX;
-  if (pos.x_percent > EDGE_THRESHOLD) inflate.right = EXPAND_PX;
-  if (pos.x_percent < 10) inflate.left = EXPAND_PX;
+
+  const xPx = (pos.x_percent / 100) * viewport.width;
+  const yPx = (pos.y_percent / 100) * viewport.height;
+  const distances = {
+    left: xPx,
+    right: viewport.width - (xPx + boxPx.width),
+    top: yPx,
+    bottom: viewport.height - (yPx + boxPx.height),
+  };
+
+  const resolveInflate = (distancePx: number): number | undefined => {
+    if (distancePx >= edgeThresholdPx) return undefined;
+    const ratio = 1 - Math.max(0, distancePx) / edgeThresholdPx;
+    const value = Math.round(
+      minInflatePx + (maxInflatePx - minInflatePx) * ratio,
+    );
+    return Math.min(maxInflatePx, Math.max(minInflatePx, value));
+  };
+
+  const top = resolveInflate(distances.top);
+  const right = resolveInflate(distances.right);
+  const bottom = resolveInflate(distances.bottom);
+  const left = resolveInflate(distances.left);
+
+  if (top !== undefined) inflate.top = top;
+  if (right !== undefined) inflate.right = right;
+  if (bottom !== undefined) inflate.bottom = bottom;
+  if (left !== undefined) inflate.left = left;
   return inflate;
 }
 

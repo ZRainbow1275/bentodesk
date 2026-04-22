@@ -29,22 +29,33 @@ import {
   unregisterDropZoneElement,
 } from "../../services/dropTarget";
 import { internalDrag } from "../../services/drag";
-import { preloadIcons } from "../../services/ipc";
-import { updateZone, zonesStore } from "../../stores/zones";
+import { bulkUpdateZones, preloadIcons } from "../../services/ipc";
+import { loadZones, updateZone, zonesStore } from "../../stores/zones";
 import { suggestStack } from "../../services/stack";
 import { stackZonesAction } from "../../stores/stacks";
+import {
+  beginGroupZoneDrag,
+  endGroupZoneDrag,
+  getGroupDragPreviewPosition,
+  isZoneMultiSelected,
+  selectZone,
+  selectedZoneIds,
+  updateGroupZoneDrag,
+} from "../../stores/selection";
 import ZenCapsule from "./ZenCapsule";
 import BentoPanel from "./BentoPanel";
 import "./BentoZone.css";
 
 interface BentoZoneProps {
   zone: BentoZoneType;
+  interactionMode?: "standalone" | "stack-member";
 }
 
 /** Batch size for idle-scheduled icon preload. Matches the tokio
  * extractor's thread-pool depth so batches don't queue behind each
  * other during the expand animation. */
 const PRELOAD_BATCH = 8;
+const ZONE_DRAG_THRESHOLD_PX = 4;
 
 type IdleSchedule = (cb: () => void) => void;
 
@@ -64,6 +75,24 @@ function schedulePreloadBatches(paths: string[]) {
       void preloadIcons(slice);
     });
   }
+}
+
+function getCapsulePixelSize(zone: BentoZoneType): { width: number; height: number } {
+  const shape = zone.capsule_shape || "pill";
+  const size = zone.capsule_size || "medium";
+
+  if (shape === "circle") {
+    const px =
+      size === "small" ? 42 : size === "large" ? 64 : 52;
+    return { width: px, height: px };
+  }
+
+  const dims: Record<string, { width: number; height: number }> = {
+    small: { width: 120, height: 36 },
+    medium: { width: 160, height: 48 },
+    large: { width: 200, height: 56 },
+  };
+  return dims[size] ?? dims.medium;
 }
 
 const BentoZone: Component<BentoZoneProps> = (props) => {
@@ -95,6 +124,11 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
 
   const hitTestHandlers = createHitTestHandlers();
   const dropHandlers = createDropHandlers(props.zone.id);
+  const isStackMember = () => props.interactionMode === "stack-member";
+  const capsulePixels = () => getCapsulePixelSize(props.zone);
+  const zoneDisplayMode = () => props.zone.display_mode ?? getZoneDisplayMode();
+  const zoneLocked = () => props.zone.locked === true;
+  const zoneSelected = () => !isStackMember() && isZoneMultiSelected(props.zone.id);
 
   const expanded = () => isZoneExpanded(props.zone.id);
   const isDropTarget = () => activeDropZone() === props.zone.id;
@@ -114,12 +148,17 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // Register this zone's DOM element for cursor position hit-testing and drop targeting
   onMount(() => {
     if (zoneRef) {
-      registerZoneElement(zoneRef, { inflate: computeInflateForPosition(props.zone.position) });
+      registerZoneElement(zoneRef, {
+        inflate: computeInflateForPosition(props.zone.position, {
+          kind: isStackMember() ? "stack" : "zone",
+          boxPx: capsulePixels(),
+        }),
+      });
       registerDropZoneElement(zoneRef, props.zone.id);
     }
     // v1.2.1 — `always` mode: mount the zone already expanded so the user
     // sees a Fences-style persistent panel without any hover trigger.
-    if (getZoneDisplayMode() === "always") {
+    if (!isStackMember() && zoneDisplayMode() === "always") {
       expandZone(props.zone.id);
     }
   });
@@ -128,8 +167,15 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // immediately pops every zone open; flipping out leaves the current state
   // alone (next hover-leave / re-click will collapse naturally).
   createEffect(() => {
-    if (getZoneDisplayMode() === "always" && !expanded()) {
+    if (!isStackMember() && zoneDisplayMode() === "always" && !expanded()) {
       expandZone(props.zone.id);
+    }
+  });
+
+  createEffect(() => {
+    if (isStackMember() && expanded()) {
+      collapseZone(props.zone.id);
+      setAnchorSnapshot(null);
     }
   });
 
@@ -138,7 +184,13 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     // Touch position to subscribe the effect; computeInflateForPosition reads it internally.
      void props.zone.position;
     if (zoneRef) {
-      updateZoneInflate(zoneRef, computeInflateForPosition(props.zone.position));
+      updateZoneInflate(
+        zoneRef,
+        computeInflateForPosition(props.zone.position, {
+          kind: isStackMember() ? "stack" : "zone",
+          boxPx: capsulePixels(),
+        }),
+      );
     }
   });
 
@@ -281,11 +333,12 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const handleMouseEnter = (e: MouseEvent) => {
     hitTestHandlers.onPointerEnter();
     clearTimers();
+    if (isStackMember()) return;
     if (isHoverIntentSuspended()) return;
     // v1.2.1 — only `hover` mode schedules an expand on pointer entry.
     // `always` is already expanded at mount; `click` only reacts to a
     // deliberate click so hovering alone must not flicker the capsule.
-    if (getZoneDisplayMode() !== "hover") return;
+    if (zoneDisplayMode() !== "hover") return;
     // Seed velocity baseline at enter so the first onMouseMove computes from a
     // stable reference (movementX/Y is unreliable on first frame).
     lastPosX = e.clientX;
@@ -302,10 +355,11 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // If > VELOCITY_THRESHOLD_PX_PER_SEC the user is "slashing through" — fire the
   // expand immediately so the interaction feels responsive on fast flicks.
   const handleMouseMove = (e: MouseEvent) => {
+    if (isStackMember()) return;
     if (expanded() || isHoverIntentSuspended()) return;
     // Velocity fast-path only applies to `hover` mode — `click` mode must
     // never expand on movement alone, even a "slashing" gesture.
-    if (getZoneDisplayMode() !== "hover") return;
+    if (zoneDisplayMode() !== "hover") return;
     const now = performance.now();
     const dt = now - lastPosTime;
     if (dt > 0 && dt < 200) {
@@ -328,7 +382,8 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   // expands the zone. Once expanded, mouse-leave still auto-collapses, so
   // the interaction feels like a launcher pop-over rather than a mode toggle.
   const handleZoneClick = (e: MouseEvent) => {
-    if (getZoneDisplayMode() !== "click") return;
+    if (isStackMember()) return;
+    if (zoneDisplayMode() !== "click") return;
     if (expanded()) return;
     if (e.button !== 0) return;
     // Fire only when the user clicked the zen (capsule) surface; clicks on
@@ -343,9 +398,10 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const handleMouseLeave = () => {
     hitTestHandlers.onPointerLeave();
     clearTimers();
+    if (isStackMember()) return;
     if (isHoverIntentSuspended()) return;
     // `always` mode: zones are persistently expanded — mouse leave is a no-op.
-    if (getZoneDisplayMode() === "always") return;
+    if (zoneDisplayMode() === "always") return;
     if (expanded()) {
       // R2: if we're still inside the post-expand lock window, defer
       // the collapse until after the spring settles. We schedule a
@@ -372,14 +428,93 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     y_percent: number;
   } | null>(null);
 
+  const handleZoneMouseDown = (e: MouseEvent) => {
+    if (isStackMember()) return;
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest(".bento-zone__resize-handle")) return;
+    selectZone(props.zone.id, {
+      shift: e.shiftKey,
+      ctrl: e.ctrlKey || e.metaKey,
+      orderedIds: zonesStore.zones.map((zone) => zone.id),
+    });
+  };
+
   // Zone repositioning via drag on header
   const handleHeaderDragStart = (e: MouseEvent) => {
+    if (zoneLocked()) return;
     e.preventDefault();
     clearTimers();
     const rect = (e.currentTarget as HTMLElement)
       .closest(".bento-zone")
       ?.getBoundingClientRect();
     if (!rect) return;
+
+    const currentSelection = selectedZoneIds();
+    const shouldGroupDrag =
+      !isStackMember() &&
+      currentSelection.has(props.zone.id) &&
+      currentSelection.size > 1;
+
+    if (shouldGroupDrag) {
+      const selectedZones = zonesStore.zones.filter((zone) =>
+        currentSelection.has(zone.id),
+      );
+      if (
+        selectedZones.length < 2 ||
+        selectedZones.some((zone) => zone.locked)
+      ) {
+        return;
+      }
+
+      const releaseDrag = acquireDragLock();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let moved = false;
+
+      beginGroupZoneDrag(
+        selectedZones.map((zone) => ({
+          id: zone.id,
+          position: zone.position,
+        })),
+      );
+      setIsDragRepositioning(true);
+
+      const onMouseMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!moved && Math.hypot(dx, dy) < ZONE_DRAG_THRESHOLD_PX) return;
+        moved = true;
+        updateGroupZoneDrag({
+          x_percent: (dx / window.innerWidth) * 100,
+          y_percent: (dy / window.innerHeight) * 100,
+        });
+      };
+
+      const onMouseUp = async () => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        try {
+          const finalPreview = endGroupZoneDrag();
+          if (!moved) return;
+          const updates = Object.entries(finalPreview).map(([id, position]) => ({
+            id,
+            position,
+          }));
+          if (updates.length > 0) {
+            await bulkUpdateZones(updates);
+            await loadZones();
+          }
+        } finally {
+          setIsDragRepositioning(false);
+          releaseDrag();
+        }
+      };
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      return;
+    }
 
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
@@ -475,6 +610,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   type ResizeAxis = "se" | "e" | "s";
 
   const handleResizeStart = (axis: ResizeAxis, e: MouseEvent) => {
+    if (zoneLocked()) return;
     e.preventDefault();
     e.stopPropagation();
     clearTimers();
@@ -584,24 +720,8 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
 
   // Capsule (zen) dimensions based on shape and size
   const zenDimensions = () => {
-    const shape = props.zone.capsule_shape || "pill";
-    const size = props.zone.capsule_size || "medium";
-
-    // Size → width × height lookup (circle uses square aspect ratio)
-    const sizeMap: Record<string, { w: string; h: string }> = {
-      small:  { w: "120px", h: "36px" },
-      medium: { w: "160px", h: "48px" },
-      large:  { w: "200px", h: "56px" },
-    };
-
-    const dims = sizeMap[size] || sizeMap.medium;
-
-    if (shape === "circle") {
-      // Circle: square dimensions based on size
-      const circleSize = size === "small" ? "42px" : size === "large" ? "64px" : "52px";
-      return { w: circleSize, h: circleSize };
-    }
-    return dims;
+    const dims = capsulePixels();
+    return { w: `${dims.width}px`, h: `${dims.height}px` };
   };
 
   /**
@@ -620,7 +740,10 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     const isExp = expanded();
     const accent = props.zone.accent_color;
     // During drag, use local signal for instant visual feedback; otherwise use store
-    const pos = dragPosition() ?? props.zone.position;
+    const pos =
+      dragPosition() ??
+      getGroupDragPreviewPosition(props.zone.id) ??
+      props.zone.position;
     const zen = zenDimensions();
     const anchor = currentAnchor();
     const base: Record<string, string> = {
@@ -666,12 +789,14 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     const drag = isDragRepositioning() ? "bento-zone--dragging" : "";
     const resize = isResizing() ? "bento-zone--resizing" : "";
     const dragHover = isCrossDragHover() ? "bento-zone--drag-hover" : "";
+    const selected = zoneSelected() ? "bento-zone--selected" : "";
+    const locked = zoneLocked() ? "bento-zone--locked" : "";
     // Apply capsule shape to the OUTER container so border-radius works with overflow:hidden
     const shape = !expanded() ? `bento-zone--shape-${props.zone.capsule_shape || "pill"}` : "";
     const anchor = currentAnchor();
     const anchorX = expanded() && anchor.x === "right" ? "bento-zone--anchor-right" : "";
     const anchorY = expanded() && anchor.y === "bottom" ? "bento-zone--anchor-bottom" : "";
-    return `${base} ${state} ${drop} ${drag} ${resize} ${dragHover} ${shape} ${anchorX} ${anchorY}`;
+    return `${base} ${state} ${drop} ${drag} ${resize} ${dragHover} ${selected} ${locked} ${shape} ${anchorX} ${anchorY}`;
   };
 
   return (
@@ -682,6 +807,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       onMouseEnter={handleMouseEnter}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
+      onMouseDown={handleZoneMouseDown}
       onClick={handleZoneClick}
       onDragEnter={dropHandlers.onDragEnter}
       onDragOver={dropHandlers.onDragOver}

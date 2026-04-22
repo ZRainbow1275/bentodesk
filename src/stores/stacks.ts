@@ -57,6 +57,10 @@ export function getStackTop(stackId: string): BentoZone | undefined {
   return arr[arr.length - 1];
 }
 
+export function getStackMembers(stackId: string): BentoZone[] {
+  return stackMap().get(stackId) ?? [];
+}
+
 /** IPC wrappers keep consumers from importing `services/ipc` everywhere. */
 export async function stackZonesAction(zoneIds: string[]): Promise<string | null> {
   if (zoneIds.length < 2) return null;
@@ -87,6 +91,27 @@ export async function reorderStackAction(
 ): Promise<boolean> {
   try {
     await ipcReorderStack(stackId, zoneId, newOrder);
+    await loadZones();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function detachZoneFromStackAction(
+  stackId: string,
+  zoneId: string,
+): Promise<boolean> {
+  const members = getStackMembers(stackId);
+  if (members.length < 2) return false;
+  const remainingIds = members
+    .filter((zone) => zone.id !== zoneId)
+    .map((zone) => zone.id);
+  try {
+    await ipcUnstackZones(stackId);
+    if (remainingIds.length >= 2) {
+      await ipcStackZones(remainingIds);
+    }
     await loadZones();
     return true;
   } catch {

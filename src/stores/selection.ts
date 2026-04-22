@@ -12,9 +12,15 @@
  * - marquee → union with hit-tested ids
  */
 import { createSignal, createMemo } from "solid-js";
+import type { RelativePosition } from "../types/zone";
+import { buildGroupDragPreview, type GroupDragOrigin } from "../services/groupDrag";
 
 const [selectedZoneIds, setSelectedZoneIds] = createSignal<Set<string>>(new Set());
 const [selectedItemIds, setSelectedItemIds] = createSignal<Set<string>>(new Set());
+const [groupDragOrigin, setGroupDragOrigin] = createSignal<GroupDragOrigin | null>(null);
+const [groupDragDelta, setGroupDragDelta] = createSignal<RelativePosition | null>(null);
+const [groupDragPreviewPositions, setGroupDragPreviewPositions] =
+  createSignal<GroupDragOrigin | null>(null);
 
 /** Last anchor per-zone → enables shift-click range. */
 const itemAnchorByZone = new Map<string, string>();
@@ -36,6 +42,9 @@ export function isItemMultiSelected(itemId: string): boolean {
 export function clearMultiSelection(): void {
   setSelectedZoneIds(new Set<string>());
   setSelectedItemIds(new Set<string>());
+  setGroupDragOrigin(null);
+  setGroupDragDelta(null);
+  setGroupDragPreviewPositions(null);
   itemAnchorByZone.clear();
   lastZoneAnchor = null;
 }
@@ -149,4 +158,43 @@ export function replaceWithMarqueeSelection(
 ): void {
   setSelectedZoneIds(new Set<string>(zoneIds));
   setSelectedItemIds(new Set<string>(itemIds));
+}
+
+export function beginGroupZoneDrag(
+  zones: Array<{ id: string; position: RelativePosition }>,
+): void {
+  const origin: GroupDragOrigin = {};
+  for (const zone of zones) {
+    origin[zone.id] = zone.position;
+  }
+  setGroupDragOrigin(origin);
+  setGroupDragDelta({ x_percent: 0, y_percent: 0 });
+  setGroupDragPreviewPositions(origin);
+}
+
+export function updateGroupZoneDrag(delta: RelativePosition): void {
+  const origin = groupDragOrigin();
+  if (!origin) return;
+  setGroupDragDelta(delta);
+  setGroupDragPreviewPositions(buildGroupDragPreview(origin, delta));
+}
+
+export function cancelGroupZoneDrag(): void {
+  setGroupDragOrigin(null);
+  setGroupDragDelta(null);
+  setGroupDragPreviewPositions(null);
+}
+
+export function endGroupZoneDrag(): GroupDragOrigin {
+  const preview = groupDragPreviewPositions() ?? {};
+  cancelGroupZoneDrag();
+  return preview;
+}
+
+export function getGroupDragPreviewPosition(zoneId: string): RelativePosition | null {
+  return groupDragPreviewPositions()?.[zoneId] ?? null;
+}
+
+export function isGroupDragActive(): boolean {
+  return groupDragPreviewPositions() !== null;
 }

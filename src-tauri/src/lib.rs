@@ -587,11 +587,13 @@ pub fn run() {
             commands::icon::preload_icons,
             commands::icon::clear_icon_cache,
             commands::icon::get_icon_cache_stats,
+            commands::icon::repair_item_icon_hashes,
             // Layout commands
             commands::layout::save_snapshot,
             commands::layout::load_snapshot,
             commands::layout::list_snapshots,
             commands::layout::delete_snapshot,
+            commands::layout::normalize_zone_layout,
             // Grouping commands
             commands::grouping::scan_desktop,
             commands::grouping::suggest_groups,

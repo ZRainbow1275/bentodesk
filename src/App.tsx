@@ -31,7 +31,14 @@ import {
   type EventCleanup,
 } from "./services/events";
 import { registerHotkeys, type HotkeyHandlers } from "./services/hotkeys";
-import { preloadIcons } from "./services/ipc";
+import {
+  normalizeZoneLayout,
+  openFile,
+  preloadIcons,
+  repairItemIconHashes,
+  redoCheckpoint,
+  undoCheckpoint,
+} from "./services/ipc";
 import {
   loadZones,
   handleFileChanged,
@@ -66,7 +73,6 @@ import {
   bumpViewport,
 } from "./stores/ui";
 import { refreshMonitors, invalidateMonitorCache } from "./services/geometry";
-import { openFile } from "./services/ipc";
 import { openAboutDialog, isAnyModalOpen } from "./stores/ui";
 import { applyCurrentTheme } from "./themes";
 import { t } from "./i18n";
@@ -84,7 +90,6 @@ import DragPreview from "./components/DragPreview";
 import DebugOverlay from "./components/DebugOverlay/DebugOverlay";
 import BulkManagerPanel from "./components/BulkManager/BulkManagerPanel";
 import KeybindingsSection from "./components/Settings/KeybindingsSection";
-import { undoCheckpoint, redoCheckpoint } from "./services/ipc";
 import {
   openTimeline,
   toggleBulkManager,
@@ -132,7 +137,34 @@ const App: Component = () => {
     // 3. Load initial data from backend
     await Promise.all([loadZones(), loadSettings(), refreshMonitors()]);
 
-    // 3a. Track viewport size reactively for anchor-flip geometry
+    // 3a. Repair stale icon hashes / upgraded layout drift before the UI
+    //     starts relying on persisted hashes and stack metadata.
+    const [iconRepairResult, layoutRepairResult] = await Promise.allSettled([
+      repairItemIconHashes(),
+      normalizeZoneLayout(),
+    ]);
+
+    const repairedCount =
+      iconRepairResult.status === "fulfilled"
+        ? iconRepairResult.value.repaired_count
+        : 0;
+    const normalizedCount =
+      layoutRepairResult.status === "fulfilled"
+        ? layoutRepairResult.value.normalized_zone_ids.length
+        : 0;
+
+    if (iconRepairResult.status === "rejected") {
+      console.warn("Startup icon repair failed:", iconRepairResult.reason);
+    }
+    if (layoutRepairResult.status === "rejected") {
+      console.warn("Startup layout normalization failed:", layoutRepairResult.reason);
+    }
+
+    if (repairedCount > 0 || normalizedCount > 0) {
+      await loadZones();
+    }
+
+    // 3b. Track viewport size reactively for anchor-flip geometry
     installViewportTracker();
 
     // 4. Set up event listeners from backend
@@ -268,7 +300,8 @@ const App: Component = () => {
       <DebugOverlay />
       <BulkManagerPanel />
       <KeybindingsSection handlerFor={getGlobalHotkeyHandler} />
-      <Show when={getOutsideDesktopError()}>
+      <Show when={getOutsideDesktopError()} keyed>
+        {(outsideDesktopError) => (
         <div class="app-toast app-toast--outside-desktop" role="alert">
           <div class="app-toast__header">
             <div class="app-toast__title">
@@ -283,14 +316,15 @@ const App: Component = () => {
             </button>
           </div>
           <div class="app-toast__path">
-            {getOutsideDesktopError()!.path}
+            {outsideDesktopError.path}
           </div>
           <ul class="app-toast__sources">
-            <For each={getOutsideDesktopError()!.allowed_sources}>
+            <For each={outsideDesktopError.allowed_sources}>
               {(src) => <li class="app-toast__source">{src}</li>}
             </For>
           </ul>
         </div>
+        )}
       </Show>
       <Show when={zonesStore.error && !getOutsideDesktopError()}>
         <div class="app-toast app-toast--generic" role="alert">

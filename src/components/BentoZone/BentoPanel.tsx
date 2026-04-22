@@ -17,6 +17,7 @@ import "./BentoPanel.css";
 interface BentoPanelProps {
   zone: BentoZone;
   onHeaderDragStart: (e: MouseEvent) => void;
+  onClose?: () => void;
 }
 
 const BentoPanel: Component<BentoPanelProps> = (props) => {
@@ -32,6 +33,10 @@ const BentoPanel: Component<BentoPanelProps> = (props) => {
   });
 
   const handleClose = () => {
+    if (props.onClose) {
+      props.onClose();
+      return;
+    }
     collapseZone(props.zone.id);
   };
 

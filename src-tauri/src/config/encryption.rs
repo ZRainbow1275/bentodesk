@@ -198,9 +198,7 @@ pub fn encrypt_with_dpapi(plaintext: &[u8]) -> Result<EncryptedBlob, BentoDeskEr
 
     // SAFETY: Windows requires us to free the blob via LocalFree on success.
     unsafe {
-        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(
-            output.pbData as *mut _,
-        ));
+        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(output.pbData as *mut _));
     }
 
     Ok(EncryptedBlob::Dpapi {
@@ -255,9 +253,7 @@ pub fn decrypt_with_dpapi(blob: &EncryptedBlob) -> Result<Vec<u8>, BentoDeskErro
 
     // SAFETY: Free the Windows-allocated buffer.
     unsafe {
-        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(
-            output.pbData as *mut _,
-        ));
+        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(output.pbData as *mut _));
     }
 
     let _ = input;

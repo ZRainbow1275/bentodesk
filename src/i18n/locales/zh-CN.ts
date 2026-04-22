@@ -128,6 +128,8 @@ const zhCN = {
 
   // ─── Item Grid ─────────────────────────────────────────────
   itemGridEmptyDropHere: "拖放文件到这里",
+  itemCardMissingBadge: "文件缺失",
+  itemCardMissingTooltip: "这个被隐藏的桌面项目在 BentoDesk 存储中已丢失。",
 
   // ─── About Dialog ──────────────────────────────────────────
   aboutAppName: "BentoDesk",
@@ -259,6 +261,15 @@ const zhCN = {
   bulkManagerAutoLayout: "自动排布",
   bulkManagerDeleteSelected: "删除所选",
   bulkManagerSelectedLabel: "已选:",
+  bulkManagerAliasLabel: "别名",
+  bulkManagerAliasPlaceholder: "留空表示清空别名",
+  bulkManagerCapsuleSizeLabel: "胶囊尺寸",
+  bulkManagerDisplayModeLabel: "显示模式",
+  bulkManagerLockedLabel: "锁定",
+  bulkManagerKeepCurrent: "保持当前值",
+  bulkManagerLockedOn: "已锁定",
+  bulkManagerLockedOff: "未锁定",
+  bulkManagerApplyFields: "应用字段",
   bulkManagerColName: "名称",
   bulkManagerColItems: "项目",
   bulkManagerColAccent: "强调色",
@@ -401,6 +412,11 @@ const zhCN = {
   rulesWizardAll: "全部满足",
   rulesWizardAny: "任一满足",
   rulesWizardDays: "天",
+  stackMembersLabel: "鎴愬憳",
+  stackShowPreview: "棰勮",
+  stackHidePreview: "鏀惰捣",
+  stackDetachMember: "鎷嗗嚭",
+  stackPreviewActive: "棰勮涓?",
 } as const;
 
 /** Keys of the translation object — used for type-safe key lookups. */

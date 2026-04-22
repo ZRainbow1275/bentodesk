@@ -128,6 +128,20 @@
   transition: box-shadow 150ms ease-out, border-color 150ms ease-out, background 150ms ease-out;
 }
 
+.bento-zone--selected {
+  box-shadow:
+    0 0 0 2px rgba(59, 130, 246, 0.55),
+    var(--shadow-expanded, 0 16px 48px rgba(0, 0, 0, 0.4));
+}
+
+.bento-zone--locked {
+  cursor: default;
+}
+
+.bento-zone--locked .bento-zone__resize-handle {
+  display: none;
+}
+
 /* ─── Snapshot Flash Feedback ───────────────────────────── */
 .bento-zone--snapshot-flash {
   animation: snapshot-flash 600ms ease-out;

@@ -9,6 +9,7 @@ import type { BentoItem } from "../../types/zone";
 import { showContextMenu, selectItem, isItemSelected } from "../../stores/ui";
 import { openFile } from "../../services/ipc";
 import { beginDragTracking, internalDrag } from "../../services/drag";
+import { t } from "../../i18n";
 import ItemIcon from "./ItemIcon";
 import Tooltip from "../shared/Tooltip";
 import "./ItemCard.css";
@@ -26,8 +27,10 @@ interface ItemCardProps {
 
 const ItemCard: Component<ItemCardProps> = (props) => {
   const selected = () => isItemSelected(props.zoneId, props.item.id);
+  const isMissing = () => props.item.file_missing === true;
 
   const handleDoubleClick = () => {
+    if (isMissing()) return;
     void openFile(props.item.path);
   };
 
@@ -43,7 +46,7 @@ const ItemCard: Component<ItemCardProps> = (props) => {
 
   const handleMouseDown = (e: MouseEvent) => {
     // Only track drag on left-click
-    if (e.button !== 0) return;
+    if (e.button !== 0 || isMissing()) return;
     selectItem(props.zoneId, props.item.id);
     beginDragTracking(
       [props.item.path],
@@ -64,7 +67,7 @@ const ItemCard: Component<ItemCardProps> = (props) => {
 
   return (
     <div
-      class={`item-card item-lift item-enter ${props.item.is_wide ? "item-card--wide" : ""} ${selected() ? "item-card--selected" : ""} ${isDragging() ? "item-card--dragging" : ""}`}
+      class={`item-card item-lift item-enter ${props.item.is_wide ? "item-card--wide" : ""} ${selected() ? "item-card--selected" : ""} ${isDragging() ? "item-card--dragging" : ""} ${isMissing() ? "item-card--missing" : ""}`}
       style={{
         "grid-column": props.item.is_wide ? "span 2" : undefined,
         "animation-delay": animationDelay(),
@@ -74,20 +77,35 @@ const ItemCard: Component<ItemCardProps> = (props) => {
       onMouseDown={handleMouseDown}
       tabIndex={0}
       role="button"
-      aria-label={`Open ${displayName(props.item.name)}`}
+      aria-label={
+        isMissing()
+          ? `${displayName(props.item.name)} ${t("itemCardMissingBadge")}`
+          : `Open ${displayName(props.item.name)}`
+      }
+      aria-disabled={isMissing() ? "true" : undefined}
     >
       <ItemIcon
         path={props.item.path}
         iconHash={props.item.icon_hash}
         isWide={props.item.is_wide}
       />
-      <Tooltip content={displayName(props.item.name)}>
-        <span
-          class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
-        >
-          {displayName(props.item.name)}
-        </span>
-      </Tooltip>
+      <div class={`item-card__meta ${props.item.is_wide ? "item-card__meta--wide" : ""}`}>
+        <Tooltip content={displayName(props.item.name)}>
+          <span
+            class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
+          >
+            {displayName(props.item.name)}
+          </span>
+        </Tooltip>
+        <Tooltip content={t("itemCardMissingTooltip")}>
+          <span
+            class={`item-card__missing-badge ${isMissing() ? "item-card__missing-badge--visible" : ""}`}
+            aria-hidden={isMissing() ? undefined : "true"}
+          >
+            {t("itemCardMissingBadge")}
+          </span>
+        </Tooltip>
+      </div>
     </div>
   );
 };

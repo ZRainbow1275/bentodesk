@@ -1,66 +1,303 @@
-/* StackWrapper — D2 Zone Stack visual layout + fan-out animation */
-
 .stack-wrapper {
   position: absolute;
-  left: var(--stack-x, 0);
-  top: var(--stack-y, 0);
-  width: var(--stack-w, auto);
-  height: var(--stack-h, auto);
   pointer-events: auto;
+  overflow: visible;
 }
 
-/* Inside a stack, the member BentoZone element must anchor to the layer
-   origin (0,0) — its own left/top (derived from the base zone's position)
-   would otherwise place it at stack_x% of the layer width rather than at
-   the stack's actual viewport coordinates. The dimensions (zen vs expanded)
-   are still owned by BentoZone so we only override the coordinate props. */
-.stack-wrapper__layer > .bento-zone {
-  left: 0 !important;
-  top: 0 !important;
-  right: auto !important;
-  bottom: auto !important;
+.stack-wrapper__surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 180px;
 }
 
-.stack-wrapper__layer {
-  position: absolute;
-  inset: 0;
-  /* Cards stack with a slight rightward+downward offset and reverse rotation
-     so deeper layers recede. --stack-depth = 0 for the top, max for the
-     bottom. */
-  --stack-offset: calc(var(--stack-depth, 0) * 4px);
-  --stack-rotate: calc(var(--stack-depth, 0) * -1deg);
-  transform:
-    translate(var(--stack-offset), var(--stack-offset))
-    rotate(var(--stack-rotate));
-  transform-origin: 50% 50%;
+.stack-capsule {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  min-width: 220px;
+  padding: 10px 12px;
+  border-radius: 24px;
+  border: 1px solid var(--border-zen, rgba(255, 255, 255, 0.1));
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    var(--surface-zen, rgba(22, 22, 26, 0.88));
+  -webkit-backdrop-filter: var(--blur-zen);
+  backdrop-filter: var(--blur-zen);
+  box-shadow: var(--shadow-zen);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
   transition:
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 200ms ease-out;
-  z-index: calc(100 - var(--stack-depth, 0));
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease;
 }
 
-/* Fan-out mode: children radiate outward in a 120deg arc. The top layer
-   (depth 0) stays put to keep a stable focus target; the rest spread. */
-.stack-wrapper--fanned .stack-wrapper__layer {
-  transform:
-    rotate(var(--fan-angle, 0deg))
-    translateY(calc(-1 * var(--fan-dist, 0px)));
+.stack-capsule:hover,
+.stack-capsule.is-open {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.24),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
-.stack-wrapper__layer:nth-child(1) { transition-delay: 0ms; }
-.stack-wrapper__layer:nth-child(2) { transition-delay: 30ms; }
-.stack-wrapper__layer:nth-child(3) { transition-delay: 60ms; }
-.stack-wrapper__layer:nth-child(4) { transition-delay: 90ms; }
-.stack-wrapper__layer:nth-child(5) { transition-delay: 120ms; }
-
-/* Suppress backdrop-filter on children while animating to keep framerate
-   above 55fps even with 5+ members. */
-.stack-wrapper--fanned .stack-wrapper__layer .bento-zone {
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
+.stack-capsule.has-preview {
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.24),
+    0 0 0 1px rgba(59, 130, 246, 0.42);
 }
 
-/* Context menu pinned to cursor when right-click opens it */
+.stack-capsule.is-locked {
+  cursor: default;
+  opacity: 0.9;
+}
+
+.stack-wrapper--locked .stack-capsule__badge {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+}
+
+.stack-capsule__peek {
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+}
+
+.stack-capsule__peek-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: -6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stack-capsule__peek-icon:first-child {
+  margin-left: 0;
+}
+
+.stack-capsule__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stack-capsule__title {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stack-capsule__preview-indicator {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.14);
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.stack-capsule__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.stack-tray {
+  min-width: 280px;
+  padding: 10px;
+  border-radius: 18px;
+  border: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.12));
+  background: var(--surface-expanded, rgba(28, 28, 30, 0.92));
+  -webkit-backdrop-filter: var(--blur-expanded);
+  backdrop-filter: var(--blur-expanded);
+  box-shadow: var(--shadow-expanded);
+}
+
+.stack-tray__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.stack-tray__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stack-tray__title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary, #fff);
+}
+
+.stack-tray__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+}
+
+.stack-tray__toolbar-btn,
+.stack-tray__action-btn {
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+.stack-tray__toolbar-btn {
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stack-tray__toolbar-btn--danger {
+  color: #fca5a5;
+}
+
+.stack-tray__toolbar-btn:hover,
+.stack-tray__action-btn:hover {
+  background: rgba(255, 255, 255, 0.11);
+  transform: translateY(-1px);
+}
+
+.stack-tray__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stack-tray__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.stack-tray__row.is-selected {
+  border-color: rgba(59, 130, 246, 0.42);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.stack-tray__member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.stack-tray__member-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stack-tray__member-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.stack-tray__member-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.stack-tray__member-meta {
+  font-size: 11px;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.65));
+}
+
+.stack-tray__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stack-tray__action-btn {
+  padding: 7px 10px;
+  font-size: 11px;
+}
+
+.stack-focused-preview {
+  position: absolute;
+  min-width: 280px;
+  max-width: 600px;
+  min-height: 200px;
+  max-height: 600px;
+  overflow: hidden;
+  border-radius: var(--radius-expanded, 18px);
+  box-shadow:
+    0 26px 60px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.stack-focused-preview--right {
+  left: calc(100% + 16px);
+}
+
+.stack-focused-preview--left {
+  right: calc(100% + 16px);
+}
+
+.stack-focused-preview--top {
+  top: 0;
+}
+
+.stack-focused-preview--bottom {
+  bottom: 0;
+}
+
 .stack-context-menu {
   position: fixed;
   z-index: 10000;
@@ -94,7 +331,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stack-wrapper__layer {
-    transition: transform 120ms linear, opacity 120ms linear;
+  .stack-capsule,
+  .stack-tray__toolbar-btn,
+  .stack-tray__action-btn {
+    transition: none;
   }
 }

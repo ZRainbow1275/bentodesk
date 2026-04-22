@@ -49,6 +49,11 @@
   pointer-events: none;
 }
 
+.item-card--missing {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+}
+
 /* Wide variant — horizontal layout */
 .item-card--wide {
   flex-direction: row;
@@ -56,6 +61,19 @@
   padding: 10px 12px;
   gap: 10px;
   min-height: auto;
+}
+
+.item-card__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+}
+
+.item-card__meta--wide {
+  align-items: flex-start;
 }
 
 /* Name — standard (vertical) */
@@ -82,4 +100,21 @@
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.item-card__missing-badge {
+  display: none;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.02em;
+  color: #ffe3e3;
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.item-card__missing-badge--visible {
+  display: inline-flex;
 }

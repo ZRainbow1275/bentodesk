@@ -26,9 +26,13 @@ pub struct BulkZoneUpdate {
     #[serde(default)]
     pub accent_color: Option<String>,
     #[serde(default)]
+    pub capsule_size: Option<String>,
+    #[serde(default)]
     pub locked: Option<bool>,
     #[serde(default)]
     pub alias: Option<String>,
+    #[serde(default)]
+    pub display_mode: Option<Option<String>>,
 }
 
 /// The supported auto-layout algorithms. Must match frontend literal union.
@@ -70,11 +74,30 @@ pub async fn bulk_update_zones(
                 if let Some(color) = &upd.accent_color {
                     zone.accent_color = Some(color.clone());
                 }
-                // `locked` + `alias` are consumed by D theme when those fields
-                // land. For v1.2.0 they are accepted but not yet persisted;
-                // zones lacking those columns ignore them silently.
-                let _ = upd.locked;
-                let _ = upd.alias;
+                if let Some(size) = &upd.capsule_size {
+                    zone.capsule_size = size.clone();
+                }
+                if let Some(locked) = upd.locked {
+                    zone.locked = locked;
+                }
+                if let Some(alias) = &upd.alias {
+                    let trimmed = alias.trim();
+                    zone.alias = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                }
+                if let Some(mode_opt) = &upd.display_mode {
+                    zone.display_mode = mode_opt.clone().and_then(|mode| {
+                        let trimmed = mode.trim().to_string();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        }
+                    });
+                }
                 zone.updated_at = now.clone();
                 count += 1;
             }

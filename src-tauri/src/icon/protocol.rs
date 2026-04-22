@@ -3,9 +3,9 @@
 //! The WebView2 frontend requests icons via this protocol. The handler looks up
 //! the icon hash in the hot-tier cache first; on miss it consults the warm
 //! tier (on-disk PNG) and promotes the entry into the hot tier. If neither
-//! tier has the bytes, a 1x1 transparent placeholder is returned to prevent
-//! rendering errors — callers are expected to have called
-//! [`extract_and_cache`] first to populate the cache.
+//! tier has the bytes, it now returns an explicit 404 so the frontend can
+//! distinguish "stale hash / cache miss" from a valid icon. Callers are
+//! expected to have called [`extract_and_cache`] first to populate the cache.
 
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ use super::extractor;
 /// * `bentodesk://icon/{hash}` — extracted Windows shell icon (hot/warm cache).
 /// * `bentodesk://custom-icon/{uuid}` — user-uploaded icon from disk.
 ///
-/// Returns a placeholder 1x1 transparent PNG when the requested asset is
-/// unavailable so `<img src>` tags do not show broken images.
+/// Returns an explicit 404 when the requested asset is unavailable so the
+/// frontend can re-prime or fall back instead of accepting a transparent icon.
 pub fn handle_icon_request(
     handle: &AppHandle,
     cache: &IconCache,
@@ -49,7 +49,7 @@ pub fn handle_icon_request(
                 .body(bytes)
                 .expect("failed to build custom-icon response");
         }
-        return placeholder_response();
+        return missing_asset_response("custom-icon", &clean);
     }
 
     let hash = uri
@@ -70,16 +70,18 @@ pub fn handle_icon_request(
             .body(body)
             .expect("failed to build icon response")
     } else {
-        placeholder_response()
+        missing_asset_response("icon", &decoded_hash)
     }
 }
 
-fn placeholder_response() -> Response<Vec<u8>> {
+fn missing_asset_response(kind: &str, key: &str) -> Response<Vec<u8>> {
     Response::builder()
-        .status(200)
-        .header("Content-Type", "image/png")
-        .body(create_transparent_pixel())
-        .expect("failed to build placeholder response")
+        .status(404)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Cache-Control", "no-cache, no-store, max-age=0")
+        .header("X-BentoDesk-Asset-Miss", kind)
+        .body(format!("missing bentodesk asset: {kind}:{key}").into_bytes())
+        .expect("failed to build missing-asset response")
 }
 
 /// Extract an icon for a file path and store it in the cache, returning the hash.
@@ -136,11 +138,17 @@ fn extract_and_cache_inner(
     Ok(hash)
 }
 
-fn create_transparent_pixel() -> Vec<u8> {
-    let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]));
-    let mut buf = Vec::new();
-    let encoder = image::codecs::png::PngEncoder::new(&mut buf);
-    image::ImageEncoder::write_image(encoder, img.as_raw(), 1, 1, image::ExtendedColorType::Rgba8)
-        .expect("encoding 1x1 PNG should not fail");
-    buf
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_asset_response_is_explicit_404() {
+        let response = missing_asset_response("icon", "deadbeef");
+        assert_eq!(response.status(), 404);
+        assert_eq!(
+            response.headers().get("X-BentoDesk-Asset-Miss").unwrap(),
+            "icon"
+        );
+    }
 }

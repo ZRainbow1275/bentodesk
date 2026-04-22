@@ -168,14 +168,12 @@ pub async fn apply_auto_group(
         // Look up icon desktop position before hiding
         let (icon_x, icon_y) = {
             let backup = state.icon_backup.lock().ok();
-            let display_name = file_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
             match backup.as_ref().and_then(|b| b.as_ref()) {
-                Some(layout) => crate::icon_positions::lookup_icon_position(layout, &display_name)
-                    .map(|(x, y)| (Some(x), Some(y)))
-                    .unwrap_or((None, None)),
+                Some(layout) => {
+                    crate::icon_positions::lookup_icon_position_for_path(layout, file_path)
+                        .map(|(x, y)| (Some(x), Some(y)))
+                        .unwrap_or((None, None))
+                }
                 None => (None, None),
             }
         };
@@ -348,7 +346,7 @@ pub async fn auto_group_new_file(
     let (icon_x, icon_y) = {
         let backup = state.icon_backup.lock().ok();
         match backup.as_ref().and_then(|b| b.as_ref()) {
-            Some(layout) => crate::icon_positions::lookup_icon_position(layout, &file_name)
+            Some(layout) => crate::icon_positions::lookup_icon_position_for_path(layout, p)
                 .map(|(x, y)| (Some(x), Some(y)))
                 .unwrap_or((None, None)),
             None => (None, None),

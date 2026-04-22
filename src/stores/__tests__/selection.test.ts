@@ -13,6 +13,10 @@ import {
   clearMultiSelection,
   isZoneMultiSelected,
   isItemMultiSelected,
+  beginGroupZoneDrag,
+  updateGroupZoneDrag,
+  endGroupZoneDrag,
+  getGroupDragPreviewPosition,
   selectedZoneIds,
   selectedItemIds,
 } from "../selection";
@@ -68,5 +72,24 @@ describe("selection store", () => {
     replaceWithMarqueeSelection(["z2"], []);
     expect(isZoneMultiSelected("z1")).toBe(false);
     expect(isZoneMultiSelected("z2")).toBe(true);
+  });
+
+  it("tracks group drag preview positions until commit", () => {
+    beginGroupZoneDrag([
+      { id: "z1", position: { x_percent: 10, y_percent: 20 } },
+      { id: "z2", position: { x_percent: 40, y_percent: 50 } },
+    ]);
+    updateGroupZoneDrag({ x_percent: 5, y_percent: -10 });
+    expect(getGroupDragPreviewPosition("z1")).toEqual({
+      x_percent: 15,
+      y_percent: 10,
+    });
+    expect(getGroupDragPreviewPosition("z2")).toEqual({
+      x_percent: 45,
+      y_percent: 40,
+    });
+    const committed = endGroupZoneDrag();
+    expect(committed.z1).toEqual({ x_percent: 15, y_percent: 10 });
+    expect(getGroupDragPreviewPosition("z1")).toBeNull();
   });
 });

@@ -14,6 +14,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, PhysicalPosition, currentMonitor } from "@tauri-apps/api/window";
 import ZoneIcon from "../components/Icons/ZoneIcon";
 import type { BentoZone, BentoItem } from "../types/zone";
+import { getIconUrl, listZones, openFile } from "../services/ipc";
 import "./MiniBarView.css";
 
 const SNAP_THRESHOLD = 24;
@@ -22,20 +23,62 @@ interface MiniBarViewProps {
   zoneId: string;
 }
 
+const MiniBarItemIcon: Component<{ item: BentoItem }> = (props) => {
+  const [src, setSrc] = createSignal<string | null>(null);
+
+  createEffect(() => {
+    const path = props.item.path;
+    props.item.icon_hash;
+    let active = true;
+    setSrc(null);
+    void getIconUrl(path)
+      .then((nextSrc) => {
+        if (active) {
+          setSrc(nextSrc);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setSrc(null);
+        }
+      });
+    onCleanup(() => {
+      active = false;
+    });
+  });
+
+  return (
+    <Show when={src()} keyed fallback={<span aria-hidden="true">{getMiniBarFallback(props.item)}</span>}>
+      {(iconSrc) => (
+        <img
+          src={iconSrc}
+          alt=""
+          width={24}
+          height={24}
+          onError={() => setSrc(null)}
+        />
+      )}
+    </Show>
+  );
+};
+
 const MiniBarView: Component<MiniBarViewProps> = (props) => {
   const [zone, setZone] = createSignal<BentoZone | null>(null);
   const [error, setError] = createSignal<string | null>(null);
 
   async function loadZone() {
     try {
-      const all = await invoke<BentoZone[]>("list_zones");
+      const all = await listZones();
       const z = all.find((zone) => zone.id === props.zoneId);
       if (!z) {
+        setZone(null);
         setError("Zone not found");
         return;
       }
+      setError(null);
       setZone(z);
     } catch (e) {
+      setZone(null);
       setError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -98,7 +141,7 @@ const MiniBarView: Component<MiniBarViewProps> = (props) => {
     } catch (err) {
       console.warn("emit failed, falling back to direct open:", err);
       try {
-        await invoke("open_file", { path: item.path });
+        await openFile(item.path);
       } catch (e) {
         console.error("open_file failed:", e);
       }
@@ -126,31 +169,30 @@ const MiniBarView: Component<MiniBarViewProps> = (props) => {
   return (
     <div class="minibar" data-tauri-drag-region>
       <div class="minibar__grab" data-tauri-drag-region>
-        <Show when={zone()}>
-          <ZoneIcon icon={zone()!.icon} size={14} />
+        <Show when={zone()} keyed>
+          {(currentZone) => <ZoneIcon icon={currentZone.icon} size={14} />}
         </Show>
       </div>
       <div class="minibar__items">
-        <Show when={zone()} fallback={<span class="minibar__loading">…</span>}>
-          <For each={zone()!.items.slice(0, 16)}>
-            {(item) => (
-              <button
-                class="minibar__item"
-                title={item.name}
-                onClick={() => handleItemClick(item)}
-              >
-                <img
-                  src={`bentodesk://icon/${item.icon_hash}`}
-                  alt=""
-                  width={24}
-                  height={24}
-                />
-              </button>
-            )}
-          </For>
-          <Show when={zone()!.items.length === 0}>
-            <span class="minibar__empty">Empty zone</span>
-          </Show>
+        <Show when={zone()} keyed fallback={<span class="minibar__loading">…</span>}>
+          {(currentZone) => (
+            <>
+              <For each={currentZone.items.slice(0, 16)}>
+                {(item) => (
+                  <button
+                    class="minibar__item"
+                    title={item.name}
+                    onClick={() => handleItemClick(item)}
+                  >
+                    <MiniBarItemIcon item={item} />
+                  </button>
+                )}
+              </For>
+              <Show when={currentZone.items.length === 0}>
+                <span class="minibar__empty">Empty zone</span>
+              </Show>
+            </>
+          )}
         </Show>
       </div>
       <button class="minibar__close" onClick={handleClose} aria-label="Close">
@@ -162,5 +204,18 @@ const MiniBarView: Component<MiniBarViewProps> = (props) => {
     </div>
   );
 };
+
+function getMiniBarFallback(item: BentoItem): string {
+  switch (item.item_type) {
+    case "Folder":
+      return "\u{1F4C1}";
+    case "Shortcut":
+      return "\u{1F517}";
+    case "Application":
+      return "\u{2699}";
+    default:
+      return "\u{1F4C4}";
+  }
+}
 
 export default MiniBarView;

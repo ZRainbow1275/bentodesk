@@ -123,6 +123,48 @@
   color: var(--text-secondary, #c0c0cc);
 }
 
+.bulk-manager__bulk-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: 10px 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.08));
+  align-items: end;
+}
+
+.bulk-manager__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bulk-manager__field-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #c0c0cc);
+}
+
+.bulk-manager__input,
+.bulk-manager__select {
+  width: 100%;
+  min-height: 36px;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--border-zen, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: inherit;
+  font-size: 0.85rem;
+}
+
+.bulk-manager__select {
+  cursor: pointer;
+}
+
+.bulk-manager__apply-btn {
+  min-height: 36px;
+  align-self: stretch;
+}
+
 .bulk-manager__tablewrap {
   flex: 1;
   overflow: auto;
@@ -184,7 +226,7 @@
 .bulk-manager__layoutmenu {
   position: absolute;
   right: 20px;
-  top: 112px;
+  top: 164px;
   background: var(--surface-expanded, rgba(20, 20, 28, 0.98));
   border: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.12));
   border-radius: 10px;
@@ -263,4 +305,14 @@
 
 .bulk-manager__layout-label {
   font-size: 0.9rem;
+}
+
+@media (max-width: 960px) {
+  .bulk-manager__bulk-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bulk-manager__apply-btn {
+    width: 100%;
+  }
 }

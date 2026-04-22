@@ -84,12 +84,9 @@ pub async fn add_item(
     // extension for .lnk/.url, with extension for everything else).
     let (icon_x, icon_y) = {
         let backup = state.icon_backup.lock().ok();
-        let display_name = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let desktop_path = std::path::Path::new(&path);
         match backup.as_ref().and_then(|b| b.as_ref()) {
-            Some(layout) => icon_positions::lookup_icon_position(layout, &display_name)
+            Some(layout) => icon_positions::lookup_icon_position_for_path(layout, desktop_path)
                 .map(|(x, y)| (Some(x), Some(y)))
                 .unwrap_or((None, None)),
             None => (None, None),
@@ -196,15 +193,12 @@ pub async fn remove_item(
             }
             // Restore succeeded -- optionally set icon position
             if let (Some(x), Some(y)) = (icon_x, icon_y) {
-                let display_name = std::path::Path::new(original)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if let Err(e) = icon_positions::set_single_icon_position(&display_name, x, y) {
-                    tracing::warn!(
-                        "Failed to restore icon position for '{}': {e}",
-                        display_name
-                    );
+                if let Err(e) = icon_positions::set_single_icon_position_for_path(
+                    std::path::Path::new(original),
+                    x,
+                    y,
+                ) {
+                    tracing::warn!("Failed to restore icon position for '{}': {e}", original);
                 }
             }
         }
