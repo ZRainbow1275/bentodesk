@@ -806,3 +806,22 @@
   background: rgba(245, 158, 11, 0.08);
   border: 1px solid rgba(245, 158, 11, 0.35);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-panel__nav-item,
+  .settings-panel__close,
+  .settings-input,
+  .settings-textarea,
+  .toggle-switch,
+  .toggle-switch__thumb,
+  .palette-swatch,
+  .settings-btn,
+  .panel-header__btn,
+  .settings-dev-section__chevron,
+  .settings-section__file-input,
+  .settings-section__color-input,
+  .settings-section__url-input {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

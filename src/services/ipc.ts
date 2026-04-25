@@ -432,6 +432,7 @@ export interface BulkZoneUpdate {
   accent_color?: string;
   locked?: boolean;
   alias?: string;
+  icon?: string;
   capsule_size?: CapsuleSize;
   display_mode?: ZoneDisplayMode | null;
 }

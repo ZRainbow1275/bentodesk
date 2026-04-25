@@ -374,6 +374,73 @@ mod tests {
     }
 
     #[test]
+    fn lookup_icon_position_three_tier_identity_fallback() {
+        // Layout-restore identity contract: when restoring an item that was
+        // previously hidden inside `.bentodesk/`, the caller must be able to
+        // resolve the saved icon position from any of the three persisted
+        // identifiers.
+        //   tier 1 — original_path: the desktop path the file was hiding from
+        //   tier 2 — hidden_path:   the path inside `.bentodesk/{zone}/`
+        //   tier 3 — display_name:  the visible caption (extension-stripped)
+        //
+        // The saved layout always indexes by display_name (Windows captions),
+        // so each tier must derive the same lookup key.
+        let saved = SavedIconLayout {
+            icons: vec![
+                IconPosition {
+                    name: "Quarterly Plan".to_string(),
+                    x: 100,
+                    y: 200,
+                },
+                IconPosition {
+                    name: "report.pdf".to_string(),
+                    x: 50,
+                    y: 75,
+                },
+            ],
+            saved_at: "2026-04-22T00:00:00Z".to_string(),
+            resolution: resolution::Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            dpi: 1.0,
+        };
+
+        // Tier 1: original_path resolves to the user-visible caption.
+        let original = Path::new("C:\\Users\\HP\\Desktop\\Quarterly Plan.lnk");
+        assert_eq!(
+            lookup_icon_position_for_path(&saved, original),
+            Some((100, 200)),
+            "tier 1 (original_path) failed"
+        );
+
+        // Tier 2: hidden_path under .bentodesk/ keeps the same file name and
+        // therefore the same caption — it must resolve identically.
+        let hidden =
+            Path::new("C:\\Users\\HP\\AppData\\BentoDesk\\.bentodesk\\zone-a\\Quarterly Plan.lnk");
+        assert_eq!(
+            lookup_icon_position_for_path(&saved, hidden),
+            Some((100, 200)),
+            "tier 2 (hidden_path) failed"
+        );
+
+        // Tier 3: when only the display_name is known (no path context for an
+        // extensionless file like report.pdf), `display_name_from_path` must
+        // still surface the caption verbatim.
+        let display_only = Path::new("report.pdf");
+        assert_eq!(
+            display_name_from_path(display_only).as_deref(),
+            Some("report.pdf"),
+            "tier 3 (display_name derivation) failed"
+        );
+        assert_eq!(
+            lookup_icon_position(&saved, "report.pdf"),
+            Some((50, 75)),
+            "tier 3 (display_name lookup) failed"
+        );
+    }
+
+    #[test]
     fn load_from_nonexistent_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_from_file(dir.path()).unwrap();

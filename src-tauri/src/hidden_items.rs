@@ -1154,29 +1154,187 @@ pub fn restore_all_hidden(app_handle: &AppHandle) {
     );
 }
 
+/// Outcome of [`restore_zone_items`] / [`restore_zone_items_with_dirs`].
+/// Carries both the success count and the spec G ladder skip list so the
+/// caller can surface "couldn't restore N items" to the UI without losing
+/// the per-item reason (`AmbiguousDisplayName` vs `Unrecognised`).
+#[derive(Debug, Clone, Default)]
+pub struct RestoreZoneItemsReport {
+    /// Number of items successfully moved back to their authoritative
+    /// on-disk location (Tier 1 / 2 / 3).
+    pub restored: u32,
+    /// Items the spec G identity ladder refused to restore (Tier 4 / 5).
+    /// The frontend may aggregate these into a `LayoutNormalizeReport`
+    /// payload when zone deletion happens during a normalize cycle.
+    pub skipped: Vec<crate::commands::layout::SkippedRestoreItem>,
+}
+
 /// Restore items for a specific zone. Called before deleting a zone.
 ///
-/// Returns the number of items successfully restored.
+/// Walks every item through the spec G identity ladder (see
+/// [`crate::commands::item::resolve_restore_identity`]):
+///
+/// 1. `Original(path)` / `Hidden(path)` / `DisplayName(path)` →
+///    `restore_file` against the resolved path, increment `restored`.
+/// 2. `AmbiguousDisplayName` / `Unrecognised` → push into
+///    [`RestoreZoneItemsReport::skipped`] with the matching reason. We
+///    deliberately do not guess; safer to leave the file alone than to
+///    move the wrong file into the user's desktop.
+///
+/// The desktop directory and `.bentodesk/` root come from the live
+/// `AppState` settings via [`hidden_dir`]. For tests, see
+/// [`restore_zone_items_with_dirs`] which takes both paths explicitly.
 pub fn restore_zone_items(
     app_handle: &AppHandle,
     items: &[crate::layout::persistence::BentoItem],
-) -> u32 {
+) -> RestoreZoneItemsReport {
     let hdir = hidden_dir(app_handle);
+    let desktop_dir = {
+        let state = app_handle.state::<crate::AppState>();
+        let settings = state.settings.lock().expect("settings lock poisoned");
+        PathBuf::from(&settings.desktop_path)
+    };
+
+    let report = restore_zone_items_with_dirs(items, &desktop_dir, &hdir);
+
+    // Only the production path touches the safety manifest — the helper
+    // stays pure so tests can assert behaviour without spinning up a
+    // manifest file.
+    for item in items {
+        if let Some(orig) = item.original_path.as_deref() {
+            // manifest_remove is a no-op for entries it cannot find, so
+            // calling it for every item (including skipped ones) is safe
+            // and keeps the manifest converging on the layout state.
+            manifest_remove(&hdir, orig);
+        }
+    }
+
+    report
+}
+
+/// Pure helper for [`restore_zone_items`]. Takes the desktop and hidden
+/// roots explicitly so tests can drive it against `tempfile::tempdir`
+/// fixtures without an `AppHandle`.
+///
+/// The hidden root corresponds to `.bentodesk/` (NOT a per-zone
+/// subdirectory). `resolve_restore_identity` walks both `desktop_dir`
+/// and the supplied hidden root for the display-name tiers, so passing
+/// `.bentodesk/` here lets it find files inside any `.bentodesk/<zone>/`
+/// child via `read_dir`-driven scanning.
+pub fn restore_zone_items_with_dirs(
+    items: &[crate::layout::persistence::BentoItem],
+    desktop_dir: &Path,
+    hidden_root: &Path,
+) -> RestoreZoneItemsReport {
+    use crate::commands::item::{resolve_restore_identity, RestoreIdentity};
+    use crate::commands::layout::{SkippedRestoreItem, SkippedRestoreReason};
+
     let mut restored = 0u32;
+    let mut skipped = Vec::new();
 
     for item in items {
-        if let (Some(ref orig), Some(ref hidden)) = (&item.original_path, &item.hidden_path) {
-            tracing::info!("  Zone delete restore: {} -> {}", hidden, orig);
-            if restore_file(orig, hidden) {
-                manifest_remove(&hdir, orig);
-                restored += 1;
-            } else {
-                tracing::error!("  Zone delete restore FAILED for: {}", orig);
+        let identity = resolve_restore_identity(item, desktop_dir, hidden_root);
+
+        match identity {
+            RestoreIdentity::Original(path) => {
+                // Tier 1 — destination is the authoritative path. The
+                // hidden mirror (if any) is the file we move from.
+                let source = item.hidden_path.as_deref();
+                let dest = path.to_string_lossy().to_string();
+                if let Some(hidden) = source {
+                    tracing::info!("  Zone delete restore (Tier 1): {} -> {}", hidden, dest);
+                    if restore_file(&dest, hidden) {
+                        restored += 1;
+                    } else {
+                        tracing::error!("  Zone delete restore FAILED for: {}", dest);
+                    }
+                } else {
+                    // The original file is already sitting on the desktop
+                    // and we never moved it into `.bentodesk/`. Treat as
+                    // already-restored.
+                    tracing::info!(
+                        "  Zone delete restore (Tier 1, no-op): {} already on desktop",
+                        dest
+                    );
+                    restored += 1;
+                }
+            }
+            RestoreIdentity::Hidden(path) => {
+                // Tier 2 — the file lives inside `.bentodesk/<zone>/`.
+                // The destination is `original_path` if known, otherwise
+                // we synthesise one inside `desktop_dir` from the file
+                // name so the user sees the file again instead of
+                // losing track of it.
+                let source = path.to_string_lossy().to_string();
+                let dest = item
+                    .original_path
+                    .clone()
+                    .unwrap_or_else(|| {
+                        desktop_dir
+                            .join(path.file_name().unwrap_or_default())
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                tracing::info!("  Zone delete restore (Tier 2): {} -> {}", source, dest);
+                if restore_file(&dest, &source) {
+                    restored += 1;
+                } else {
+                    tracing::error!("  Zone delete restore FAILED for: {}", dest);
+                }
+            }
+            RestoreIdentity::DisplayName(path) => {
+                // Tier 3 — single display-name match. If the resolved
+                // path already lives on the desktop, nothing to do; if
+                // it lives in the hidden mirror, move it back to the
+                // desktop using its original filename.
+                let resolved = path.to_string_lossy().to_string();
+                if path.starts_with(desktop_dir) {
+                    tracing::info!(
+                        "  Zone delete restore (Tier 3, on-desktop): {} already visible",
+                        resolved
+                    );
+                    restored += 1;
+                } else {
+                    let dest = desktop_dir
+                        .join(path.file_name().unwrap_or_default())
+                        .to_string_lossy()
+                        .to_string();
+                    tracing::info!("  Zone delete restore (Tier 3): {} -> {}", resolved, dest);
+                    if restore_file(&dest, &resolved) {
+                        restored += 1;
+                    } else {
+                        tracing::error!("  Zone delete restore FAILED for: {}", dest);
+                    }
+                }
+            }
+            RestoreIdentity::AmbiguousDisplayName => {
+                tracing::warn!(
+                    "  Zone delete restore SKIPPED (ambiguous): item {} ({})",
+                    item.id,
+                    item.name
+                );
+                skipped.push(SkippedRestoreItem {
+                    item_id: item.id.clone(),
+                    item_name: item.name.clone(),
+                    reason: SkippedRestoreReason::AmbiguousDisplayName,
+                });
+            }
+            RestoreIdentity::Unrecognised => {
+                tracing::warn!(
+                    "  Zone delete restore SKIPPED (unrecognised): item {} ({})",
+                    item.id,
+                    item.name
+                );
+                skipped.push(SkippedRestoreItem {
+                    item_id: item.id.clone(),
+                    item_name: item.name.clone(),
+                    reason: SkippedRestoreReason::Unrecognised,
+                });
             }
         }
     }
 
-    restored
+    RestoreZoneItemsReport { restored, skipped }
 }
 
 /// Ensure `.bentodesk/` folder has hidden+system attributes on startup.
@@ -2004,5 +2162,132 @@ mod tests {
         let p = PathBuf::from(r"C:\Users\Desktop");
         let stripped = strip_unc_prefix(&p);
         assert_eq!(stripped, PathBuf::from(r"C:\Users\Desktop"));
+    }
+
+    // ── restore_zone_items_with_dirs (spec G integration) ────────────────
+
+    use crate::commands::layout::SkippedRestoreReason;
+    use crate::layout::persistence::{BentoItem, GridPosition, ItemType};
+
+    fn restore_test_item(
+        id: &str,
+        name: &str,
+        original_path: Option<&str>,
+        hidden_path: Option<&str>,
+    ) -> BentoItem {
+        BentoItem {
+            id: id.to_string(),
+            zone_id: "z-test".to_string(),
+            item_type: ItemType::File,
+            name: name.to_string(),
+            path: original_path.unwrap_or("").to_string(),
+            icon_hash: "h".to_string(),
+            grid_position: GridPosition {
+                col: 0,
+                row: 0,
+                col_span: 1,
+            },
+            is_wide: false,
+            added_at: "2026-04-22T00:00:00Z".to_string(),
+            original_path: original_path.map(String::from),
+            hidden_path: hidden_path.map(String::from),
+            file_missing: false,
+            icon_x: None,
+            icon_y: None,
+        }
+    }
+
+    fn touch_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(path, b"content").expect("touch file");
+    }
+
+    /// Spec G integration: when two on-disk files share the same display
+    /// name and the BentoItem carries no `original_path` / `hidden_path`
+    /// to disambiguate, `restore_zone_items_with_dirs` must NOT pick a
+    /// random match. The item is dropped into `skipped` with reason
+    /// `AmbiguousDisplayName`, and neither distractor file is touched.
+    ///
+    /// `resolve_restore_identity` does a shallow scan over `desktop_dir`
+    /// AND the supplied `hidden_root`, so the simplest way to genuinely
+    /// reach Tier 4 (multiple matches) is to plant two homonyms at the
+    /// roots the resolver actually walks: one on the desktop, one
+    /// directly inside `.bentodesk/` (top-level, not inside a zone
+    /// sub-dir which the shallow scan does not recurse into).
+    #[test]
+    fn restore_zone_items_skips_ambiguous_distractor_without_moving_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("desktop");
+        let hidden_root = tmp.path().join(".bentodesk");
+        let zone_hidden = hidden_root.join("z-test");
+        std::fs::create_dir_all(&desktop).expect("desktop");
+        std::fs::create_dir_all(&zone_hidden).expect("zone hidden");
+
+        // Two homonyms scanned by resolve_restore_identity's shallow
+        // walk: one in `desktop/`, one in `.bentodesk/` itself. Both
+        // share display name "report.pdf" so the resolver hits Tier 4.
+        let desktop_homonym = desktop.join("report.pdf");
+        let hidden_homonym = hidden_root.join("report.pdf");
+        touch_file(&desktop_homonym);
+        touch_file(&hidden_homonym);
+
+        // Item with NO original_path / hidden_path — only the display
+        // name to go on. This is the spec G failure mode the ladder
+        // refuses to guess at.
+        let ambiguous_item = restore_test_item("ambig-1", "report.pdf", None, None);
+
+        // A control item with a clean Tier 2 (hidden_path resolves) so
+        // we also confirm the `restored` counter still advances when a
+        // distractor item is mixed in with a recoverable one.
+        let recoverable_path = zone_hidden.join("notes.txt");
+        touch_file(&recoverable_path);
+        let recoverable_dest = desktop.join("notes.txt");
+        let recoverable_item = restore_test_item(
+            "ok-1",
+            "notes.txt",
+            Some(&recoverable_dest.to_string_lossy()),
+            Some(&recoverable_path.to_string_lossy()),
+        );
+
+        let report = restore_zone_items_with_dirs(
+            &[ambiguous_item, recoverable_item],
+            &desktop,
+            &hidden_root,
+        );
+
+        // Ambiguous item is logged into `skipped` with the right reason.
+        assert_eq!(report.skipped.len(), 1, "expected 1 skipped item");
+        assert_eq!(report.skipped[0].item_id, "ambig-1");
+        assert_eq!(report.skipped[0].item_name, "report.pdf");
+        assert_eq!(
+            report.skipped[0].reason,
+            SkippedRestoreReason::AmbiguousDisplayName
+        );
+
+        // Distractor files are untouched — the resolver refused to
+        // guess and neither homonym was moved.
+        assert!(
+            desktop_homonym.exists(),
+            "desktop homonym must NOT be deleted"
+        );
+        assert!(
+            hidden_homonym.exists(),
+            "hidden homonym must NOT be moved out — ambiguous"
+        );
+
+        // Control item recovered cleanly via Tier 2 (original_path does
+        // not exist, hidden_path does, so resolve_restore_identity
+        // returns Hidden(...) and we move it back).
+        assert_eq!(report.restored, 1, "recoverable item must be restored");
+        assert!(
+            recoverable_dest.exists(),
+            "control item should be back on the desktop"
+        );
+        assert!(
+            !recoverable_path.exists(),
+            "control item should have left .bentodesk/"
+        );
     }
 }

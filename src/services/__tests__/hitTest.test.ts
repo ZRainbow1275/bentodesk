@@ -148,6 +148,137 @@ describe("hitTest state machine", () => {
         ),
       ).toEqual({ right: 18, bottom: 13 });
     });
+
+    // 4 edges × 2 capsule kinds — every edge inflate must point only outward.
+    // The contract is: a zone hugging the left edge must inflate `left` only,
+    // never `right` (which would push the hit area inward, eating screen
+    // real estate from neighbouring zones / desktop interaction). The same
+    // axiom applies for every edge × kind permutation.
+
+    describe("edge inflate is single-direction (no inward bleed)", () => {
+      const viewport = { width: 1000, height: 1000 };
+
+      const cases: Array<{
+        edge: "left" | "right" | "top" | "bottom";
+        kind: "zone" | "stack";
+        position: { x_percent: number; y_percent: number };
+        boxPx: { width: number; height: number };
+        expectedKey: "left" | "right" | "top" | "bottom";
+        forbiddenKey: "left" | "right" | "top" | "bottom";
+      }> = [
+        // ── normal zone capsule ──
+        {
+          edge: "left",
+          kind: "zone",
+          position: { x_percent: 0, y_percent: 50 },
+          boxPx: { width: 160, height: 48 },
+          expectedKey: "left",
+          forbiddenKey: "right",
+        },
+        {
+          edge: "right",
+          kind: "zone",
+          position: { x_percent: 100, y_percent: 50 },
+          boxPx: { width: 160, height: 48 },
+          expectedKey: "right",
+          forbiddenKey: "left",
+        },
+        {
+          edge: "top",
+          kind: "zone",
+          position: { x_percent: 50, y_percent: 0 },
+          boxPx: { width: 160, height: 48 },
+          expectedKey: "top",
+          forbiddenKey: "bottom",
+        },
+        {
+          edge: "bottom",
+          kind: "zone",
+          position: { x_percent: 50, y_percent: 100 },
+          boxPx: { width: 160, height: 48 },
+          expectedKey: "bottom",
+          forbiddenKey: "top",
+        },
+        // ── stack capsule ──
+        {
+          edge: "left",
+          kind: "stack",
+          position: { x_percent: 0, y_percent: 50 },
+          boxPx: { width: 184, height: 56 },
+          expectedKey: "left",
+          forbiddenKey: "right",
+        },
+        {
+          edge: "right",
+          kind: "stack",
+          position: { x_percent: 100, y_percent: 50 },
+          boxPx: { width: 184, height: 56 },
+          expectedKey: "right",
+          forbiddenKey: "left",
+        },
+        {
+          edge: "top",
+          kind: "stack",
+          position: { x_percent: 50, y_percent: 0 },
+          boxPx: { width: 184, height: 56 },
+          expectedKey: "top",
+          forbiddenKey: "bottom",
+        },
+        {
+          edge: "bottom",
+          kind: "stack",
+          position: { x_percent: 50, y_percent: 100 },
+          boxPx: { width: 184, height: 56 },
+          expectedKey: "bottom",
+          forbiddenKey: "top",
+        },
+      ];
+
+      for (const tc of cases) {
+        it(`${tc.kind} capsule on ${tc.edge} edge inflates only outward`, () => {
+          const inflate = computeInflateForPosition(tc.position, {
+            kind: tc.kind,
+            viewport,
+            boxPx: tc.boxPx,
+          });
+
+          // The outward edge must carry an inflate value.
+          expect(inflate[tc.expectedKey]).toBeGreaterThan(0);
+          // The opposing inward edge must NOT be inflated — that would push
+          // the hit area into the middle of the screen.
+          expect(inflate[tc.forbiddenKey]).toBeUndefined();
+
+          // Inflate magnitude must respect the kind-specific min/max bounds.
+          const min = tc.kind === "stack" ? 8 : 6;
+          const max = tc.kind === "stack" ? 18 : 14;
+          const v = inflate[tc.expectedKey] as number;
+          expect(v).toBeGreaterThanOrEqual(min);
+          expect(v).toBeLessThanOrEqual(max);
+        });
+      }
+    });
+
+    it("stack and normal kinds use distinct edge inflate magnitudes at the same position", () => {
+      // Same on-screen position handed to both kinds must produce different
+      // inflate values because the stack profile carries larger min/max.
+      const viewport = { width: 1000, height: 1000 };
+      const position = { x_percent: 95, y_percent: 50 };
+
+      const zoneInflate = computeInflateForPosition(position, {
+        kind: "zone",
+        viewport,
+        boxPx: { width: 160, height: 48 },
+      });
+      const stackInflate = computeInflateForPosition(position, {
+        kind: "stack",
+        viewport,
+        boxPx: { width: 184, height: 56 },
+      });
+
+      expect(zoneInflate.right).toBeDefined();
+      expect(stackInflate.right).toBeDefined();
+      expect(stackInflate.right).toBeGreaterThan(zoneInflate.right as number);
+    });
   });
 
   // ── Drag lock ──

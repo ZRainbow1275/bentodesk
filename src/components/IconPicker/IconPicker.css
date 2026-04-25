@@ -153,3 +153,13 @@
   background: rgba(239, 68, 68, 0.1);
   border-radius: 6px;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-picker,
+  .icon-picker__category,
+  .icon-picker__cell,
+  .icon-picker__custom-delete {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

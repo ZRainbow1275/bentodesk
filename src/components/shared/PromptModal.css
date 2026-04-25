@@ -56,3 +56,12 @@
   gap: 8px;
   margin-top: 14px;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-modal,
+  .prompt-modal__input,
+  .prompt-modal__btn {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

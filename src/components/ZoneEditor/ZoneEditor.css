@@ -447,3 +447,20 @@
   color: var(--accent-blue);
   font-weight: var(--font-weight-semibold, 600);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .zone-editor,
+  .zone-editor__close-btn,
+  .zone-editor__input,
+  .zone-editor__textarea,
+  .zone-editor__color-swatch,
+  .zone-editor__shape-btn,
+  .zone-editor__size-btn,
+  .zone-editor__btn,
+  .zone-editor__icon-btn,
+  .zone-editor__icon-grid-cell,
+  .zone-editor__file-input {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

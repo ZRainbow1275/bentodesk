@@ -291,3 +291,24 @@
   pointer-events: none;
   min-height: 80px;
 }
+
+/* ─── Reduced motion ─────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .bento-zone__zen-layer,
+  .bento-zone__bento-layer {
+    transition-duration: 0.01ms;
+    transition-delay: 0ms;
+  }
+
+  .bento-zone--drag-hover {
+    transition-duration: 0.01ms;
+  }
+
+  .bento-zone__resize-handle {
+    transition-duration: 0.01ms;
+  }
+
+  .bento-zone--snapshot-flash {
+    animation-duration: 0.01ms;
+  }
+}

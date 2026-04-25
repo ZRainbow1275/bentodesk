@@ -30,6 +30,8 @@ import {
 import type { CapsuleSize, ZoneDisplayMode } from "../../types/zone";
 import PalettePicker from "./PalettePicker";
 import AutoLayoutMenu from "./AutoLayoutMenu";
+import IconPicker from "../IconPicker/IconPicker";
+import ZoneIcon from "../Icons/ZoneIcon";
 import { t } from "../../i18n";
 import "./BulkManagerPanel.css";
 
@@ -46,6 +48,9 @@ const BulkManagerPanel: Component = () => {
 
   const [aliasValue, setAliasValue] = createSignal("");
   const [aliasDirty, setAliasDirty] = createSignal(false);
+  const [iconValue, setIconValue] = createSignal<string>("");
+  const [iconDirty, setIconDirty] = createSignal(false);
+  const [iconPickerOpen, setIconPickerOpen] = createSignal(false);
   const [capsuleSizeValue, setCapsuleSizeValue] = createSignal<"" | CapsuleSize>("");
   const [displayModeValue, setDisplayModeValue] = createSignal<"" | ZoneDisplayMode>("");
   const [lockedValue, setLockedValue] = createSignal<LockedBulkValue>("unchanged");
@@ -53,6 +58,9 @@ const BulkManagerPanel: Component = () => {
   const resetBulkFields = (): void => {
     setAliasValue("");
     setAliasDirty(false);
+    setIconValue("");
+    setIconDirty(false);
+    setIconPickerOpen(false);
     setCapsuleSizeValue("");
     setDisplayModeValue("");
     setLockedValue("unchanged");
@@ -101,6 +109,7 @@ const BulkManagerPanel: Component = () => {
   const hasBulkFieldChanges = createMemo(() => {
     return (
       aliasDirty() ||
+      iconDirty() ||
       capsuleSizeValue() !== "" ||
       displayModeValue() !== "" ||
       lockedValue() !== "unchanged"
@@ -187,6 +196,11 @@ const BulkManagerPanel: Component = () => {
 
         if (aliasDirty()) {
           update.alias = aliasValue().trim();
+          changed = true;
+        }
+
+        if (iconDirty() && iconValue()) {
+          update.icon = iconValue();
           changed = true;
         }
 
@@ -337,6 +351,34 @@ const BulkManagerPanel: Component = () => {
               />
             </label>
 
+            <div class="bulk-manager__field">
+              <span class="bulk-manager__field-label">
+                {t("bulkManagerIconLabel")}
+              </span>
+              <div class="bulk-manager__icon-picker-row">
+                <Show
+                  when={iconDirty() && iconValue()}
+                  fallback={
+                    <span class="bulk-manager__icon-placeholder">
+                      {t("bulkManagerIconKeepCurrent")}
+                    </span>
+                  }
+                >
+                  <span class="bulk-manager__icon-preview">
+                    <ZoneIcon icon={iconValue()} size={20} />
+                  </span>
+                  <span class="bulk-manager__icon-name">{iconValue()}</span>
+                </Show>
+                <button
+                  type="button"
+                  class="bulk-manager__btn"
+                  onClick={() => setIconPickerOpen(true)}
+                >
+                  {t("bulkManagerIconChange")}
+                </button>
+              </div>
+            </div>
+
             <label class="bulk-manager__field">
               <span class="bulk-manager__field-label">
                 {t("bulkManagerCapsuleSizeLabel")}
@@ -415,6 +457,17 @@ const BulkManagerPanel: Component = () => {
             <AutoLayoutMenu
               onPick={applyAutoLayout}
               onClose={() => setLayoutOpen(false)}
+            />
+          </Show>
+          <Show when={iconPickerOpen()}>
+            <IconPicker
+              selected={iconValue() || undefined}
+              onSelect={(icon) => {
+                setIconValue(icon);
+                setIconDirty(true);
+                setIconPickerOpen(false);
+              }}
+              onClose={() => setIconPickerOpen(false)}
             />
           </Show>
 

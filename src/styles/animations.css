@@ -188,3 +188,37 @@
     transition-duration: 0.01ms;
   }
 }
+
+/* ─── Runtime effects degradation (low-FPS / low-power runtime) ──────────────
+ *
+ * `services/runtimeHealth.ts` writes `data-runtime-effects="full|reduced|minimal"`
+ * onto <html> based on a rolling rAF frame-time sample. This block consumes
+ * that signal so the JS-side degradation actually reaches the renderer:
+ *
+ *   • reduced  — keep the choreography but compress durations to ~1/4 so the
+ *                spring/cross-fade still feels intentional, not laggy.
+ *   • minimal  — drop animations entirely; instant state transitions only.
+ */
+[data-runtime-effects="reduced"] .spring-expand,
+[data-runtime-effects="reduced"] .content-reveal,
+[data-runtime-effects="reduced"] .item-lift {
+  transition-duration: 0.12s;
+}
+
+[data-runtime-effects="reduced"] .scale-in,
+[data-runtime-effects="reduced"] .pulse,
+[data-runtime-effects="reduced"] .item-enter {
+  animation-duration: 0.12s;
+}
+
+[data-runtime-effects="minimal"] .spring-expand,
+[data-runtime-effects="minimal"] .content-reveal,
+[data-runtime-effects="minimal"] .item-lift {
+  transition: none !important;
+}
+
+[data-runtime-effects="minimal"] .scale-in,
+[data-runtime-effects="minimal"] .pulse,
+[data-runtime-effects="minimal"] .item-enter {
+  animation: none !important;
+}

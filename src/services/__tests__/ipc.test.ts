@@ -347,6 +347,42 @@ describe("ipc service", () => {
 
   // ── Error propagation ──
 
+  // ── Bulk operations (Theme C — v2 five fields incl. icon) ──
+  describe("Bulk operations", () => {
+    it("bulkUpdateZones forwards updates payload verbatim, including icon", async () => {
+      mockInvoke.mockResolvedValue(2);
+
+      const updates: ipc.BulkZoneUpdate[] = [
+        { id: "z1", alias: "Docs", icon: "lucide:folder", locked: true },
+        {
+          id: "z2",
+          icon: "custom:abc123",
+          capsule_size: "large",
+          display_mode: "always",
+        },
+      ];
+      const n = await ipc.bulkUpdateZones(updates);
+
+      expect(mockInvoke).toHaveBeenCalledWith("bulk_update_zones", { updates });
+      expect(n).toBe(2);
+    });
+
+    it("BulkZoneUpdate type accepts the v2 five-field set (alias/icon/size/mode/lock)", () => {
+      // Pure type-shape probe — the assignment compiles only if every field
+      // is present on the interface. The runtime body is incidental.
+      const sample: ipc.BulkZoneUpdate = {
+        id: "z1",
+        alias: "MyZone",
+        icon: "lucide:folder",
+        capsule_size: "medium",
+        display_mode: "always",
+        locked: false,
+      };
+      expect(sample.icon).toBe("lucide:folder");
+      expect(sample.alias).toBe("MyZone");
+    });
+  });
+
   describe("Error propagation", () => {
     it("should propagate IPC errors to the caller", async () => {
       mockInvoke.mockRejectedValue(new Error("Backend crashed"));

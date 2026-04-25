@@ -73,17 +73,17 @@ jobs:
           releaseBody: |
             ## BentoDesk ${{ inputs.tag || github.ref_name }}
 
-            签名版发布，用于 GitHub Release 分发与 Tauri Updater 自动更新。
+            签名发布包，用于 GitHub Releases 分发和 Tauri Updater 自动更新。
 
             ### 下载内容
 
-            - `BentoDesk_*_x64-setup.exe`：Windows NSIS 安装包
-            - `*.sig`：对应安装包的 minisign 签名文件
-            - `latest.json`：Updater 使用的版本清单
+            - `BentoDesk_*_x64-setup.exe`: Windows NSIS 安装包
+            - `*.sig`: 对应安装包的 minisign 签名文件
+            - `latest.json`: Updater 使用的版本清单
 
             ### 升级说明
 
-            - 已安装较新版本的用户，可通过应用内更新或直接下载安装包覆盖安装
+            - 已安装旧版本的用户，可通过应用内更新或直接下载安装包覆盖安装
             - 安装前请先退出正在运行的 BentoDesk
             - 详细修复和变更请查看 `CHANGELOG.md`
 

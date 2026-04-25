@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "!v*-updater"
 
 jobs:
   build-and-release:
@@ -40,10 +41,13 @@ jobs:
         run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        # Unsigned public release workflow. Signed updater releases must go
+        # through `release-with-updater.yml`, which injects minisign secrets.
+        uses: tauri-apps/tauri-action@v0.6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          args: --no-sign
           tagName: ${{ github.ref_name }}
           releaseName: "BentoDesk ${{ github.ref_name }}"
           releaseBody: |
@@ -53,13 +57,13 @@ jobs:
 
             ### 下载内容
 
-            - `BentoDesk_*_x64-setup.exe`：NSIS 安装包，推荐普通用户使用
-            - `BentoDesk_*_x64_en-US.msi`：MSI 安装包，适合需要企业分发的场景
+            - `BentoDesk_*_x64-setup.exe`: NSIS 安装包，推荐普通用户使用
+            - `BentoDesk_*_x64_en-US.msi`: MSI 安装包，适合企业分发场景
 
             ### 安装说明
 
             - 安装前请先退出正在运行的 BentoDesk
-            - 如从旧版本手动升级，可直接运行安装包覆盖安装
+            - 从旧版本手动升级时，可直接运行安装包覆盖安装
             - 详细变更请查看 `CHANGELOG.md`
           releaseDraft: false
           prerelease: false

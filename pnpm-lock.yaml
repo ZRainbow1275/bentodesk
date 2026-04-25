@@ -30,8 +30,8 @@ importers:
         specifier: ^7.1.0
         version: 7.3.0
       lucide-static:
-        specifier: ^0.471.0
-        version: 0.471.0
+        specifier: ^1.11.0
+        version: 1.11.0
       solid-js:
         specifier: ^1.9
         version: 1.9.11
@@ -991,8 +991,8 @@ packages:
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
 
-  lucide-static@0.471.0:
-    resolution: {integrity: sha512-Fx4tdvPetYVgTPgac+iYuB9HcEum4wWb2sZvbnWHW1XUeOmjHkcum1TEa6zV1WmMoCTnE3eo3GsR4pXILaLFiA==}
+  lucide-static@1.11.0:
+    resolution: {integrity: sha512-+1S3QkfaDJnjTG7Gif6562COLU36bRgJkkb3r0goDfEprRwaRh/ivbIll37DUppmN1TDeGUgPib/BxaRXn3S6A==}
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -2051,7 +2051,7 @@ snapshots:
     dependencies:
       yallist: 3.1.1
 
-  lucide-static@0.471.0: {}
+  lucide-static@1.11.0: {}
 
   magic-string@0.30.21:
     dependencies:

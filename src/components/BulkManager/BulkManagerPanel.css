@@ -165,6 +165,41 @@
   align-self: stretch;
 }
 
+.bulk-manager__icon-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+}
+
+.bulk-manager__icon-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+.bulk-manager__icon-name {
+  font-size: 0.82rem;
+  color: var(--text-primary, #f0f0f5);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-manager__icon-placeholder {
+  font-size: 0.82rem;
+  color: var(--text-secondary, #c0c0cc);
+  flex: 1;
+  font-style: italic;
+}
+
 .bulk-manager__tablewrap {
   flex: 1;
   overflow: auto;
@@ -314,5 +349,16 @@
 
   .bulk-manager__apply-btn {
     width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bulk-manager__close,
+  .bulk-manager__btn,
+  .bulk-manager__sort,
+  .bulk-manager__icon-preview,
+  .bulk-manager__row {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
   }
 }

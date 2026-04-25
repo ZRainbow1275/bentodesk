@@ -72,3 +72,10 @@
   background: rgba(239, 68, 68, 0.2);
   color: var(--accent-red);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-header__btn {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

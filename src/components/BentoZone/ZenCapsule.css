@@ -124,3 +124,10 @@
 .zen-capsule--circle.zen-capsule--large .zen-capsule__icon {
   font-size: 28px;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .zen-capsule {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

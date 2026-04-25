@@ -56,3 +56,10 @@
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.08);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .search-bar__clear {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

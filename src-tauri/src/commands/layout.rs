@@ -15,6 +15,35 @@ use crate::AppState;
 #[derive(Debug, Clone, Serialize)]
 pub struct LayoutNormalizeReport {
     pub normalized_zone_ids: Vec<String>,
+    /// Items the layout-restore path could not resolve to a single
+    /// authoritative on-disk location (spec G's `AmbiguousDisplayName` and
+    /// `Unrecognised` outcomes). Aggregated across both startup normalize
+    /// and per-zone restore so the UI can surface a single skipped count.
+    /// Defaults to empty when no items were skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedRestoreItem>,
+}
+
+/// One item that the spec G identity ladder refused to restore. Carries
+/// the reason so the caller can decide between "log + ignore" and
+/// "surface to the user via toast".
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SkippedRestoreItem {
+    pub item_id: String,
+    pub item_name: String,
+    pub reason: SkippedRestoreReason,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkippedRestoreReason {
+    /// Multiple desktop / hidden files share the same display name and the
+    /// item carried no `original_path` / `hidden_path` to disambiguate.
+    AmbiguousDisplayName,
+    /// No identifier resolves: paths point at vanished files and no
+    /// desktop entry shares the display name.
+    Unrecognised,
 }
 
 /// Save the current layout as a named snapshot.
@@ -97,6 +126,7 @@ pub async fn normalize_zone_layout(
 
     Ok(LayoutNormalizeReport {
         normalized_zone_ids,
+        skipped: Vec::new(),
     })
 }
 
@@ -287,5 +317,181 @@ mod tests {
         assert_eq!(layout.zones[1].id, "a");
         assert_eq!(layout.zones[1].sort_order, 1);
         assert_eq!(layout.zones[1].stack_order, 1);
+    }
+
+    #[test]
+    fn normalize_layout_drops_multiple_singleton_stack_badges() {
+        // Three zones each holding their own non-overlapping stack_id are all
+        // singletons. Each badge must be cleared, none of them should keep a
+        // residual stack_order, and the changed report must list every zone.
+        let mut layout = LayoutData::default();
+        let make = |id: &str, stack: &str| {
+            let mut z = make_zone(id);
+            z.position.x_percent = 10.0;
+            z.position.y_percent = 10.0;
+            z.expanded_size.w_percent = 20.0;
+            z.expanded_size.h_percent = 20.0;
+            z.stack_id = Some(stack.to_string());
+            z.stack_order = 4;
+            z
+        };
+        layout.zones = vec![
+            make("solo-a", "ghost-a"),
+            make("solo-b", "ghost-b"),
+            make("solo-c", "ghost-c"),
+        ];
+
+        let changed = normalize_layout_data(&mut layout);
+
+        assert_eq!(
+            changed,
+            vec!["solo-a".to_string(), "solo-b".to_string(), "solo-c".to_string()]
+        );
+        for zone in &layout.zones {
+            assert!(
+                zone.stack_id.is_none(),
+                "zone {} should drop singleton stack badge",
+                zone.id
+            );
+            assert_eq!(zone.stack_order, 0, "zone {} should reset stack_order", zone.id);
+        }
+    }
+
+    #[test]
+    fn normalize_layout_resolves_duplicate_stack_order_collisions() {
+        // Two members of the same stack carry an identical stack_order. The
+        // tiebreaker chain (stack_order, sort_order, id) must hand them
+        // distinct contiguous slots without dropping anyone.
+        let mut layout = LayoutData::default();
+        let mut alpha = make_zone("alpha");
+        alpha.sort_order = 0;
+        alpha.position.x_percent = 5.0;
+        alpha.position.y_percent = 5.0;
+        alpha.expanded_size.w_percent = 20.0;
+        alpha.expanded_size.h_percent = 20.0;
+        alpha.stack_id = Some("group".to_string());
+        alpha.stack_order = 1;
+
+        let mut bravo = make_zone("bravo");
+        bravo.sort_order = 1;
+        bravo.position.x_percent = 30.0;
+        bravo.position.y_percent = 5.0;
+        bravo.expanded_size.w_percent = 20.0;
+        bravo.expanded_size.h_percent = 20.0;
+        bravo.stack_id = Some("group".to_string());
+        bravo.stack_order = 1;
+
+        let mut charlie = make_zone("charlie");
+        charlie.sort_order = 2;
+        charlie.position.x_percent = 55.0;
+        charlie.position.y_percent = 5.0;
+        charlie.expanded_size.w_percent = 20.0;
+        charlie.expanded_size.h_percent = 20.0;
+        charlie.stack_id = Some("group".to_string());
+        charlie.stack_order = 1;
+
+        layout.zones = vec![alpha, bravo, charlie];
+
+        let changed = normalize_layout_data(&mut layout);
+
+        let stack_orders: Vec<u32> = layout.zones.iter().map(|z| z.stack_order).collect();
+        assert_eq!(stack_orders, vec![0, 1, 2]);
+        // Tiebreak by id when stack_order + sort_order tie => alpha < bravo < charlie.
+        let ids: Vec<&str> = layout.zones.iter().map(|z| z.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "bravo", "charlie"]);
+        // alpha shifted 1->0 and charlie shifted 1->2; bravo's slot stayed at 1
+        // so it is not reported as changed.
+        assert!(changed.contains(&"alpha".to_string()));
+        assert!(changed.contains(&"charlie".to_string()));
+        assert!(!changed.contains(&"bravo".to_string()));
+    }
+
+    #[test]
+    fn normalize_layout_clamps_negative_and_overflow_positions() {
+        // A legacy zone migrated from a different resolution may have stored
+        // out-of-bounds coordinates. After normalize, every zone must sit in
+        // the [0,100) interval (with size kept inside [5,100]).
+        let mut layout = LayoutData::default();
+
+        let mut negative = make_zone("neg");
+        negative.position.x_percent = -50.0;
+        negative.position.y_percent = -200.0;
+        negative.expanded_size.w_percent = 20.0;
+        negative.expanded_size.h_percent = 30.0;
+
+        let mut overflow = make_zone("over");
+        overflow.position.x_percent = 250.0;
+        overflow.position.y_percent = 1000.0;
+        overflow.expanded_size.w_percent = 200.0; // clamp size first
+        overflow.expanded_size.h_percent = 250.0;
+
+        layout.zones = vec![negative, overflow];
+
+        let changed = normalize_layout_data(&mut layout);
+
+        assert!(changed.contains(&"neg".to_string()));
+        assert!(changed.contains(&"over".to_string()));
+
+        for zone in &layout.zones {
+            assert!(
+                zone.position.x_percent >= 0.0 && zone.position.x_percent < 100.0,
+                "zone {} x_percent {} out of [0,100)",
+                zone.id,
+                zone.position.x_percent
+            );
+            assert!(
+                zone.position.y_percent >= 0.0 && zone.position.y_percent < 100.0,
+                "zone {} y_percent {} out of [0,100)",
+                zone.id,
+                zone.position.y_percent
+            );
+            assert!(
+                zone.expanded_size.w_percent >= 5.0 && zone.expanded_size.w_percent <= 100.0,
+                "zone {} w_percent {} out of [5,100]",
+                zone.id,
+                zone.expanded_size.w_percent
+            );
+            assert!(
+                zone.expanded_size.h_percent >= 5.0 && zone.expanded_size.h_percent <= 100.0,
+                "zone {} h_percent {} out of [5,100]",
+                zone.id,
+                zone.expanded_size.h_percent
+            );
+        }
+    }
+
+    #[test]
+    fn layout_normalize_report_carries_changed_zone_ids() {
+        // Build a report from the public `LayoutNormalizeReport` shape and
+        // confirm the contract: serialize cleanly, contain only the zone IDs
+        // that the normalizer reported as changed.
+        let mut layout = LayoutData::default();
+        let mut z1 = make_zone("z1");
+        z1.position.x_percent = 95.0;
+        z1.position.y_percent = -10.0;
+        z1.expanded_size.w_percent = 30.0;
+        z1.expanded_size.h_percent = 120.0;
+        let mut z2 = make_zone("z2");
+        z2.position.x_percent = 5.0;
+        z2.position.y_percent = 5.0;
+        z2.expanded_size.w_percent = 10.0;
+        z2.expanded_size.h_percent = 10.0;
+        z2.sort_order = 0;
+        layout.zones = vec![z1, z2];
+
+        let normalized_zone_ids = normalize_layout_data(&mut layout);
+        let report = LayoutNormalizeReport {
+            normalized_zone_ids: normalized_zone_ids.clone(),
+            skipped: Vec::new(),
+        };
+
+        assert_eq!(report.normalized_zone_ids, normalized_zone_ids);
+        assert!(report.normalized_zone_ids.contains(&"z1".to_string()));
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            json.contains("normalized_zone_ids"),
+            "report payload missing field, got {json}"
+        );
     }
 }

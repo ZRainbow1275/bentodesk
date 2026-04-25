@@ -40,7 +40,10 @@ jobs:
         run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri app
-        run: pnpm tauri build
+        # `tauri.conf.json` enables updater artifacts, but CI build-test runs
+        # without release signing secrets. Use the same unsigned release build
+        # path that is verified locally (`pnpm tauri build --no-sign`).
+        run: pnpm tauri build --no-sign
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4

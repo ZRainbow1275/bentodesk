@@ -167,3 +167,17 @@
 .settings-btn--danger:active {
   transform: translateY(0);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .context-menu,
+  .context-menu__item,
+  .context-menu__submenu-trigger,
+  .settings-btn,
+  .settings-btn--danger,
+  .settings-btn--danger:hover,
+  .settings-btn--danger:active {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+    transform: none;
+  }
+}

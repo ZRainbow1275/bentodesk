@@ -365,3 +365,18 @@
   padding: var(--spacing-sm);
   text-align: center;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .smart-group__panel,
+  .smart-group__close-btn,
+  .smart-group__suggestion-card,
+  .smart-group__action-btn,
+  .smart-group__primary-btn,
+  .smart-group__secondary-btn,
+  .smart-group__color-swatch,
+  .smart-group__icon-btn,
+  .smart-group__preview-icon {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

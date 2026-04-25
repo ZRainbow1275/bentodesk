@@ -1,5 +1,7 @@
 //! Item management commands.
 
+use std::path::{Path, PathBuf};
+
 use tauri::State;
 
 use crate::error::BentoDeskError;
@@ -398,4 +400,294 @@ pub async fn toggle_item_wide(
     state.persist_layout();
 
     Ok(result)
+}
+
+// ─── Layout-restore identity fallback (spec G) ───────────────────────────
+
+/// Outcome of resolving a `BentoItem` against a real desktop directory at
+/// layout-restore time. The variants encode every branch of the fallback
+/// ladder so callers (and tests) can distinguish "we restored this" from
+/// "we deliberately skipped this and logged a warning".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreIdentity {
+    /// Tier 1 — `original_path` exists on the real desktop.
+    Original(PathBuf),
+    /// Tier 2 — `hidden_path` (the `.bentodesk/` mirror) exists on disk.
+    Hidden(PathBuf),
+    /// Tier 3 — only `name` matches and exactly one file on the desktop
+    /// shares that display name, so the match is unambiguous.
+    DisplayName(PathBuf),
+    /// Tier 4 — `name` matches, multiple desktop files share that display
+    /// name. We refuse to guess and emit a warning instead.
+    AmbiguousDisplayName,
+    /// Tier 5 — none of `original_path`, `hidden_path`, or `name` resolve
+    /// against either the desktop or the hidden mirror. The item is skipped.
+    Unrecognised,
+}
+
+/// Resolve a `BentoItem` to the real on-disk file the next layout restore
+/// should target.
+///
+/// Priority chain (spec G — "图标恢复不能只按 display_name"):
+/// 1. `original_path` — exists on the desktop, restore there.
+/// 2. `hidden_path` — exists inside `.bentodesk/<zone>/`, restore from there.
+/// 3. `name` — unique match against the desktop directory listing.
+/// 4. `name` — multiple matches → refuse, log warning, skip.
+/// 5. None of the above → unrecognised, skip with warning.
+///
+/// `desktop_dir` is the real desktop directory (or override) and
+/// `hidden_dir` is the `.bentodesk/` root. Both must already exist on disk;
+/// callers must NOT pass synthesized paths.
+pub fn resolve_restore_identity(
+    item: &BentoItem,
+    desktop_dir: &Path,
+    hidden_dir: &Path,
+) -> RestoreIdentity {
+    // Tier 1: original_path beats every other identifier when the file is
+    // still sitting where the user originally placed it.
+    if let Some(orig) = item
+        .original_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let p = PathBuf::from(orig);
+        if p.exists() {
+            return RestoreIdentity::Original(p);
+        }
+    }
+
+    // Tier 2: hidden_path under .bentodesk/<zone>/.
+    if let Some(hidden) = item
+        .hidden_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let p = PathBuf::from(hidden);
+        if p.exists() {
+            return RestoreIdentity::Hidden(p);
+        }
+    }
+
+    // Tier 3 / 4: scan the real desktop directory for files whose visible
+    // caption (file_name) matches `item.name`. Hidden mirror is consulted
+    // too because items removed from the desktop may still live there.
+    let display_name = item.name.trim();
+    if display_name.is_empty() {
+        tracing::warn!(
+            "restore_identity: item {} has empty display name and no resolvable path",
+            item.id
+        );
+        return RestoreIdentity::Unrecognised;
+    }
+
+    let mut matches = collect_display_name_matches(desktop_dir, display_name);
+    matches.extend(collect_display_name_matches(hidden_dir, display_name));
+    // Deduplicate canonicalised entries — a file could be referenced under
+    // different relative roots but still resolve to the same inode.
+    matches.sort();
+    matches.dedup();
+
+    match matches.len() {
+        0 => {
+            tracing::warn!(
+                "restore_identity: item {} ({}) cannot be restored — no path or name match",
+                item.id,
+                item.name
+            );
+            RestoreIdentity::Unrecognised
+        }
+        1 => RestoreIdentity::DisplayName(matches.into_iter().next().expect("len==1")),
+        _ => {
+            tracing::warn!(
+                "restore_identity: item {} ({}) skipped — {} candidates share the display name; refusing to guess",
+                item.id,
+                item.name,
+                matches.len()
+            );
+            RestoreIdentity::AmbiguousDisplayName
+        }
+    }
+}
+
+/// List every file inside `dir` whose file name (caption) equals
+/// `display_name`. Returns `Vec<PathBuf>` sorted by `sort()` so callers
+/// can dedupe deterministically. Missing directory → empty vec.
+fn collect_display_name_matches(dir: &Path, display_name: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            if name == display_name {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::persistence::{GridPosition, ItemType};
+    use std::fs;
+    use std::io::Write;
+
+    fn make_item(
+        id: &str,
+        name: &str,
+        path: &str,
+        original_path: Option<&str>,
+        hidden_path: Option<&str>,
+    ) -> BentoItem {
+        BentoItem {
+            id: id.to_string(),
+            zone_id: "z".to_string(),
+            item_type: ItemType::File,
+            name: name.to_string(),
+            path: path.to_string(),
+            icon_hash: "h".to_string(),
+            grid_position: GridPosition {
+                col: 0,
+                row: 0,
+                col_span: 1,
+            },
+            is_wide: false,
+            added_at: "2026-04-22T00:00:00Z".to_string(),
+            original_path: original_path.map(String::from),
+            hidden_path: hidden_path.map(String::from),
+            file_missing: false,
+            icon_x: None,
+            icon_y: None,
+        }
+    }
+
+    fn touch(path: &Path) {
+        let mut f = fs::File::create(path).expect("create temp file");
+        f.write_all(b"real-content").expect("write temp file");
+    }
+
+    fn setup_dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("desktop");
+        let hidden = tmp.path().join(".bentodesk").join("zone-a");
+        fs::create_dir_all(&desktop).expect("desktop dir");
+        fs::create_dir_all(&hidden).expect("hidden dir");
+        (tmp, desktop, hidden)
+    }
+
+    /// Tier 1 — `original_path` exists on the real desktop. Restore must
+    /// target the original location, never fall through to lower tiers.
+    #[test]
+    fn tier_1_original_path_wins_when_present_on_desktop() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        let original = desktop.join("report.pdf");
+        touch(&original);
+        // A homonym in the hidden dir must NOT trick the resolver into
+        // returning Tier 2 / 3 — Tier 1 is authoritative.
+        touch(&hidden.join("report.pdf"));
+
+        let item = make_item(
+            "i-1",
+            "report.pdf",
+            &original.to_string_lossy(),
+            Some(&original.to_string_lossy()),
+            Some(&hidden.join("report.pdf").to_string_lossy()),
+        );
+
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::Original(original));
+    }
+
+    /// Tier 2 — `original_path` is missing on disk but `hidden_path`
+    /// resolves. The item still lives in `.bentodesk/` so restore must
+    /// target the hidden mirror.
+    #[test]
+    fn tier_2_hidden_path_used_when_original_missing() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        let hidden_file = hidden.join("notes.txt");
+        touch(&hidden_file);
+        // original_path was never recorded.
+        let item = make_item(
+            "i-2",
+            "notes.txt",
+            &hidden_file.to_string_lossy(),
+            None,
+            Some(&hidden_file.to_string_lossy()),
+        );
+
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::Hidden(hidden_file));
+    }
+
+    /// Tier 3 — neither path is recorded but the desktop has exactly one
+    /// file matching the persisted display name. Caller can safely use it.
+    #[test]
+    fn tier_3_display_name_used_when_paths_missing_and_match_unique() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        let candidate = desktop.join("invoice.pdf");
+        touch(&candidate);
+        // Distractor with a different name -- must NOT match.
+        touch(&desktop.join("other.pdf"));
+
+        let item = make_item("i-3", "invoice.pdf", "", None, None);
+
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::DisplayName(candidate));
+    }
+
+    /// Tier 4 — duplicate display names across desktop and hidden dirs.
+    /// Resolver refuses to guess and surfaces `AmbiguousDisplayName` so
+    /// the caller can log + skip rather than restoring the wrong file.
+    #[test]
+    fn tier_4_ambiguous_display_name_refuses_to_guess() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        // Two real, distinct files with the same caption -- different bytes,
+        // different parent dirs. No sane heuristic can pick between them.
+        touch(&desktop.join("draft.docx"));
+        touch(&hidden.join("draft.docx"));
+
+        let item = make_item("i-4", "draft.docx", "", None, None);
+
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::AmbiguousDisplayName);
+    }
+
+    /// Tier 5 — every signal misses: paths point at vanished files and
+    /// no desktop entry shares the display name. Resolver returns
+    /// `Unrecognised` so the restore loop can skip cleanly.
+    #[test]
+    fn tier_5_completely_unknown_item_is_skipped() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        // Empty desktop + empty hidden dir.
+
+        let item = make_item(
+            "i-5",
+            "ghost.bin",
+            "",
+            Some("Z:/never/existed.bin"),
+            Some("Z:/also/missing.bin"),
+        );
+
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::Unrecognised);
+    }
+
+    /// Edge — empty display name and no paths must collapse to
+    /// `Unrecognised` rather than scanning every file in the desktop dir.
+    #[test]
+    fn empty_name_with_no_paths_is_unrecognised() {
+        let (_tmp, desktop, hidden) = setup_dirs();
+        touch(&desktop.join("anything.txt"));
+
+        let item = make_item("i-6", "   ", "", None, None);
+        let identity = resolve_restore_identity(&item, &desktop, &hidden);
+        assert_eq!(identity, RestoreIdentity::Unrecognised);
+    }
 }

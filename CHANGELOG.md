@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.2] — 2026-04-25 · **Zone UX / Stack / Layout Repair Closeout**
+
+继 0422 真实录屏暴露的 zone 堆叠 / 批量操作 / 边缘唤醒 / 图标空白 / 名称可读 / 布局恢复一组耦合性问题，本版完成一次"完整收尾"修复，重点不在新增功能，而在把现有交互闭环到生产级稳定。
+
+### Fixed — 修复
+
+#### Stack v2 渲染模型
+- 将 stack 从"多个完整 BentoZone 嵌套在 transform wrapper 内"改造为"单一 StackCapsule + StackTray + 单成员 FocusedZonePreview"，**消除多 panel 同时抢交互**导致的视觉/命中混乱。
+- `stack_zones` 现主动拒绝 < 2 输入（之前只拒绝 empty），消除孤儿 stack badge 残留的隐式契约——不再依赖 `normalize_zone_layout` 启动时清理。
+
+#### 升级后图标空白与桌面布局错位
+- `bentodesk://icon/{hash}` cache miss 现返回 **HTTP 404** 而非"看似成功的透明 1×1 PNG"——前端可识别失败并触发 fallback / 重新提取，不再误判为成功渲染。
+- 新增 `repair_item_icon_hashes` Tauri 命令：遍历 layout 内 items，对空 hash / cache miss / path 已变化三种情况重新计算并回写。App 启动阶段 `repairItemIconHashes()` + `normalizeZoneLayout()` 通过 `Promise.allSettled` 并行调用，失败隔离不阻塞 UI。
+- 新增 **`RestoreIdentity` 5 档优先级链**（`Original` → `Hidden` → `DisplayName` → `AmbiguousDisplayName` → `Unrecognised`），覆盖 spec G "稳定身份恢复"契约。`restore_zone_items` 已切换为该链，**同名多文件场景不再误恢复**——而是计入 skipped 报告并跳过。
+
+#### 批量操作闭环
+- `BulkZoneUpdate` IPC 结构补 `icon: Option<String>` 字段（前端 `BulkZoneUpdate` 接口、后端 `apply_bulk_updates` 分支、`BulkManagerPanel` UI 组件 + IconPicker 触发卡片，全链路对齐）。BulkManager v2 五字段 `icon / alias / display_mode / size / lock` **全部齐全**。
+- 多 zone 实时整体拖动：`beginGroupZoneDrag` / `updateGroupZoneDrag` / `endGroupZoneDrag` 全链路接入 `BentoZone.tsx` 渲染管线，拖动期间所有选中 zone 实时跟随预览（不再 mouseup 后跳位）。
+
+#### 边缘唤醒分流
+- `computeInflateForPosition` 对 stack capsule 与普通 capsule 分别返回 inflate（zone box 160×48 / stack 184×56；zone edgeThreshold 120 / stack 132），靠近屏幕边缘时**只向屏幕外缘扩张，不向内侵蚀**。
+- `hitTest.test.ts` 测试集扩展到 32 case（含 4 边 × 2 类型 + magnitude 区分）。
+
+#### 动画与兼容性
+- `prefers-reduced-motion: reduce` 覆盖率 **20/20 = 100%**（核心 6 + 外围 14）：BulkManagerPanel / ItemCard / SettingsPanel / PromptModal / MiniBarView / IconPicker / SmartGroupSuggestor / About / ZoneEditor / ZenCapsule / ContextMenu / SearchBar / SnapshotPicker / PanelHeader 全部追加。
+- 低性能降级：`runtimeHealth.ts` 的 `data-runtime-effects="reduced|minimal"` 信号现接入 CSS 消费层（`spring-expand` / `content-reveal` / `item-lift` / `scale-in` / `pulse` / `item-enter`），从"信号断头路"补成端到端降级路径。
+- 注：`spring-expand` 保留 v1.2.0 的 `width/height` 实现（`contain: layout paint` + `@property --rad` 合成层调优），不强行切到 transform-only。
+
+### Added — 新增
+
+- **图标库扩充**：`lucide-static` 升级 `0.471.0 → 1.11.0`，`icon-index.json` 重生成 **1947 条**（≥1600 spec 要求）。
+- **`RestoreZoneItemsReport` / `SkippedRestoreItem` / `SkippedRestoreReason`** 三个新公共类型，让恢复路径的跳过状态对调用方可见，便于未来 UI 层提示。
+- **`resolve_restore_identity(item, desktop_dir, hidden_dir)`** + 6 个 case 的纯函数测试，作为 spec G 契约着陆点。
+- **`apply_stack_zones` / `apply_unstack_zones` / `apply_reorder_stack`** 抽出为纯 helper，`stack_zones` Tauri 命令成为薄壳——lock-mutate-persist 链路可独立单测。
+
+### Tests — 测试覆盖
+
+- 后端 `cargo test --lib`：**315 passed / 0 failed**（v1.2.1 时 ~270 → 现 315，**新增 ~45 个**）：
+  - `commands/bulk.rs`：13（含 icon 字段全链路 + 5 种 layout 算法）
+  - `commands/icon.rs`：5（empty / cache miss / path 变 / no-op / 边界）— 此前 0
+  - `commands/item.rs`：6（`RestoreIdentity` 5 档 + 边界）— 此前 0
+  - `commands/layout.rs`：6（clamp / reindex / drop singleton / collision / overflow / report）
+  - `commands/zone.rs`：7（含 stack create / unstack / reorder / 单成员拒绝 / 跨 stack 转移）
+  - `hidden_items.rs`：1 集成测试（ambiguous distractor 不误恢复）
+- 前端 `pnpm test --run`：**192 passed / 0 failed**（v1.2.1 时 ~110 → 现 192，**新增 ~82 个**）：
+  - `services/__tests__/hitTest.test.ts`：32（4 边 × 2 类型 + magnitude）
+  - `services/__tests__/stack.test.ts`：扩充 9 case（60% 阈值 + tray open + stackMap）
+  - `services/__tests__/runtimeEffects.test.ts`：9（dataset 信号 + 选择器命中）
+  - `services/__tests__/ipc.test.ts`：扩充（`bulkUpdateZones` icon 字段透传 + 类型探针）
+  - `__tests__/spec-matrix.test.ts`：**41**（spec 9 项 × 视频 6 时间点融合矩阵）
+- `cargo clippy --lib --tests --all-features -- -D warnings`：**0 警告**
+- `npx tsc --noEmit`：**0 错误**
+- `pnpm build`：成功（CSS 87.92 kB / JS 459.40 kB / icon-index 1947 条）
+
+### Internal — 工程结构
+
+- 新增 `src/components/BentoZone/StackCapsule.tsx` / `StackTray.tsx` / `FocusedZonePreview.tsx`
+- 新增 `src/services/groupDrag.ts` + `src/stores/stacks.ts`
+- 新增后端命令 `repair_item_icon_hashes` / `normalize_zone_layout`
+- 新增公共类型 `RestoreIdentity` / `RestoreZoneItemsReport` / `LayoutNormalizeReport.skipped`
+
+### 升级注意
+
+- v1.2.1 → v1.2.2 走自动 updater（minisign 签名验证）。
+- 旧布局加载 → 启动 `repairItemIconHashes` + `normalizeZoneLayout` 自动修复透明图标 / 越界位置 / 同名 ambiguous item。
+- `BulkZoneUpdate.icon` 是新增字段，老前端发送旧 payload 仍兼容（serde `default`）。
+
+---
+
 ## [1.2.1] - 2026-04-22
 
 补丁版，面向已经安装 `v1.2.0` 但遇到启动闪退或开机自启失效的用户。

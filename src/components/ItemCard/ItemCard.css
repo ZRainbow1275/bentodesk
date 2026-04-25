@@ -118,3 +118,11 @@
 .item-card__missing-badge--visible {
   display: inline-flex;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .item-card,
+  .item-card:active {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

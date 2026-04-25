@@ -208,3 +208,15 @@
 .snapshot-btn--cancel:hover {
   background: rgba(255, 255, 255, 0.1);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .snapshot-picker,
+  .snapshot-picker__close-btn,
+  .snapshot-picker__item,
+  .snapshot-btn,
+  .snapshot-btn--confirm,
+  .snapshot-btn--cancel {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}

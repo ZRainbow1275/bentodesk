@@ -114,3 +114,12 @@ body {
   padding: 2px 4px;
   background: rgba(239, 68, 68, 0.12);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .minibar__item,
+  .minibar__item:hover {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+    transform: none;
+  }
+}

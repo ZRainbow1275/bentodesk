@@ -115,3 +115,11 @@
 .about-dialog__close-btn:hover {
   background: rgba(255, 255, 255, 0.1);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .about-dialog,
+  .about-dialog__close-btn {
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
+  }
+}
