@@ -16,6 +16,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify tag matches package versions
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          EXPECTED="${TAG#v}"
+          EXPECTED="${EXPECTED%-updater}"
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          PKG=$(node -p "require('./package.json').version")
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "tag=$EXPECTED conf=$CONF pkg=$PKG cargo=$CARGO"
+          if [ "$EXPECTED" != "$CONF" ] || [ "$EXPECTED" != "$PKG" ] || [ "$EXPECTED" != "$CARGO" ]; then
+            echo "::error::Version mismatch — tag $TAG expects $EXPECTED but found conf=$CONF pkg=$PKG cargo=$CARGO"
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
