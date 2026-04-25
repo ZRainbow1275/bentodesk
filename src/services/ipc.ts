@@ -16,6 +16,7 @@ import type {
   ZoneDisplayMode,
   ItemIconRepairReport,
   LayoutNormalizeReport,
+  LayoutReconcileReport,
 } from "../types/zone";
 import type { AppSettings, SettingsUpdate } from "../types/settings";
 import type {
@@ -165,6 +166,24 @@ export async function repairItemIconHashes(): Promise<ItemIconRepairReport> {
 
 export async function normalizeZoneLayout(): Promise<LayoutNormalizeReport> {
   return invoke<LayoutNormalizeReport>("normalize_zone_layout");
+}
+
+/**
+ * Reconcile every zone's items against on-disk reality.
+ *
+ * For each item, the backend either:
+ * - confirms the file is already inside `.bentodesk/{zone_id}/` (no-op),
+ * - moves the file from the desktop into `.bentodesk/{zone_id}/` and
+ *   updates `hidden_path`, or
+ * - flags the item as `file_missing = true` when neither path resolves.
+ *
+ * Must run BEFORE `loadZones()` on startup so the UI sees the final
+ * `hidden_path` / `file_missing` values. When `reconciled_count > 0` or
+ * `missing_count > 0`, callers should re-fetch zones to pick up the
+ * mutated layout.
+ */
+export async function reconcileAllZoneItems(): Promise<LayoutReconcileReport> {
+  return invoke<LayoutReconcileReport>("reconcile_all_zone_items");
 }
 
 // ─── Layout / Snapshot Management ────────────────────────────

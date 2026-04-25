@@ -46,6 +46,37 @@
   will-change: width, height, --rad;
 }
 
+/*
+ * #8 Real spring-expand keyframes — used for capsule wake / panel emerge.
+ * The 60% overshoot (scale 1.02) is what makes the motion feel like a
+ * physical spring rather than the previous linear ease-out, which was
+ * the user-reported "胶囊伸缩动画不丝滑" symptom (P1 in v3).
+ *
+ * The keyframe is intentionally short (240ms) so it stacks cleanly on top
+ * of the .spring-expand width/height transition (500ms): the size
+ * interpolation drives the "growth" while these keyframes drive the
+ * "pop". They don't fight each other because animation acts on `transform`
+ * and `opacity` — distinct properties from the transitioned width/height.
+ */
+@keyframes spring-expand {
+  0% {
+    transform: scale(0.96);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.02);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.spring-emerge {
+  animation: spring-expand 240ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
 /* Content reveal — delayed fade + slide for zone content */
 .content-reveal {
   opacity: 0;
@@ -146,6 +177,10 @@
     transition-duration: 0.01ms;
   }
 
+  .spring-emerge {
+    animation-duration: 0.01ms;
+  }
+
   .content-reveal {
     transition-duration: 0.01ms;
     transition-delay: 0ms;
@@ -207,7 +242,8 @@
 
 [data-runtime-effects="reduced"] .scale-in,
 [data-runtime-effects="reduced"] .pulse,
-[data-runtime-effects="reduced"] .item-enter {
+[data-runtime-effects="reduced"] .item-enter,
+[data-runtime-effects="reduced"] .spring-emerge {
   animation-duration: 0.12s;
 }
 
@@ -219,6 +255,7 @@
 
 [data-runtime-effects="minimal"] .scale-in,
 [data-runtime-effects="minimal"] .pulse,
-[data-runtime-effects="minimal"] .item-enter {
+[data-runtime-effects="minimal"] .item-enter,
+[data-runtime-effects="minimal"] .spring-emerge {
   animation: none !important;
 }

@@ -9,10 +9,17 @@ import {
 } from "solid-js";
 import type { BentoZone as BentoZoneType } from "../../types/zone";
 import { detachZoneFromStackAction, unstackZonesAction } from "../../stores/stacks";
-import { updateZone } from "../../stores/zones";
+import { loadZones, updateZone, zonesStore } from "../../stores/zones";
 import { getViewportSize } from "../../stores/ui";
 import { acquireDragLock } from "../../services/hitTest";
 import { getZoneDisplayMode } from "../../stores/settings";
+import { bulkUpdateZones } from "../../services/ipc";
+import {
+  beginGroupZoneDrag,
+  endGroupZoneDrag,
+  selectedZoneIds,
+  updateGroupZoneDrag,
+} from "../../stores/selection";
 import { t } from "../../i18n";
 import FocusedZonePreview from "./FocusedZonePreview";
 import StackCapsule from "./StackCapsule";
@@ -163,6 +170,82 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     const zone = baseZone();
     if (!zone) return;
 
+    // Group-drag path: when this stack is part of a multi-selection alongside
+    // free-standing zones (or other stacks), drag every selected zone as one.
+    // The preview is driven by the shared selection store so BentoZone's
+    // dragPosition/preview consumers light up too.
+    const memberIds = new Set(props.zones.map((m) => m.id));
+    const currentSelection = selectedZoneIds();
+    const stackIsSelected = props.zones.some((m) => currentSelection.has(m.id));
+    if (stackIsSelected && currentSelection.size > 1) {
+      const allSelectedZones = zonesStore.zones.filter((z) =>
+        currentSelection.has(z.id),
+      );
+      const reachesOutsideStack = allSelectedZones.some(
+        (z) => !memberIds.has(z.id),
+      );
+      if (
+        reachesOutsideStack &&
+        allSelectedZones.length >= 2 &&
+        !allSelectedZones.some((z) => z.locked)
+      ) {
+        // Include every stack member (selected or not) so the cluster moves
+        // as a rigid unit alongside the cross-stack selection.
+        const draggable = new Map<string, BentoZoneType>();
+        for (const z of allSelectedZones) draggable.set(z.id, z);
+        for (const m of props.zones) draggable.set(m.id, m);
+
+        const releaseDrag = acquireDragLock();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        let moved = false;
+
+        beginGroupZoneDrag(
+          [...draggable.values()].map((z) => ({
+            id: z.id,
+            position: z.position,
+          })),
+        );
+
+        const onMouseMove = (ev: MouseEvent): void => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          if (!moved && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+          moved = true;
+          updateGroupZoneDrag({
+            x_percent: (dx / window.innerWidth) * 100,
+            y_percent: (dy / window.innerHeight) * 100,
+          });
+        };
+
+        const onMouseUp = async (): Promise<void> => {
+          document.removeEventListener("mousemove", onMouseMove);
+          document.removeEventListener("mouseup", onMouseUp);
+          try {
+            const finalPreview = endGroupZoneDrag();
+            if (!moved) return;
+            suppressNextClick = true;
+            const updates = Object.entries(finalPreview).map(
+              ([id, position]) => ({ id, position }),
+            );
+            if (updates.length > 0) {
+              await bulkUpdateZones(updates);
+              await loadZones();
+            }
+          } finally {
+            releaseDrag();
+          }
+        };
+
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+        return;
+      }
+    }
+
+    // Default path: drag the stack as a self-contained cluster — each member
+    // shifts by the same delta as the base capsule. This is unchanged from
+    // the pre-#3 behaviour for a stack that isn't in a wider selection.
     const releaseDrag = acquireDragLock();
     const startX = e.clientX;
     const startY = e.clientY;

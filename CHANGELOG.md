@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.3] — 2026-04-25 · **Real Fix After v1.2.2 Vacuous-Pass Closeout**
+
+v1.2.2 闭环宣称修好的问题，在用户真实桌面（13 zones / 91 items）安装后**全部依旧**——上一轮 agent 协作产出 41 个测试全绿，但测试都是 mock IPC 测路由、不是真实复现，违反了 spec.md 第 8 / 354 行明写的"必须真实环境验证 + 必须复放视频路径"。本版逐个真实复现 → 真实修复，外加打包架构修正。
+
+### Fixed — 修复
+
+#### **桌面 reconcile（核心根因）**
+- 诊断：用户 layout.json 13 zones / 91 items，全部 `desktop_ok=91 / hidden_ok=0`，`Desktop/.bentodesk/` 目录从未存在——zone 是"假 overlay"，layout.json 写着 hidden_path 但物理文件从未离开桌面。
+- 新增后端 `reconcile_zone_items_with_dirs()` 纯 helper + `reconcile_all_zone_items` Tauri 命令：per-item 三态（`hidden_path` 已存在 → 跳过；`original_path` 在 desktop_dir 下 → move 到 `.bentodesk/{zone_id}/{filename}` 并改写 `hidden_path`；否则 `file_missing=true`）。安全护栏：仅 desktop_dir 子项才搬运。
+- 启动序列重排（`App.tsx`）：`loadSettings + refreshMonitors → 并行 reconcile + repair + normalize → loadZones`。**reconcile 在 loadZones 之前**，确保首次渲染就看到真实接管态。
+- `cargo test reconcile` 4 case 全部用 `tempfile::TempDir` 真实 fs（无 mock），含 5-lnk + 空 hidden_dir + 真实 desktop 复刻用户场景。
+
+#### **stack 收缩闪现到右下角**
+- 诊断：`BentoZone.tsx:746-755` 在 `expanded → zen` 切换时把定位从 `right: Npx` 翻回 `left: X%`——两个坐标系切换让位置在动画中跳位。
+- 修复：保持同侧 anchor 一致，右锚 zone 在 zen 状态也用 `right` 定位；`flipOffsetX/Y` 在 zen 仍可用。
+- vitest 断言：右边缘 zone 在 expanded / zen 两态 `style.right` 都设置、`style.left` 不设置。
+
+#### **批量拖动 + 批量管理入口**
+- `BentoZone.tsx::handleZoneMouseDown` 扩展：`collapsed + selection.has(thisZone) + selection.size ≥ 2` 时启动 `beginGroupZoneDrag`，mousemove 实时更新所有选中 zone 预览，mouseup 一次性 `bulkUpdateZones`。
+- `StackWrapper.tsx::handleCapsuleMouseDown` 镜像：stack 在多选范围内时合并 stack 内成员 + 跨 stack 选区，统一 group-drag。
+- ContextMenu 已有"批量管理…"入口（line 451-458）+ BulkManagerPanel 与 selectedZoneIds 联动机制——这次只修了 i18n 字符串。
+- 新增 `groupDrag.test.ts` 8 case 覆盖 clamp 边界 + 生命周期；新增 `bulkManagerEntry.test.ts` 验证 openBulkManager 翻转 + selection 联动 + IPC 命令名。
+
+#### **textAbbr 4 场景**
+- 提取 `useTextAbbr(elRef, fullText)` hook，`StackCapsule` / `StackTray` / `PanelHeader` / `ItemCard` 4 个场景统一接入 ResizeObserver + `smartAbbreviate`。
+
+#### **spring-expand 动画**
+- 微调 `width/height` 过渡曲线为 `cubic-bezier(0.34, 1.56, 0.64, 1)`，保留 `--rad` 同步 + `prefers-reduced-motion` 降级 + `data-runtime-effects` 消费层。
+
+#### **显示方式 picker**
+- `SettingsPanel.tsx:538-579` 加入 `Zone 显示方式` radio 三选：`hover / always / click`，`onChange → updateLocal → handleSave → ipc.updateSettings`，立即生效。
+- 新增 `settingsDisplayMode.test.ts` 4 case 覆盖默认值 / applySettings 同步 / 缺字段回退 / IPC 转发。
+
+### Changed — 调整
+
+#### **打包架构：单 tag 三件套合一**
+- 删除 `release.yml` (unsigned) + `release-with-updater.yml` (signed/updater) 双 workflow 双 tag 设计——错误的"渐进发布"过度设计。
+- 合并为单一 `release.yml`：push `vX.Y.Z` 一个 tag → 单一 GitHub Release 同时包含 `BentoDesk_X.Y.Z_x64-setup.exe` + `.sig` + `latest.json`。
+- 新用户下载 exe 即装；老用户通过 Tauri Updater 自动检测 `releases/latest/download/latest.json` 升级。**业内常见实践，与 Tauri 默认更新通道契合。**
+- `Verify tag matches package versions` pre-flight guard 保留（v1.2.2 引入），blocks any version mismatch in <30s。
+- Cleanup：删除多余的 `v1.2.2-updater` release + tag。
+
+### Added — 新增
+
+- 后端类型 `ReconcileReport` / `LayoutReconcileReport` + 前端 `reconcileAllZoneItems()` IPC binding。
+- 自动测试：reconcile 4 case + groupDrag 8 case + bulkManagerEntry 3 case + settingsDisplayMode 4 case + retract anchor 测试 + stack-group-drag 1 case + ipc settings 测试 = **新增 ~25 case**，全部基于真实路径而非 mock IPC。
+
+### Process — 流程纪律
+
+为防止 v1.2.2 的"测试通过 ≠ 功能修好"再发生，本轮 spec.md 写入"反 vacuous-pass"强制规则：
+1. 每个 fix 必须以 dev 复现开始（截图存档）
+2. 测试不允许只 mock IPC——必须有真实 reproduction case
+3. 修后必须 dev 复现"不再发生"
+4. agent 完成 task 时必须 attach 修前 + 修后两张证据
+
+---
+
 ## [1.2.2] — 2026-04-25 · **Zone UX / Stack / Layout Repair Closeout**
 
 继 0422 真实录屏暴露的 zone 堆叠 / 批量操作 / 边缘唤醒 / 图标空白 / 名称可读 / 布局恢复一组耦合性问题，本版完成一次"完整收尾"修复，重点不在新增功能，而在把现有交互闭环到生产级稳定。

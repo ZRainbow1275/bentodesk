@@ -287,7 +287,7 @@ const en: Translations = {
   bulkManagerLayoutColumn: "Column",
   bulkManagerLayoutSpiral: "Spiral",
   bulkManagerLayoutOrganic: "Organic",
-  bulkManagerContextEntry: "Manage all zones",
+  bulkManagerContextEntry: "Bulk manage…",
   paletteNord: "Nord",
   paletteDracula: "Dracula",
   paletteSolarized: "Solarized",

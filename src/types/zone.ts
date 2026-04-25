@@ -122,3 +122,11 @@ export interface ItemIconRepairReport {
 export interface LayoutNormalizeReport {
   normalized_zone_ids: string[];
 }
+
+export interface LayoutReconcileReport {
+  reconciled_count: number;
+  already_managed_count: number;
+  missing_count: number;
+  unknown_count: number;
+  touched_zone_ids: string[];
+}

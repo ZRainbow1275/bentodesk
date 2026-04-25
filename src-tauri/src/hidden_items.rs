@@ -1337,6 +1337,265 @@ pub fn restore_zone_items_with_dirs(
     RestoreZoneItemsReport { restored, skipped }
 }
 
+// --- Reconcile (Inverse of Restore) -----------------------------------------
+
+/// Outcome of a reconcile pass over one or more zones. The frontend treats
+/// this purely as a status payload — it does not mutate UI state directly,
+/// instead it re-fetches `list_zones` when `reconciled_count > 0`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReconcileReport {
+    /// Items whose physical file was moved from `desktop_dir` into
+    /// `.bentodesk/{zone_id}/` during this pass. The `hidden_path` field of
+    /// each reconciled item is updated in place.
+    pub reconciled_count: u32,
+    /// Items already in `.bentodesk/` (hidden_path resolves on disk). No
+    /// action taken.
+    pub already_managed_count: u32,
+    /// Items where neither `hidden_path` nor `original_path` resolves on
+    /// disk. Marked `file_missing = true` so the UI can surface a
+    /// reselect / delete affordance.
+    pub missing_count: u32,
+    /// Items that had no `original_path` AND no resolvable `hidden_path`
+    /// — typically legacy entries created before the desktop-subfolder
+    /// migration. Marked `file_missing = true` and counted alongside
+    /// `missing_count` to avoid silent skips.
+    pub unknown_count: u32,
+}
+
+/// Pure helper that reconciles a single zone's items against the on-disk
+/// reality of `desktop_dir` and `hidden_dir`. Mirrors the structure of
+/// [`restore_zone_items_with_dirs`] but executes the inverse motion:
+/// desktop file → `.bentodesk/{zone_id}/`.
+///
+/// Logic per item:
+/// 1. If `hidden_path` exists on disk → already managed, skip.
+/// 2. Else if `original_path` exists on disk → move it into
+///    `hidden_dir/zone_id/{filename}` (with UUID disambiguation when names
+///    collide), update `item.hidden_path`, increment `reconciled_count`.
+/// 3. Else → flag `item.file_missing = true`, increment `missing_count`
+///    (or `unknown_count` if `original_path` is `None`).
+///
+/// `hidden_dir` corresponds to `.bentodesk/` (NOT the per-zone subfolder).
+/// The helper creates `hidden_dir/zone_id/` with `create_dir_all` if it
+/// does not yet exist, matching the production behaviour of
+/// [`zone_hidden_dir`] minus the Win32 stealth attribute application
+/// (which is platform-specific and not part of the reconcile contract).
+pub fn reconcile_zone_items_with_dirs(
+    items: &mut [crate::layout::persistence::BentoItem],
+    zone_id: &str,
+    desktop_dir: &Path,
+    hidden_dir: &Path,
+) -> ReconcileReport {
+    let mut report = ReconcileReport::default();
+
+    for item in items.iter_mut() {
+        // Tier 1 — already hidden on disk: nothing to do.
+        if let Some(hidden) = item.hidden_path.as_deref() {
+            if Path::new(hidden).exists() {
+                report.already_managed_count += 1;
+                continue;
+            }
+        }
+
+        // Tier 2 — original still on the user's desktop: physically move
+        // it into the zone's hidden subfolder.
+        //
+        // Safety guard: ONLY reconcile items whose `original_path` is
+        // located inside `desktop_dir`. A layout entry pointing at, say,
+        // `C:\Program Files\foo.exe` would otherwise get silently swept
+        // into `.bentodesk/{zone}/` which is not what the user expects
+        // and is irreversible without recovery tooling.
+        let original = match item.original_path.as_deref() {
+            Some(o)
+                if Path::new(o).exists()
+                    && paths_match(
+                        Path::new(o).parent().unwrap_or(Path::new("")),
+                        desktop_dir,
+                    ) =>
+            {
+                Some(o.to_string())
+            }
+            _ => None,
+        };
+
+        if let Some(orig) = original {
+            let zone_dir = hidden_dir.join(zone_id);
+            if let Err(e) = std::fs::create_dir_all(&zone_dir) {
+                tracing::error!(
+                    "reconcile: failed to create zone dir {:?}: {} — skipping item {}",
+                    zone_dir,
+                    e,
+                    item.id
+                );
+                report.missing_count += 1;
+                item.file_missing = true;
+                continue;
+            }
+
+            let source = Path::new(&orig);
+            let dest = unique_hidden_path(&zone_dir, source);
+
+            // Same-drive rename should be instant. On failure fall back to
+            // copy + delete (cross-drive desktops are rare but possible).
+            let moved = match std::fs::rename(source, &dest) {
+                Ok(()) => true,
+                Err(rename_err) => {
+                    tracing::warn!(
+                        "reconcile: fs::rename failed for {} -> {:?}: {} — trying copy+delete",
+                        orig,
+                        dest,
+                        rename_err
+                    );
+                    match std::fs::copy(source, &dest) {
+                        Ok(_) => match std::fs::remove_file(source) {
+                            Ok(()) => true,
+                            Err(rm_err) => {
+                                tracing::error!(
+                                    "reconcile: copy succeeded but delete of original failed for {}: {}. Removing copy to stay safe.",
+                                    orig,
+                                    rm_err
+                                );
+                                let _ = std::fs::remove_file(&dest);
+                                false
+                            }
+                        },
+                        Err(copy_err) => {
+                            tracing::error!(
+                                "reconcile: copy fallback failed for {} -> {:?}: {}",
+                                orig,
+                                dest,
+                                copy_err
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+
+            if moved {
+                let new_hidden = dest.to_string_lossy().to_string();
+                tracing::info!(
+                    "reconcile: zone '{}' moved {} -> {}",
+                    zone_id,
+                    orig,
+                    new_hidden
+                );
+                item.hidden_path = Some(new_hidden);
+                item.file_missing = false;
+                report.reconciled_count += 1;
+            } else {
+                // We could not move the file but it does still exist at
+                // the original location — leave it visible on the desktop
+                // and mark the layout entry as missing so the UI prompts
+                // the user. This is the safe-default branch.
+                report.missing_count += 1;
+                item.file_missing = true;
+            }
+            continue;
+        }
+
+        // Tier 3 — neither hidden_path nor original_path resolves. Mark
+        // missing so the UI can surface a reselect / delete affordance.
+        if item.original_path.is_none() && item.hidden_path.is_none() {
+            tracing::warn!(
+                "reconcile: zone '{}' item {} ({}) has no path information",
+                zone_id,
+                item.id,
+                item.name
+            );
+            report.unknown_count += 1;
+        } else {
+            tracing::warn!(
+                "reconcile: zone '{}' item {} ({}) — both original and hidden paths missing on disk",
+                zone_id,
+                item.id,
+                item.name
+            );
+            report.missing_count += 1;
+        }
+        item.file_missing = true;
+    }
+
+    report
+}
+
+/// Production wrapper for [`reconcile_zone_items_with_dirs`] that also
+/// updates the safety manifest for every newly-managed item, and stamps
+/// stealth attributes on freshly-created zone subfolders.
+///
+/// Mutates `items` in place — the caller is responsible for persisting
+/// the surrounding `LayoutData` once the pass completes.
+pub fn reconcile_zone_items(
+    app_handle: &AppHandle,
+    items: &mut [crate::layout::persistence::BentoItem],
+    zone_id: &str,
+) -> ReconcileReport {
+    let hdir = hidden_dir(app_handle);
+    let desktop_dir = {
+        let state = app_handle.state::<crate::AppState>();
+        let settings = state.settings.lock().expect("settings lock poisoned");
+        PathBuf::from(&settings.desktop_path)
+    };
+
+    // Capture pre-pass state of which items had a hidden_path so we can
+    // detect which ones were moved by the helper and add manifest entries.
+    let prev_hidden: Vec<Option<String>> = items
+        .iter()
+        .map(|i| i.hidden_path.clone())
+        .collect();
+
+    let report = reconcile_zone_items_with_dirs(items, zone_id, &desktop_dir, &hdir);
+
+    // Stamp stealth on the zone subdir if any item landed inside it.
+    if report.reconciled_count > 0 {
+        let zone_dir = hdir.join(zone_id);
+        if zone_dir.exists() {
+            ensure_stealth(&zone_dir);
+        }
+    }
+
+    // Update the safety manifest for items that were newly hidden during
+    // this pass. We diff against the captured pre-pass state to avoid
+    // re-recording entries that were already managed.
+    for (idx, item) in items.iter().enumerate() {
+        let was_hidden = prev_hidden
+            .get(idx)
+            .and_then(|p| p.as_deref())
+            .map(|p| Path::new(p).exists())
+            .unwrap_or(false);
+        let is_hidden_now = item
+            .hidden_path
+            .as_deref()
+            .map(|p| Path::new(p).exists())
+            .unwrap_or(false);
+
+        if !was_hidden && is_hidden_now {
+            if let (Some(original), Some(hidden)) =
+                (item.original_path.as_deref(), item.hidden_path.as_deref())
+            {
+                let file_size = std::fs::metadata(hidden).map(|m| m.len()).unwrap_or(0);
+                let display_name = Path::new(hidden)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                manifest_add(
+                    &hdir,
+                    original,
+                    hidden,
+                    zone_id,
+                    file_size,
+                    &display_name,
+                    None,
+                    None,
+                    "",
+                );
+            }
+        }
+    }
+
+    report
+}
+
 /// Ensure `.bentodesk/` folder has hidden+system attributes on startup.
 /// In subfolder mode, we do NOT need to re-hide individual files.
 /// Also counts files across all zone subdirectories for logging.
@@ -2289,5 +2548,193 @@ mod tests {
             !recoverable_path.exists(),
             "control item should have left .bentodesk/"
         );
+    }
+
+    // ── reconcile_zone_items_with_dirs ───────────────────────────────────
+
+    /// Reproduces the exact diagnostic situation observed for ZRainbow's
+    /// real layout.json on 2026-04-25: 5 zone items pointing at desktop
+    /// .lnk files, each with a `hidden_path` recorded but the `.bentodesk/`
+    /// folder never created. Expectation after a single reconcile pass:
+    /// every file has been moved into `.bentodesk/{zone_id}/`, every
+    /// item's `hidden_path` has been rewritten to the new location, and
+    /// `file_missing` stays `false`.
+    #[test]
+    fn reconcile_moves_real_desktop_files_into_zone_subfolder() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("Desktop");
+        let hidden = desktop.join(".bentodesk");
+        std::fs::create_dir_all(&desktop).expect("create desktop");
+        // NOTE: do NOT pre-create .bentodesk — reconcile must create it.
+
+        let zone_id = "zone-1";
+        let names = [
+            "Steam.lnk",
+            "Discord.lnk",
+            "VSCode.lnk",
+            "Brave.lnk",
+            "OBS.lnk",
+        ];
+
+        let mut items: Vec<BentoItem> = names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| {
+                let original = desktop.join(name);
+                touch_file(&original);
+                // Mimic the user's broken layout.json: hidden_path is
+                // populated but the file at that path does NOT exist.
+                let stale_hidden =
+                    hidden.join(zone_id).join(name).to_string_lossy().to_string();
+                restore_test_item(
+                    &format!("item-{idx}"),
+                    name,
+                    Some(&original.to_string_lossy()),
+                    Some(&stale_hidden),
+                )
+            })
+            .collect();
+
+        let report = reconcile_zone_items_with_dirs(&mut items, zone_id, &desktop, &hidden);
+
+        assert_eq!(report.reconciled_count, 5, "all 5 items must reconcile");
+        assert_eq!(report.already_managed_count, 0);
+        assert_eq!(report.missing_count, 0);
+        assert_eq!(report.unknown_count, 0);
+
+        // Zone subdir must exist after the pass.
+        let zone_dir = hidden.join(zone_id);
+        assert!(zone_dir.is_dir(), "zone subdir should be created");
+
+        // Every desktop file moved + every hidden_path rewritten to a
+        // resolvable location.
+        for (idx, name) in names.iter().enumerate() {
+            let original = desktop.join(name);
+            assert!(
+                !original.exists(),
+                "desktop file {name} should have moved out"
+            );
+
+            let item = &items[idx];
+            assert!(!item.file_missing, "{name} should not be flagged missing");
+
+            let new_hidden = item
+                .hidden_path
+                .as_deref()
+                .expect("reconciled item must have hidden_path");
+            let new_hidden_path = Path::new(new_hidden);
+            assert!(
+                new_hidden_path.exists(),
+                "{name} new hidden path {new_hidden} must exist"
+            );
+            assert!(
+                new_hidden_path.starts_with(&zone_dir),
+                "{name} hidden_path must live under {zone_dir:?}"
+            );
+        }
+    }
+
+    /// Idempotency: a second pass after a successful reconcile must be a
+    /// no-op and report every item as `already_managed`.
+    #[test]
+    fn reconcile_is_idempotent_after_first_pass() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("Desktop");
+        let hidden = desktop.join(".bentodesk");
+        std::fs::create_dir_all(&desktop).expect("create desktop");
+
+        let zone_id = "zone-idem";
+        let original = desktop.join("Notes.lnk");
+        touch_file(&original);
+
+        let mut items = vec![restore_test_item(
+            "i-1",
+            "Notes.lnk",
+            Some(&original.to_string_lossy()),
+            None,
+        )];
+
+        let pass1 = reconcile_zone_items_with_dirs(&mut items, zone_id, &desktop, &hidden);
+        assert_eq!(pass1.reconciled_count, 1);
+
+        let pass2 = reconcile_zone_items_with_dirs(&mut items, zone_id, &desktop, &hidden);
+        assert_eq!(pass2.reconciled_count, 0);
+        assert_eq!(pass2.already_managed_count, 1);
+        assert_eq!(pass2.missing_count, 0);
+    }
+
+    /// When neither `hidden_path` nor `original_path` resolves on disk,
+    /// the item must be flagged `file_missing = true` and counted under
+    /// `missing_count`. The test deliberately leaves both paths
+    /// referencing files that do not exist.
+    #[test]
+    fn reconcile_flags_items_with_no_resolvable_path_as_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("Desktop");
+        let hidden = desktop.join(".bentodesk");
+        std::fs::create_dir_all(&desktop).expect("create desktop");
+
+        let mut items = vec![restore_test_item(
+            "ghost",
+            "ghost.lnk",
+            Some(&desktop.join("ghost.lnk").to_string_lossy()),
+            Some(&hidden.join("zone-x").join("ghost.lnk").to_string_lossy()),
+        )];
+
+        let report = reconcile_zone_items_with_dirs(&mut items, "zone-x", &desktop, &hidden);
+
+        assert_eq!(report.reconciled_count, 0);
+        assert_eq!(report.missing_count, 1);
+        assert_eq!(report.unknown_count, 0);
+        assert!(items[0].file_missing, "ghost item must be marked missing");
+    }
+
+    /// When two zones contain items with identical filenames, the
+    /// per-zone subfolder isolation must keep them separate even if both
+    /// originals are physically present on the desktop. The collision
+    /// disambiguator should never fire because each zone has its own
+    /// subdir.
+    #[test]
+    fn reconcile_isolates_filenames_across_zones() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desktop = tmp.path().join("Desktop");
+        let hidden = desktop.join(".bentodesk");
+        std::fs::create_dir_all(&desktop).expect("create desktop");
+
+        // Two desktop files with the same name in different folders is
+        // impossible on Windows, so we instead set up two zones each
+        // owning one identically-named entry. This is the common case
+        // (e.g. two zones both holding a `Settings.lnk`).
+        let original = desktop.join("Settings.lnk");
+        touch_file(&original);
+
+        let mut zone_a_items = vec![restore_test_item(
+            "a-1",
+            "Settings.lnk",
+            Some(&original.to_string_lossy()),
+            None,
+        )];
+
+        let report_a =
+            reconcile_zone_items_with_dirs(&mut zone_a_items, "zone-a", &desktop, &hidden);
+        assert_eq!(report_a.reconciled_count, 1);
+
+        // Zone A consumed the desktop file. Zone B has a stale layout
+        // entry pointing at the same gone path — must be flagged missing.
+        let mut zone_b_items = vec![restore_test_item(
+            "b-1",
+            "Settings.lnk",
+            Some(&original.to_string_lossy()),
+            None,
+        )];
+        let report_b =
+            reconcile_zone_items_with_dirs(&mut zone_b_items, "zone-b", &desktop, &hidden);
+        assert_eq!(report_b.reconciled_count, 0);
+        assert_eq!(report_b.missing_count, 1);
+        assert!(zone_b_items[0].file_missing);
+
+        // Zone A's file lives under .bentodesk/zone-a/, NOT zone-b.
+        assert!(hidden.join("zone-a").join("Settings.lnk").exists());
+        assert!(!hidden.join("zone-b").join("Settings.lnk").exists());
     }
 }

@@ -9,6 +9,7 @@ import type { BentoItem } from "../../types/zone";
 import { showContextMenu, selectItem, isItemSelected } from "../../stores/ui";
 import { openFile } from "../../services/ipc";
 import { beginDragTracking, internalDrag } from "../../services/drag";
+import { useTextAbbr } from "../../services/textAbbr";
 import { t } from "../../i18n";
 import ItemIcon from "./ItemIcon";
 import Tooltip from "../shared/Tooltip";
@@ -28,6 +29,9 @@ interface ItemCardProps {
 const ItemCard: Component<ItemCardProps> = (props) => {
   const selected = () => isItemSelected(props.zoneId, props.item.id);
   const isMissing = () => props.item.file_missing === true;
+
+  const visibleName = () => displayName(props.item.name);
+  const abbr = useTextAbbr(visibleName);
 
   const handleDoubleClick = () => {
     if (isMissing()) return;
@@ -90,11 +94,20 @@ const ItemCard: Component<ItemCardProps> = (props) => {
         isWide={props.item.is_wide}
       />
       <div class={`item-card__meta ${props.item.is_wide ? "item-card__meta--wide" : ""}`}>
-        <Tooltip content={displayName(props.item.name)}>
+        <Tooltip
+          content={visibleName()}
+          disabled={
+            props.item.is_wide
+              ? abbr.tooltipDisabled()
+              : false
+          }
+        >
           <span
             class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
+            ref={props.item.is_wide ? abbr.setRef : undefined}
+            aria-label={visibleName()}
           >
-            {displayName(props.item.name)}
+            {props.item.is_wide ? abbr.text() : visibleName()}
           </span>
         </Tooltip>
         <Tooltip content={t("itemCardMissingTooltip")}>

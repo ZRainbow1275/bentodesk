@@ -35,6 +35,11 @@ import { loadZones, updateZone, zonesStore } from "../../stores/zones";
 import { suggestStack } from "../../services/stack";
 import { stackZonesAction } from "../../stores/stacks";
 import {
+  computeTransformOrigin,
+  computeZonePositionStyle,
+  SPRING_TRANSITION_MS,
+} from "../../services/anchorOrigin";
+import {
   beginGroupZoneDrag,
   endGroupZoneDrag,
   getGroupDragPreviewPosition,
@@ -96,6 +101,26 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     flipOffsetX: number;
     flipOffsetY: number;
   } | null>(null);
+  // #5 fix: snapshot is held through the collapse transition so transform-origin
+  // stays pinned to the anchor corner until the spring has fully retracted. We
+  // schedule a deferred release once collapseZone() runs.
+  let snapshotReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSnapshotReleaseTimer = () => {
+    if (snapshotReleaseTimer !== null) {
+      clearTimeout(snapshotReleaseTimer);
+      snapshotReleaseTimer = null;
+    }
+  };
+  const scheduleSnapshotRelease = () => {
+    clearSnapshotReleaseTimer();
+    snapshotReleaseTimer = setTimeout(() => {
+      snapshotReleaseTimer = null;
+      // Only clear if we're still collapsed — a re-expand re-captures.
+      if (!expanded()) {
+        setAnchorSnapshot(null);
+      }
+    }, SPRING_TRANSITION_MS);
+  };
 
   // ─── Resize state ────────────────────────────────────────────
   const [isResizing, setIsResizing] = createSignal(false);
@@ -295,6 +320,9 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   const VELOCITY_THRESHOLD_PX_PER_SEC = 800;
 
   const triggerExpand = (fastPath: boolean) => {
+    // Cancel any pending snapshot release left from a recent collapse so
+    // the freshly-captured anchor isn't nulled mid-spring.
+    clearSnapshotReleaseTimer();
     // Freeze the anchor direction before flipping state → expanded
     // so `zoneStyle()` observes a stable snapshot on first paint.
     captureAnchorSnapshot();
@@ -399,9 +427,12 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
         : baseDelay;
       collapseTimer = setTimeout(() => {
         collapseZone(props.zone.id);
-        // Drop the snapshot so the next expand re-evaluates against
-        // current capsule position / viewport.
-        setAnchorSnapshot(null);
+        // #5 fix: don't drop the snapshot synchronously — keep it for the
+        // duration of the spring transition so transform-origin stays
+        // pinned to the anchor corner while the panel retracts. The
+        // deferred release re-evaluates against current capsule position
+        // on the next expand.
+        scheduleSnapshotRelease();
       }, effectiveDelay);
     }
   };
@@ -417,6 +448,85 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement | null;
     if (target?.closest(".bento-zone__resize-handle")) return;
+    // Don't intercept clicks bubbling up from PanelHeader (its onMouseDown
+    // already starts a header-driven drag). When expanded, the BentoPanel
+    // surface should not start a group drag — only the capsule body does.
+    if (target?.closest(".bento-panel__header")) return;
+
+    const currentSelection = selectedZoneIds();
+    const isCollapsedSurface = !expanded();
+    const wasInSelection =
+      currentSelection.has(props.zone.id) && currentSelection.size > 1;
+
+    // Capsule-driven group drag: if the user mousedowns the collapsed capsule
+    // of a zone that is part of a multi-selection, drag the whole selection.
+    // Single-zone selection or non-multi-select still falls through to the
+    // existing single-zone selection update.
+    if (isCollapsedSurface && wasInSelection && !zoneLocked()) {
+      const selectedZones = zonesStore.zones.filter((zone) =>
+        currentSelection.has(zone.id),
+      );
+      if (
+        selectedZones.length >= 2 &&
+        !selectedZones.some((zone) => zone.locked)
+      ) {
+        e.preventDefault();
+        clearTimers();
+
+        const releaseDrag = acquireDragLock();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        let moved = false;
+
+        beginGroupZoneDrag(
+          selectedZones.map((zone) => ({
+            id: zone.id,
+            position: zone.position,
+          })),
+        );
+        setIsDragRepositioning(true);
+
+        const onMouseMove = (ev: MouseEvent) => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          if (!moved && Math.hypot(dx, dy) < ZONE_DRAG_THRESHOLD_PX) return;
+          moved = true;
+          updateGroupZoneDrag({
+            x_percent: (dx / window.innerWidth) * 100,
+            y_percent: (dy / window.innerHeight) * 100,
+          });
+        };
+
+        const onMouseUp = async () => {
+          document.removeEventListener("mousemove", onMouseMove);
+          document.removeEventListener("mouseup", onMouseUp);
+          try {
+            const finalPreview = endGroupZoneDrag();
+            if (!moved) return;
+            const updates = Object.entries(finalPreview).map(
+              ([id, position]) => ({ id, position }),
+            );
+            if (updates.length > 0) {
+              await bulkUpdateZones(updates);
+              await loadZones();
+            }
+          } finally {
+            setIsDragRepositioning(false);
+            // #5 fix: group-drag moved this capsule too → invalidate the
+            // anchor snapshot so the next expand recaptures against the
+            // new position.
+            clearSnapshotReleaseTimer();
+            setAnchorSnapshot(null);
+            releaseDrag();
+          }
+        };
+
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+        return;
+      }
+    }
+
     selectZone(props.zone.id, {
       shift: e.shiftKey,
       ctrl: e.ctrlKey || e.metaKey,
@@ -491,6 +601,10 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
           }
         } finally {
           setIsDragRepositioning(false);
+          // #5 fix: group-drag moved this capsule (header path) → invalidate
+          // the anchor snapshot so the next expand recaptures.
+          clearSnapshotReleaseTimer();
+          setAnchorSnapshot(null);
           releaseDrag();
         }
       };
@@ -581,6 +695,12 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
         setIsDragRepositioning(false);
         setDragPosition(null);
       });
+
+      // #5 fix: capsule moved → previous flipOffset is stale. Drop the
+      // snapshot so the next expand re-captures against the new capsule
+      // position; until then zoneStyle falls back to the `left: x%` path.
+      clearSnapshotReleaseTimer();
+      setAnchorSnapshot(null);
 
       // Release the drag lock last — zone position is stable
       releaseDrag();
@@ -683,6 +803,7 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
 
   onCleanup(() => {
     clearTimers();
+    clearSnapshotReleaseTimer();
     if (zoneRef) {
       unregisterZoneElement(zoneRef);
       unregisterDropZoneElement(zoneRef);
@@ -709,13 +830,17 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
   };
 
   /**
-   * Current anchor in use. When expanded & snapshot exists we use the
-   * frozen snapshot; while collapsed we default to top-left so the
-   * capsule follows its stored position.
+   * Current anchor in use. When the snapshot exists we use it for BOTH the
+   * expand AND collapse spring transitions — the snapshot is only released
+   * after the collapse animation completes (see `scheduleSnapshotRelease`).
+   *
+   * #5 fix: previous incarnation reset to top-left immediately on collapse,
+   * which yanked transform-origin away from the anchor corner mid-animation
+   * and made the capsule appear to "flash" to the bottom-right corner.
    */
   const currentAnchor = createMemo(() => {
     const snap = anchorSnapshot();
-    if (expanded() && snap) return snap;
+    if (snap) return snap;
     return { x: "left" as const, y: "top" as const, flipOffsetX: 0, flipOffsetY: 0 };
   });
 
@@ -729,7 +854,6 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       getGroupDragPreviewPosition(props.zone.id) ??
       props.zone.position;
     const zen = zenDimensions();
-    const anchor = currentAnchor();
     const base: Record<string, string> = {
       position: "absolute",
       "pointer-events": "auto",
@@ -738,31 +862,41 @@ const BentoZone: Component<BentoZoneProps> = (props) => {
       width: isExp ? expandedWidth() : zen.w,
       height: isExp ? expandedHeight() : zen.h,
     };
-    // R1: emit `right:` / `bottom:` when the anchor flipped so the
-    // panel grows leftward / upward away from the overflow edge. The
-    // offset is absolute pixels measured at expand-time; we avoid a
-    // mid-animation jump that would occur if we mixed percentage
-    // left + pixel right.
-    if (isExp && anchor.x === "right") {
-      base.right = `${anchor.flipOffsetX}px`;
-    } else {
-      base.left = `${pos.x_percent}%`;
-    }
-    if (isExp && anchor.y === "bottom") {
-      base.bottom = `${anchor.flipOffsetY}px`;
-    } else {
-      base.top = `${pos.y_percent}%`;
-    }
+    // R1 + #5 fix: keep the coordinate system stable across the expand /
+    // collapse spring by emitting `right:` / `bottom:` whenever a snapshot
+    // is anchored to those edges — in BOTH expanded and zen states.
+    // Previously the style flipped between `right: Npx` (expanded) and
+    // `left: X%` (zen) at the moment `expanded()` went false, and the
+    // browser cannot interpolate between two different anchor sides, so
+    // the rendered position jumped — the visible "flash to bottom-right
+    // corner" the user reported.
+    //
+    // See computeZonePositionStyle for the decision logic + the drag
+    // carve-out (live drag must honor pos.x_percent).
+    const isDraggingZen =
+      !isExp &&
+      (dragPosition() !== null ||
+        getGroupDragPreviewPosition(props.zone.id) !== null);
+    const positionStyle = computeZonePositionStyle({
+      snapshot: anchorSnapshot(),
+      pos,
+      isDraggingZen,
+    });
+    if (positionStyle.left !== undefined) base.left = positionStyle.left;
+    if (positionStyle.right !== undefined) base.right = positionStyle.right;
+    if (positionStyle.top !== undefined) base.top = positionStyle.top;
+    if (positionStyle.bottom !== undefined) base.bottom = positionStyle.bottom;
     // Inject zone accent as CSS custom property for child consumption
     if (accent) {
       base["--zone-accent"] = accent;
     }
-    // D1: bind transform-origin to the anchor direction so the spring-expand
-    // animation grows from the snapshot anchor corner (e.g. bottom-right)
-    // instead of the default center — matches the visual "emerge from capsule"
-    // expected when expanding near a screen edge.
-    base["--origin-x"] = anchor.x === "right" ? "right" : "left";
-    base["--origin-y"] = anchor.y === "bottom" ? "bottom" : "top";
+    // D1 + #5 fix: bind transform-origin to the anchor direction so the
+    // spring-expand animation grows from (and retracts back into) the
+    // snapshot anchor corner. The snapshot is held through the collapse
+    // transition (see scheduleSnapshotRelease) so this stays pinned.
+    const origin = computeTransformOrigin(anchorSnapshot());
+    base["--origin-x"] = origin.x;
+    base["--origin-y"] = origin.y;
     return base;
   };
 

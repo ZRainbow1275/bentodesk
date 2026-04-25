@@ -107,6 +107,85 @@ pub async fn delete_snapshot(_state: State<'_, AppState>, id: String) -> Result<
     manager.delete(&id).map_err(|e| e.to_string())
 }
 
+/// Aggregate result of `reconcile_all_zone_items` across every zone in
+/// the live layout. Mirrors the per-zone counters of
+/// [`crate::hidden_items::ReconcileReport`] but sums across the whole
+/// layout so the frontend can decide in a single check whether it needs
+/// to re-fetch zone state.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LayoutReconcileReport {
+    pub reconciled_count: u32,
+    pub already_managed_count: u32,
+    pub missing_count: u32,
+    pub unknown_count: u32,
+    /// Zone IDs whose items were mutated during the pass. The frontend
+    /// uses this to decide whether to re-call `list_zones` / refresh UI.
+    pub touched_zone_ids: Vec<String>,
+}
+
+/// Walk every zone in the live layout and reconcile its items against
+/// on-disk reality:
+/// - Items already hidden under `.bentodesk/{zone_id}/` are no-ops.
+/// - Items whose `original_path` still sits on the desktop are physically
+///   moved into the zone's hidden subfolder; `hidden_path` is rewritten.
+/// - Items whose neither path resolves are flagged `file_missing = true`.
+///
+/// The layout is persisted exactly once at the end of the pass when any
+/// item or counter changed. Idempotent — calling twice in a row is safe.
+#[tauri::command]
+pub async fn reconcile_all_zone_items(
+    state: State<'_, AppState>,
+) -> Result<LayoutReconcileReport, String> {
+    let app_handle = state.app_handle.clone();
+    let mut aggregate = LayoutReconcileReport::default();
+
+    let touched = {
+        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut touched_zone_ids: Vec<String> = Vec::new();
+        for zone in layout.zones.iter_mut() {
+            let zone_id = zone.id.clone();
+            let report = crate::hidden_items::reconcile_zone_items(
+                &app_handle,
+                &mut zone.items,
+                &zone_id,
+            );
+            aggregate.reconciled_count += report.reconciled_count;
+            aggregate.already_managed_count += report.already_managed_count;
+            aggregate.missing_count += report.missing_count;
+            aggregate.unknown_count += report.unknown_count;
+            // Touched = anything that mutated the zone's items: either a
+            // file actually moved, or an item flag flipped to missing.
+            if report.reconciled_count > 0
+                || report.missing_count > 0
+                || report.unknown_count > 0
+            {
+                touched_zone_ids.push(zone_id);
+            }
+        }
+        if !touched_zone_ids.is_empty() {
+            layout.last_modified = chrono::Utc::now().to_rfc3339();
+        }
+        touched_zone_ids
+    };
+
+    if !touched.is_empty() {
+        state.persist_layout();
+    }
+
+    aggregate.touched_zone_ids = touched;
+
+    tracing::info!(
+        "reconcile_all_zone_items: reconciled={} already={} missing={} unknown={} zones_touched={}",
+        aggregate.reconciled_count,
+        aggregate.already_managed_count,
+        aggregate.missing_count,
+        aggregate.unknown_count,
+        aggregate.touched_zone_ids.len()
+    );
+
+    Ok(aggregate)
+}
+
 #[tauri::command]
 pub async fn normalize_zone_layout(
     state: State<'_, AppState>,

@@ -585,6 +585,7 @@ pub fn run() {
             commands::layout::list_snapshots,
             commands::layout::delete_snapshot,
             commands::layout::normalize_zone_layout,
+            commands::layout::reconcile_all_zone_items,
             // Grouping commands
             commands::grouping::scan_desktop,
             commands::grouping::suggest_groups,

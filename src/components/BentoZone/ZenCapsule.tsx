@@ -3,11 +3,11 @@
  * Displays: icon, title, item count badge.
  * 160x48px capsule with glassmorphism.
  */
-import { Component, createSignal, createMemo, onMount, onCleanup } from "solid-js";
+import { Component } from "solid-js";
 import type { BentoZone } from "../../types/zone";
 import ZoneIcon from "../Icons/ZoneIcon";
 import Tooltip from "../shared/Tooltip";
-import { smartAbbreviate, getFontCtx } from "../../services/textAbbr";
+import { useTextAbbr } from "../../services/textAbbr";
 import "./ZenCapsule.css";
 
 interface ZenCapsuleProps {
@@ -23,29 +23,7 @@ const ZenCapsule: Component<ZenCapsuleProps> = (props) => {
 
   const fullName = () => props.zone.alias ?? props.zone.name;
 
-  const [titleEl, setTitleEl] = createSignal<HTMLElement | undefined>();
-  const [maxPx, setMaxPx] = createSignal(0);
-  const [fontCtx, setFontCtx] = createSignal<{ font: string }>({ font: "12px sans-serif" });
-
-  onMount(() => {
-    const el = titleEl();
-    if (!el) return;
-    setFontCtx(getFontCtx(el));
-    const measure = () => setMaxPx(el.clientWidth);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    onCleanup(() => ro.disconnect());
-  });
-
-  const abbreviated = createMemo(() => {
-    const w = maxPx();
-    const name = fullName();
-    if (w <= 0) return name;
-    return smartAbbreviate(name, w, fontCtx());
-  });
-
-  const tooltipDisabled = createMemo(() => abbreviated() === fullName());
+  const abbr = useTextAbbr(fullName);
 
   return (
     <div class={capsuleClass()}>
@@ -54,11 +32,11 @@ const ZenCapsule: Component<ZenCapsuleProps> = (props) => {
         </span>
       <span
         class="zen-capsule__title"
-        ref={setTitleEl}
+        ref={abbr.setRef}
         aria-label={fullName()}
       >
-        <Tooltip content={fullName()} disabled={tooltipDisabled()}>
-          {abbreviated()}
+        <Tooltip content={fullName()} disabled={abbr.tooltipDisabled()}>
+          {abbr.text()}
         </Tooltip>
       </span>
       <span class="zen-capsule__badge">{props.zone.items.length}</span>

@@ -285,7 +285,7 @@ const zhCN = {
   bulkManagerLayoutColumn: "纵向一列",
   bulkManagerLayoutSpiral: "螺旋",
   bulkManagerLayoutOrganic: "有机分布",
-  bulkManagerContextEntry: "管理所有 Zones",
+  bulkManagerContextEntry: "批量管理…",
   paletteNord: "Nord",
   paletteDracula: "Dracula",
   paletteSolarized: "Solarized",

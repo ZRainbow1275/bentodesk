@@ -35,6 +35,7 @@ import {
   normalizeZoneLayout,
   openFile,
   preloadIcons,
+  reconcileAllZoneItems,
   repairItemIconHashes,
   redoCheckpoint,
   undoCheckpoint,
@@ -134,37 +135,59 @@ const App: Component = () => {
     // 2. Apply saved theme immediately (from localStorage, before backend responds)
     applyCurrentTheme();
 
-    // 3. Load initial data from backend
-    await Promise.all([loadZones(), loadSettings(), refreshMonitors()]);
+    // 3. Load settings + monitor topology immediately. Zones are loaded
+    //    AFTER the reconcile pass so the UI never sees stale hidden_path
+    //    / file_missing values from a layout that drifted from disk.
+    await Promise.all([loadSettings(), refreshMonitors()]);
 
-    // 3a. Repair stale icon hashes / upgraded layout drift before the UI
-    //     starts relying on persisted hashes and stack metadata.
-    const [iconRepairResult, layoutRepairResult] = await Promise.allSettled([
-      repairItemIconHashes(),
-      normalizeZoneLayout(),
-    ]);
+    // 3a. Reconcile + repair the persisted layout against on-disk reality
+    //     BEFORE we surface any zone state to the UI:
+    //     - reconcileAllZoneItems: physically move items from the user's
+    //       desktop into `.bentodesk/{zone_id}/` for any zone whose items
+    //       were "fake-managed" (hidden_path recorded but file never
+    //       moved). This is the fix for the 91-items-still-on-desktop
+    //       diagnostic of 2026-04-25.
+    //     - repairItemIconHashes / normalizeZoneLayout: existing
+    //       icon-hash + layout drift normalisers, kept in parallel since
+    //       they touch different fields.
+    const [reconcileResult, iconRepairResult, layoutRepairResult] =
+      await Promise.allSettled([
+        reconcileAllZoneItems(),
+        repairItemIconHashes(),
+        normalizeZoneLayout(),
+      ]);
 
-    const repairedCount =
-      iconRepairResult.status === "fulfilled"
-        ? iconRepairResult.value.repaired_count
-        : 0;
-    const normalizedCount =
-      layoutRepairResult.status === "fulfilled"
-        ? layoutRepairResult.value.normalized_zone_ids.length
-        : 0;
-
+    if (reconcileResult.status === "fulfilled") {
+      const r = reconcileResult.value;
+      if (
+        r.reconciled_count > 0 ||
+        r.missing_count > 0 ||
+        r.unknown_count > 0
+      ) {
+        console.info(
+          `[reconcile] moved=${r.reconciled_count} already=${r.already_managed_count} missing=${r.missing_count} unknown=${r.unknown_count} zones=${r.touched_zone_ids.length}`
+        );
+      }
+    } else {
+      console.warn("Startup zone reconcile failed:", reconcileResult.reason);
+    }
     if (iconRepairResult.status === "rejected") {
       console.warn("Startup icon repair failed:", iconRepairResult.reason);
     }
     if (layoutRepairResult.status === "rejected") {
-      console.warn("Startup layout normalization failed:", layoutRepairResult.reason);
+      console.warn(
+        "Startup layout normalization failed:",
+        layoutRepairResult.reason
+      );
     }
 
-    if (repairedCount > 0 || normalizedCount > 0) {
-      await loadZones();
-    }
+    // 3b. Load zones AFTER reconcile/repair/normalize so the UI never
+    //     paints stale hidden_path or file_missing flags. A single round
+    //     trip is enough — the previous Promise.allSettled() already
+    //     awaited every backend mutation.
+    await loadZones();
 
-    // 3b. Track viewport size reactively for anchor-flip geometry
+    // 3c. Track viewport size reactively for anchor-flip geometry
     installViewportTracker();
 
     // 4. Set up event listeners from backend

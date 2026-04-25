@@ -187,3 +187,63 @@ export function getFontCtx(el: HTMLElement): { font: string } {
     font: `${cs.fontStyle} ${cs.fontVariant} ${cs.fontWeight} ${cs.fontSize} / ${cs.lineHeight} ${cs.fontFamily}`,
   };
 }
+
+// ─── Solid hook ─────────────────────────────────────────────
+
+import { createSignal, createMemo, onMount, onCleanup, type Accessor } from "solid-js";
+
+/**
+ * Solid composable that turns a long string + an element ref into a reactive
+ * abbreviated rendering driven by ResizeObserver. Wires up the trio that
+ * StackCapsule / PanelHeader / ZenCapsule / StackTray member rows / ItemCard
+ * names all need:
+ *
+ *   1. A `setRef` callback to attach to the title span.
+ *   2. A reactive `text()` accessor that emits the best-fitting abbreviation
+ *      for the element's current `clientWidth`.
+ *   3. A reactive `tooltipDisabled()` accessor — true when the element shows
+ *      the full name and the tooltip would be redundant.
+ *
+ * The hook owns the ResizeObserver lifecycle. Caller does not need to manage
+ * onCleanup — the hook installs its own.
+ *
+ * #7 motivation: prior to this hook the four scenes each open-coded the same
+ * 18 lines, ItemCard / StackTray didn't bother and just relied on
+ * text-overflow: ellipsis, and the v1.2.2 release shipped with three
+ * different abbreviation behaviours across the four name-rendering scenes.
+ */
+export interface UseTextAbbrResult {
+  setRef: (el: HTMLElement | undefined) => void;
+  text: Accessor<string>;
+  tooltipDisabled: Accessor<boolean>;
+}
+
+export function useTextAbbr(fullText: () => string): UseTextAbbrResult {
+  const [el, setEl] = createSignal<HTMLElement | undefined>();
+  const [maxPx, setMaxPx] = createSignal(0);
+  const [fontCtx, setFontCtx] = createSignal<{ font: string }>({
+    font: "12px sans-serif",
+  });
+
+  onMount(() => {
+    const node = el();
+    if (!node) return;
+    setFontCtx(getFontCtx(node));
+    const measure = () => setMaxPx(node.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    onCleanup(() => ro.disconnect());
+  });
+
+  const text = createMemo(() => {
+    const width = maxPx();
+    const name = fullText();
+    if (width <= 0) return name;
+    return smartAbbreviate(name, width, fontCtx());
+  });
+
+  const tooltipDisabled = createMemo(() => text() === fullText());
+
+  return { setRef: setEl, text, tooltipDisabled };
+}

@@ -1,17 +1,9 @@
-import {
-  Component,
-  For,
-  Show,
-  createMemo,
-  createSignal,
-  onCleanup,
-  onMount,
-} from "solid-js";
+import { Component, For, Show, createMemo } from "solid-js";
 import type { BentoZone } from "../../types/zone";
 import { t } from "../../i18n";
 import ZoneIcon from "../Icons/ZoneIcon";
 import Tooltip from "../shared/Tooltip";
-import { getFontCtx, smartAbbreviate } from "../../services/textAbbr";
+import { useTextAbbr } from "../../services/textAbbr";
 
 interface StackCapsuleProps {
   zones: BentoZone[];
@@ -28,36 +20,12 @@ const StackCapsule: Component<StackCapsuleProps> = (props) => {
   const fullName = () => topZone()?.alias ?? topZone()?.name ?? "";
   const memberPeek = createMemo(() => props.zones.slice(-3));
 
-  const [titleEl, setTitleEl] = createSignal<HTMLElement | undefined>();
-  const [maxPx, setMaxPx] = createSignal(0);
-  const [fontCtx, setFontCtx] = createSignal<{ font: string }>({
-    font: "12px sans-serif",
-  });
-
-  onMount(() => {
-    const el = titleEl();
-    if (!el) return;
-    setFontCtx(getFontCtx(el));
-    const measure = () => setMaxPx(el.clientWidth);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    onCleanup(() => ro.disconnect());
-  });
-
-  const abbreviated = createMemo(() => {
-    const width = maxPx();
-    const name = fullName();
-    if (width <= 0) return name;
-    return smartAbbreviate(name, width, fontCtx());
-  });
-
-  const tooltipDisabled = createMemo(() => abbreviated() === fullName());
+  const abbr = useTextAbbr(fullName);
 
   return (
     <button
       type="button"
-      class={`stack-capsule ${props.open ? "is-open" : ""} ${props.hasPreview ? "has-preview" : ""} ${props.locked ? "is-locked" : ""}`}
+      class={`stack-capsule spring-emerge ${props.open ? "is-open" : ""} ${props.hasPreview ? "has-preview" : ""} ${props.locked ? "is-locked" : ""}`}
       onMouseDown={props.onMouseDown}
       onClick={props.onClick}
       onContextMenu={props.onContextMenu}
@@ -79,11 +47,11 @@ const StackCapsule: Component<StackCapsuleProps> = (props) => {
       </span>
       <span
         class="stack-capsule__title"
-        ref={setTitleEl}
+        ref={abbr.setRef}
         aria-label={fullName()}
       >
-        <Tooltip content={fullName()} disabled={tooltipDisabled()}>
-          {abbreviated()}
+        <Tooltip content={fullName()} disabled={abbr.tooltipDisabled()}>
+          {abbr.text()}
         </Tooltip>
       </span>
       <Show when={props.hasPreview}>
