@@ -392,9 +392,28 @@ const en: Translations = {
 
   // Context menu — Theme E
   contextMenuPinMinibar: "Pin as Mini Bar",
+  contextMenuPinMinibarSuccess: "Pinned as Mini Bar",
+  contextMenuPinMinibarError: "Cannot pin Mini Bar",
   contextMenuBindFolder: "Bind Folder…",
   contextMenuSaveCapsule: "Save as Context Capsule",
   contextMenuSaveCapsulePrompt: "Capsule name?",
+
+  // Stack auto-spread (v1.2.4)
+  stackSpreadTooltip: "Spread overlapping zones",
+  stackSpreadError: "Spread failed",
+
+  // Bulk selection floating bar (v1.2.4)
+  bulkBarAriaLabel: "Bulk zone actions",
+  bulkBarSelectedCount: "{n} selected",
+  bulkBarRename: "Bulk Manager",
+  bulkBarAlign: "Align",
+  bulkBarGrid: "Grid",
+  bulkBarDelete: "Delete",
+  bulkBarClear: "Clear",
+  bulkBarConfirmDelete: "Delete {count} zones?",
+  bulkBarAlignError: "Align failed",
+  bulkBarGridError: "Grid failed",
+  bulkBarDeleteError: "Some zones could not be deleted",
 
   // Rules Wizard
   rulesWizardTitle: "Rules",

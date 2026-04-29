@@ -35,7 +35,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   encryption: { mode: "None" },
   debug_overlay: false,
-  zone_display_mode: "hover",
+  // zone_display_mode intentionally omitted — Rust schema default is None
+  // and the frontend cascade reads `globalSetting ?? zoneOverride ?? "hover"`,
+  // so leaving this `undefined` lets per-zone `display_mode` overrides take
+  // effect on a fresh install. The user explicitly setting a global mode
+  // then overrides every zone via the SettingsPanel picker.
 };
 
 const [settings, setSettings] = createSignal<AppSettings>(DEFAULT_SETTINGS);
@@ -124,7 +128,15 @@ export function getDebugOverlayEnabled(): boolean {
  * - "hover"  → mouse-over expands (default, v1.x behaviour)
  * - "always" → zones mount expanded, never auto-collapse (Fences-style)
  * - "click"  → single click expands; mouse-leave still collapses
+ *
+ * v5 Fix #7 (PRD critical-review.md D1): we no longer fall back to "hover"
+ * here. Returning `undefined` when the global picker has not made a choice
+ * lets the per-zone `display_mode` (set via BulkManager) participate in the
+ * cascade. Callers (BentoZone.tsx:145, StackWrapper.tsx:84) already do
+ * `getZoneDisplayMode() ?? props.zone.display_mode ?? "hover"`, so the
+ * fallback chain finally works as documented. The previous `?? "hover"`
+ * short-circuited the whole chain and made per-zone overrides decorative.
  */
-export function getZoneDisplayMode(): "hover" | "always" | "click" {
-  return settings().zone_display_mode ?? "hover";
+export function getZoneDisplayMode(): "hover" | "always" | "click" | undefined {
+  return settings().zone_display_mode;
 }

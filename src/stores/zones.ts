@@ -3,7 +3,7 @@
  * All mutations go through IPC to the backend, then update the local store.
  */
 import { createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import type {
   BentoZone,
   BentoItem,
@@ -90,7 +90,15 @@ export async function loadZones(): Promise<void> {
   setState("error", null);
   try {
     const zones = await ipc.listZones();
-    setState("zones", zones);
+    // reconcile() merges by key ("id" default) and recursively replaces
+    // nested fields (position.x_percent, expanded_size.w_percent, …).
+    // Plain setState("zones", zones) on createStore performs *keyed*
+    // reconciliation that preserves existing nested proxies — so a
+    // bulk-spread that only mutates `position` looks like a no-op to the
+    // UI even though the underlying objects changed. reconcile() is the
+    // documented escape hatch for "I have fresh server data, replace
+    // everything that differs".
+    setState("zones", reconcile(zones, { key: "id", merge: false }));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState("error", message);

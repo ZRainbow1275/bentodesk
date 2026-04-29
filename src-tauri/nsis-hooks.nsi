@@ -9,9 +9,19 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Create "Uninstall BentoDesk" shortcut in Start Menu
+  ; Skip shortcut/icon refresh during /UPDATE — same lnk target as before,
+  ; recreating it triggers an Explorer icon-cache flicker that users perceive
+  ; as "icons looking weird" after upgrade. Symmetric with POSTUNINSTALL guard.
+  ${GetOptions} $CMDLINE "/UPDATE" $0
+  ${IfNot} ${Errors}
+    Goto skip_postinstall_shortcut
+  ${EndIf}
+
+  ; Create "Uninstall BentoDesk" shortcut in Start Menu (fresh install only)
   CreateDirectory "$SMPROGRAMS\BentoDesk"
   CreateShortCut "$SMPROGRAMS\BentoDesk\卸载 BentoDesk.lnk" "$INSTDIR\uninstall.exe"
+
+  skip_postinstall_shortcut:
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

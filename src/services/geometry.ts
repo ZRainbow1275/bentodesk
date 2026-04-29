@@ -90,17 +90,56 @@ export function findMonitorForPointSync(
 
 /**
  * Resolve the monitor that contains the capsule at a given DOM rect.
- * Uses `devicePixelRatio` to convert from CSS pixels (what
- * `getBoundingClientRect()` returns) to physical pixels (what the
- * Rust side stores). On DPI-mixed setups the primary monitor's scale
- * determines `devicePixelRatio`, so secondary-monitor placement still
- * works as long as the capsule lives in overlay-window coordinates.
+ *
+ * v8 round-4 fix: on mixed-DPI multi-monitor setups (e.g. 96 dpi primary +
+ * 192 dpi secondary) using the global `window.devicePixelRatio` to scale
+ * EVERY candidate rect into physical px is wrong — `devicePixelRatio`
+ * only reflects the monitor the *overlay window* lives on, so a capsule
+ * dragged onto a higher-DPI secondary lands at the wrong physical
+ * coordinate and `findMonitorForPointSync` either picks the primary again
+ * or no monitor at all. The repro is: a 1920×1080 primary at 100 % +
+ * a 3840×2160 secondary at 200 %; dropping a capsule on the secondary
+ * leaves the anchor flip stuck on primary-side defaults.
+ *
+ * Strategy: try each monitor's own `dpi_scale` and pick the first match.
+ * Falls back to the global DPR if no monitor's scaling matches (defensive
+ * for callers that pre-date the multi-DPI patch).
+ *
+ * Rounding: a 0.5 px offset toward the rect interior nudges off-by-one
+ * boundaries away from the seam between two monitors, where `Math.round`
+ * could otherwise land the lookup point exactly on `r.x + r.width` and
+ * fall into the neighbour.
  */
 export function monitorForClientRect(
   rect: { left: number; top: number; width: number; height: number }
 ): MonitorInfo | null {
+  const cssCenterX = rect.left + rect.width / 2;
+  const cssCenterY = rect.top + rect.height / 2;
+
+  if (cache && cache.length > 0) {
+    for (const m of cache) {
+      const dpr = m.dpi_scale && m.dpi_scale > 0 ? m.dpi_scale : null;
+      if (dpr === null) continue;
+      // Translate the candidate's CSS center into THIS monitor's
+      // physical-px space and test containment. The 0.5 px nudge keeps
+      // exact-boundary points on the side they came from.
+      const physX = Math.floor(cssCenterX * dpr + 0.5);
+      const physY = Math.floor(cssCenterY * dpr + 0.5);
+      const r = m.rect_full;
+      if (
+        physX >= r.x &&
+        physX < r.x + r.width &&
+        physY >= r.y &&
+        physY < r.y + r.height
+      ) {
+        return m;
+      }
+    }
+  }
+
+  // Fallback: global DPR for legacy / single-monitor builds.
   const dpr = window.devicePixelRatio || 1;
-  const centerX = Math.round((rect.left + rect.width / 2) * dpr);
-  const centerY = Math.round((rect.top + rect.height / 2) * dpr);
+  const centerX = Math.floor(cssCenterX * dpr + 0.5);
+  const centerY = Math.floor(cssCenterY * dpr + 0.5);
   return findMonitorForPointSync(centerX, centerY);
 }

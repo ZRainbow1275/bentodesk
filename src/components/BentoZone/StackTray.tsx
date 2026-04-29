@@ -3,7 +3,14 @@ import type { BentoZone } from "../../types/zone";
 import { t } from "../../i18n";
 import ZoneIcon from "../Icons/ZoneIcon";
 import Tooltip from "../shared/Tooltip";
-import { useTextAbbr } from "../../services/textAbbr";
+import {
+  FontGroupContext,
+  createFontGroup,
+  useTextAbbrGroup,
+} from "../../services/textAbbrGroup";
+
+/** stack-tray__member-name's CSS-declared default size. */
+const STACK_TRAY_MEMBER_DEFAULT_FONT_PX = 13;
 
 interface StackTrayProps {
   zones: BentoZone[];
@@ -27,7 +34,10 @@ interface StackTrayRowProps {
  */
 const StackTrayRow: Component<StackTrayRowProps> = (props) => {
   const zoneName = () => props.zone.alias ?? props.zone.name;
-  const abbr = useTextAbbr(zoneName);
+  // v8: row participates in the StackTray-wide FontGroup so member names in
+  // a single tray render at a uniform size. Falls back to per-row sizing
+  // if a row is somehow rendered outside a FontGroupContext provider.
+  const abbr = useTextAbbrGroup(zoneName);
 
   return (
     <div class={`stack-tray__row ${props.selected ? "is-selected" : ""}`}>
@@ -49,6 +59,7 @@ const StackTrayRow: Component<StackTrayRowProps> = (props) => {
               class="stack-tray__member-name"
               ref={abbr.setRef}
               aria-label={zoneName()}
+              style={{ "font-size": `${abbr.fontSize()}px` }}
             >
               {abbr.text()}
             </span>
@@ -86,6 +97,12 @@ const StackTrayRow: Component<StackTrayRowProps> = (props) => {
 const StackTray: Component<StackTrayProps> = (props) => {
   const orderedZones = createMemo(() => [...props.zones].reverse());
 
+  // v8 font-uniformity: every member row registers with the same group so a
+  // tray with mixed-length zone names renders one consistent font-size
+  // instead of a ragged stack. Default 13px matches the CSS-declared size
+  // for `.stack-tray__member-name`.
+  const fontGroup = createFontGroup(STACK_TRAY_MEMBER_DEFAULT_FONT_PX);
+
   return (
     <div class="stack-tray spring-emerge" onMouseDown={(e) => e.stopPropagation()}>
       <div class="stack-tray__header">
@@ -101,18 +118,20 @@ const StackTray: Component<StackTrayProps> = (props) => {
           {t("stackDissolve")}
         </button>
       </div>
-      <div class="stack-tray__list">
-        <For each={orderedZones()}>
-          {(zone) => (
-            <StackTrayRow
-              zone={zone}
-              selected={props.previewZoneId === zone.id}
-              onSelectPreview={props.onSelectPreview}
-              onDetach={props.onDetach}
-            />
-          )}
-        </For>
-      </div>
+      <FontGroupContext.Provider value={fontGroup}>
+        <div class="stack-tray__list">
+          <For each={orderedZones()}>
+            {(zone) => (
+              <StackTrayRow
+                zone={zone}
+                selected={props.previewZoneId === zone.id}
+                onSelectPreview={props.onSelectPreview}
+                onDetach={props.onDetach}
+              />
+            )}
+          </For>
+        </div>
+      </FontGroupContext.Provider>
     </div>
   );
 };

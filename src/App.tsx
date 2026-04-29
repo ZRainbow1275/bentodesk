@@ -74,7 +74,7 @@ import {
   bumpViewport,
 } from "./stores/ui";
 import { refreshMonitors, invalidateMonitorCache } from "./services/geometry";
-import { openAboutDialog, isAnyModalOpen } from "./stores/ui";
+import { openAboutDialog, isAnyModalOpen, getFlashToast, clearFlashToast } from "./stores/ui";
 import { applyCurrentTheme } from "./themes";
 import { t } from "./i18n";
 import { For } from "solid-js";
@@ -355,6 +355,17 @@ const App: Component = () => {
         <div class="app-toast app-toast--generic" role="alert">
           {zonesStore.error}
         </div>
+      </Show>
+      <Show when={getFlashToast()} keyed>
+        {(toast) => (
+          <div
+            class={`app-toast app-toast--generic app-toast--flash app-toast--flash-${toast.variant}`}
+            role={toast.variant === "error" ? "alert" : "status"}
+            onClick={clearFlashToast}
+          >
+            {toast.message}
+          </div>
+        )}
       </Show>
     </div>
   );

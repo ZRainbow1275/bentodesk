@@ -12,7 +12,14 @@ import {
 import PanelHeader from "./PanelHeader";
 import SearchBar from "../SearchBar/SearchBar";
 import ItemGrid from "./ItemGrid";
+import {
+  FontGroupContext,
+  createFontGroup,
+} from "../../services/textAbbrGroup";
 import "./BentoPanel.css";
+
+/** ItemCard's CSS-declared default name size — see ItemCard.css. */
+const ITEM_CARD_DEFAULT_FONT_PX = 11;
 
 interface BentoPanelProps {
   zone: BentoZone;
@@ -40,6 +47,14 @@ const BentoPanel: Component<BentoPanelProps> = (props) => {
     collapseZone(props.zone.id);
   };
 
+  // v8 font-uniformity: every ItemCard inside this panel registers with the
+  // same group, so the rendered name size is min(needed) — preventing the
+  // ragged column where each name shrunk independently. The group is created
+  // once per panel instance; SolidJS owners hold it for the panel's lifetime.
+  // PanelHeader deliberately uses plain useTextAbbr (it is standalone, not
+  // part of the column), so we wrap only the content area.
+  const fontGroup = createFontGroup(ITEM_CARD_DEFAULT_FONT_PX);
+
   return (
     <div class="bento-panel">
       <PanelHeader
@@ -50,9 +65,11 @@ const BentoPanel: Component<BentoPanelProps> = (props) => {
       <Show when={searchActive()}>
         <SearchBar zoneId={props.zone.id} />
       </Show>
-      <div class="bento-panel__content content-reveal content-reveal--visible">
-        <ItemGrid zone={props.zone} items={filteredItems()} />
-      </div>
+      <FontGroupContext.Provider value={fontGroup}>
+        <div class="bento-panel__content content-reveal content-reveal--visible">
+          <ItemGrid zone={props.zone} items={filteredItems()} />
+        </div>
+      </FontGroupContext.Provider>
     </div>
   );
 };

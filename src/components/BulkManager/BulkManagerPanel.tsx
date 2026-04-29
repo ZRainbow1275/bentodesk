@@ -263,8 +263,27 @@ const BulkManagerPanel: Component = () => {
     resetBulkFields();
   });
 
+  // v5 Fix #5: while the bulk panel is open we mark <body> so global CSS can
+  // drop pointer-events on every BentoZone/StackWrapper underneath. Without
+  // this lock the canvas zones (z-index 1000 expanded) bleed hover/click
+  // through the scrim because they share the same stacking context.
+  createEffect(() => {
+    if (typeof document === "undefined") return;
+    const body = document.body;
+    if (isBulkManagerOpen()) body.classList.add("bulk-manager-open");
+    else body.classList.remove("bulk-manager-open");
+  });
+
   onMount(() => document.addEventListener("keydown", handleKey));
-  onCleanup(() => document.removeEventListener("keydown", handleKey));
+  onCleanup(() => {
+    document.removeEventListener("keydown", handleKey);
+    // Defensive: never leave the body marked if the panel unmounts mid-open
+    // (HMR / route swap). Production close still goes through the createEffect
+    // above which has already cleared the class.
+    if (typeof document !== "undefined") {
+      document.body.classList.remove("bulk-manager-open");
+    }
+  });
 
   return (
     <Show when={isBulkManagerOpen()}>

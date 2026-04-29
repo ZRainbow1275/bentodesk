@@ -12,6 +12,7 @@
 import { createSignal } from "solid-js";
 import { startDrag } from "./ipc";
 import { reorderItems, moveItem, getZoneById } from "../stores/zones";
+import { setIsDragging as setGlobalDragging } from "../stores/dragging";
 
 /** Minimum pixel movement to detect drag intent */
 const DRAG_THRESHOLD_PX = 5;
@@ -242,6 +243,12 @@ export function beginDragTracking(
 
     if (distance >= DRAG_THRESHOLD_PX) {
       state.isDragging = true;
+      // v6 fix #3: raise the global drag flag the moment we cross the
+      // threshold so a flick across another zone during item drag never
+      // pops a hover-expand on it. This covers both internal reorder
+      // and OLE external drag (the external path also benefits because
+      // the cursor leaves the webview almost immediately).
+      setGlobalDragging(true);
 
       if (state.itemId && state.zoneId) {
         // Start internal reorder drag
@@ -279,6 +286,10 @@ export function beginDragTracking(
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("mouseup", onMouseUp);
     activeDrag = null;
+    // v6 fix #3: lower the global drag flag in the single funnel that
+    // both mouseup and the cancel path go through. Doing it here guarantees
+    // we never leak a stuck `true` if either codepath aborts early.
+    setGlobalDragging(false);
   };
 
   state.cleanup = cleanupListeners;

@@ -16,14 +16,53 @@
 }
 
 /* ─── Dragging State (zone repositioning) ────────────── */
+/* v8 #3 (redo) — drag visual is the IDLE zen capsule itself, only flagged
+   as "in drag" via opacity + decoration removal. The earlier round-puck
+   approach (32x32 + display:none on title/badge) caused three regressions:
+   (a) shrunken hit area limited the drag region; (b) `transform: scale()`
+   does NOT update layout rect, so dragOffset (computed via
+   getBoundingClientRect()) stayed at the un-scaled position while the
+   capsule rendered scaled — cursor and capsule visibly desync. We keep
+   geometry fully intact (no width/height/border-radius overrides, no
+   child hiding) so `getBoundingClientRect()` returns the same rect the
+   user started dragging from. The visual cue is now purely
+   non-geometric: lower opacity + suppressed backdrop-filter signal
+   "this capsule is being moved, not opened". */
 .bento-zone--dragging {
-  /* Disable all transitions during drag — spring-expand fights position changes */
-  transition: none !important;
-  /* Hint browser to optimize left/top repaints via GPU compositing */
-  will-change: left, top;
-  /* Suppress backdrop-filter repaint storms during drag */
+  /* Suppress backdrop-filter: cheaper repaints during drag AND a subtle
+     visual hint that the capsule is no longer "live" (the glassy blur
+     is part of the awake/zen affordance). */
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+  /* opacity-only transition — no transform animation means no
+     cursor-vs-capsule desync. translateZ(0) is a static GPU layer hint
+     (no animated value) and is allowed by CSS. */
+  transition: opacity 120ms ease-out !important;
+  will-change: left, top, opacity;
+  /* 0.7 opacity reads as "in transit": clearly faded vs idle (1.0) but
+     not so ghostly that the user loses sight of what they're carrying.
+     Earlier values (0.4 = invisible; 0.85 = imperceptible) were both
+     wrong endpoints. */
+  opacity: 0.7;
+  /* Static GPU promotion hint — NOT an animated transform, so no
+     layout/cursor desync. Centre origin is harmless since no scale is
+     applied; kept for parity with prior anchor-mirroring rules. */
+  transform: translateZ(0);
+  transform-origin: center center !important;
+}
+
+/* v8 #3 (redo) — stacks get the same treatment via a sibling class.
+   StackWrapper toggles this while `dragPosition()` is non-null. Geometry
+   is preserved so the cluster's hit area stays full-size; only the
+   visual decoration is faded. */
+.stack-wrapper--dragging {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  transition: opacity 120ms ease-out !important;
+  will-change: left, top, opacity;
+  opacity: 0.7;
+  transform: translateZ(0);
+  transform-origin: center center !important;
 }
 
 /* ─── Zen Mode (Collapsed Capsule) ──────────────────────── */
@@ -132,6 +171,25 @@
   box-shadow:
     0 0 0 2px rgba(59, 130, 246, 0.55),
     var(--shadow-expanded, 0 16px 48px rgba(0, 0, 0, 0.4));
+}
+
+.bento-zone--selected::after {
+  content: "✓";
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.95);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 4;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
 .bento-zone--locked {

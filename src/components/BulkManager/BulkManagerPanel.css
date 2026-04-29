@@ -5,11 +5,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  /* v5 Fix #5: scrim must outrank BentoZone expanded (z-index 1000) so the
+     scrim genuinely covers the canvas. Previously both lived at 1000 and DOM
+     order let later-rendered zones bleed hover/click through the overlay. */
+  z-index: 2000;
   pointer-events: auto;
 }
 
 .bulk-manager__panel {
+  /* v5 Fix #5: panel sits one above the scrim so its own buttons remain
+     clickable even when other absolutely-positioned chrome shares the new
+     2000 layer. */
+  position: relative;
+  z-index: 2001;
   width: min(960px, 92vw);
   max-height: 82vh;
   background: var(--surface-expanded, rgba(20, 20, 28, 0.96));
@@ -21,6 +29,24 @@
   flex-direction: column;
   overflow: hidden;
   backdrop-filter: var(--blur-expanded, blur(24px) saturate(170%));
+}
+
+/*
+ * v5 Fix #5: when BulkManagerPanel mounts it adds `bulk-manager-open` to
+ * <body>. Every BentoZone / StackWrapper becomes inert so users cannot hover
+ * or click any zone while the bulk panel owns the modal. The scrim/panel keep
+ * their own pointer-events: auto via the rules above.
+ */
+body.bulk-manager-open .bento-zone,
+body.bulk-manager-open .bento-zone *,
+body.bulk-manager-open .stack-wrapper,
+body.bulk-manager-open .stack-wrapper * {
+  pointer-events: none !important;
+}
+
+body.bulk-manager-open .bulk-manager__scrim,
+body.bulk-manager-open .bulk-manager__scrim * {
+  pointer-events: auto !important;
 }
 
 .bulk-manager__header {

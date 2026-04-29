@@ -10,6 +10,14 @@ interface StackCapsuleProps {
   open: boolean;
   hasPreview: boolean;
   locked: boolean;
+  /**
+   * v8 round-10 (Issue B1): when the stack is bloomed, the in-capsule
+   * "预览中" indicator becomes redundant — the active-petal ring + the
+   * preview panel itself already convey "preview is open". A third
+   * signal on the (now-receded) capsule reads as visual noise. When
+   * `bloomed === true` we suppress the indicator pill.
+   */
+  bloomed: boolean;
   onMouseDown: (e: MouseEvent) => void;
   onClick: (e: MouseEvent) => void;
   onContextMenu: (e: MouseEvent) => void;
@@ -49,12 +57,13 @@ const StackCapsule: Component<StackCapsuleProps> = (props) => {
         class="stack-capsule__title"
         ref={abbr.setRef}
         aria-label={fullName()}
+        style={{ "font-size": `${abbr.fontSize()}px` }}
       >
         <Tooltip content={fullName()} disabled={abbr.tooltipDisabled()}>
           {abbr.text()}
         </Tooltip>
       </span>
-      <Show when={props.hasPreview}>
+      <Show when={props.hasPreview && !props.bloomed}>
         <span class="stack-capsule__preview-indicator">
           {t("stackPreviewActive")}
         </span>

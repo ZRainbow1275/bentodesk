@@ -5,6 +5,9 @@
 /* @refresh reload */
 import { render } from "solid-js/web";
 
+// Dev-only Tauri IPC mock. Tree-shaken in production via import.meta.env.DEV.
+import "./dev-mock";
+
 // Global CSS — imported here so Vite processes and bundles them in production.
 // Order matters: variables → reset → utilities → animations.
 import "./styles/variables.css";

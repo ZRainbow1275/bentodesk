@@ -280,7 +280,31 @@ pub fn hidden_dir(app_handle: &AppHandle) -> PathBuf {
         settings.desktop_path.clone()
     };
 
-    let dir = PathBuf::from(&desktop_path).join(".bentodesk");
+    // Refuse to resolve a hidden_dir against an empty or relative
+    // desktop_path. PathBuf::from("").join(".bentodesk") yields the
+    // relative path ".bentodesk", which fs::create_dir_all happily
+    // resolves against the process cwd — historically this caused
+    // manifest.json to be written to the install dir / user profile
+    // and then quarantined onto the actual desktop on next startup.
+    // Returning a sentinel absolute path makes all downstream fs
+    // operations fail-loud instead of fail-quiet-and-corrupt.
+    let trimmed = desktop_path.trim();
+    if trimmed.is_empty() {
+        tracing::error!(
+            "hidden_dir: settings.desktop_path is empty — refusing to resolve hidden_dir against cwd"
+        );
+        return PathBuf::from("BENTODESK-INVALID-DESKTOP-PATH");
+    }
+    let abs = PathBuf::from(trimmed);
+    if !abs.is_absolute() {
+        tracing::error!(
+            "hidden_dir: settings.desktop_path is not absolute: {:?}",
+            trimmed
+        );
+        return PathBuf::from("BENTODESK-INVALID-DESKTOP-PATH");
+    }
+
+    let dir = abs.join(".bentodesk");
 
     if !dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -987,10 +1011,21 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> bool {
             original_path,
             e
         );
-        // Cross-drive fallback
+        // Cross-drive fallback. If we can't delete the source after a
+        // successful copy the file ends up at both paths — the user gets
+        // their desktop file back (good) but the hidden copy lingers and
+        // may cause a duplicate on next startup. Surface that loudly so the
+        // operator can clean up; the restore itself still counts as success.
         match std::fs::copy(source, dest) {
             Ok(_) => {
-                let _ = std::fs::remove_file(source);
+                if let Err(rm_err) = std::fs::remove_file(source) {
+                    tracing::error!(
+                        "Restore: copy ok but delete of hidden source failed for {}: {} — duplicate at {} until cleanup",
+                        hidden_path,
+                        rm_err,
+                        hidden_path
+                    );
+                }
             }
             Err(e2) => {
                 tracing::error!(
@@ -1390,11 +1425,23 @@ pub fn reconcile_zone_items_with_dirs(
 
     for item in items.iter_mut() {
         // Tier 1 — already hidden on disk: nothing to do.
+        // If the hidden_path field is set but the physical file is gone,
+        // the layout entry is stale (historical bug from migrate_attrib_hidden_files
+        // writing layout state without the move actually succeeding, or external
+        // cleanup of the .bentodesk/ subtree by AV/OneDrive/user). Clear the
+        // field so Tier 2 below can resolve a fresh destination.
         if let Some(hidden) = item.hidden_path.as_deref() {
             if Path::new(hidden).exists() {
                 report.already_managed_count += 1;
                 continue;
             }
+            tracing::warn!(
+                "reconcile: stale hidden_path for item {} ({}) — physical file does not exist at {}, clearing field so Tier 2 retries",
+                item.id,
+                item.name,
+                hidden
+            );
+            item.hidden_path = None;
         }
 
         // Tier 2 — original still on the user's desktop: physically move
@@ -1812,11 +1859,26 @@ fn migrate_old_move_dir(app_handle: &AppHandle, old_dir: &Path) -> u32 {
 
         let success = match std::fs::rename(&file_path, &dest) {
             Ok(()) => true,
-            Err(_) => match std::fs::copy(&file_path, &dest) {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(&file_path);
-                    true
-                }
+            Err(rename_err) => match std::fs::copy(&file_path, &dest) {
+                Ok(_) => match std::fs::remove_file(&file_path) {
+                    Ok(()) => true,
+                    Err(rm_err) => {
+                        tracing::error!(
+                            "Legacy migration: copy ok but delete of source failed for {}: {} (rename was: {}). Removing copy to stay safe.",
+                            file_path.display(),
+                            rm_err,
+                            rename_err
+                        );
+                        if let Err(cleanup_err) = std::fs::remove_file(&dest) {
+                            tracing::error!(
+                                "Legacy migration: failed to clean up orphan copy at {}: {} — manual cleanup required",
+                                dest.display(),
+                                cleanup_err
+                            );
+                        }
+                        false
+                    }
+                },
                 Err(e) => {
                     tracing::error!(
                         "Legacy migration failed: {} -> {}: {}",
@@ -1916,15 +1978,41 @@ fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
         let zone_dir = zone_hidden_dir(app_handle, zone_id);
         let dest = unique_hidden_path(&zone_dir, source);
 
+        // Critical: never write success=true unless the source has actually
+        // left the desktop. If copy succeeds but remove_file fails the file
+        // exists in two places — recording it as hidden in layout would lock
+        // the layout entry into a "fake hidden" state that subsequent
+        // reconcile passes can't easily repair (the historical root cause of
+        // 91-stale-hidden_path bug).
         let success = match std::fs::rename(source, &dest) {
             Ok(()) => true,
-            Err(_) => match std::fs::copy(source, &dest) {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(source);
-                    true
-                }
-                Err(e) => {
-                    tracing::error!("Attrib migration failed for {}: {}", orig_path, e);
+            Err(rename_err) => match std::fs::copy(source, &dest) {
+                Ok(_) => match std::fs::remove_file(source) {
+                    Ok(()) => true,
+                    Err(rm_err) => {
+                        tracing::error!(
+                            "Attrib migration: copy ok but delete of source failed for {}: {} (rename was: {}). Removing copy to stay safe.",
+                            orig_path,
+                            rm_err,
+                            rename_err
+                        );
+                        if let Err(cleanup_err) = std::fs::remove_file(&dest) {
+                            tracing::error!(
+                                "Attrib migration: failed to clean up orphan copy at {:?}: {} — manual cleanup required",
+                                dest,
+                                cleanup_err
+                            );
+                        }
+                        false
+                    }
+                },
+                Err(copy_err) => {
+                    tracing::error!(
+                        "Attrib migration failed for {}: rename={} copy={}",
+                        orig_path,
+                        rename_err,
+                        copy_err
+                    );
                     false
                 }
             },

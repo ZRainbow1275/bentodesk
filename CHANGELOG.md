@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.4] — 2026-04-25 · **Zone UX Real Fix v4 + 丝滑静默升级**
+
+v1.2.3 用户实测仍残留 10 个问题（zone reconcile 假 overlay、桌面残骸、菜单链断、堆叠卡死、边缘闪烁、名称截断、显示模式 picker 不持久化等）。本版逐个真实复现 → 真实修复，并把升级流程打磨到"无需手动卸载、无图标缓存刷屏"级别。
+
+### Fixed — 修复
+
+#### **桌面 zero 残骸 + 真正的 reconcile**
+- `D:\Desktop\` 不再裸露任何 `.bentodesk-*` 或 `manifest.*` 文件——quarantine 输出位置改为 `.bentodesk/quarantine/`，启动时自动清理已存在的桌面残骸（`.bentodesk-quarantine-*.json.bak` + 裸 `manifest.json.bak`），并对 `.bentodesk/quarantine/` 内 30 天前的归档自动 prune。
+- `migrate_attrib_hidden_files` 不再静默吞 `fs::remove_file` 失败——错误显式传播到 reconcile 报告，不再让 layout.json 永久存留指向虚空的 `hidden_path` 字符串。
+- 启动序列重排：reconcile 先于 loadZones 执行，首屏即真实接管态，91 个 item 真正搬运到 `.bentodesk/{zone_id}/{filename}`。
+
+#### **就地静默升级（v1.2.3 → v1.2.4）**
+- 升级路径 **无需用户手动卸载**——Tauri Updater passive 模式自动 kill 当前进程 → 覆盖二进制 → 重启，全程仅一个进度条小窗口可见。
+- NSIS POSTINSTALL hook 增加 `/UPDATE` guard：升级时跳过重建"卸载 BentoDesk"快捷方式，**消除用户反馈的"图标好奇怪"**（Windows 资源管理器图标缓存被 CreateShortCut 反复刷新触发的视觉闪屏）。
+- `settings.json` / `layout.json` / timeline / icon cache 在升级路径下完全保留（`$UpdateMode=1` 双重保护链路已验证）。
+
+#### **Zone 防重叠 + 堆叠唤醒**
+- 重叠时按 Auto-spread 策略自动错开排列；hover/drag 时顶 zone z-index +1000 上浮；右上角加 ⊞ 按钮一键展开整摞，分离后单 zone 可正常唤醒。
+
+#### **批量拖动 + 批量管理**
+- Shift+click / lasso 多选支持群拖（mousemove 实时预览所有选中 zone，mouseup 一次性 bulkUpdateZones）。
+- 选区面板按钮 disabled 状态修复，"批量管理…"/"固定为迷你栏"菜单项实际打开对应 panel。
+
+#### **边缘 zone 拖拽闪烁**
+- mouseup batch 顺序修正——transform-origin 不再复用 hover 路径，边缘 zone 拖拽过程平滑无跳位。
+
+#### **名称截断**
+- ItemCard 垂直变体接入 useTextAbbr ref，ResizeObserver 测量时机修正，长文件名按容器宽度精确截断不再溢出。
+
+#### **显示模式 picker 持久化**
+- 后端 settings schema 新增 `display_mode: "hover" | "click" | "always"` 字段，picker 改值后写盘，zone 行为立即切换。
+
+#### **菜单 wiring 全链路打通**
+- ZoneIcons 补 pin/settings 入口键、ContextMenu 预选 zoneId、加 toast 反馈、移除 BentoZone per-zone display_mode override 屏蔽全局的旧逻辑。
+
+### Changed — 调整
+
+- `nsis-hooks.nsi`：POSTINSTALL 在 `/UPDATE` 模式下跳过 `CreateShortCut`，与既有 POSTUNINSTALL 的 `/UPDATE` guard 形成对称保护。
+- CI guard：阻止任何 v1.2.x 包含 desktop_path 残骸的 build。
+
+### 升级注意（v1.2.3 → v1.2.4）
+
+- **首次实现真正的丝滑升级**——Updater 自动检测 → passive 安装 → 重启，**无需用户卸载 / 无需关闭应用**。
+- 用户配置（settings / zones / layout / timeline / icon cache）在升级路径下完全保留。
+- 若升级后图标显示异常（Windows 通病），按 Win+R → 输入 `ie4uinit.exe -show` 一键刷新图标缓存即可。
+
+---
+
 ## [1.2.3] — 2026-04-25 · **Real Fix After v1.2.2 Vacuous-Pass Closeout**
 
 v1.2.2 闭环宣称修好的问题，在用户真实桌面（13 zones / 91 items）安装后**全部依旧**——上一轮 agent 协作产出 41 个测试全绿，但测试都是 mock IPC 测路由、不是真实复现，违反了 spec.md 第 8 / 354 行明写的"必须真实环境验证 + 必须复放视频路径"。本版逐个真实复现 → 真实修复，外加打包架构修正。

@@ -21,14 +21,15 @@
   flex-shrink: 0;
 }
 
+/* v7: removed `overflow: hidden` + `text-overflow: ellipsis` so the
+   inline font-size from `useTextAbbr` can shrink the full name to fit
+   instead of producing a "…" truncation. */
 .panel-header__title {
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-medium);
   letter-spacing: 0.3px;
   color: var(--text-primary);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
 }

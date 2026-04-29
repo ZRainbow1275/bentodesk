@@ -76,30 +76,31 @@
   align-items: flex-start;
 }
 
-/* Name — standard (vertical) */
+/* Name — standard (vertical)
+   v5 Fix #6.2: removed CSS-level ellipsis (line-clamp, text-overflow,
+   overflow:hidden, -webkit-box) so `useTextAbbr` is the single source of
+   truth for label truncation. CSS was collapsing the first-frame full name
+   to "..." before the canvas measurement landed, producing the "..."-only
+   ghost label users reported. Kept word-break + max-width so multi-line
+   wrapping still works inside narrow capsule grids. */
 .item-card__name {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-normal);
   color: var(--text-secondary);
   line-height: 1.3;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
   word-break: break-all;
   max-width: 100%;
 }
 
-/* Name — wide variant */
+/* Name — wide variant
+   v5 Fix #6.2: same removal as the standard variant. We keep
+   `white-space: nowrap` so the wide row never wraps mid-name; the abbr hook
+   produces a width-fitting candidate so no ellipsis is needed. */
 .item-card__name--wide {
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
-  -webkit-line-clamp: 1;
   white-space: nowrap;
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .item-card__missing-badge {

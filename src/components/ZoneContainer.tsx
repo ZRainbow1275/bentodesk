@@ -26,6 +26,7 @@ import {
   unionMarqueeSelection,
   clearMultiSelection,
 } from "../stores/selection";
+import SelectionFloatingBar from "./shared/SelectionFloatingBar";
 
 const ZoneContainer: Component = () => {
   // Split zones into (free-standing) + (grouped by stack_id). The stackMap
@@ -40,6 +41,13 @@ const ZoneContainer: Component = () => {
   });
 
   const stacks = createMemo(() => Array.from(stackMap().entries()));
+
+  // v7 #6: the global ⊞ "spread overlapping zones" button has been removed.
+  // Per user feedback, hover-bloom on a stack cluster is now the ONLY way to
+  // reach individual stacked zones — the previous global ⊞ rail was reported
+  // as non-functional and confusing. The overlap-detection / auto-spread
+  // helpers in `services/stack` are still exported for any future programmatic
+  // spread (e.g. from the command palette), but no UI surfaces them here.
 
   // ─── Theme C: marquee (drag-to-select) ────────────────────
   const [isDragging, setIsDragging] = createSignal(false);
@@ -165,6 +173,12 @@ const ZoneContainer: Component = () => {
           );
         })()}
       </Show>
+      {/*
+        * v7 #6: global ⊞ "spread overlapping zones" button removed —
+        * hover-bloom on a stack cluster (StackWrapper) is the single
+        * canonical way for the user to reach individual stacked zones.
+        */}
+      <SelectionFloatingBar />
     </div>
   );
 };

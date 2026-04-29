@@ -1,19 +1,26 @@
 /**
- * smartAbbreviate — D3 name truncation service.
+ * v7 text-fit service — proportional font shrinking, no truncation.
  *
- * Problem: `text-overflow: ellipsis` loses too much information when zone
- * names are long. "Compiler Project" → "Compile…" drops the semantic
- * identifier entirely. Users can no longer tell zones apart at a glance.
+ * Strategy change vs. v6: instead of producing an abbreviated string with a
+ * trailing "…", we keep the **complete** name and shrink the font-size until
+ * the rendered width fits the container. The minimum size is 8px; if the
+ * full name still overflows at 8px, we keep 8px and let the glyphs render
+ * tightly (visually dense but information-complete).
  *
- * Solution: classify characters by script, tokenize, then progressively
- * emit abbreviations based on script rules:
- *   - pure ASCII single-word: head slice ("Compiler" → "C" → "Co" → "Com")
- *   - multi-word ASCII     : initials ("Visual Studio Code" → "VSC")
- *   - pure CJK             : head 2 characters ("编译器" → "编译")
- *   - mixed                : per-segment abbreviation then concatenate
+ * Algorithm:
+ *   1. Measure the full name at the element's default font-size.
+ *   2. If nameW <= maxPx → render at default size.
+ *   3. Otherwise targetSize = clamp(8, defaultSize * maxPx / nameW, defaultSize).
+ *   4. Floor targetSize to integer pixels and re-emit.
  *
- * Progressive fill uses off-screen canvas measureText so the caller passes
- * just maxPx + the CSS font context.
+ * The hook still owns ResizeObserver + fonts.ready re-measurement so the
+ * three trigger paths (mount, container resize, web font load) all converge
+ * on a single text() / fontSize() pair.
+ *
+ * v6 carry-over: classifyChar / segmentName / measureText / getFontCtx are
+ * retained and exported because tests and future strategies (e.g. CJK-aware
+ * letter-spacing tweaks) may reuse them. The old "candidates"-and-pick-the-
+ * richest path and the FIRST_FRAME_FALLBACK_CHARS "…" splice are gone.
  */
 
 // ─── Character classification ───────────────────────────────
@@ -95,97 +102,99 @@ export function measureText(s: string, font: string): number {
   return ctx.measureText(s).width;
 }
 
-// ─── Abbreviation strategies ────────────────────────────────
+// ─── Sizing strategy ────────────────────────────────────────
 
-/**
- * Produce an ordered list of candidate strings, from shortest to fullest,
- * all of which are valid abbreviations of `name`. The caller walks the
- * list until one overflows the target width and keeps the previous one.
- */
-export function abbreviationCandidates(name: string): string[] {
-  const segs = segmentName(name);
-  if (segs.length === 0) return [""];
-  const asciiSegs = segs.filter((s) => s.kind === "ascii");
-  const cjkSegs = segs.filter((s) => s.kind === "cjk");
-  const multiAsciiWords = asciiSegs.length > 1;
+/** Lower bound for the proportional shrink. Below this glyphs are unreadable. */
+export const MIN_FONT_SIZE_PX = 8;
 
-  const out: string[] = [];
+export interface FitFontContext {
+  /** Family-only CSS `font` shorthand fragment, e.g. `"500 / 1.3 'Inter', sans-serif"`. */
+  fontFamilyShorthand: string;
+  /** Default (CSS-declared) font-size in pixels — the size we measure at first. */
+  defaultFontSizePx: number;
+}
 
-  // Start with initials-only for multi-word ASCII ("Visual Studio Code" → "VSC")
-  if (multiAsciiWords && cjkSegs.length === 0) {
-    const initials = asciiSegs.map((s) => s.text[0]?.toUpperCase() ?? "").join("");
-    if (initials.length > 0) out.push(initials);
-  }
-  // Head 1, 2 CJK characters for a CJK-heavy segment.
-  if (cjkSegs.length > 0 && asciiSegs.length === 0) {
-    const first = cjkSegs[0].text;
-    if (first.length >= 1) out.push(first.slice(0, 1));
-    if (first.length >= 2) out.push(first.slice(0, 2));
-  }
-  // Mixed: concat first character of each segment, progressively adding.
-  if (cjkSegs.length > 0 && asciiSegs.length > 0) {
-    const heads = segs.filter((s) => s.kind !== "sep").map((s) => s.text[0] ?? "");
-    for (let i = 1; i <= heads.length; i++) {
-      const candidate = heads.slice(0, i).join("");
-      if (candidate.length > 0) out.push(candidate);
-    }
-  }
-
-  // Progressive head-slice of the full name: this always fits the longer
-  // targets. We start from 1 char and go up to the full length.
-  for (let i = 1; i <= name.length; i++) {
-    out.push(name.slice(0, i));
-  }
-  out.push(name);
-
-  // De-duplicate while preserving order (shortest → fullest). Dropping
-  // duplicates prevents "1 char" from repeating when strategies collide.
-  const seen = new Set<string>();
-  return out.filter((s) => {
-    if (seen.has(s)) return false;
-    seen.add(s);
-    return true;
-  });
+export interface FitResult {
+  /** The text to render — always equal to the input `name` (never truncated). */
+  text: string;
+  /** Font-size in CSS pixels. Equal to defaultFontSizePx when the name fits. */
+  fontSizePx: number;
 }
 
 /**
- * Public API: choose the richest candidate whose measured width does not
- * exceed `maxPx`. Falls back to the shortest 1-char form if even that
- * overflows (avoids returning empty string).
+ * v7 public API: pick a font-size that lets the full `name` render within
+ * `maxPx`. Returns both the (untruncated) text and the chosen size so callers
+ * can apply it inline.
+ *
+ * Edge cases:
+ *  - Empty name → empty text, default size (caller still has a stable element).
+ *  - maxPx <= 0 (pre-layout) → return default size; the parent's overflow
+ *    rules + the next ResizeObserver tick will correct any one-frame bleed.
+ *    Crucially we no longer emit a "…" placeholder, so the user-visible name
+ *    is correct from the moment real measurement runs.
+ *  - Full name still overflows at MIN_FONT_SIZE_PX → keep MIN_FONT_SIZE_PX
+ *    and let the browser render the glyphs tightly. Information-complete
+ *    beats visually-clean per the v7 product decision.
  */
-export function smartAbbreviate(
+export function fitFontSize(
   name: string,
   maxPx: number,
-  fontCtx: { font: string; letterSpacing?: number },
-): string {
-  if (!name) return "";
-  if (maxPx <= 0) return name;
-  const font = fontCtx.font || "12px sans-serif";
-  // Fast path: entire name fits.
-  if (measureText(name, font) <= maxPx) return name;
-
-  const candidates = abbreviationCandidates(name);
-  let best = candidates[0] ?? name;
-  for (const c of candidates) {
-    if (measureText(c, font) <= maxPx) {
-      best = c;
-    } else {
-      break;
-    }
+  ctx: FitFontContext,
+): FitResult {
+  if (!name) {
+    return { text: "", fontSizePx: ctx.defaultFontSizePx };
   }
-  return best;
+  if (maxPx <= 0) {
+    return { text: name, fontSizePx: ctx.defaultFontSizePx };
+  }
+
+  const defaultFont = `${ctx.defaultFontSizePx}px ${ctx.fontFamilyShorthand}`;
+  const widthAtDefault = measureText(name, defaultFont);
+
+  if (widthAtDefault <= maxPx) {
+    return { text: name, fontSizePx: ctx.defaultFontSizePx };
+  }
+
+  // Linear scaling estimate — for fonts that don't kern wildly across sizes
+  // this lands within ~1 px of the binary-search optimum without the loop.
+  const ratio = maxPx / widthAtDefault;
+  const scaled = Math.floor(ctx.defaultFontSizePx * ratio);
+  const targetSize = Math.max(
+    MIN_FONT_SIZE_PX,
+    Math.min(ctx.defaultFontSizePx, scaled),
+  );
+  return { text: name, fontSizePx: targetSize };
 }
 
-/** Extract a CSS `font` shorthand from a mounted element (for ResizeObserver). */
-export function getFontCtx(el: HTMLElement): { font: string } {
-  if (typeof window === "undefined") return { font: "12px sans-serif" };
+/**
+ * Read the family-only `font` shorthand and the default font-size from a
+ * mounted element. We split size out so that re-measuring after we've
+ * applied an inline `font-size: 8px` doesn't poison the "default" reference.
+ *
+ * The caller is expected to record the default size **once** at mount time
+ * (or whenever the element's CSS-declared size genuinely changes — e.g.
+ * theme switch, which we do not currently support).
+ */
+export function readFontContext(el: HTMLElement): FitFontContext {
+  if (typeof window === "undefined") {
+    return { fontFamilyShorthand: "sans-serif", defaultFontSizePx: 13 };
+  }
   const cs = window.getComputedStyle(el);
-  // `font` shorthand may be empty in some browsers; rebuild from parts.
-  const short = cs.font;
-  if (short && short.length > 0) return { font: short };
-  return {
-    font: `${cs.fontStyle} ${cs.fontVariant} ${cs.fontWeight} ${cs.fontSize} / ${cs.lineHeight} ${cs.fontFamily}`,
-  };
+  const sizePx = parsePx(cs.fontSize) || 13;
+  const family = cs.fontFamily || "sans-serif";
+  const weight = cs.fontWeight || "normal";
+  const style = cs.fontStyle || "normal";
+  const variant = cs.fontVariant || "normal";
+  const lineHeight = cs.lineHeight && cs.lineHeight !== "normal" ? cs.lineHeight : "normal";
+  // Note: we deliberately omit the size from the shorthand so callers can
+  // splice in their target size each measurement.
+  const fontFamilyShorthand = `${style} ${variant} ${weight} / ${lineHeight} ${family}`;
+  return { fontFamilyShorthand, defaultFontSizePx: sizePx };
+}
+
+function parsePx(v: string): number {
+  const m = /^(\d+(?:\.\d+)?)px$/.exec(v.trim());
+  return m ? parseFloat(m[1]) : 0;
 }
 
 // ─── Solid hook ─────────────────────────────────────────────
@@ -194,56 +203,143 @@ import { createSignal, createMemo, onMount, onCleanup, type Accessor } from "sol
 
 /**
  * Solid composable that turns a long string + an element ref into a reactive
- * abbreviated rendering driven by ResizeObserver. Wires up the trio that
+ * font-size that keeps the full text visible. Wires up the trio that
  * StackCapsule / PanelHeader / ZenCapsule / StackTray member rows / ItemCard
  * names all need:
  *
  *   1. A `setRef` callback to attach to the title span.
- *   2. A reactive `text()` accessor that emits the best-fitting abbreviation
- *      for the element's current `clientWidth`.
- *   3. A reactive `tooltipDisabled()` accessor — true when the element shows
- *      the full name and the tooltip would be redundant.
+ *   2. A reactive `text()` accessor — always the full name (v7).
+ *   3. A reactive `fontSize()` accessor — pixels, applied inline by callers.
+ *   4. A reactive `tooltipDisabled()` accessor — true when default size is
+ *      used (i.e. nothing was shrunk and the glyphs match the surrounding
+ *      typography). At smaller sizes the tooltip stays enabled so users can
+ *      hover for a normal-weight read.
  *
- * The hook owns the ResizeObserver lifecycle. Caller does not need to manage
- * onCleanup — the hook installs its own.
- *
- * #7 motivation: prior to this hook the four scenes each open-coded the same
- * 18 lines, ItemCard / StackTray didn't bother and just relied on
- * text-overflow: ellipsis, and the v1.2.2 release shipped with three
- * different abbreviation behaviours across the four name-rendering scenes.
+ * The hook owns the ResizeObserver lifecycle and the fonts.ready listener;
+ * callers do not manage onCleanup themselves.
  */
 export interface UseTextAbbrResult {
   setRef: (el: HTMLElement | undefined) => void;
   text: Accessor<string>;
+  fontSize: Accessor<number>;
   tooltipDisabled: Accessor<boolean>;
 }
 
 export function useTextAbbr(fullText: () => string): UseTextAbbrResult {
   const [el, setEl] = createSignal<HTMLElement | undefined>();
   const [maxPx, setMaxPx] = createSignal(0);
-  const [fontCtx, setFontCtx] = createSignal<{ font: string }>({
-    font: "12px sans-serif",
+  const [fontCtx, setFontCtx] = createSignal<FitFontContext>({
+    fontFamilyShorthand: "sans-serif",
+    defaultFontSizePx: 13,
   });
 
   onMount(() => {
     const node = el();
     if (!node) return;
-    setFontCtx(getFontCtx(node));
-    const measure = () => setMaxPx(node.clientWidth);
+    // Capture the CSS-declared default size **before** we ever apply an
+    // inline override. Re-reading getComputedStyle later would observe our
+    // own inline size and shrink the "default" further on each measurement.
+    setFontCtx(readFontContext(node));
+
+    let rafId: number | null = null;
+    let lastWidth = -1;
+    let disposed = false;
+    const commitMeasure = () => {
+      rafId = null;
+      const w = Math.round(node.clientWidth);
+      if (w !== lastWidth && w > 0) {
+        lastWidth = w;
+        setMaxPx(w);
+      }
+    };
+    const measure = () => {
+      if (rafId !== null) return;
+      rafId =
+        typeof requestAnimationFrame === "function"
+          ? requestAnimationFrame(commitMeasure)
+          : (setTimeout(commitMeasure, 16) as unknown as number);
+    };
+
+    // rAF-poll clientWidth until layout settles. The synchronous mount-time
+    // sample frequently reads 0 because the ItemCard sits inside a flex/grid
+    // track whose width is distributed in a later layout pass than the one
+    // that mounts the child. Polling for up to ~5 frames lets us catch the
+    // real width as soon as the parent's flex distribution commits, without
+    // blocking the first paint.
+    const MAX_BOOTSTRAP_FRAMES = 5;
+    let bootstrapAttempts = 0;
+    const bootstrapMeasure = () => {
+      if (disposed) return;
+      const w = Math.round(node.clientWidth);
+      if (w > 0) {
+        lastWidth = w;
+        setMaxPx(w);
+        return;
+      }
+      if (bootstrapAttempts < MAX_BOOTSTRAP_FRAMES) {
+        bootstrapAttempts++;
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(bootstrapMeasure);
+        } else {
+          setTimeout(bootstrapMeasure, 16);
+        }
+      }
+    };
+    bootstrapMeasure();
+
+    // When web fonts arrive after first paint, the canvas measurer was using
+    // fallback metrics that under/over-estimated glyph width. Re-measure once
+    // `document.fonts` signals readiness so the chosen size matches the
+    // rendered glyphs. We **do not** refresh the font context here because
+    // by this point the element may already carry our inline font-size; the
+    // family/weight stay constant across the swap.
+    const fontsApi =
+      typeof document !== "undefined"
+        ? (document as Document & { fonts?: FontFaceSet }).fonts
+        : undefined;
+    if (fontsApi) {
+      fontsApi.ready
+        .then(() => {
+          if (disposed) return;
+          const w = Math.round(node.clientWidth);
+          if (w > 0) {
+            // Force a recompute even if width is unchanged, since the glyph
+            // metrics underlying measureText have shifted.
+            lastWidth = -1;
+            setMaxPx(w);
+          }
+        })
+        .catch(() => {
+          /* ignore — fonts API may reject in some embedded WebViews */
+        });
+    }
+
     measure();
+
     const ro = new ResizeObserver(measure);
     ro.observe(node);
-    onCleanup(() => ro.disconnect());
+    onCleanup(() => {
+      disposed = true;
+      ro.disconnect();
+      if (rafId !== null) {
+        if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+        else clearTimeout(rafId as unknown as number);
+        rafId = null;
+      }
+    });
   });
 
-  const text = createMemo(() => {
+  const fit = createMemo<FitResult>(() => {
     const width = maxPx();
     const name = fullText();
-    if (width <= 0) return name;
-    return smartAbbreviate(name, width, fontCtx());
+    return fitFontSize(name, width, fontCtx());
   });
 
-  const tooltipDisabled = createMemo(() => text() === fullText());
+  const text = createMemo(() => fit().text);
+  const fontSize = createMemo(() => fit().fontSizePx);
+  const tooltipDisabled = createMemo(
+    () => fit().fontSizePx >= fontCtx().defaultFontSizePx,
+  );
 
-  return { setRef: setEl, text, tooltipDisabled };
+  return { setRef: setEl, text, fontSize, tooltipDisabled };
 }

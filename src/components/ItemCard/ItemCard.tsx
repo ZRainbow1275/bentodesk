@@ -9,7 +9,7 @@ import type { BentoItem } from "../../types/zone";
 import { showContextMenu, selectItem, isItemSelected } from "../../stores/ui";
 import { openFile } from "../../services/ipc";
 import { beginDragTracking, internalDrag } from "../../services/drag";
-import { useTextAbbr } from "../../services/textAbbr";
+import { useTextAbbrGroup } from "../../services/textAbbrGroup";
 import { t } from "../../i18n";
 import ItemIcon from "./ItemIcon";
 import Tooltip from "../shared/Tooltip";
@@ -31,7 +31,10 @@ const ItemCard: Component<ItemCardProps> = (props) => {
   const isMissing = () => props.item.file_missing === true;
 
   const visibleName = () => displayName(props.item.name);
-  const abbr = useTextAbbr(visibleName);
+  // v8: name uses the panel-wide FontGroup when available so a column of
+  // ItemCards reads as a uniform block. Falls back to per-element sizing
+  // when no FontGroupContext provider is mounted.
+  const abbr = useTextAbbrGroup(visibleName);
 
   const handleDoubleClick = () => {
     if (isMissing()) return;
@@ -96,18 +99,15 @@ const ItemCard: Component<ItemCardProps> = (props) => {
       <div class={`item-card__meta ${props.item.is_wide ? "item-card__meta--wide" : ""}`}>
         <Tooltip
           content={visibleName()}
-          disabled={
-            props.item.is_wide
-              ? abbr.tooltipDisabled()
-              : false
-          }
+          disabled={abbr.tooltipDisabled()}
         >
           <span
             class={`item-card__name ${props.item.is_wide ? "item-card__name--wide" : ""}`}
-            ref={props.item.is_wide ? abbr.setRef : undefined}
+            ref={abbr.setRef}
             aria-label={visibleName()}
+            style={{ "font-size": `${abbr.fontSize()}px` }}
           >
-            {props.item.is_wide ? abbr.text() : visibleName()}
+            {abbr.text()}
           </span>
         </Tooltip>
         <Tooltip content={t("itemCardMissingTooltip")}>

@@ -50,6 +50,7 @@ const PanelHeader: Component<PanelHeaderProps> = (props) => {
         class="panel-header__title"
         ref={abbr.setRef}
         aria-label={fullName()}
+        style={{ "font-size": `${abbr.fontSize()}px` }}
       >
         <Tooltip content={fullName()} disabled={abbr.tooltipDisabled()}>
           {abbr.text()}

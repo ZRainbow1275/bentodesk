@@ -69,7 +69,15 @@ export async function stackZonesAction(zoneIds: string[]): Promise<string | null
     // Reload layout so stack_id / stack_order reflect server-side truth.
     await loadZones();
     return stackId;
-  } catch {
+  } catch (err) {
+    // v9: surface IPC failures to the console. Pre-v9 these were
+    // silently swallowed via `catch {}`, which made debugging the
+    // round-9 dissolve bug impossible — the user sees nothing happen
+    // when the action fails (Tauri command not registered, lock
+    // contention, malformed args, etc.). With logs the user / dev can
+    // diagnose without running the app under DevTools.
+    // eslint-disable-next-line no-console
+    console.error("[stacks:stackZonesAction] IPC failed", { zoneIds, err });
     return null;
   }
 }
@@ -79,7 +87,9 @@ export async function unstackZonesAction(stackId: string): Promise<boolean> {
     await ipcUnstackZones(stackId);
     await loadZones();
     return true;
-  } catch {
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[stacks:unstackZonesAction] IPC failed", { stackId, err });
     return false;
   }
 }
@@ -93,7 +103,14 @@ export async function reorderStackAction(
     await ipcReorderStack(stackId, zoneId, newOrder);
     await loadZones();
     return true;
-  } catch {
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[stacks:reorderStackAction] IPC failed", {
+      stackId,
+      zoneId,
+      newOrder,
+      err,
+    });
     return false;
   }
 }
@@ -114,7 +131,13 @@ export async function detachZoneFromStackAction(
     }
     await loadZones();
     return true;
-  } catch {
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[stacks:detachZoneFromStackAction] IPC failed", {
+      stackId,
+      zoneId,
+      err,
+    });
     return false;
   }
 }

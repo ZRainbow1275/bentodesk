@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  computeAnchorFromCapsulePosition,
   computeTransformOrigin,
   computeZonePositionStyle,
   canReleaseSnapshot,
@@ -263,5 +264,98 @@ describe("computeZonePositionStyle", () => {
     });
     expect(out.right).toBe("7px");
     expect(out.bottom).toBe("13px");
+  });
+});
+
+/**
+ * v8 round-3 #1+2: the drop-flash regression.
+ *
+ * Repro: dragging an expanded zone and releasing in the lower-right
+ * quadrant of a 1920x1080 viewport USED to leave the panel painting
+ * with `{left: x%, top: y%}` for one frame because captureAnchorSnapshot
+ * required a DOM rect that wasn't in its final position yet. The visible
+ * symptom was the panel "flashing" off the right/bottom edge on every
+ * drop near a screen corner.
+ *
+ * `computeAnchorFromCapsulePosition` predicts the anchor synchronously
+ * from the persisted `pos`, so it can be installed in the same Solid
+ * batch that flips `isDragRepositioning` back to false.
+ */
+describe("computeAnchorFromCapsulePosition", () => {
+  const VP = { width: 1920, height: 1080 };
+  const CAP = { width: 56, height: 56 };
+  const PANEL = { w_percent: 20, h_percent: 40 }; // 384x432
+
+  it("anchors top-left when dropped near origin", () => {
+    const snap = computeAnchorFromCapsulePosition({
+      pos: { x_percent: 5, y_percent: 5 },
+      capsulePx: CAP,
+      expandedPct: PANEL,
+      viewport: VP,
+    });
+    expect(snap.x).toBe("left");
+    expect(snap.y).toBe("top");
+  });
+
+  it("anchors bottom-right when dropped in lower-right quadrant", () => {
+    // Capsule near bottom-right corner: would overflow growing
+    // rightward+downward, so anchor must flip to right+bottom.
+    const snap = computeAnchorFromCapsulePosition({
+      pos: { x_percent: 90, y_percent: 90 },
+      capsulePx: CAP,
+      expandedPct: PANEL,
+      viewport: VP,
+    });
+    expect(snap.x).toBe("right");
+    expect(snap.y).toBe("bottom");
+    // flipOffset = viewport - (cap.left + cap.width) — these become the
+    // `right:` / `bottom:` CSS values used by the spring animation.
+    const expectedRight = VP.width - ((90 / 100) * VP.width + CAP.width);
+    const expectedBottom = VP.height - ((90 / 100) * VP.height + CAP.height);
+    expect(snap.flipOffsetX).toBeCloseTo(expectedRight);
+    expect(snap.flipOffsetY).toBeCloseTo(expectedBottom);
+  });
+
+  it("zero flipOffset clamp prevents negative right/bottom", () => {
+    // pos that would push capRight/Bottom past the viewport (off-screen
+    // due to clamp slop) — flipOffset must clamp to 0, not go negative.
+    const snap = computeAnchorFromCapsulePosition({
+      pos: { x_percent: 100, y_percent: 100 },
+      capsulePx: CAP,
+      expandedPct: PANEL,
+      viewport: VP,
+    });
+    expect(snap.flipOffsetX).toBeGreaterThanOrEqual(0);
+    expect(snap.flipOffsetY).toBeGreaterThanOrEqual(0);
+  });
+
+  it("uses panel-fallback dims when expanded_size is 0/0", () => {
+    // expanded_size unset → 360x420 default. With a 56x56 capsule
+    // centered horizontally, panel should still fit, anchor stays left/top.
+    const snap = computeAnchorFromCapsulePosition({
+      pos: { x_percent: 10, y_percent: 10 },
+      capsulePx: CAP,
+      expandedPct: { w_percent: 0, h_percent: 0 },
+      viewport: VP,
+    });
+    expect(snap.x).toBe("left");
+    expect(snap.y).toBe("top");
+  });
+
+  it("respects shrunken work area (taskbar reservation)", () => {
+    // Real-world: Windows reserves ~48px at bottom for the taskbar; the
+    // work-area `bottom` is 1032 even though viewport.height is 1080.
+    // A capsule sitting near y=80% (=864) plus 432px panel would overrun
+    // the work-area bottom (864+432=1296 > 1032), so anchor must flip
+    // to "bottom" — which it would NOT if we naively used viewport bounds.
+    const work = { left: 0, top: 0, right: 1920, bottom: 1032 };
+    const snap = computeAnchorFromCapsulePosition({
+      pos: { x_percent: 50, y_percent: 80 },
+      capsulePx: CAP,
+      expandedPct: PANEL,
+      viewport: VP,
+      work,
+    });
+    expect(snap.y).toBe("bottom");
   });
 });

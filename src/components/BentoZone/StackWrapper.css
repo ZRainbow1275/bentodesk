@@ -4,12 +4,533 @@
   overflow: visible;
 }
 
+/* v8 round-8 (Bug Drag-Regression): lift the surface (which contains
+ * <StackCapsule>) above the bloom buffer (z-index: 49) AND petals
+ * (z-index: 50) in the wrapper's stacking context. The
+ * `.stack-bloom-buffer` is `position: fixed` and is rendered LATER in
+ * the DOM than the surface. The buffer sits on top of the capsule and
+ * its `onMouseDown` handler used to swallow the mousedown so
+ * `handleCapsuleMouseDown` never fired and drag never started.
+ * Promoting the surface to z-index: 51 puts the capsule on TOP of the
+ * buffer halo so mousedown lands on the capsule.
+ *
+ * v8 round-12: the buffer now spans the full viewport (100vw×100vh) so
+ * multi-row wrap layouts still get hit-test coverage. The surface
+ * z-index promotion is what keeps the capsule clickable through the
+ * full-viewport buffer overlay. */
 .stack-wrapper__surface {
   position: relative;
+  z-index: 51;
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 180px;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * v7 #4 hover-bloom (rewritten) — real, visible fan-out so the user
+ * can pull members out one by one without ever clicking ⊞.
+ *
+ * Two layers:
+ *   1. `.stack-bloom-buffer` is an INVISIBLE hit-area that surrounds
+ *      the capsule on all sides. It is sized to fully cover every
+ *      petal's resting and bloomed positions, so the cursor can move
+ *      from the capsule to any petal without crossing into "outside
+ *      the wrapper" territory (which would fire `mouseleave` and
+ *      retract the bloom mid-interaction). v6's bug was that petals
+ *      flew far outside the wrapper's natural box and the
+ *      `mouseleave` fired immediately.
+ *   2. `.stack-bloom` is the visible petal grid. Petals are sized
+ *      large enough to read (icon + name) and positioned far enough
+ *      from the capsule (~120-160 px) that the user clearly perceives
+ *      the cluster has spread — matching the user's mental model of
+ *      "drag each zone out one at a time". They live INSIDE the
+ *      buffer so hovering a petal counts as still being on the
+ *      wrapper.
+ *
+ * Round-12 lays petals out as a horizontal row directly below (or
+ * above, when the capsule is near the viewport bottom) the stack
+ * capsule, side by side. When too many petals to fit horizontally,
+ * the row wraps to a multi-row grid centred under the capsule. Each
+ * petal shows the zone's icon and an aliased name so the user can
+ * tell them apart before clicking. Clicking / hovering opens the
+ * FocusedZonePreview for that member (== the existing "expand" UX).
+ * ────────────────────────────────────────────────────────────────── */
+
+/* v8 round-12 (bloom-row-layout): the bloom lays petals out in a
+ * horizontal row directly below (or above, when the capsule is near
+ * the bottom edge) the stack capsule. Both `.stack-bloom-buffer` and
+ * each `.stack-bloom__petal` are `position: fixed` (set inline by JS),
+ * so this stylesheet only defines visuals + the resting/bloomed
+ * transition. Geometry — left/top/width/height — comes from inline
+ * styles that JS computes via `resolvePetalRow` against the capsule
+ * rect. The wrapper's natural box stays a single capsule hit target,
+ * while the bloom layers escape the wrapper's stacking context
+ * entirely (which is why their z-index is documented here, not
+ * relative to .stack-wrapper).
+ *
+ * Round-12 buffer is now viewport-sized (100vw × 100vh) so multi-row
+ * wrap layouts get full hit-test coverage anywhere petals may render.
+ * Pre-round-12 the buffer was a circular halo around the cursor radius
+ * — which broke the moment the row layout extended outside that
+ * circle. The buffer is invisible (no background) and `pointer-events:
+ * auto` so the cursor staying within the viewport keeps the bloom
+ * registered with the hit-test poller. Petals sit on top via z-index
+ * 51 so clicks land on the petal, not the buffer. */
+.stack-bloom-buffer {
+  pointer-events: auto;
+  /* Keep buffer below petals (50) but above any FocusedZonePreview
+   * the petal hover may open. */
+  z-index: 49;
+  /* Uncomment to visualise during debugging:
+   * background: rgba(255, 0, 0, 0.06); */
+}
+
+.stack-bloom {
+  /* Inline `position: fixed` is set per-petal; the container itself
+   * is a non-positioned, inert child that exists purely so the
+   * <For> render can group all petals under a single role="menu". */
+  pointer-events: none;
+  z-index: 50;
+}
+
+/* v8 round-8 (bloom polish): elevate petals from "tile on glass" to
+ * "card on glass" — match BentoPanel's ambient style with refined
+ * radius, padding, gradient, and a 1px inner-top highlight so the
+ * petal reads as part of the same depth language as expanded panels.
+ * Round-7 already strengthened backdrop / shadows; this round refines
+ * surface tokens, icon halo, name color, and active state contrast.
+ *
+ * v8 round-11 (bloom-elegant-anim): petals now ENTER via a staggered
+ * spring keyframe instead of relying on a transition + class flip.
+ * The inline JS style provides four CSS custom props per petal:
+ *   --bloom-origin-x / --bloom-origin-y  → vector from petal box's
+ *       top-left corner BACK to the cursor (so scale(0.4) at origin
+ *       visibly "lives" on the cursor before flying out).
+ *   --bloom-to-x / --bloom-to-y          → 0px / 0px (the petal's
+ *       resting position, since left/top already place it correctly).
+ *   --petal-index                        → For-index (drives stagger).
+ *   --bloom-petal-count                  → members.length (drives the
+ *       reverse stagger on exit).
+ *
+ * Steady-state is `transform: translate(var(--bloom-to-x),
+ * var(--bloom-to-y)) scale(1)` — animation-fill-mode: forwards locks
+ * the final keyframe so hover/active transitions take over after.
+ *
+ * Reduced-motion users still get the legacy fade-only path via the
+ * @media block at the bottom of the file (fades-only, no spring). */
+.stack-bloom__petal {
+  /* 108×96 capsule-style tile (slightly wider than tall so two-line
+   * names don't truncate). Inline left/top/width/height driven by JS.
+   * v8 round-8: bumped border-radius 14→16, padding to 12/10 to give
+   * the petal a more "card-like" feel matching BentoPanel. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  /* v8 round-8 polish #B1: replaced vertical gradient with a 155deg
+   * gradient so the petal picks up the same diagonal sheen language
+   * as BentoPanel cards. The two-stop gradient subtly lights the
+   * top-left corner and shadows the bottom-right, suggesting depth. */
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04)),
+    var(--surface-expanded, rgba(18, 18, 24, 0.94));
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 51;
+
+  /* v8 round-11/12: defaults for the four animation custom props. JS
+   * overrides --bloom-origin-x/y per petal so each petal "drops out"
+   * of the capsule centre toward its row resting place. The to-x/y
+   * stay 0 in normal flow because left/top already place the petal at
+   * its resolved row position; the keyframes interpolate from
+   * origin→0. (Pre-round-12 the origin was the cursor; round-12
+   * changed it to the capsule centre when the radial bloom was
+   * abandoned.) */
+  --petal-index: 0;
+  --bloom-petal-count: 1;
+  --bloom-origin-x: 0px;
+  --bloom-origin-y: 0px;
+  --bloom-to-x: 0px;
+  --bloom-to-y: 0px;
+
+  /* Pre-animation state — opacity 0 + scale at origin. animation-name
+   * + animation-fill-mode below take over during the entry, leaving
+   * `transform: translate(var(--bloom-to-x), var(--bloom-to-y))
+   * scale(1); opacity: 1` as the final/steady state per the
+   * forwards fill-mode. */
+  opacity: 0;
+  transform: translate(var(--bloom-origin-x), var(--bloom-origin-y)) scale(0.4);
+  /* v8 round-8 polish #B1: include a 1px white inset highlight at the
+   * top edge (the inset shadow) — same trick BentoPanel uses to suggest
+   * a subtle bevel where light catches the surface. The three outer
+   * shadows preserve round-7's depth language. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 18px 38px rgba(0, 0, 0, 0.42),
+    0 4px 12px rgba(0, 0, 0, 0.25),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+  /* Color/elevation transitions stay (driven by hover / active class
+   * flips). Transform/opacity are owned by the keyframe animations so
+   * they're explicitly excluded — listing them here would race the
+   * keyframe animation and produce visual jitter on petal hover. */
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.stack-wrapper--bloomed .stack-bloom__petal {
+  /* Entry: 420 ms spring with capped total stagger. forwards fill-mode
+   * leaves opacity:1 + transform: translate(to-x, to-y) scale(1) locked
+   * in once the keyframe completes, so subsequent hover transforms
+   * compose cleanly without re-triggering the entry.
+   *
+   * v8 round-14 (stagger cap): pre-round-14 the stagger was a fixed
+   * 38 ms per petal, which gave a 16-petal bloom 608 ms total entry
+   * — too long to feel responsive. The cap rewrites the per-petal
+   * delay as `(360 / count) * index`, distributing the same
+   * staircase across at most 360 ms regardless of count. For ≤ 10
+   * petals the per-petal delay is still ≥ 36 ms (visually
+   * indistinguishable from the round-12 38 ms); for larger counts
+   * the per-petal delay shrinks but the cluster still appears
+   * sequenced rather than synchronous. `max(1, count)` guards a
+   * div-by-zero in the degenerate single-petal stacks. */
+  animation: stack-bloom-petal-enter 420ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation-delay: calc(
+    (360ms / max(1, var(--bloom-petal-count, 1))) * var(--petal-index, 0)
+  );
+  /* v8 round-14 (will-change cleanup): hint the GPU layer during the
+   * entry animation. The JS handler in StackWrapper.tsx flips
+   * will-change to `auto` on animationend so the layer is released
+   * once the petal settles. */
+  will-change: transform, opacity;
+}
+
+/* Reverse stagger on exit: index 0 (first in) leaves last (so the
+ * cluster visually re-collects toward the cursor).
+ *
+ * v8 round-14: total exit stagger capped at 240 ms (per the round-14
+ * perf pass). With max 24 petals the per-petal delay is ≥ 10 ms; for
+ * smaller stacks the cluster reads as a sequenced collapse without a
+ * laggy tail. */
+.stack-bloom__petal--leaving {
+  animation: stack-bloom-petal-exit 220ms cubic-bezier(0.4, 0, 0.7, 0.2) forwards;
+  animation-delay: calc(
+    (240ms / max(1, var(--bloom-petal-count, 1)))
+      * (var(--bloom-petal-count, 1) - 1 - var(--petal-index, 0))
+  );
+}
+
+@keyframes stack-bloom-petal-enter {
+  0% {
+    transform: translate(var(--bloom-origin-x), var(--bloom-origin-y)) scale(0.4);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--bloom-to-x), var(--bloom-to-y)) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes stack-bloom-petal-exit {
+  0% {
+    transform: translate(var(--bloom-to-x), var(--bloom-to-y)) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--bloom-origin-x), var(--bloom-origin-y)) scale(0.5);
+    opacity: 0;
+  }
+}
+
+/* v8 round-8 polish #B2: icon halo, kept circular (border-radius: 50%),
+ * tinted with the member zone's accent color via --zone-accent custom
+ * prop so each petal's icon glows in its own identity color. Adds a
+ * 1px white inset highlight on top edge so the icon reads as a "lit"
+ * focal point of the petal.
+ *
+ * v8 round-14: the halo size now scales with the petal size bucket via
+ * the --petal-icon-size custom prop (defaults to 36 px for ≤ 4 member
+ * stacks, smaller for larger stacks). The fallback 40 px keeps the
+ * round-8 dimensions when the prop isn't set (e.g. the indicator
+ * tile). */
+.stack-bloom__petal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--petal-icon-size, 40px);
+  height: var(--petal-icon-size, 40px);
+  border-radius: 50%;
+  background: linear-gradient(
+    135deg,
+    var(--zone-accent, rgba(255, 255, 255, 0.18)),
+    color-mix(in srgb, var(--zone-accent, rgba(255, 255, 255, 0.12)) 40%, transparent)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  flex-shrink: 0;
+  transition: background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+/* v8 round-8 polish #B3: soften the petal name color so it reads
+ * supportive rather than shouting. color-mix dims the primary text
+ * token by 8% so it sits visually below the icon. */
+.stack-bloom__petal-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  width: 100%;
+  /* 2-line clamp so longer Chinese aliases don't get chopped to "…"
+   * mid-character. Falls back to text-overflow ellipsis for browsers
+   * lacking -webkit-line-clamp (none in our Tauri target, but cheap). */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  color: color-mix(in srgb, var(--text-primary, #fff) 92%, transparent);
+}
+
+/* v8 round-8 polish #B4: ramp the active state contrast — when the
+ * preview is showing this petal's panel, the petal gets a 2px solid
+ * accent ring + a faint outer glow so the user can see at a glance
+ * which petal owns the visible preview. Hover state stays slightly
+ * lighter so the difference between hover-only and hover+selected
+ * reads.
+ *
+ * v8 round-11/12: hover composes with the entry-animation's resting
+ * `translate(var(--bloom-to-x), var(--bloom-to-y))` so the petal
+ * lifts WITHOUT cancelling the row position locked in by the
+ * keyframe's `forwards` fill-mode. A dedicated 180 ms transition
+ * scoped to `transform` keeps the hover lift smooth without
+ * fighting the 420 ms entry spring (which has already finished by
+ * the time the user can hover). */
+.stack-bloom__petal:hover {
+  border-color: color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.6)) 70%, transparent);
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.20), rgba(255, 255, 255, 0.06)),
+    var(--surface-expanded, rgba(18, 18, 24, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 22px 44px rgba(0, 0, 0, 0.48),
+    0 6px 16px rgba(0, 0, 0, 0.28),
+    0 0 0 1px var(--zone-accent, rgba(99, 165, 255, 0.5));
+  transform: translate(var(--bloom-to-x), var(--bloom-to-y)) scale(1.05);
+  transition:
+    transform 180ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+/* v8 round-10 (Issue B3): tone down the active state. Round-8 used a
+ * 2px solid ring + a 4px outer 24%-opacity glow which read as "loud"
+ * stacked alongside the connector diamond + capsule preview-indicator.
+ * With those two redundant signals removed, the active ring no longer
+ * needs to shout — a 1.5px border + a softer 4px outer glow at 16%
+ * opacity is enough to distinguish active from hover without
+ * dominating the visual hierarchy.
+ *
+ * v8 round-11: active state subtly breathes — the outer glow oscillates
+ * between 5.5 px / 16 % and 7 px / 22 % over 1.5 s ease-in-out infinite.
+ * Adds life to the focused petal without being loud. The breathing
+ * keyframe owns box-shadow only; the inner inset highlight, three
+ * elevation shadows, and 1.5 px ring are baked into both keyframe
+ * stops so they don't flicker. */
+.stack-bloom__petal--active {
+  border-color: var(--zone-accent, rgba(99, 165, 255, 0.7));
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.20), rgba(255, 255, 255, 0.05)),
+    var(--surface-expanded, rgba(18, 18, 24, 0.98));
+  transform: translate(var(--bloom-to-x), var(--bloom-to-y)) scale(1.05);
+  animation:
+    stack-bloom-petal-enter 420ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards,
+    stack-bloom-petal-active-pulse 1.5s ease-in-out 600ms infinite;
+  animation-delay: calc(var(--petal-index, 0) * 38ms), 600ms;
+  /* While both animations run, box-shadow flips to the second
+   * (pulse). Once the entry finishes, the pulse keeps cycling. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 22px 44px rgba(0, 0, 0, 0.46),
+    0 6px 16px rgba(0, 0, 0, 0.26),
+    0 0 0 1.5px var(--zone-accent, rgba(99, 165, 255, 0.7)),
+    0 0 0 5.5px color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.7)) 16%, transparent);
+}
+
+@keyframes stack-bloom-petal-active-pulse {
+  0% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 22px 44px rgba(0, 0, 0, 0.46),
+      0 6px 16px rgba(0, 0, 0, 0.26),
+      0 0 0 1.5px var(--zone-accent, rgba(99, 165, 255, 0.7)),
+      0 0 0 5.5px color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.7)) 16%, transparent);
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 22px 44px rgba(0, 0, 0, 0.46),
+      0 6px 16px rgba(0, 0, 0, 0.26),
+      0 0 0 1.5px var(--zone-accent, rgba(99, 165, 255, 0.7)),
+      0 0 0 7px color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.7)) 22%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 22px 44px rgba(0, 0, 0, 0.46),
+      0 6px 16px rgba(0, 0, 0, 0.26),
+      0 0 0 1.5px var(--zone-accent, rgba(99, 165, 255, 0.7)),
+      0 0 0 5.5px color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.7)) 16%, transparent);
+  }
+}
+
+.stack-bloom__petal:hover .stack-bloom__petal-icon,
+.stack-bloom__petal--active .stack-bloom__petal-icon {
+  background: linear-gradient(
+    135deg,
+    var(--zone-accent, rgba(99, 165, 255, 0.45)),
+    color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.45)) 60%, transparent)
+  );
+  border-color: color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.45)) 60%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * v8 round-14 — many-members modifier.
+ *
+ * When a stack has > 8 members the wrapper picks up the
+ * .stack-wrapper--many-members class. CSS overrides:
+ *   1. Disable the breathing pulse on `--active` — at 80×72 px or
+ *      smaller, the pulsing outer halo becomes more noisy than
+ *      informative, and the simultaneous animation on N petals
+ *      multiplies GPU compositing cost.
+ *   2. Simplify the box-shadow stack — small petals don't read better
+ *      with a 38 px-blur outer shadow; reducing the blur radius shrinks
+ *      the compositor's repaint area when many petals share screen
+ *      real-estate.
+ *   3. Tighten gap + padding so the row reads denser without overlap.
+ *
+ * All three rules are scoped under .stack-wrapper--many-members so
+ * stacks of ≤ 8 members keep the round-12 visual treatment intact.
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Disable the pulse animation; static glow takes over. The active
+ * state still gets a 1.5 px ring + a softer outer glow so the user
+ * can tell which petal is focused, but the box-shadow no longer
+ * oscillates on a 1.5 s cycle. */
+.stack-wrapper--many-members .stack-bloom__petal--active {
+  animation:
+    stack-bloom-petal-enter 420ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation-delay: calc(
+    (360ms / max(1, var(--bloom-petal-count, 1))) * var(--petal-index, 0)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 12px 24px rgba(0, 0, 0, 0.42),
+    0 4px 8px rgba(0, 0, 0, 0.22),
+    0 0 0 1.5px var(--zone-accent, rgba(99, 165, 255, 0.7)),
+    0 0 0 4px color-mix(in srgb, var(--zone-accent, rgba(99, 165, 255, 0.7)) 18%, transparent);
+}
+
+/* Simplify the box-shadow for smaller petals — large outer shadows
+ * (38 px blur) produce composition cost that scales with N petals.
+ * The simplified shadow keeps depth perception while halving the
+ * blur radius. */
+.stack-wrapper--many-members .stack-bloom__petal {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    0 8px 18px rgba(0, 0, 0, 0.36),
+    0 2px 6px rgba(0, 0, 0, 0.20),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.stack-wrapper--many-members .stack-bloom__petal:hover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 12px 24px rgba(0, 0, 0, 0.42),
+    0 4px 10px rgba(0, 0, 0, 0.24),
+    0 0 0 1px var(--zone-accent, rgba(99, 165, 255, 0.5));
+}
+
+/* v8 round-14 (overflow indicator): the "+N more" tile renders at
+ * the final visible-row slot. Visually softer than a real petal so
+ * the user reads it as informational, not actionable. No
+ * accent-color halo, no hover lift, no clickable affordance. */
+.stack-bloom__petal--overflow {
+  cursor: default;
+  pointer-events: none;
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    var(--surface-zen, rgba(22, 22, 26, 0.78));
+  border-color: rgba(255, 255, 255, 0.12);
+  color: color-mix(in srgb, var(--text-primary, #fff) 70%, transparent);
+}
+
+.stack-bloom__petal--overflow .stack-bloom__petal-name {
+  font-size: 18px;
+  font-weight: 700;
+  /* Override the 2-line clamp — the indicator is one short token. */
+  -webkit-line-clamp: 1;
+}
+
+/* v8 round-4 real-fix (Bug 2): while the bloom is open, scale + dim
+ * the resting capsule so the user perceives "the cluster has split
+ * apart" — the petals are the foreground, the capsule recedes. The
+ * capsule is still clickable (clicking re-collapses the bloom).
+ *
+ * v8 round-10 (Issue B4): pushed scale 0.94 → 0.92 and opacity 0.7 →
+ * 0.55 so the capsule clearly recedes into the background while the
+ * petals carry the foreground. With other redundant signals (preview
+ * indicator, connector diamond) removed in this round, the recession
+ * needs to do more work to establish "petals are the focus".
+ *
+ * v8 round-11 (bloom-elegant-anim): bumped the bloomed-capsule
+ * transition to a 320 ms spring so the capsule eases into the faded
+ * state alongside the first petal's entry (~360 ms total). Without
+ * this matching curve, the capsule scaled instantly while petals
+ * spring-flew out, producing visual desync. Spring overshoot is
+ * subtle here because we go DOWN (0.92), so the bezier reads as
+ * "settle" rather than "bounce". */
+.stack-wrapper--bloomed .stack-capsule {
+  transform: scale(0.92);
+  opacity: 0.55;
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 14px 36px rgba(0, 0, 0, 0.22),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+  transition:
+    transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 320ms ease-out,
+    box-shadow 220ms ease,
+    border-color 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stack-bloom__petal,
+  .stack-bloom__petal--leaving,
+  .stack-bloom__petal--active,
+  .stack-wrapper--bloomed .stack-bloom__petal {
+    /* Reduced-motion users get a flat fade. We override animation
+     * (since the keyframes include transform changes) and put the
+     * fade in the transition so the petal still appears/disappears,
+     * just without the spring. */
+    animation: none;
+    transition: opacity 120ms ease;
+    opacity: 1;
+    transform: translate(var(--bloom-to-x), var(--bloom-to-y)) scale(1);
+  }
 }
 
 .stack-capsule {
@@ -32,6 +553,7 @@
   cursor: pointer;
   transition:
     transform 180ms ease,
+    opacity 180ms ease,
     box-shadow 180ms ease,
     border-color 180ms ease;
 }
@@ -93,13 +615,14 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* v7: removed `overflow: hidden` + `text-overflow: ellipsis` so the inline
+   font-size from `useTextAbbr` can shrink the full name to fit instead of
+   producing a "…" truncation. */
 .stack-capsule__title {
   min-width: 0;
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .stack-capsule__preview-indicator {
@@ -244,10 +767,11 @@
   gap: 3px;
 }
 
+/* v7: removed `overflow: hidden` + `text-overflow: ellipsis` so the inline
+   font-size from `useTextAbbr` can shrink the full name to fit instead of
+   producing a "…" truncation. */
 .stack-tray__member-name {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   font-weight: 600;
@@ -269,18 +793,83 @@
   font-size: 11px;
 }
 
+/* v8 round-7 (Bloom-Real-Fix): give the preview an actual visible
+ * surface. Previously this rule set only border-radius + box-shadow
+ * — the BentoPanel inside has no background of its own, so the
+ * preview rendered as a transparent rectangle and the user reported
+ * "preview opens but I see nothing". Adopting the same surface
+ * tokens as the legacy expanded BentoZone (.bento-zone--expanded)
+ * makes it visually identical to a single zone in expanded form,
+ * which matches the user's mental model — "hovering a petal pops up
+ * that zone's expanded panel". The 2px accent border-top mirrors
+ * .bento-zone--expanded so the stack member's accent color reads.
+ *
+ * v8 round-8 polish: the preview now uses a slide-in entrance
+ * (translate-y(6px → 0) + opacity 0 → 1) for a more polished feel
+ * than round-7's scale-up. The connector hint is layered via ::before
+ * so the user reads "this preview belongs to that petal" — see the
+ * --left/--right modifiers below for direction-aware positioning. */
 .stack-focused-preview {
+  /* v8 round-10 (Issue C): preview-size custom props default to the
+   * legacy "expanded" max envelope so the tray-driven preview
+   * (anchored to the wrapper) keeps its full size. The floating
+   * (bloom-anchored) variant overrides them below to a compact 360×420
+   * footprint per round-10 spec. */
+  --floating-preview-max-w: 600px;
+  --floating-preview-max-h: 600px;
   position: absolute;
   min-width: 280px;
-  max-width: 600px;
+  max-width: var(--floating-preview-max-w);
   min-height: 200px;
-  max-height: 600px;
-  overflow: hidden;
-  border-radius: var(--radius-expanded, 18px);
+  max-height: var(--floating-preview-max-h);
+  overflow: visible;
+  border-radius: var(--radius-expanded, 16px);
+  background: var(--surface-expanded, rgba(12, 12, 18, 0.92));
+  -webkit-backdrop-filter: var(--blur-expanded, blur(28px) saturate(180%));
+  backdrop-filter: var(--blur-expanded, blur(28px) saturate(180%));
+  border: 1px solid var(--border-expanded, rgba(255, 255, 255, 0.14));
+  border-top: 2px solid var(--zone-accent, var(--accent-blue, #3b82f6));
+  /* Layered shadow matching the expanded BentoPanel depth language so
+   * the panel reads as elevated above the desktop / bloom petals. */
   box-shadow:
-    0 26px 60px rgba(0, 0, 0, 0.28),
-    0 0 0 1px rgba(255, 255, 255, 0.06);
+    0 28px 64px rgba(0, 0, 0, 0.46),
+    0 6px 18px rgba(0, 0, 0, 0.32),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  /* v8 round-8 polish #C3: slide-up + fade entrance instead of
+   * scale-up. Origin pulled from the petal-side edge so the panel
+   * grows toward the user's gaze. */
+  animation: focused-preview-slide-in 200ms cubic-bezier(0.32, 1.1, 0.4, 1) forwards;
 }
+
+/* v8 round-8 polish #C5: BentoPanel inside the preview inherits the
+ * preview's overflow:visible — but its scrollable content area should
+ * still scroll. Force the panel itself (and the header / item-grid
+ * descendants) to keep their own scroll containment so the panel
+ * reads as a self-contained card with its own scrollbars. */
+.stack-focused-preview > * {
+  border-radius: inherit;
+  overflow: hidden;
+}
+
+@keyframes focused-preview-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* v8 round-10 (Issue B2): REMOVED the connector diamond pseudo. The
+ * user reads "this preview belongs to this petal" from spatial
+ * proximity (preview right next to the highlighted petal); the bright
+ * blue diamond was gimmicky visual noise, especially when stacked
+ * alongside the active-petal ring + the panel border-top accent. The
+ * round-8 implementation has been deleted; the connector positioning
+ * rules below are inert without the ::before content but are kept as
+ * comments so the design intent stays discoverable. */
 
 .stack-focused-preview--right {
   left: calc(100% + 16px);
@@ -296,6 +885,45 @@
 
 .stack-focused-preview--bottom {
   bottom: 0;
+}
+
+/* v8 round-10 (Issue B2): connector nub positioning rules removed
+ * along with the ::before pseudo above. */
+
+/* v8 round-6 (Bloom-Real-Fix): when the preview is bloom-anchored, JS
+ * sets `position: fixed` + explicit left/top inline. We still need
+ * to neutralise the `--left { right: calc(100% + 16px) }` (and
+ * symmetric `--bottom { bottom: 0 }`) declarations, because inline
+ * `left: Xpx` doesn't cancel the stylesheet's `right: calc(...)` —
+ * with BOTH set, the element gets sized to the gap between left and
+ * right and visually stretches across the screen. Forcing right /
+ * bottom to `auto` here gives JS-set left+top exclusive control.
+ * z-index 60 sits the preview above bloom petals (51) and the
+ * buffer halo (49) so the user's hover target is always the
+ * front-most layer regardless of stacking-context inheritance
+ * from .stack-wrapper.
+ *
+ * v8 round-10 (Issue C): the floating preview now caps at 360×420 so
+ * even members with many items render as a compact card next to the
+ * petal, not a half-screen panel. The internal BentoPanel content
+ * scrolls within these bounds via `bento-panel__content` overflow
+ * rules. JS also clamps the inline width/height it computes from the
+ * zone's expanded_size to MAX_W/MAX_H so the inline style never
+ * overrides this cap. */
+.stack-focused-preview--floating {
+  z-index: 60;
+  --floating-preview-max-w: 360px;
+  --floating-preview-max-h: 420px;
+  max-width: var(--floating-preview-max-w);
+  max-height: var(--floating-preview-max-h);
+}
+
+.stack-focused-preview--floating.stack-focused-preview--left {
+  right: auto;
+}
+
+.stack-focused-preview--floating.stack-focused-preview--bottom {
+  bottom: auto;
 }
 
 .stack-context-menu {

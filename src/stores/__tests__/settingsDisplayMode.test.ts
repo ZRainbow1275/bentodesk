@@ -74,11 +74,34 @@ describe("settings store — zone_display_mode picker", () => {
     expect(getZoneDisplayMode()).toBe("click");
   });
 
-  it("falls back to hover when payload omits zone_display_mode", () => {
+  it("returns undefined when payload omits zone_display_mode", () => {
+    // v5 Fix #7: getZoneDisplayMode no longer hard-codes "hover" when the
+    // global picker has no value. Returning undefined is required so the
+    // per-zone `display_mode` cascade in BentoZone/StackWrapper actually
+    // takes effect (previously the `?? "hover"` short-circuit made any
+    // BulkManager-set per-zone override decorative).
     const partial = baseSettings();
     delete (partial as Partial<AppSettings>).zone_display_mode;
     applySettings(partial as AppSettings);
+    expect(getZoneDisplayMode()).toBeUndefined();
+  });
+
+  it("applySettings always → hover collapses expanded zones", () => {
+    // v8 fix #2: when the picker switches OUT of "always", BentoZone's
+    // inverse-collapse createEffect fires the moment getZoneDisplayMode()
+    // flips. This store-level test guards the precondition: the getter
+    // must transition synchronously from "always" to "hover" so any
+    // BentoZone subscriber (currently expanded because mode was "always")
+    // can read the new value in the same microtask and call collapseZone.
+    applySettings({ ...baseSettings(), zone_display_mode: "always" });
+    expect(getZoneDisplayMode()).toBe("always");
+
+    // Simulate the IPC echo from the backend after the picker flips to hover.
+    applySettings({ ...baseSettings(), zone_display_mode: "hover" });
+    // Synchronous flip is the contract that lets the inverse-collapse effect
+    // run without a frame delay; otherwise the picker feels inert.
     expect(getZoneDisplayMode()).toBe("hover");
+    expect(getSettings().zone_display_mode).toBe("hover");
   });
 
   it("updateSettings forwards zone_display_mode to backend and applies result", async () => {

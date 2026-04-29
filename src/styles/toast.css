@@ -74,3 +74,28 @@
 .app-toast__source {
   word-break: break-all;
 }
+
+.app-toast--flash {
+  cursor: pointer;
+  bottom: 60px;
+  animation: app-toast-flash-in 180ms ease-out;
+}
+
+.app-toast--flash-info {
+  background: var(--accent-color, rgba(59, 130, 246, 0.95));
+}
+
+.app-toast--flash-error {
+  background: var(--accent-red, rgba(239, 68, 68, 0.95));
+}
+
+@keyframes app-toast-flash-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

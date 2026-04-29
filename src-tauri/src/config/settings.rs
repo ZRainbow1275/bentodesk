@@ -150,9 +150,13 @@ pub struct AppSettings {
     /// D1: show debug overlay (hit-rect / anchor / state) in dev/diagnostic mode.
     #[serde(default)]
     pub debug_overlay: bool,
-    /// v1.2.1 — zone reveal interaction mode. `Hover` keeps v1.x behaviour.
-    #[serde(default)]
-    pub zone_display_mode: ZoneDisplayMode,
+    /// v1.2.1 — zone reveal interaction mode. `None` means "inherit from the
+    /// per-zone `display_mode` field". The frontend cascade is:
+    ///   `globalSetting ?? zoneOverride ?? "hover"`
+    /// so leaving this `None` until the user explicitly picks a global mode
+    /// is what makes per-zone overrides actually visible after install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_display_mode: Option<ZoneDisplayMode>,
 }
 
 fn default_safety_profile() -> SafetyProfile {
@@ -406,7 +410,7 @@ impl AppSettings {
             self.debug_overlay = v;
         }
         if let Some(v) = update.zone_display_mode {
-            self.zone_display_mode = v;
+            self.zone_display_mode = Some(v);
         }
         if let Some(upd) = update.updates {
             if let Some(v) = upd.check_frequency {
@@ -471,7 +475,7 @@ impl Default for AppSettings {
             encryption: EncryptionConfig::default(),
             _legacy: serde_json::Value::Null,
             debug_overlay: false,
-            zone_display_mode: ZoneDisplayMode::Hover,
+            zone_display_mode: None,
         }
     }
 }
@@ -583,11 +587,11 @@ mod tests {
     }
 
     #[test]
-    fn zone_display_mode_defaults_to_hover_and_serializes_lowercase() {
-        // Default = Hover matches v1.x behaviour — upgrading installs keep
-        // their existing interaction model without a schema migration.
+    fn zone_display_mode_defaults_to_none_and_serializes_lowercase() {
+        // Default = None lets per-zone `display_mode` overrides cascade
+        // through to the UI on a fresh install (v5 — Q-display-cascade).
         let settings = AppSettings::default();
-        assert_eq!(settings.zone_display_mode, ZoneDisplayMode::Hover);
+        assert_eq!(settings.zone_display_mode, None);
 
         // Lowercase tag is the wire contract the frontend relies on.
         assert_eq!(
@@ -600,14 +604,14 @@ mod tests {
         );
 
         // A legacy v1.2 settings file (no zone_display_mode key) must still
-        // deserialize — that is the entire point of the additive default.
+        // deserialize — Option<ZoneDisplayMode> with serde default = None.
         let legacy = r##"{"schema_version":3,"version":"1.2.0","ghost_layer_enabled":true,
             "expand_delay_ms":150,"collapse_delay_ms":400,"icon_cache_size":500,
             "auto_group_enabled":true,"theme":"Dark","accent_color":"#3b82f6",
             "desktop_path":"C:/Users/x/Desktop","watch_paths":[],"portable_mode":false,
             "launch_at_startup":false,"show_in_taskbar":false}"##;
         let parsed: AppSettings = serde_json::from_str(legacy).unwrap();
-        assert_eq!(parsed.zone_display_mode, ZoneDisplayMode::Hover);
+        assert_eq!(parsed.zone_display_mode, None);
     }
 
     #[test]
@@ -640,7 +644,7 @@ mod tests {
             zone_display_mode: Some(ZoneDisplayMode::Always),
         };
         settings.apply_update(update);
-        assert_eq!(settings.zone_display_mode, ZoneDisplayMode::Always);
+        assert_eq!(settings.zone_display_mode, Some(ZoneDisplayMode::Always));
     }
 
     #[test]

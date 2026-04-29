@@ -544,13 +544,24 @@ const SettingsPanel: Component = () => {
                   <div class="settings-row__hint">{t("settingsDisplayModeHint")}</div>
                 </div>
                 <div class="settings-row__control settings-display-mode">
+                  {/* v7 fix #2: picker 切换立即生效。v6 picker `onChange` 仅
+                      改 localSettings，必须用户点击「保存」按钮才提交 backend。
+                      但用户期望切换即时反馈（"立即生效"），这是 v6 picker
+                      "无效"的真实根因——不是 IPC 没走通，是 IPC 根本没有
+                      被发起。改为同步调用 updateSettingsStore，把改动直接
+                      推到 backend；store 拿到响应后立即 setSettings 触发
+                      所有 BentoZone 的 zoneDisplayMode createMemo 重算。 */}
                   <label class="settings-display-mode__option">
                     <input
                       type="radio"
                       name="zone_display_mode"
                       value="hover"
                       checked={(localSettings().zone_display_mode ?? "hover") === "hover"}
-                      onChange={() => updateLocal("zone_display_mode", "hover")}
+                      onChange={() => {
+                        if (import.meta.env.DEV) console.debug("[picker]", "hover");
+                        updateLocal("zone_display_mode", "hover");
+                        void updateSettingsStore({ zone_display_mode: "hover" });
+                      }}
                     />
                     <span>{t("settingsDisplayModeHover")}</span>
                   </label>
@@ -560,7 +571,11 @@ const SettingsPanel: Component = () => {
                       name="zone_display_mode"
                       value="always"
                       checked={localSettings().zone_display_mode === "always"}
-                      onChange={() => updateLocal("zone_display_mode", "always")}
+                      onChange={() => {
+                        if (import.meta.env.DEV) console.debug("[picker]", "always");
+                        updateLocal("zone_display_mode", "always");
+                        void updateSettingsStore({ zone_display_mode: "always" });
+                      }}
                     />
                     <span>{t("settingsDisplayModeAlways")}</span>
                   </label>
@@ -570,7 +585,11 @@ const SettingsPanel: Component = () => {
                       name="zone_display_mode"
                       value="click"
                       checked={localSettings().zone_display_mode === "click"}
-                      onChange={() => updateLocal("zone_display_mode", "click")}
+                      onChange={() => {
+                        if (import.meta.env.DEV) console.debug("[picker]", "click");
+                        updateLocal("zone_display_mode", "click");
+                        void updateSettingsStore({ zone_display_mode: "click" });
+                      }}
                     />
                     <span>{t("settingsDisplayModeClick")}</span>
                   </label>

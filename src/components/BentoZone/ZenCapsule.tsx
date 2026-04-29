@@ -34,6 +34,7 @@ const ZenCapsule: Component<ZenCapsuleProps> = (props) => {
         class="zen-capsule__title"
         ref={abbr.setRef}
         aria-label={fullName()}
+        style={{ "font-size": `${abbr.fontSize()}px` }}
       >
         <Tooltip content={fullName()} disabled={abbr.tooltipDisabled()}>
           {abbr.text()}

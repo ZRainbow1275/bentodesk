@@ -20,7 +20,7 @@ vi.mock("../../stores/ui", async () => {
   };
 });
 
-import { detectOverlap, suggestStack, type ZoneRect } from "../stack";
+import { computeAutoSpread, detectOverlap, suggestStack, type ZoneRect } from "../stack";
 import type { BentoZone } from "../../types/zone";
 
 function rect(id: string, left: number, top: number, w: number, h: number): ZoneRect {
@@ -205,6 +205,122 @@ function withStack(
     stack_order: stackOrder,
   } as BentoZone;
 }
+
+describe("threshold boundary at 0.30 (regression guard)", () => {
+  // Two 20×20% zones, sliding b along x makes intersection = (20 - dx) × 20.
+  // Ratio = intersection / min-area = (20 - dx) × 20 / (20 × 20) = (20 - dx) / 20.
+  //   dx = 14.2 → ratio ≈ 0.29 (just under 0.30)
+  //   dx = 13.8 → ratio ≈ 0.31 (just over 0.30)
+  // Locks in the math against future suggestStack regressions.
+  it("does NOT cluster at 0.29 ratio (just below 0.30)", () => {
+    const zones = [mkZone("a", 0, 0, 20, 20), mkZone("b", 14.2, 0, 20, 20)];
+    expect(suggestStack(zones, 0.3)).toEqual([]);
+  });
+
+  it("DOES cluster at 0.31 ratio (just above 0.30)", () => {
+    const zones = [mkZone("a", 0, 0, 20, 20), mkZone("b", 13.8, 0, 20, 20)];
+    const clusters = suggestStack(zones, 0.3);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("v1.2.4 stack redo — overlap with stacked zones included", () => {
+  it("clusters zones even when both already carry a legacy stack_id", () => {
+    // Real-world v1.2.3 layout: two zones spatially overlap but were already
+    // promoted into a stack by the auto-stacker — overlap detection must
+    // still surface them so the ⊞ button + auto-spread can dissolve and fan.
+    const zones = [
+      withStack(mkZone("a", 10, 10, 20, 20), "LEGACY", 0),
+      withStack(mkZone("b", 12, 11, 20, 20), "LEGACY", 1),
+    ];
+    const clusters = suggestStack(zones, 0.05);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].sort()).toEqual(["a", "b"]);
+  });
+
+  it("reports cluster at the lowered v1.2.4 5% threshold", () => {
+    // 8% overlap — too low for legacy 0.6 threshold, must trigger at 0.05.
+    const zones = [
+      mkZone("a", 0, 0, 20, 20),
+      mkZone("b", 18.4, 0, 20, 20),
+    ];
+    expect(suggestStack(zones, 0.6)).toEqual([]);
+    expect(suggestStack(zones, 0.05)).toHaveLength(1);
+  });
+});
+
+describe("computeAutoSpread", () => {
+  it("returns empty when fewer than 2 cluster members supplied", () => {
+    const zones = [mkZone("solo", 0, 0)];
+    expect(computeAutoSpread(zones, ["solo"])).toEqual([]);
+  });
+
+  it("ignores ids that are not in the zones list", () => {
+    const zones = [mkZone("a", 0, 0)];
+    expect(computeAutoSpread(zones, ["a", "ghost"])).toEqual([]);
+  });
+
+  it("emits one entry per cluster member, ordered by sort_order", () => {
+    const zones = [
+      { ...mkZone("a", 10, 10, 20, 20), sort_order: 2 } as BentoZone,
+      { ...mkZone("b", 12, 11, 20, 20), sort_order: 0 } as BentoZone,
+      { ...mkZone("c", 11, 11, 20, 20), sort_order: 1 } as BentoZone,
+    ];
+    const spread = computeAutoSpread(zones, ["a", "b", "c"]);
+    expect(spread.map((s) => s.id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("never returns 0% positions when supplied a sane viewport", () => {
+    // Viewport mock above is 1000×1000; spread members are 20% wide each so
+    // x_percent must be > 0 and < 100 for every entry.
+    const zones = [
+      { ...mkZone("a", 10, 10, 20, 20), sort_order: 0 } as BentoZone,
+      { ...mkZone("b", 12, 11, 20, 20), sort_order: 1 } as BentoZone,
+    ];
+    const spread = computeAutoSpread(zones, ["a", "b"]);
+    for (const entry of spread) {
+      expect(entry.x_percent).toBeGreaterThan(0);
+      expect(entry.x_percent).toBeLessThan(100);
+      expect(entry.y_percent).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("aligns every member onto the same y row", () => {
+    const zones = [
+      { ...mkZone("a", 10, 10, 20, 20), sort_order: 0 } as BentoZone,
+      { ...mkZone("b", 12, 25, 20, 20), sort_order: 1 } as BentoZone,
+    ];
+    const spread = computeAutoSpread(zones, ["a", "b"]);
+    expect(spread).toHaveLength(2);
+    expect(spread[0].y_percent).toBe(spread[1].y_percent);
+  });
+
+  it("never emits NaN/0% when getViewportSize returns {0, 0} (window fallback)", async () => {
+    // Simulate the early-init race: ui store getViewportSize returns {0,0}
+    // before installViewportTracker fires. computeAutoSpread must fall back
+    // to window dimensions, so x_percent stays finite + > 0 instead of NaN.
+    vi.resetModules();
+    vi.doMock("../../stores/ui", async () => {
+      const actual = await vi.importActual<Record<string, unknown>>("../../stores/ui");
+      return { ...actual, getViewportSize: () => ({ width: 0, height: 0 }) };
+    });
+    const { computeAutoSpread: computeWithZeroVp } = await import("../stack");
+    const zones = [
+      { ...mkZone("a", 10, 10, 20, 20), sort_order: 0 } as BentoZone,
+      { ...mkZone("b", 12, 11, 20, 20), sort_order: 1 } as BentoZone,
+    ];
+    const spread = computeWithZeroVp(zones, ["a", "b"]);
+    expect(spread).toHaveLength(2);
+    for (const entry of spread) {
+      expect(Number.isFinite(entry.x_percent)).toBe(true);
+      expect(Number.isFinite(entry.y_percent)).toBe(true);
+      expect(entry.x_percent).toBeGreaterThanOrEqual(0);
+    }
+    vi.doUnmock("../../stores/ui");
+    vi.resetModules();
+  });
+});
 
 describe("stackMap derivation", () => {
   it("buckets two zones sharing a stack_id and orders by stack_order", () => {

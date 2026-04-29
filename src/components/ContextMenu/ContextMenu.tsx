@@ -18,6 +18,7 @@ import {
   getContextMenu,
   hideContextMenu,
   setConfirmDialogOpen,
+  showFlashToast,
 } from "../../stores/ui";
 import * as ipc from "../../services/ipc";
 import * as zonesStore from "../../stores/zones";
@@ -28,6 +29,7 @@ import {
   openSmartGroupDialog,
   openBulkManager,
 } from "../../stores/ui";
+import { selectedZoneIds, setZoneSelection } from "../../stores/selection";
 import { t } from "../../i18n";
 import ZoneIcon from "../Icons/ZoneIcon";
 import PromptModal from "../shared/PromptModal";
@@ -404,7 +406,20 @@ function buildZoneMenuItems(
       label: t("contextMenuPinMinibar") || "Pin as Mini Bar",
       action: () => {
         void invoke("pin_zone_as_minibar", { zoneId: target.zoneId })
-          .catch((e) => console.error("pin_zone_as_minibar failed:", e));
+          .then(() => {
+            showFlashToast(
+              t("contextMenuPinMinibarSuccess") || "Pinned as Mini Bar",
+              "info",
+            );
+          })
+          .catch((e) => {
+            console.error("pin_zone_as_minibar failed:", e);
+            showFlashToast(
+              `${t("contextMenuPinMinibarError") || "Cannot pin Mini Bar"}: ${String(e)}`,
+              "error",
+              5000,
+            );
+          });
       },
     },
     // Theme E2-e — Bind zone to a folder. Once bound, the folder's
@@ -452,6 +467,10 @@ function buildZoneMenuItems(
       icon: "settings",
       label: t("bulkManagerContextEntry"),
       action: () => {
+        const current = selectedZoneIds();
+        if (current.size === 0 || !current.has(target.zoneId)) {
+          setZoneSelection([target.zoneId]);
+        }
         openBulkManager();
       },
       separator: true,

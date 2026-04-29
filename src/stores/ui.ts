@@ -364,6 +364,47 @@ export function setConfirmDialogOpen(open: boolean): void {
   setConfirmDialogOpenSignal(open);
 }
 
+// ─── Flash toast (transient feedback) ───────────────────────
+
+interface FlashToast {
+  message: string;
+  variant: "info" | "error";
+  id: number;
+}
+
+const [flashToast, setFlashToastSignal] = createSignal<FlashToast | null>(null);
+let flashToastTimer: ReturnType<typeof setTimeout> | null = null;
+let flashToastSeq = 0;
+
+export function getFlashToast(): FlashToast | null {
+  return flashToast();
+}
+
+export function showFlashToast(
+  message: string,
+  variant: "info" | "error" = "info",
+  durationMs = 3000,
+): void {
+  if (flashToastTimer !== null) {
+    clearTimeout(flashToastTimer);
+    flashToastTimer = null;
+  }
+  flashToastSeq += 1;
+  setFlashToastSignal({ message, variant, id: flashToastSeq });
+  flashToastTimer = setTimeout(() => {
+    setFlashToastSignal(null);
+    flashToastTimer = null;
+  }, durationMs);
+}
+
+export function clearFlashToast(): void {
+  if (flashToastTimer !== null) {
+    clearTimeout(flashToastTimer);
+    flashToastTimer = null;
+  }
+  setFlashToastSignal(null);
+}
+
 // ─── Aggregate modal state ──────────────────────────────────
 
 /**

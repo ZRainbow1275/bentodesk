@@ -139,40 +139,72 @@ pub async fn reconcile_all_zone_items(
     let app_handle = state.app_handle.clone();
     let mut aggregate = LayoutReconcileReport::default();
 
-    let touched = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
-        let mut touched_zone_ids: Vec<String> = Vec::new();
-        for zone in layout.zones.iter_mut() {
-            let zone_id = zone.id.clone();
-            let report = crate::hidden_items::reconcile_zone_items(
-                &app_handle,
-                &mut zone.items,
-                &zone_id,
-            );
-            aggregate.reconciled_count += report.reconciled_count;
-            aggregate.already_managed_count += report.already_managed_count;
-            aggregate.missing_count += report.missing_count;
-            aggregate.unknown_count += report.unknown_count;
-            // Touched = anything that mutated the zone's items: either a
-            // file actually moved, or an item flag flipped to missing.
-            if report.reconciled_count > 0
-                || report.missing_count > 0
-                || report.unknown_count > 0
-            {
-                touched_zone_ids.push(zone_id);
-            }
-        }
-        if !touched_zone_ids.is_empty() {
-            layout.last_modified = chrono::Utc::now().to_rfc3339();
-        }
-        touched_zone_ids
+    // Phase 1 — snapshot the items under lock (cheap memcpy of Vec<BentoItem>).
+    // We deliberately do NOT run fs::rename inside the layout lock: a single
+    // OneDrive-locked file can stall rename for seconds, and with 90+ items
+    // that easily blocks every other IPC for minutes. Snapshot, drop lock,
+    // do IO, then merge back by item id.
+    let zone_snapshots: Vec<(String, Vec<crate::layout::persistence::BentoItem>)> = {
+        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        layout
+            .zones
+            .iter()
+            .map(|z| (z.id.clone(), z.items.clone()))
+            .collect()
     };
 
-    if !touched.is_empty() {
+    // Phase 2 — run reconcile against owned snapshots (no lock held).
+    let mut touched_zone_ids: Vec<String> = Vec::new();
+    let mut updated_snapshots: Vec<(String, Vec<crate::layout::persistence::BentoItem>)> =
+        Vec::with_capacity(zone_snapshots.len());
+
+    for (zone_id, mut items) in zone_snapshots {
+        let report =
+            crate::hidden_items::reconcile_zone_items(&app_handle, &mut items, &zone_id);
+        aggregate.reconciled_count += report.reconciled_count;
+        aggregate.already_managed_count += report.already_managed_count;
+        aggregate.missing_count += report.missing_count;
+        aggregate.unknown_count += report.unknown_count;
+        if report.reconciled_count > 0
+            || report.missing_count > 0
+            || report.unknown_count > 0
+        {
+            touched_zone_ids.push(zone_id.clone());
+        }
+        updated_snapshots.push((zone_id, items));
+    }
+
+    // Phase 3 — re-acquire lock and merge updated items back into the live
+    // layout. Match by `(zone_id, item_id)` so any items the user added /
+    // removed during the IO window are preserved (we only overwrite the
+    // mutable hidden_path / file_missing fields on items we actually saw).
+    let did_mutate = !touched_zone_ids.is_empty();
+    if did_mutate {
+        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+
+        for (zone_id, snapshot_items) in updated_snapshots {
+            if let Some(zone) = layout.zones.iter_mut().find(|z| z.id == zone_id) {
+                for snap_item in snapshot_items {
+                    if let Some(live) =
+                        zone.items.iter_mut().find(|i| i.id == snap_item.id)
+                    {
+                        // Only fields that reconcile is allowed to touch.
+                        // Anything else (icon_hash, grid_position, etc.) may
+                        // have been mutated by a concurrent IPC and must
+                        // remain authoritative.
+                        live.hidden_path = snap_item.hidden_path;
+                        live.file_missing = snap_item.file_missing;
+                    }
+                }
+            }
+        }
+
+        layout.last_modified = chrono::Utc::now().to_rfc3339();
+        drop(layout);
         state.persist_layout();
     }
 
-    aggregate.touched_zone_ids = touched;
+    aggregate.touched_zone_ids = touched_zone_ids;
 
     tracing::info!(
         "reconcile_all_zone_items: reconciled={} already={} missing={} unknown={} zones_touched={}",

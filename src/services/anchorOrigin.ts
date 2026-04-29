@@ -150,3 +150,161 @@ export function computeZonePositionStyle(
 
   return out;
 }
+
+// ─── Anchor flip decision (pure) ────────────────────────────
+
+export interface CapsuleRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface WorkArea {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface DecideAnchorOpts {
+  /** Capsule's bounding rect in viewport CSS pixels. */
+  rect: CapsuleRect;
+  /** Effective panel size after CSS max clamp (px). */
+  effPanelW: number;
+  effPanelH: number;
+  /** Work area (viewport or monitor-resolved) in CSS pixels. */
+  work: WorkArea;
+  /** Edge-margin from viewport border before flipping (shadow/ring buffer). */
+  margin?: number;
+  /** Safety band near the bottom/right edge that triggers a flip even if
+   * `wouldOverflow*` is just barely false. */
+  edgeSafety?: number;
+}
+
+/**
+ * v8: decide expand-time anchor from capsule rect + work area.
+ *
+ * Rules (per zone-real-fix-v8 PRD §1):
+ *  1. Skip multi-monitor logic at the call site — `work` should already
+ *     reflect either viewport or the active monitor.
+ *  2. `inLowerHalf` triggers if EITHER capsule center is below work-area
+ *     center, OR natural-direction (top anchor) growth would exceed
+ *     `workBottom - edgeSafety`.
+ *  3. Same for `inRightHalf` on X axis.
+ *  4. `flipStillFits*` is NOT a precondition — CSS max-height/width will
+ *     clamp the panel if the flipped side is also tight; the visual
+ *     intuition "lower half → grow upward" wins.
+ */
+export function decideAnchorFromRect(opts: DecideAnchorOpts): {
+  x: AnchorX;
+  y: AnchorY;
+} {
+  const MARGIN = opts.margin ?? 8;
+  const EDGE_SAFETY = opts.edgeSafety ?? 32;
+  const { rect, effPanelW, effPanelH, work } = opts;
+
+  const wouldOverflowX = rect.left + effPanelW + MARGIN > work.right;
+  const wouldOverflowY = rect.top + effPanelH + MARGIN > work.bottom;
+
+  const spaceBelow = work.bottom - rect.bottom;
+  const spaceAbove = rect.bottom - work.top;
+  const spaceRight = work.right - rect.right;
+  const spaceLeft = rect.right - work.left;
+
+  const nearBottomEdge =
+    spaceBelow < effPanelH + MARGIN && spaceAbove >= effPanelH + MARGIN;
+  const nearRightEdge =
+    spaceRight < effPanelW + MARGIN && spaceLeft >= effPanelW + MARGIN;
+
+  const capsuleCenterX = (rect.left + rect.right) / 2;
+  const capsuleCenterY = (rect.top + rect.bottom) / 2;
+  const workCenterX = (work.left + work.right) / 2;
+  const workCenterY = (work.top + work.bottom) / 2;
+
+  const inLowerHalf =
+    capsuleCenterY > workCenterY ||
+    rect.top + effPanelH + MARGIN > work.bottom - EDGE_SAFETY;
+  const inRightHalf =
+    capsuleCenterX > workCenterX ||
+    rect.left + effPanelW + MARGIN > work.right - EDGE_SAFETY;
+
+  return {
+    x: wouldOverflowX || nearRightEdge || inRightHalf ? "right" : "left",
+    y: wouldOverflowY || nearBottomEdge || inLowerHalf ? "bottom" : "top",
+  };
+}
+
+// ─── Pre-drop anchor pre-computation (DOM-free) ─────────────
+
+export interface ComputeAnchorFromCapsuleOpts {
+  /** Capsule home position as percentages of the viewport. */
+  pos: { x_percent: number; y_percent: number };
+  /** Zen capsule pixel box (matches getCapsuleBoxPx output). */
+  capsulePx: { width: number; height: number };
+  /** Stored expanded size in viewport percent (0 = use defaults). */
+  expandedPct: { w_percent: number; h_percent: number };
+  /** Viewport size in CSS pixels. */
+  viewport: { width: number; height: number };
+  /** Optional resolved monitor work-area. Defaults to viewport bounds. */
+  work?: WorkArea;
+  /** Edge buffer; matches captureAnchorSnapshot default of 8. */
+  margin?: number;
+}
+
+/**
+ * Predict the anchor a freshly-dropped capsule should adopt, WITHOUT
+ * reading any DOM. Used in the drag-mouseup `finally` block to install
+ * the correct `right/bottom` anchor in the SAME Solid batch that flips
+ * `isDragRepositioning` back to false.
+ *
+ * Why DOM-free: at mouseup time the rendered element is still showing
+ * the dragging-zen layer; its `getBoundingClientRect()` reflects the
+ * cursor-following position, not the just-persisted `pos`. Reading the
+ * DOM in the next RAF leaves a 1-frame window where the panel re-inflates
+ * with a stale `{left: x%, top: y%}` style and visibly over-runs the
+ * right edge of the screen — the "flash to left/right" symptom the user
+ * reported on every drop near a screen edge.
+ *
+ * Mirrors `captureAnchorSnapshot` in BentoZone.tsx: same MAX_PANEL_PX
+ * clamp (600), same default panel size fallback (360x420), same
+ * `decideAnchorFromRect` call, same flipOffset math.
+ */
+export function computeAnchorFromCapsulePosition(
+  opts: ComputeAnchorFromCapsuleOpts,
+): AnchorSnapshot {
+  const MARGIN = opts.margin ?? 8;
+  const MAX_PANEL_PX = 600;
+
+  const capLeft = (opts.pos.x_percent / 100) * opts.viewport.width;
+  const capTop = (opts.pos.y_percent / 100) * opts.viewport.height;
+  const capRight = capLeft + opts.capsulePx.width;
+  const capBottom = capTop + opts.capsulePx.height;
+
+  const cfgW = opts.expandedPct.w_percent;
+  const cfgH = opts.expandedPct.h_percent;
+  const panelW = cfgW > 0 ? (cfgW / 100) * opts.viewport.width : 360;
+  const panelH = cfgH > 0 ? (cfgH / 100) * opts.viewport.height : 420;
+  const effPanelW = Math.min(panelW, MAX_PANEL_PX);
+  const effPanelH = Math.min(panelH, MAX_PANEL_PX);
+
+  const work: WorkArea = opts.work ?? {
+    left: 0,
+    top: 0,
+    right: opts.viewport.width,
+    bottom: opts.viewport.height,
+  };
+
+  const { x: anchorX, y: anchorY } = decideAnchorFromRect({
+    rect: { left: capLeft, top: capTop, right: capRight, bottom: capBottom },
+    effPanelW,
+    effPanelH,
+    work,
+    margin: MARGIN,
+  });
+
+  const flipOffsetX = Math.max(0, opts.viewport.width - capRight);
+  const flipOffsetY = Math.max(0, opts.viewport.height - capBottom);
+
+  return { x: anchorX, y: anchorY, flipOffsetX, flipOffsetY };
+}

@@ -252,6 +252,52 @@ pub fn run() {
                 let _hdir = hidden_items::hidden_dir(app.handle());
             }
 
+            // --- One-shot migration: reset stale hidden_path fields ---
+            // v1.2.x layouts on user machines accumulated `hidden_path`
+            // strings that point at `.bentodesk/{zone}/<file>` paths whose
+            // physical files no longer exist (root cause: copy-then-failed-
+            // delete in migrate_attrib_hidden_files plus external cleanup
+            // of the .bentodesk subtree by AV / OneDrive). These layout
+            // entries were "fake hidden" — original_path on the desktop,
+            // hidden_path field set but pointing at nothing.
+            //
+            // Clear those fields once at startup so the subsequent
+            // reconcile pass treats them as fresh items and physically
+            // moves them. Idempotent — a clean layout is a no-op.
+            {
+                let state = app.state::<AppState>();
+                let mut layout = state.layout.lock().expect("layout lock poisoned at startup migration");
+                let mut cleaned = 0u32;
+                for zone in layout.zones.iter_mut() {
+                    for item in zone.items.iter_mut() {
+                        let stale = match item.hidden_path.as_deref() {
+                            Some(hp) => !std::path::Path::new(hp).exists(),
+                            None => false,
+                        };
+                        if stale {
+                            tracing::warn!(
+                                "Startup migration: clearing stale hidden_path for item {} ({}) in zone {}: was {:?}",
+                                item.id,
+                                item.name,
+                                zone.id,
+                                item.hidden_path
+                            );
+                            item.hidden_path = None;
+                            cleaned += 1;
+                        }
+                    }
+                }
+                if cleaned > 0 {
+                    layout.last_modified = chrono::Utc::now().to_rfc3339();
+                    drop(layout);
+                    state.persist_layout();
+                    tracing::warn!(
+                        "Startup migration: cleared {} stale hidden_path fields — reconcile will retry physical move",
+                        cleaned
+                    );
+                }
+            }
+
             // --- Legacy migration ---
             // Migrate from BOTH old architectures:
             // 1. AppData/hidden_items/ directory (old "file move" mode)
@@ -341,51 +387,318 @@ pub fn run() {
             // on the desktop. These should only exist inside .bentodesk/.
             // We rename (not delete) with a timestamped prefix so any user
             // data accidentally stored at this path is preserved for recovery.
+            //
+            // v1.2.4: route quarantine output into `.bentodesk/quarantine/`
+            // rather than the desktop root, sweep up any pre-existing
+            // `.bentodesk-quarantine-*` files left over by older builds, and
+            // auto-prune entries older than 30 days so the recovery folder
+            // does not grow unboundedly.
             {
                 let desktop = {
                     let state = app.state::<AppState>();
                     let s = state.settings.lock().expect("settings lock");
                     std::path::PathBuf::from(&s.desktop_path)
                 };
+
+                // Sentinel guard: if desktop_path is empty / relative the
+                // PathBuf join would resolve against the process cwd —
+                // historically this is exactly how `manifest.json.bak`
+                // ended up in user profile / install dir / D:\ root, then
+                // got picked up by the legacy quarantine sweep and dumped
+                // back onto the desktop. Skip the entire block instead.
+                let desktop_str = desktop.as_os_str().to_string_lossy();
+                let desktop_trimmed = desktop_str.trim();
+                if desktop_trimmed.is_empty() || !desktop.is_absolute() {
+                    tracing::error!(
+                        "Quarantine sweep: desktop_path is empty or non-absolute ({:?}) — skipping startup quarantine to avoid scribbling on cwd",
+                        desktop_trimmed
+                    );
+                } else {
+
+                let bentodesk_dir = desktop.join(".bentodesk");
+                let quarantine_dir = bentodesk_dir.join("quarantine");
+
+                // v1.2.6 fix #5 — robust quarantine_dir creation:
+                //
+                // Previous behavior: a single `create_dir_all` attempt that
+                // only logged at `warn` level on failure, then continued
+                // running Step 1/2 with `quarantine_dir.join(...)` as the
+                // rename destination. When the directory creation actually
+                // failed (OneDrive transient lock, AV interference, perms),
+                // every subsequent `std::fs::rename` ENOENT'd against the
+                // missing directory and the legacy `.bentodesk-quarantine-*`
+                // residue + bare `manifest.json.bak` stayed visible on the
+                // user's desktop forever.
+                //
+                // New strategy:
+                //   1. Try create_dir_all once.
+                //   2. On failure, ensure the parent `.bentodesk/` exists
+                //      (creating it if necessary) and retry once more — this
+                //      handles the common case where `.bentodesk/` itself
+                //      hasn't materialised yet on a fresh install.
+                //   3. If both attempts fail, drop into a degraded fallback
+                //      that uses `.bentodesk/` (or the desktop root, as a
+                //      last resort) as the rename target so files at least
+                //      get a `quarantine-` prefix and stop colliding with
+                //      live writes. Step 1 will pick them up on a future
+                //      startup once the lock clears.
+                let mut quarantine_target = quarantine_dir.clone();
+                let quarantine_dir_ok = match std::fs::create_dir_all(&quarantine_dir) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            "Quarantine sweep: first create_dir_all({}) failed: {e} — retrying after ensuring parent",
+                            quarantine_dir.display()
+                        );
+                        // Parent retry — make sure `.bentodesk/` exists, then
+                        // try the quarantine subdir again.
+                        let _ = std::fs::create_dir_all(&bentodesk_dir);
+                        match std::fs::create_dir_all(&quarantine_dir) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "Quarantine sweep: retry succeeded — created {}",
+                                    quarantine_dir.display()
+                                );
+                                true
+                            }
+                            Err(e2) => {
+                                tracing::error!(
+                                    "Quarantine sweep: retry create_dir_all({}) also failed: {e2} — entering degraded fallback mode",
+                                    quarantine_dir.display()
+                                );
+                                false
+                            }
+                        }
+                    }
+                };
+
+                // Pick the best fallback destination for the degraded path.
+                // Preference order: .bentodesk/ → desktop root.
+                if !quarantine_dir_ok {
+                    if bentodesk_dir.is_dir()
+                        || std::fs::create_dir_all(&bentodesk_dir).is_ok()
+                    {
+                        quarantine_target = bentodesk_dir.clone();
+                        tracing::warn!(
+                            "Quarantine sweep: using .bentodesk/ as degraded fallback target ({})",
+                            quarantine_target.display()
+                        );
+                    } else {
+                        quarantine_target = desktop.clone();
+                        tracing::warn!(
+                            "Quarantine sweep: .bentodesk/ also unavailable — falling back to desktop root with `.bentodesk-quarantine-*` prefix"
+                        );
+                    }
+                }
+
                 let quarantine_ts =
                     chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+
+                // Step 1 — quarantine any stale manifest files left at the
+                // desktop root (legacy bug from hidden_dir resolving to cwd).
+                //
+                // `manifest.json.bak` / `.tmp` are *never* meaningful at the
+                // desktop root: they are write-ahead artefacts that only
+                // belong inside `.bentodesk/`. If we cannot rename them
+                // anywhere safe and the file is one of these transient
+                // backups, fall through to a delete so the user's desktop
+                // stops accumulating cruft. `manifest.json` itself is kept
+                // and only ever moved (it could contain user data).
                 for stale_name in &[
                     "manifest.json",
                     "manifest.json.bak",
                     "manifest.json.tmp",
                 ] {
                     let stale_path = desktop.join(stale_name);
-                    if stale_path.exists() {
-                        let dst = desktop.join(format!(
-                            ".bentodesk-quarantine-{}-{}",
-                            quarantine_ts, stale_name
-                        ));
-                        if let Err(e) = std::fs::rename(&stale_path, &dst) {
-                            tracing::warn!(
+                    if !stale_path.exists() {
+                        continue;
+                    }
+
+                    // Rename target depends on whether quarantine_dir is
+                    // available. In the happy path the prefix is folded
+                    // into the timestamped filename; in the degraded path
+                    // we emit the same `.bentodesk-quarantine-*` filename
+                    // shape so a future startup's Step 2 will sweep it up.
+                    let dst_name = format!(
+                        ".bentodesk-quarantine-{}-{}",
+                        quarantine_ts, stale_name
+                    );
+                    let dst = quarantine_target.join(&dst_name);
+
+                    match std::fs::rename(&stale_path, &dst) {
+                        Ok(()) => tracing::info!(
+                            "Quarantined stale legacy file {} -> {}",
+                            stale_path.display(),
+                            dst.display()
+                        ),
+                        Err(e) => {
+                            tracing::error!(
                                 "Failed to quarantine stale {}: {e}",
                                 stale_path.display()
                             );
-                        } else {
-                            tracing::info!(
-                                "Quarantined stale legacy file {} -> {}",
-                                stale_path.display(),
-                                dst.display()
-                            );
+                            // Last-ditch cleanup for transient backup files
+                            // (.bak / .tmp). NEVER delete `manifest.json`
+                            // itself — it might hold the only copy of the
+                            // user's layout if .bentodesk/ vanished.
+                            if *stale_name != "manifest.json" {
+                                match std::fs::remove_file(&stale_path) {
+                                    Ok(()) => tracing::warn!(
+                                        "Quarantine sweep: rename failed, removed transient backup {}",
+                                        stale_path.display()
+                                    ),
+                                    Err(e2) => tracing::error!(
+                                        "Quarantine sweep: could not remove transient backup {}: {e2}",
+                                        stale_path.display()
+                                    ),
+                                }
+                            }
                         }
                     }
                 }
+
+                // Step 2 — sweep up any pre-existing `.bentodesk-quarantine-*`
+                // residue at the desktop root (users on v1.2.x accumulated
+                // 4-5 of these). Move into the new quarantine subdir so the
+                // desktop ends up clean.
+                //
+                // If `quarantine_dir` is unavailable we *don't* try to move
+                // these to .bentodesk/ root (would create dozens of
+                // .bentodesk-quarantine-*.bak files in the hidden folder);
+                // they stay put and we simply retry next launch.
+                if quarantine_dir_ok {
+                    if let Ok(entries) = std::fs::read_dir(&desktop) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            let name = match path.file_name().and_then(|n| n.to_str()) {
+                                Some(n) => n.to_string(),
+                                None => continue,
+                            };
+                            if !name.starts_with(".bentodesk-quarantine-") {
+                                continue;
+                            }
+                            let dst = quarantine_dir.join(&name);
+                            // Avoid clobbering an entry that already exists in the
+                            // new location (extremely unlikely — timestamps are
+                            // unique — but cheap to guard).
+                            if dst.exists() {
+                                continue;
+                            }
+                            match std::fs::rename(&path, &dst) {
+                                Ok(()) => tracing::info!(
+                                    "Swept legacy quarantine residue {} -> {}",
+                                    path.display(),
+                                    dst.display()
+                                ),
+                                Err(e) => tracing::error!(
+                                    "Failed to sweep quarantine residue {}: {e}",
+                                    path.display()
+                                ),
+                            }
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "Quarantine sweep: skipping Step 2 residue sweep — quarantine_dir unavailable, residue will be retried next startup"
+                    );
+                }
+
+                // Step 3 — prune quarantine entries older than 30 days. The
+                // recovery folder is a safety net, not a permanent archive;
+                // 30 days is long enough for a user to notice missing data
+                // and short enough that the folder does not grow unbounded
+                // on long-running installs.
+                //
+                // Skip pruning entirely if quarantine_dir does not exist —
+                // there is nothing to read and we'd just spam an ENOENT.
+                if quarantine_dir_ok {
+                if let Ok(entries) = std::fs::read_dir(&quarantine_dir) {
+                    let cutoff = std::time::SystemTime::now()
+                        .checked_sub(std::time::Duration::from_secs(30 * 24 * 60 * 60));
+                    if let Some(cutoff) = cutoff {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            let metadata = match entry.metadata() {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+                            let mtime = match metadata.modified() {
+                                Ok(t) => t,
+                                Err(_) => continue,
+                            };
+                            if mtime >= cutoff {
+                                continue;
+                            }
+                            let removal = if metadata.is_dir() {
+                                std::fs::remove_dir_all(&path)
+                            } else {
+                                std::fs::remove_file(&path)
+                            };
+                            match removal {
+                                Ok(()) => tracing::info!(
+                                    "Auto-pruned quarantine entry older than 30d: {}",
+                                    path.display()
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "Failed to auto-prune quarantine entry {}: {e}",
+                                    path.display()
+                                ),
+                            }
+                        }
+                    }
+                }
+                } // end of "if quarantine_dir_ok" Step 3 guard
+                } // end of "desktop_path is absolute" guard
             }
 
             // Set up the always-on-bottom overlay (ghost layer)
-            if settings.ghost_layer_enabled {
-                if let Err(e) =
-                    ghost_layer::manager::GhostLayerManager::attach(app.handle())
-                {
-                    tracing::warn!(
-                        "Ghost layer failed, falling back to normal window: {}",
-                        e
-                    );
+            //
+            // v1.2.5 fix #1 — silent fallback hardening:
+            //   (a) When attach() fails the user used to end up with a
+            //       standard Windows chrome window (caption + close button +
+            //       taskbar icon) because Tauri's default decorations were
+            //       silently in effect. Apply a defensive hard-floor via
+            //       Tauri's runtime API so the window is at least
+            //       frameless + skip-taskbar even if the full ghost layer
+            //       fails to materialise.
+            //   (b) Emit a `ghost-layer-degraded` event so the UI can show
+            //       a toast instead of failing silently.
+            //   (c) See on_page_load below for the one-shot retry that
+            //       handles the "HWND not yet realised in setup()" race.
+            let ghost_attach_failed: Option<String> = if settings.ghost_layer_enabled {
+                match ghost_layer::manager::GhostLayerManager::attach(app.handle()) {
+                    Ok(()) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ghost layer failed, falling back to normal window: {}",
+                            e
+                        );
+                        Some(e.to_string())
+                    }
                 }
+            } else {
+                None
+            };
+
+            // Defensive hard-floor: regardless of ghost_layer outcome, make
+            // sure the main window is frameless + hidden from the taskbar.
+            // These two calls are idempotent — if attach() already applied
+            // them via direct Win32 the runtime call is a no-op. If attach()
+            // failed (or ghost_layer_enabled = false) this is what keeps the
+            // window from regressing into a Win11 chrome shell.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_decorations(false) {
+                    tracing::warn!("set_decorations(false) hard-floor failed: {e}");
+                }
+                if let Err(e) = window.set_skip_taskbar(true) {
+                    tracing::warn!("set_skip_taskbar(true) hard-floor failed: {e}");
+                }
+            }
+
+            // Notify the frontend that ghost layer attach failed so it can
+            // surface a toast / status indicator. Sent after the hard-floor
+            // is applied so the UI can assume a well-defined window state.
+            if let Some(err_msg) = ghost_attach_failed {
+                let _ = app.emit("ghost-layer-degraded", err_msg);
             }
 
             // Enable passthrough IMMEDIATELY so the desktop stays clickable
@@ -545,6 +858,57 @@ pub fn run() {
 
             tracing::info!("BentoDesk initialized successfully");
             Ok(())
+        })
+        // v1.2.5 fix #1.3 — belt-and-suspenders: when the WebView finishes its
+        // first page load the main HWND is guaranteed to be realised. If
+        // attach() in setup() raced ahead of HWND creation the window will
+        // be missing WS_EX_TOOLWINDOW; detect that and retry attach exactly
+        // once. Subsequent page loads (devtools reloads, hash changes) are
+        // ignored via the `Once` guard.
+        .on_page_load(|webview, _payload| {
+            use std::sync::Once;
+            static RETRY: Once = Once::new();
+            if webview.label() != "main" {
+                return;
+            }
+            RETRY.call_once(|| {
+                #[cfg(target_os = "windows")]
+                {
+                    use windows::Win32::Foundation::HWND;
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+                    };
+                    let win = webview.window();
+                    let raw_hwnd = match win.hwnd() {
+                        Ok(h) => h,
+                        Err(e) => {
+                            tracing::warn!("on_page_load: hwnd() unavailable: {e}");
+                            return;
+                        }
+                    };
+                    let hwnd = HWND(raw_hwnd.0);
+                    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+                    let has_toolwindow = (ex_style & WS_EX_TOOLWINDOW.0 as isize) != 0;
+                    if has_toolwindow {
+                        tracing::debug!(
+                            "on_page_load retry: WS_EX_TOOLWINDOW already present (exstyle=0x{:08X}), skipping",
+                            ex_style
+                        );
+                        return;
+                    }
+                    tracing::warn!(
+                        "on_page_load retry: WS_EX_TOOLWINDOW missing (exstyle=0x{:08X}) — attempting ghost_layer attach again",
+                        ex_style
+                    );
+                    let app_handle = webview.app_handle().clone();
+                    if let Err(e) = ghost_layer::manager::GhostLayerManager::attach(&app_handle) {
+                        tracing::error!("on_page_load retry attach failed: {e}");
+                        let _ = app_handle.emit("ghost-layer-degraded", e.to_string());
+                    } else {
+                        tracing::info!("on_page_load retry attach succeeded");
+                    }
+                }
+            });
         })
         .register_uri_scheme_protocol("bentodesk", |ctx, request| {
             let app = ctx.app_handle().clone();

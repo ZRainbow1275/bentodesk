@@ -385,9 +385,28 @@ const zhCN = {
 
   // Context menu — Theme E
   contextMenuPinMinibar: "固定为迷你栏",
+  contextMenuPinMinibarSuccess: "已固定为迷你栏",
+  contextMenuPinMinibarError: "无法固定迷你栏",
   contextMenuBindFolder: "绑定文件夹…",
   contextMenuSaveCapsule: "保存为情景胶囊",
   contextMenuSaveCapsulePrompt: "胶囊名称？",
+
+  // Stack auto-spread (v1.2.4)
+  stackSpreadTooltip: "展开重叠区域",
+  stackSpreadError: "展开失败",
+
+  // Bulk selection floating bar (v1.2.4)
+  bulkBarAriaLabel: "批量区域操作",
+  bulkBarSelectedCount: "已选 {n}",
+  bulkBarRename: "批量管理",
+  bulkBarAlign: "对齐",
+  bulkBarGrid: "网格",
+  bulkBarDelete: "删除",
+  bulkBarClear: "清除",
+  bulkBarConfirmDelete: "确认删除 {count} 个区域？",
+  bulkBarAlignError: "对齐失败",
+  bulkBarGridError: "网格排列失败",
+  bulkBarDeleteError: "部分区域无法删除",
 
   // Rules Wizard
   rulesWizardTitle: "规则",
@@ -415,11 +434,11 @@ const zhCN = {
   rulesWizardAll: "全部满足",
   rulesWizardAny: "任一满足",
   rulesWizardDays: "天",
-  stackMembersLabel: "鎴愬憳",
-  stackShowPreview: "棰勮",
-  stackHidePreview: "鏀惰捣",
-  stackDetachMember: "鎷嗗嚭",
-  stackPreviewActive: "棰勮涓?",
+  stackMembersLabel: "成员",
+  stackShowPreview: "预览",
+  stackHidePreview: "收起",
+  stackDetachMember: "拆出",
+  stackPreviewActive: "预览中",
 } as const;
 
 /** Keys of the translation object — used for type-safe key lookups. */
