@@ -1,0 +1,100 @@
+# cargo-deny v0.19 schema. Run via:
+#   cargo deny --manifest-path src-tauri/Cargo.toml check --config src-tauri/deny.toml
+# CI integration: bentodesk/.github/workflows/audit.yml.
+# Calibration: AGPL-3.0-or-later own-crate context, Tauri 2 + windows 0.58
+# + tokio + crypto stack. Audited 2026-04-29.
+
+[graph]
+# Tauri builds Windows-first; restrict the dep graph to win64 to avoid
+# noise from Linux/macOS-only transitive deps (e.g. `objc`, `cocoa`).
+targets = [
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "x86_64-pc-windows-gnu" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# [advisories] — RustSec advisory DB. Same data source as `cargo audit`,
+# but with policy knobs the audit tool doesn't expose.
+# ---------------------------------------------------------------------------
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+  # Each entry needs (1) RUSTSEC-ID, (2) one-sentence justification,
+  # (3) expiry date. Review on or before expiration.
+]
+
+# ---------------------------------------------------------------------------
+# [licenses] — SPDX-based license policy.
+# Strategy: explicit allow-list. Any license not listed here fails the build.
+# AGPL is allowed ONLY for our own crate via `exceptions`, so accidental
+# GPL/AGPL transitives are a hard fail.
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.93
+
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+  "BSL-1.0",
+  "OpenSSL",
+]
+
+# Whitelist BentoDesk's own AGPL — does not open the door to AGPL transitives.
+[[licenses.exceptions]]
+name = "bentodesk"
+allow = ["AGPL-3.0-or-later", "AGPL-3.0"]
+
+# ---------------------------------------------------------------------------
+# [bans] — Crate-level policy.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+  { name = "openssl", reason = "Use rustls/webpki-roots; OpenSSL is a build/CVE liability on Windows." },
+  { name = "openssl-sys", reason = "Same as openssl." },
+  { name = "time", version = "<0.3", reason = "RUSTSEC-2020-0071 segfault; use chrono or time >=0.3." },
+  { name = "async-std", reason = "Project standard is tokio; async-std is in maintenance mode." },
+  { name = "yaml-rust", reason = "Unmaintained since 2022; use serde_yaml or yaml-rust2." },
+  { name = "openssl-probe", reason = "Triggers OpenSSL pull-in on Windows where it's never used." },
+]
+
+skip = [
+  # Tauri 2 + windows 0.58 currently pull windows-sys 0.52 and 0.59. Track upstream.
+  { crate = "windows-sys" },
+  { crate = "syn", reason = "1.x via legacy proc-macros, 2.x is the modern path." },
+  { crate = "bitflags" },
+  { crate = "hashbrown" },
+]
+
+# ---------------------------------------------------------------------------
+# [sources] — Where can we pull crates from?
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

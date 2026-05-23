@@ -82,7 +82,7 @@ pub async fn repair_item_icon_hashes(
     state: State<'_, AppState>,
 ) -> Result<ItemIconRepairReport, String> {
     let candidates = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         collect_repair_candidates(&layout)
     };
 
@@ -98,7 +98,7 @@ pub async fn repair_item_icon_hashes(
     }
 
     let repairs = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_repairs_to_layout(&mut layout, &pending_repairs)
     };
 
@@ -145,8 +145,7 @@ where
 {
     let mut pending = Vec::new();
     for (item_id, old_icon_hash, source_path) in candidates {
-        let cache_miss =
-            old_icon_hash.trim().is_empty() || !cache.contains_any_tier(old_icon_hash);
+        let cache_miss = old_icon_hash.trim().is_empty() || !cache.contains_any_tier(old_icon_hash);
 
         let new_icon_hash = match refresh(cache, source_path) {
             Ok(hash) => hash,
@@ -389,7 +388,9 @@ mod tests {
 
         let mut layout = LayoutData {
             zones: vec![make_zone_with(vec![make_item(
-                "item-2", &path_str, &stale_hash,
+                "item-2",
+                &path_str,
+                &stale_hash,
             )])],
             ..LayoutData::default()
         };
@@ -422,11 +423,7 @@ mod tests {
         cache.put(old_hash.clone(), b"old".to_vec());
         cache.put(new_hash.clone(), b"new".to_vec());
 
-        let candidates = vec![(
-            "item-3".to_string(),
-            old_hash.clone(),
-            new_path_str.clone(),
-        )];
+        let candidates = vec![("item-3".to_string(), old_hash.clone(), new_path_str.clone())];
         let pending = compute_pending_repairs(&cache, &candidates, fake_refresh);
         assert_eq!(
             pending.len(),

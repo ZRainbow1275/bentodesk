@@ -61,7 +61,7 @@ fn validate_desktop_path(desktop_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     Ok(settings.clone())
 }
 
@@ -74,7 +74,7 @@ pub async fn update_settings(
     // save back atomically instead of leaving the backend on a partial state
     // while the frontend still sees a failed save.
     let previous_settings = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        let s = state.settings.read();
         s.clone()
     };
 
@@ -84,7 +84,7 @@ pub async fn update_settings(
     }
 
     let result = {
-        let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let mut settings = state.settings.write();
         settings.apply_update(updates);
         settings.clone()
     };
@@ -103,7 +103,7 @@ pub async fn update_settings(
         if let Err(e) = apply_launch_at_startup(&state) {
             tracing::error!("Failed to update launch-at-startup: {e}; reverting settings update");
             {
-                let mut settings = state.settings.lock().map_err(|err| err.to_string())?;
+                let mut settings = state.settings.write();
                 *settings = previous_settings.clone();
             }
             state.persist_settings();
@@ -155,7 +155,7 @@ pub async fn update_settings(
 /// On first call, also cleans up the legacy `HKCU\...\Run` registry value.
 fn apply_launch_at_startup(state: &AppState) -> Result<(), String> {
     let (enabled, high_priority, use_guardian, crash_max, crash_window) = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        let s = state.settings.read();
         (
             s.launch_at_startup,
             s.startup_high_priority,

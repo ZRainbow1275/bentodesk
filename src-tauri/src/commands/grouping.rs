@@ -11,7 +11,7 @@ use crate::AppState;
 
 #[tauri::command]
 pub async fn scan_desktop(state: State<'_, AppState>) -> Result<Vec<FileInfo>, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     let desktop_path_str = settings.desktop_path.clone();
     drop(settings);
     let desktop_path = Path::new(&desktop_path_str);
@@ -23,7 +23,7 @@ pub async fn suggest_groups(
     state: State<'_, AppState>,
     files: Vec<String>,
 ) -> Result<Vec<SuggestedGroup>, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     let desktop_path_str = settings.desktop_path.clone();
     drop(settings);
     let desktop_path = Path::new(&desktop_path_str);
@@ -49,7 +49,7 @@ pub async fn get_ai_recommendations(
     state: State<'_, AppState>,
     min_confidence: f64,
 ) -> Result<Vec<SuggestedGroup>, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     let desktop_path_str = settings.desktop_path.clone();
     drop(settings);
     let desktop_path = Path::new(&desktop_path_str);
@@ -70,7 +70,7 @@ pub async fn apply_auto_group(
     rule: AutoGroupRule,
     selected_paths: Option<Vec<String>>,
 ) -> Result<Vec<BentoItem>, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     let desktop_path_str = settings.desktop_path.clone();
     drop(settings);
 
@@ -92,7 +92,7 @@ pub async fn apply_auto_group(
     // Collect paths that are already in the zone so we can skip them before
     // doing expensive icon extraction + hide operations.
     let existing_paths: Vec<String> = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         let zone = layout
             .zones
             .iter()
@@ -103,7 +103,7 @@ pub async fn apply_auto_group(
 
     // Also check original_paths to avoid re-adding already-hidden items
     let existing_original_paths: Vec<String> = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         let zone = layout
             .zones
             .iter()
@@ -200,7 +200,7 @@ pub async fn apply_auto_group(
     }
 
     let added_items = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -255,7 +255,7 @@ pub async fn auto_group_new_file(
     state: State<'_, AppState>,
     file_path: String,
 ) -> Result<Vec<(String, BentoItem)>, String> {
-    let settings = state.settings.lock().map_err(|e| e.to_string())?;
+    let settings = state.settings.read();
     if !settings.auto_group_enabled {
         return Ok(Vec::new());
     }
@@ -291,7 +291,7 @@ pub async fn auto_group_new_file(
 
     // Collect zones with auto_group rules that match this file
     let matching_zones: Vec<(String, crate::layout::persistence::AutoGroupRule)> = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         layout
             .zones
             .iter()
@@ -367,7 +367,7 @@ pub async fn auto_group_new_file(
     // Add to each matching zone
     let mut added: Vec<(String, BentoItem)> = Vec::new();
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         for (zone_id, _rule) in &matching_zones {
             if let Some(zone) = layout.zones.iter_mut().find(|z| &z.id == zone_id) {
                 let idx = zone.items.len() as u32;

@@ -1,0 +1,20 @@
+{
+  "identifier": "minibar-window",
+  "description": "Permissions for dynamically-created minibar windows (label pattern minibar-*). Deliberately excludes tray / updater / global-shortcut / dialog / set_fullscreen / cursor_position — none of those APIs are reachable from the minibar UI per `src/views/MiniBarView.tsx` and `src-tauri/src/minibar/mod.rs`.",
+  "windows": ["minibar-*"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-title",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-outer-position",
+    "core:window:allow-current-monitor"
+  ]
+}

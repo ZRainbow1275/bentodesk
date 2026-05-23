@@ -4,20 +4,13 @@
   overflow: visible;
 }
 
-/* v8 round-8 (Bug Drag-Regression): lift the surface (which contains
- * <StackCapsule>) above the bloom buffer (z-index: 49) AND petals
- * (z-index: 50) in the wrapper's stacking context. The
- * `.stack-bloom-buffer` is `position: fixed` and is rendered LATER in
- * the DOM than the surface. The buffer sits on top of the capsule and
- * its `onMouseDown` handler used to swallow the mousedown so
- * `handleCapsuleMouseDown` never fired and drag never started.
- * Promoting the surface to z-index: 51 puts the capsule on TOP of the
- * buffer halo so mousedown lands on the capsule.
- *
- * v8 round-12: the buffer now spans the full viewport (100vw×100vh) so
- * multi-row wrap layouts still get hit-test coverage. The surface
- * z-index promotion is what keeps the capsule clickable through the
- * full-viewport buffer overlay. */
+/* v9 stack-wake-mutex: the surface keeps z-index 51 from the v8
+ * rounds — pre-v9 it sat above the deleted `.stack-bloom-buffer`
+ * (z-index 49) so capsule mousedown wasn't swallowed by the halo.
+ * The buffer is gone in v9; the explicit z-index is retained because
+ * `.stack-bloom` (and its petals at z-index 51 / 60) still need a
+ * positioned ancestor for the wrapper's natural stacking, and the
+ * value is harmless when no halo overlaps. */
 .stack-wrapper__surface {
   position: relative;
   z-index: 51;
@@ -28,25 +21,17 @@
 }
 
 /* ──────────────────────────────────────────────────────────────────
- * v7 #4 hover-bloom (rewritten) — real, visible fan-out so the user
- * can pull members out one by one without ever clicking ⊞.
- *
- * Two layers:
- *   1. `.stack-bloom-buffer` is an INVISIBLE hit-area that surrounds
- *      the capsule on all sides. It is sized to fully cover every
- *      petal's resting and bloomed positions, so the cursor can move
- *      from the capsule to any petal without crossing into "outside
- *      the wrapper" territory (which would fire `mouseleave` and
- *      retract the bloom mid-interaction). v6's bug was that petals
- *      flew far outside the wrapper's natural box and the
- *      `mouseleave` fired immediately.
- *   2. `.stack-bloom` is the visible petal grid. Petals are sized
- *      large enough to read (icon + name) and positioned far enough
- *      from the capsule (~120-160 px) that the user clearly perceives
- *      the cluster has spread — matching the user's mental model of
- *      "drag each zone out one at a time". They live INSIDE the
- *      buffer so hovering a petal counts as still being on the
- *      wrapper.
+ * v9 stack-wake-mutex (history): rounds v6/v7/v8 used a
+ * `.stack-bloom-buffer` halo (rounds 5–11 = circle around cursor;
+ * round-12 = full 100vw × 100vh viewport overlay) to keep the cursor
+ * hit-test poller "captured" anywhere near the bloom. The halo had
+ * `pointer-events: auto` and z-index 49 — high enough to shadow
+ * neighbouring zones' hover & click wake. v9 deletes the buffer
+ * entirely; petal hit-test coverage now comes from per-petal
+ * `inflate` haloes (12 px on each side, registered with the
+ * singleton hit-test map by the bloom-active createEffect in
+ * StackWrapper.tsx) plus the wrapper's own registered rect, and
+ * collapse decisions are driven by the `hoveredZone$` Solid signal.
  *
  * Round-12 lays petals out as a horizontal row directly below (or
  * above, when the capsule is near the viewport bottom) the stack
@@ -55,36 +40,13 @@
  * petal shows the zone's icon and an aliased name so the user can
  * tell them apart before clicking. Clicking / hovering opens the
  * FocusedZonePreview for that member (== the existing "expand" UX).
- * ────────────────────────────────────────────────────────────────── */
-
-/* v8 round-12 (bloom-row-layout): the bloom lays petals out in a
- * horizontal row directly below (or above, when the capsule is near
- * the bottom edge) the stack capsule. Both `.stack-bloom-buffer` and
- * each `.stack-bloom__petal` are `position: fixed` (set inline by JS),
- * so this stylesheet only defines visuals + the resting/bloomed
- * transition. Geometry — left/top/width/height — comes from inline
- * styles that JS computes via `resolvePetalRow` against the capsule
- * rect. The wrapper's natural box stays a single capsule hit target,
- * while the bloom layers escape the wrapper's stacking context
- * entirely (which is why their z-index is documented here, not
- * relative to .stack-wrapper).
  *
- * Round-12 buffer is now viewport-sized (100vw × 100vh) so multi-row
- * wrap layouts get full hit-test coverage anywhere petals may render.
- * Pre-round-12 the buffer was a circular halo around the cursor radius
- * — which broke the moment the row layout extended outside that
- * circle. The buffer is invisible (no background) and `pointer-events:
- * auto` so the cursor staying within the viewport keeps the bloom
- * registered with the hit-test poller. Petals sit on top via z-index
- * 51 so clicks land on the petal, not the buffer. */
-.stack-bloom-buffer {
-  pointer-events: auto;
-  /* Keep buffer below petals (50) but above any FocusedZonePreview
-   * the petal hover may open. */
-  z-index: 49;
-  /* Uncomment to visualise during debugging:
-   * background: rgba(255, 0, 0, 0.06); */
-}
+ * Each `.stack-bloom__petal` is `position: fixed` (set inline by
+ * JS), so this stylesheet only defines visuals + the resting /
+ * bloomed transition. Geometry — left / top / width / height —
+ * comes from inline styles that JS computes via `resolvePetalRow`
+ * against the capsule rect.
+ * ────────────────────────────────────────────────────────────────── */
 
 .stack-bloom {
   /* Inline `position: fixed` is set per-petal; the container itself
@@ -217,14 +179,19 @@
 /* Reverse stagger on exit: index 0 (first in) leaves last (so the
  * cluster visually re-collects toward the cursor).
  *
- * v8 round-14: total exit stagger capped at 240 ms (per the round-14
- * perf pass). With max 24 petals the per-petal delay is ≥ 10 ms; for
- * smaller stacks the cluster reads as a sequenced collapse without a
- * laggy tail. */
+ * v9 stack-wake-mutex: total exit stagger tightened from 240 ms →
+ * 120 ms and the per-petal exit duration shortened from 220 ms →
+ * 140 ms. The previous v8 round-14 budget made stack collapse
+ * ~3.5× slower than free-zone collapse; v9 brings the cumulative
+ * collapse path (poller detection ≤ 16 ms + petal exit 140 ms +
+ * stagger tail 120 ms = ~276 ms upper bound) inline with the
+ * BentoPanel transition (~200 ms) so stack and zone "feel" the
+ * same. With max 24 petals the per-petal delay is ≥ 5 ms; for
+ * smaller stacks the cluster still reads as a sequenced collapse. */
 .stack-bloom__petal--leaving {
-  animation: stack-bloom-petal-exit 220ms cubic-bezier(0.4, 0, 0.7, 0.2) forwards;
+  animation: stack-bloom-petal-exit 140ms cubic-bezier(0.4, 0, 0.7, 0.2) forwards;
   animation-delay: calc(
-    (240ms / max(1, var(--bloom-petal-count, 1)))
+    (120ms / max(1, var(--bloom-petal-count, 1)))
       * (var(--bloom-petal-count, 1) - 1 - var(--petal-index, 0))
   );
 }
@@ -510,11 +477,17 @@
   box-shadow:
     0 14px 36px rgba(0, 0, 0, 0.22),
     0 0 0 1px rgba(255, 255, 255, 0.06);
+  /* v9 stack-wake-mutex: tightened 320 → 180 ms so the capsule's
+   * recede animation finishes inside the same window as the v9
+   * petal exit (140 ms keyframe + 120 ms stagger tail). The
+   * spring curve is preserved — a 180 ms spring still has enough
+   * settle for the user to read the recede as deliberate without
+   * extending the collapse budget. */
   transition:
-    transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    opacity 320ms ease-out,
-    box-shadow 220ms ease,
-    border-color 220ms ease;
+    transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 180ms ease-out,
+    box-shadow 180ms ease,
+    border-color 180ms ease;
 }
 
 @media (prefers-reduced-motion: reduce) {

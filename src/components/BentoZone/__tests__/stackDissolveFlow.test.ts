@@ -113,8 +113,13 @@ describe("v9 stack dissolve flow — source contract", () => {
     expect(fnMatch).not.toBeNull();
     const body = fnMatch![1];
     // The menu must close synchronously so the user sees feedback even
-    // if the IPC stalls (e.g. backend lock contention).
-    expect(body).toMatch(/setContextMenuOpen\s*\(\s*null\s*\)/);
+    // if the IPC stalls (e.g. backend lock contention). Post-deploy
+    // round 2 refactored the inline `setContextMenuOpen(null)` into a
+    // `closeContextMenu()` helper that also releases the modal lock
+    // (Bug A fix). The semantic contract is unchanged — the helper
+    // wraps the same `setContextMenuOpen(null)` write — so we accept
+    // either spelling.
+    expect(body).toMatch(/(setContextMenuOpen\s*\(\s*null\s*\)|closeContextMenu\s*\(\s*\))/);
     expect(body).toMatch(/setPreviewZoneId\s*\(\s*null\s*\)/);
     expect(body).toMatch(/setIsBloomed\s*\(\s*false\s*\)/);
     expect(body).toMatch(/unstackZonesAction\s*\(\s*props\.stackId\s*\)/);

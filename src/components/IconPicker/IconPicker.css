@@ -163,3 +163,7 @@
     animation-duration: 0.01ms;
   }
 }
+
+.icon-picker__upload-input {
+  display: none;
+}

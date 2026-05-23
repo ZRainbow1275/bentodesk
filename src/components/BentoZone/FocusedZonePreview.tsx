@@ -50,6 +50,23 @@ interface FocusedZonePreviewProps {
    *  wrapper and start the 80 ms collapse timer, causing the bloom
    *  to retract while the user is on the preview. */
   onMouseEnter?: () => void;
+  /** v9 stack-wake-mutex perf: notify the parent StackWrapper that
+   *  the floating preview's DOM element has mounted, so the parent
+   *  can register it as a member of the bloom-element family used
+   *  by its hoveredZone$-driven collapse effect. Without this hook
+   *  the parent's effect would treat the preview as a "non-bloom"
+   *  zone (because the singleton hit-test map records the preview
+   *  but the parent's local Set doesn't), tearing down the bloom
+   *  the moment the cursor moved from a petal onto the preview.
+   *
+   *  Only wired when the preview is anchored to a petal rect (i.e.
+   *  the floating bloom variant). The legacy tray-driven path
+   *  shares the wrapper's natural rect and doesn't need this. */
+  onElementMount?: (el: HTMLElement) => void;
+  /** Symmetric to {@link onElementMount}. Fires inside `onCleanup`
+   *  so the parent's bloom-element Set drops the preview ref the
+   *  same tick the DOM detaches. */
+  onElementUnmount?: (el: HTMLElement) => void;
 }
 
 const PREVIEW_GAP_PX = 12;
@@ -163,8 +180,10 @@ const FocusedZonePreview: Component<FocusedZonePreviewProps> = (props) => {
       top: `${top}px`,
       width: `${w}px`,
       height: `${h}px`,
-      // Sit above the bloom petals (z=51) and the buffer halo (z=49)
-      // so the preview is always the front-most layer once it appears.
+      // Sit above the bloom petals (z=51) so the preview is always
+      // the front-most layer once it appears. (Pre-v9 this also had to
+      // outrank the deleted `.stack-bloom-buffer` at z=49 — the buffer
+      // is gone, but z=60 stays for petal layering.)
       "z-index": "60",
     };
   };
@@ -198,12 +217,21 @@ const FocusedZonePreview: Component<FocusedZonePreviewProps> = (props) => {
     debugPreview("mount");
     if (props.anchorRect && elementRef) {
       registerZoneElement(elementRef);
+      // v9 stack-wake-mutex perf: tell the parent StackWrapper this
+      // floating preview is part of the bloom-element family so its
+      // hoveredZone$-driven collapse effect treats cursor-over-preview
+      // as "still inside bloom" rather than "left bloom for a non-bloom
+      // zone".
+      props.onElementMount?.(elementRef);
       debugPreview("hit-test:registered");
     }
   });
 
   onCleanup(() => {
     if (elementRef) {
+      // Symmetric notify before unregistering so the parent's local
+      // Set drops the ref alongside the singleton hit-test map.
+      props.onElementUnmount?.(elementRef);
       unregisterZoneElement(elementRef);
     }
     debugPreview("cleanup");

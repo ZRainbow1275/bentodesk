@@ -1,40 +1,21 @@
 /**
- * v8 round-8 — stack drag must work while the bloom is open.
+ * v9 stack-wake-mutex — stack drag must work while the bloom is open.
  *
- * Round-5b/round-7's bloom-buffer (`.stack-bloom-buffer`, position:fixed,
- * diameter ~384px, z-index: 49) mounts the moment the user enters the
- * stack hover area. Two compound issues silently broke drag:
+ * History: rounds 5–v8 used a `.stack-bloom-buffer` halo whose v8
+ * round-8 fix layered the capsule above the buffer via z-index 51.
+ * v9 deletes the buffer entirely (the halo had `pointer-events: auto`
+ * and was shadowing neighbouring zones' wake), so the original
+ * "buffer must NOT swallow capsule mousedown" contract collapses to
+ * a simpler invariant: the surface still positions the capsule
+ * above any siblings inside the wrapper's natural stacking context,
+ * and the capsule's `onMouseDown` wiring is intact.
  *
- *   1. The buffer is rendered LATER in the DOM than the surface, so by
- *      default it stacks on top of the capsule unless the surface has
- *      a higher explicit z-index. The capsule (220×52) sits inside the
- *      buffer's halo, so cursor mousedown lands on the buffer.
- *   2. The buffer carried `onMouseDown={(e) => e.stopPropagation()}`,
- *      which was meant to keep marquee/drag from latching onto the
- *      buffer — but the side effect was that the mousedown event never
- *      reached `<StackCapsule onMouseDown={handleCapsuleMouseDown}>`,
- *      so drag never started.
- *
- * Round-8 fix:
- *   - CSS: `.stack-wrapper__surface { position: relative; z-index: 51 }`
- *     — lifts the capsule above the buffer (49) AND petals (50) in the
- *     wrapper's stacking context.
- *   - TSX: removed the buffer's `onMouseDown` stopPropagation.
- *
- * This test parses the StackWrapper.css file and verifies both contracts
- * are encoded:
- *   1. `.stack-wrapper__surface` has `z-index: 51` (above buffer/petals)
- *   2. `.stack-bloom-buffer` has `z-index: 49`
- *   3. Surface's z-index is GREATER THAN the buffer's
- *
- * It also verifies the StackWrapper.tsx source no longer carries the
- * buffer's `stopPropagation` on mousedown.
- *
- * The test is INTENTIONALLY a contract test against the source files
- * (not a full Solid render) because mounting StackWrapper requires
- * bootstrapping zonesStore + selection + ipc + settings, which is heavy
- * and orthogonal to the regression. The CSS rule + the TSX code edit
- * together fully encode the fix; if either is removed, this test fails.
+ * The DOM smoke test below mirrors the post-v9 topology — no buffer
+ * sibling in the wrapper — and verifies a `mousedown` on the capsule
+ * still fires its handler. The historical "if buffer re-appeared"
+ * regression is left in place as a defence-in-depth check: if a
+ * future round re-introduces a 100 vw overlay with stopPropagation,
+ * the test still proves the mechanism breaks.
  */
 import { describe, it, expect } from "vitest";
 // node:fs / url / path are provided by the vitest Node runner; project
@@ -92,30 +73,21 @@ function extractZIndexForSelector(
   return { match: zMatch[0], zIndex: parseInt(zMatch[1], 10) };
 }
 
-describe("v8 round-8 — stack drag-while-bloomed regression fix", () => {
-  it("CSS: .stack-wrapper__surface declares z-index: 51 to sit above the buffer", () => {
+describe("v9 stack-wake-mutex — stack drag-while-bloomed contract", () => {
+  it("CSS: .stack-wrapper__surface keeps z-index: 51 for capsule mousedown reachability", () => {
     const css = readFile(CSS_PATH);
     const surface = extractZIndexForSelector(css, ".stack-wrapper__surface");
     expect(surface).not.toBeNull();
     expect(surface!.zIndex).toBe(51);
   });
 
-  it("CSS: .stack-bloom-buffer keeps z-index: 49 (below petals 50 and surface 51)", () => {
+  it("CSS: .stack-bloom-buffer rule body is gone (v9 deletes the buffer entirely)", () => {
     const css = readFile(CSS_PATH);
-    const buffer = extractZIndexForSelector(css, ".stack-bloom-buffer");
-    expect(buffer).not.toBeNull();
-    expect(buffer!.zIndex).toBe(49);
-  });
-
-  it("CSS: surface stacks ABOVE the bloom buffer", () => {
-    const css = readFile(CSS_PATH);
-    const surface = extractZIndexForSelector(css, ".stack-wrapper__surface");
-    const buffer = extractZIndexForSelector(css, ".stack-bloom-buffer");
-    // Both must be present; the inequality is what guarantees mousedown on
-    // the capsule reaches the surface (not the overlapping buffer).
-    expect(surface).not.toBeNull();
-    expect(buffer).not.toBeNull();
-    expect(surface!.zIndex).toBeGreaterThan(buffer!.zIndex);
+    // The pre-v9 `.stack-bloom-buffer { ... }` selector must no
+    // longer carry an opening brace. Documentation comments
+    // mentioning the historical name are allowed (so future
+    // maintainers can find the v9 ADR).
+    expect(css).not.toMatch(/\.stack-bloom-buffer\s*\{/m);
   });
 
   it("CSS: .stack-wrapper__surface has position: relative (z-index requires it)", () => {
@@ -128,34 +100,14 @@ describe("v8 round-8 — stack drag-while-bloomed regression fix", () => {
     expect(surfaceRule![1]).toMatch(/position\s*:\s*relative\s*;?/m);
   });
 
-  it("TSX: bloom buffer no longer carries onMouseDown stopPropagation", () => {
+  it("TSX: no .stack-bloom-buffer JSX is rendered any more", () => {
     const tsx = readFile(TSX_PATH);
-    // Locate the buffer JSX block: starts with `class="stack-bloom-buffer"`
-    // and runs until its closing tag (self-closing `/>`).
-    const bufferBlockMatch = /class="stack-bloom-buffer"[\s\S]*?\/>/m.exec(tsx);
-    expect(bufferBlockMatch).not.toBeNull();
-    const bufferBlock = bufferBlockMatch![0];
-    // Strip `/* ... */` block comments AND `// ...` line comments before
-    // pattern matching so historical narratives in the comment do not
-    // trigger the "onMouseDown" detector. We're asserting the JSX
-    // attribute is gone, not that the word vanished from the file.
-    const codeOnly = bufferBlock
+    // Strip block + line comments before matching so the historical
+    // narrative left in comments doesn't false-match.
+    const codeOnly = tsx
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "");
-    // The fix removed the `onMouseDown={(e) => e.stopPropagation()}` line.
-    // We assert it's not in the block any more — if a future change
-    // re-adds it, this test fails loudly.
-    expect(codeOnly).not.toMatch(/onMouseDown\s*=/);
-  });
-
-  it("TSX: bloom buffer still preserves its hover-keepalive (onMouseEnter)", () => {
-    const tsx = readFile(TSX_PATH);
-    // Belt-and-braces — the round-7 mouseenter cancel must not have been
-    // accidentally removed alongside the mousedown.
-    const bufferBlockMatch = /class="stack-bloom-buffer"[\s\S]*?\/>/m.exec(tsx);
-    expect(bufferBlockMatch).not.toBeNull();
-    const bufferBlock = bufferBlockMatch![0];
-    expect(bufferBlock).toMatch(/onMouseEnter\s*=\s*\{cancelBloomCollapse\}/m);
+    expect(codeOnly).not.toMatch(/class="stack-bloom-buffer"/);
   });
 
   it("TSX: <StackCapsule onMouseDown={handleCapsuleMouseDown}> wiring is still in place", () => {
@@ -167,19 +119,14 @@ describe("v8 round-8 — stack drag-while-bloomed regression fix", () => {
   });
 });
 
-describe("v8 round-8 — bloom buffer mousedown propagation behavior (DOM)", () => {
+describe("v9 stack-wake-mutex — capsule mousedown reachability (DOM)", () => {
   /**
-   * Verify in jsdom that with the new buffer (no stopPropagation), a
-   * mousedown event dispatched on a child element bubbles correctly to
-   * the parent's mousedown listener. This is the actual mechanism the
-   * fix relies on — the capsule's mousedown must reach the wrapper /
-   * StackCapsule onMouseDown handler even when both elements live in
-   * overlapping screen space with the buffer.
-   *
-   * We construct a minimal DOM tree mirroring the post-fix topology
-   * and assert the capsule's onMouseDown fires.
+   * Post-v9 topology: the wrapper contains the surface (which holds
+   * the capsule) and the bloom container (petals only — no buffer
+   * sibling). The capsule's `onMouseDown` must still fire so drag
+   * starts.
    */
-  it("mousedown on capsule reaches handler even when buffer is a sibling without stopPropagation", () => {
+  it("mousedown on capsule fires its handler in the v9 topology (no buffer sibling)", () => {
     const wrapper = document.createElement("div");
     wrapper.className = "stack-wrapper";
     document.body.appendChild(wrapper);
@@ -192,12 +139,9 @@ describe("v8 round-8 — bloom buffer mousedown propagation behavior (DOM)", () 
     capsule.className = "stack-capsule";
     surface.appendChild(capsule);
 
-    const buffer = document.createElement("div");
-    buffer.className = "stack-bloom-buffer";
-    // Critical post-fix invariant: buffer has NO mousedown stopPropagation.
-    // (We don't attach any handler; the bug was an explicit stopPropagation
-    // on this element. Absence of the handler is the fix.)
-    wrapper.appendChild(buffer);
+    const bloomContainer = document.createElement("div");
+    bloomContainer.className = "stack-bloom";
+    wrapper.appendChild(bloomContainer);
 
     let capsuleMouseDownFired = false;
     capsule.addEventListener("mousedown", () => {
@@ -214,16 +158,12 @@ describe("v8 round-8 — bloom buffer mousedown propagation behavior (DOM)", () 
     document.body.removeChild(wrapper);
   });
 
-  it("if a future regression re-adds buffer's stopPropagation on a synthetic OVERLAY scenario, mousedown is swallowed (proves the previous bug)", () => {
-    // This mirrors the PRE-FIX topology: the buffer carries a
-    // stopPropagation handler AND overlays the capsule in the event path.
-    // We simulate it by dispatching mousedown on the BUFFER (the way it
-    // would happen if the buffer's z-index won the hit test). Asserting
-    // the capsule never receives the event proves the mechanism the
-    // round-8 fix avoids by (a) lowering the buffer's z-index relative
-    // to the surface and (b) removing the stopPropagation. If a future
-    // refactor reintroduces both conditions, this test still fails
-    // because the capsule handler never fires for buffer-targeted events.
+  it("hypothetical regression: a stopPropagation overlay on top of the capsule WOULD swallow mousedown (defence-in-depth)", () => {
+    // Defence-in-depth: if a future round re-introduces a 100 vw
+    // overlay with stopPropagation on the wrapper, the capsule
+    // handler would no longer fire. This synthetic test
+    // demonstrates the mechanism so a regression would surface in
+    // CI immediately.
     const wrapper = document.createElement("div");
     document.body.appendChild(wrapper);
     const capsule = document.createElement("button");
@@ -232,13 +172,11 @@ describe("v8 round-8 — bloom buffer mousedown propagation behavior (DOM)", () 
       fired = true;
     });
     wrapper.appendChild(capsule);
-    const buffer = document.createElement("div");
-    buffer.addEventListener("mousedown", (e) => e.stopPropagation());
-    wrapper.appendChild(buffer);
+    const overlay = document.createElement("div");
+    overlay.addEventListener("mousedown", (e) => e.stopPropagation());
+    wrapper.appendChild(overlay);
 
-    // Mousedown landing on the buffer (pre-fix bug behavior): never bubbles
-    // to anything sharing the wrapper's event tree above the buffer.
-    buffer.dispatchEvent(
+    overlay.dispatchEvent(
       new MouseEvent("mousedown", { bubbles: true, button: 0 }),
     );
     expect(fired).toBe(false);

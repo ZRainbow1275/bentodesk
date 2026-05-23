@@ -48,7 +48,7 @@ pub fn setup_file_watcher_inner(handle: &AppHandle) -> Result<DesktopDebouncer, 
     // a user-chosen non-default Desktop path as well.
     let custom = handle
         .try_state::<crate::AppState>()
-        .and_then(|state| state.settings.lock().ok().map(|s| s.desktop_path.clone()))
+        .map(|state| state.settings.read().desktop_path.clone())
         .unwrap_or_default();
     let custom_ref = if custom.trim().is_empty() {
         None

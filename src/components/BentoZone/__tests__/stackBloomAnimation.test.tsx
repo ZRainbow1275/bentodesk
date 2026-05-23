@@ -186,14 +186,18 @@ describe("v8 round-11 — bloom entry/exit keyframes (CSS contract)", () => {
     const ruleMatch = ruleRegex.exec(css);
     expect(ruleMatch).not.toBeNull();
     const body = ruleMatch![1];
+    // v9 stack-wake-mutex: exit duration tightened 220 → 140 ms so
+    // the petal-leaving keyframe finishes inside the v9 collapse
+    // budget (animation + stagger ≤ 260 ms).
     expect(body).toMatch(
-      /animation\s*:\s*stack-bloom-petal-exit\s+220ms\s+cubic-bezier\([^)]+\)\s+forwards/m,
+      /animation\s*:\s*stack-bloom-petal-exit\s+140ms\s+cubic-bezier\([^)]+\)\s+forwards/m,
     );
-    // v8 round-14: exit stagger is also capped at 240 ms total. The
-    // formula becomes `(240ms / max(1, count)) * (count - 1 - index)`
-    // so the last-in-first-out ordering is preserved while bounded.
+    // v9 stack-wake-mutex: exit stagger total tightened 240 → 120 ms.
+    // The formula becomes `(120ms / max(1, count)) * (count - 1 -
+    // index)` so the last-in-first-out ordering is preserved while
+    // bounded.
     expect(body).toMatch(
-      /animation-delay\s*:\s*calc\(\s*\(\s*240ms\s*\/\s*max\(\s*1\s*,\s*var\(--bloom-petal-count[^)]*\)\s*\)\s*\)\s*\*\s*\(\s*var\(--bloom-petal-count[^)]*\)\s*-\s*1\s*-\s*var\(--petal-index[^)]*\)\s*\)/m,
+      /animation-delay\s*:\s*calc\(\s*\(\s*120ms\s*\/\s*max\(\s*1\s*,\s*var\(--bloom-petal-count[^)]*\)\s*\)\s*\)\s*\*\s*\(\s*var\(--bloom-petal-count[^)]*\)\s*-\s*1\s*-\s*var\(--petal-index[^)]*\)\s*\)/m,
     );
   });
 
@@ -235,19 +239,20 @@ describe("v8 round-11 — bloom entry/exit keyframes (CSS contract)", () => {
     expect(body).toMatch(/animation\s*:\s*none/m);
   });
 
-  it("CSS --bloomed capsule transition matches petal entry timing (320 ms spring)", () => {
+  it("CSS --bloomed capsule transition tightened to 180 ms spring (v9 collapse budget)", () => {
     const css = readFile(CSS_PATH);
     const ruleRegex =
       /\.stack-wrapper--bloomed\s+\.stack-capsule\s*\{([^}]*)\}/m;
     const ruleMatch = ruleRegex.exec(css);
     expect(ruleMatch).not.toBeNull();
     const body = ruleMatch![1];
-    // 320 ms spring on transform + opacity ease-out so the capsule eases
-    // into its faded state alongside the first petal's entry.
+    // v9 stack-wake-mutex: shortened 320 → 180 ms so the capsule's
+    // recede animation finishes inside the v9 collapse budget. The
+    // spring curve is preserved; only the duration drops.
     expect(body).toMatch(
-      /transition\s*:[\s\S]*transform\s+320ms\s+cubic-bezier\(0\.34\s*,\s*1\.56\s*,\s*0\.64\s*,\s*1\)/m,
+      /transition\s*:[\s\S]*transform\s+180ms\s+cubic-bezier\(0\.34\s*,\s*1\.56\s*,\s*0\.64\s*,\s*1\)/m,
     );
-    expect(body).toMatch(/opacity\s+320ms\s+ease-out/m);
+    expect(body).toMatch(/opacity\s+180ms\s+ease-out/m);
   });
 });
 

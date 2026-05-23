@@ -77,7 +77,7 @@ pub async fn restore_checkpoint(
     }
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         layout.zones = target.snapshot.zones.clone();
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
@@ -112,7 +112,7 @@ pub async fn undo_checkpoint(
     let id = target.id.clone();
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         layout.zones = target.snapshot.zones.clone();
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
@@ -138,7 +138,7 @@ pub async fn redo_checkpoint(
     let id = target.id.clone();
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         layout.zones = target.snapshot.zones.clone();
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
@@ -199,10 +199,7 @@ pub async fn save_checkpoint_permanent(
 
 fn capture_current(app: &AppHandle) -> crate::layout::snapshot::DesktopSnapshot {
     let state = app.state::<crate::AppState>();
-    let layout: crate::layout::persistence::LayoutData = match state.layout.lock() {
-        Ok(l) => l.clone(),
-        Err(_) => crate::layout::persistence::LayoutData::default(),
-    };
+    let layout: crate::layout::persistence::LayoutData = state.layout.read().clone();
     let res = crate::layout::resolution::get_current_resolution();
     let dpi = crate::layout::resolution::get_dpi_scale();
     crate::layout::snapshot::DesktopSnapshot {

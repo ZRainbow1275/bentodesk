@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] — 2026-04-29 · **性能 / 安全双轨重构（A+C）**
+
+> 任务跟踪：`.trellis/tasks/04-29-04-29-perf-arch-overhaul/`（含 6 个子任务 PRD + 3 份研究文件）。研究依据：mutex / CSP / supply-chain 三路并行 trellis-research 子代理产出。
+
+### Performance — A1：AppState 混合锁 + mpsc 写队列
+
+- **`AppState.layout` / `AppState.settings`** 由 `std::sync::Mutex` 迁移到 **`parking_lot::RwLock`**：读多写少路径不再争用，task-fair，guards 不返回 `Result`。`timeline` / `icon_backup` 保留 `std::sync::Mutex`（写为主或偶发，无并发收益）。
+- **删除全局 `write_lock: Mutex<()>`**：磁盘写串行化改由 `tokio::sync::mpsc::channel(64)` + 单消费者 `tauri::async_runtime::spawn` worker。Producer 路径 `read().clone()` 后 `try_send`，**任何持锁跨同步 I/O 的反模式被根除**。
+- **`#![deny(clippy::await_holding_lock)]`** 在 `lib.rs` 顶层启用，CI 防回归。
+- **~89 个调用点**机械迁移：`commands/{bulk,config_vault,file_ops,grouping,icon,item,layout,live_folder,settings,stealth,system,timeline,zone}.rs` + `hidden_items.rs` + `themes/mod.rs` + `updater/mod.rs` + `layout/resolution.rs` + `power.rs` + `recovery_bundle.rs` + `rules/executor.rs` + `timeline/hook.rs` + `watcher/{desktop_watcher,live_folder}.rs`（grep `state\.layout\.lock|state\.settings\.lock` 当前匹配数为 0，仅剩 `lib.rs:79` 的 docstring 引用）。
+- **语义变化**：parking_lot 拒绝 poison 概念，原 5 处 `match X.lock() { Err(_) => fallback }` 中的"锁中毒回退"分支被移除（线程 panic 持锁场景下，新代码会 propagate panic 而非静默继续读取潜在污染状态）。
+- **`RunEvent::Exit` 加 final sync flush**（lib.rs:1088-1102）：退出时 `state.layout.read().clone()` + `data.save(app_handle)` 同步落盘 layout + settings，绕过 persist queue 防"用户最后一笔修改未及时入队"丢数据。原子写语义保护与 in-flight worker 写无竞争。
+- 测试：319 后端单测 + 468 前端 vitest 全绿，`cargo clippy --all-targets --release -- -D warnings` 干净，`cargo build --release` 3m13s，发布二进制 7.39 MB。
+
+### Performance — A2：tokio + windows feature 收敛
+
+- `tokio = { features = ["full"] }` → `["rt-multi-thread", "sync", "time"]`。审计依据：仓内仅用 `tokio::sync::mpsc` (lib.rs persist worker) + `tokio::time::interval` (rules/scheduler.rs) + `tauri::async_runtime::spawn` (transitively rt-multi-thread)。Tauri 自身 tokio feature 由它自己 crate 激活，不受我们直接 feature 列表约束；直接依赖面不再拉入 `tokio-macros` / `signal-hook-registry`。
+- `windows` crate 删除未实际引用且可编译验证通过的 `Win32_System_Variant` / `Win32_UI_Input_KeyboardAndMouse`。`Win32_System_Kernel` 经 `cargo check` 反证为 crash handler 的 `SetUnhandledExceptionFilter` gate，已保留。
+
+### Performance — A3：hot path 字符串迁移（已审计 / 延期实施）
+
+- 审计 `\.id\.clone\(\)` / `\.path\.clone\(\)` → 50 处分布在 13 个文件，但 49 处是 IPC payload 构造（必须 owned `String` 才能 serialize），仅 1 处（`icon::cache::IconCache` 的 LRU key）可能真正在热路径。
+- 决定**不在本期合并字符串类型变更**，理由是：(a) `Arc<str>` 缺 serde 支持需要改 wrapper; (b) 缺 benchmark 数据无法证明收益; (c) A1 的锁优化已经摘到主要果实，字符串 clone 在锁不再争用后是纳秒级问题。
+- Follow-up: 给 `IconCache` 加 hit/miss tracing 至少 1 周收集真实数据后再决定 key 类型变更。详见 `.trellis/tasks/04-29-a3-hot-path-string/prd.md`。
+
+### Security — C1：capabilities 拆分到窗口粒度
+
+- `capabilities/default.json` (覆盖 `["main", "minibar-*"]`) 拆分为：
+  - `capabilities/main-window.json` (识别符 `main-window`，仅 `["main"]`)：保留 tray + updater + global-shortcut + dialog + 各种 set_* 全套权限。
+  - `capabilities/minibar-window.json` (识别符 `minibar-window`，`["minibar-*"]`)：仅 core:default + event + window 子集（show/hide/set_size/set_position/set_focus/set_ignore_cursor_events/outer_position/current_monitor）。**显式不含** tray / updater / dialog / global-shortcut / set_fullscreen / cursor_position。
+- 通过的依据：`commands::tray` / `commands::updater` / `dialog::*` 全部被 main 窗口的 frontend 独占调用，minibar UI 无任何相关 IPC 入口（`src/views/MiniBarView.tsx` + `src-tauri/src/minibar/mod.rs` 双向核对）。
+
+### Security — C2：CSP 收紧 + 补 `script-src` 硬伤
+
+- 旧 CSP：`default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' bentodesk: asset: data:; font-src 'self'`（**没有 `script-src` 是真硬伤**）。
+- 新 CSP：`default-src 'self'; script-src 'self' 'nonce-__TAURI_SCRIPT_NONCE__'; style-src 'self' 'nonce-__TAURI_STYLE_NONCE__'; style-src-attr 'self'; img-src 'self' bentodesk: asset: data:; font-src 'self'; connect-src 'self' ipc: https://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'`，**不再包含任何 `unsafe-inline`**。
+- 关键洞察：**动态主题切换走 CSSOM**（`document.documentElement.style.setProperty`），CSSOM API 调用**不受 CSP 约束**；Chromium 实测 `element.style.*` 可运行，而 `setAttribute("style", ...)` 会被 `style-src-attr 'self'` 阻断。
+- Tauri 2 内置 `__TAURI_STYLE_NONCE__` / `__TAURI_SCRIPT_NONCE__` 占位符（`tauri-utils/src/{assets.rs:18,html.rs:155}` + `manager/mod.rs`）：构建时把占位符替换为 per-request 随机 nonce，并自动注入到每个 `<style>` / `<script>` 元素的 `nonce` 属性。
+- 为完全移除 `style-src-attr 'unsafe-inline'`，把 Solid 生产包里会生成静态 `style=` 模板的样式迁到 CSS class：`LucideDynamic` / `ZoneIcon` / `ItemIcon` / `VirtualItemGrid` / `ZoneContainer` / `ContextMenu` / `IconPicker` / `#desktop-overlay`。`pnpm build` 后扫描 `dist/`：`style=` / `setAttribute("style")` / `unsafe-inline` 全部为 0。
+- **运行时检测**：`src/main.tsx` 顶部加 `securitypolicyviolation` 监听器，dev/prod 都 console.error 暴露任何未来 violation。
+
+### Security — C3：supply-chain audit + 修 lockfile 复现性银发 bug
+
+- **新增 `bentodesk/src-tauri/deny.toml`**（cargo-deny v0.19 schema）：
+  - `[licenses]` 显式 allow-list（MIT / Apache-2.0 / BSD / ISC / MPL-2.0 / Unicode-3.0 / CC0-1.0 / 0BSD / Zlib）；外部 GPL / AGPL 一律 deny。
+  - `[[licenses.exceptions]] name = "bentodesk"` 单独白名单本仓的 AGPL-3.0-or-later，**避免传递性 copyleft 偷塞**。
+  - `[bans]` 拉黑 openssl / openssl-sys / async-std / yaml-rust / time<0.3 / openssl-probe；标记当前已知重复版本（windows-sys / syn / bitflags / hashbrown）为 skip 待上游收敛。
+  - `[sources]` `unknown-registry = "deny"` + `unknown-git = "deny"`：禁止 `git = "..."` 与第三方 registry。
+- **新增 `bentodesk/.github/workflows/audit.yml`**：3 个并行 job — `cargo-audit` + `cargo-deny`（advisories+sources / bans+licenses 拆两步）+ `pnpm audit`。`cargo-deny` 在 v0.19 下必须使用 `check --config src-tauri/deny.toml ...` 参数顺序。pnpm 分为生产 gate（`--prod`）和 full-tree warning pass。所有 job 跑 `ubuntu-latest`（OS 无关，比 Windows runner 便宜 ~8x）。Day 1 全部 `continue-on-error: true`（surfacing 模式）；Week 2 收紧 advisories+sources，Week 3 收紧 bans+licenses。Schedule 每周一 09:00 UTC 自动再审。
+- **真实审计修复**：
+  - `rustls-webpki` `0.103.12 → 0.103.13`，清除 `RUSTSEC-2026-0104` reachable panic vulnerability。
+  - `lru` `0.12.5 → 0.16.4`，清除直接依赖的 `RUSTSEC-2026-0002` unsound advisory。
+  - `rand` `0.8.5 → 0.8.6`，清除直接依赖的 `RUSTSEC-2026-0097` unsound advisory；Tauri build-chain 中 `rand 0.7.3` 仍作为 cargo-audit warning-only 输出，由 cargo-deny Windows graph 判定为 advisories ok。
+  - `vite` `6.4.1 → 6.4.2` + `vitest` `4.1.2 → 4.1.5`，清除 `GHSA-p9ff-h696-f583` 与 `GHSA-c2c7-rcm5-vvqj`，`pnpm audit --audit-level high --prod` 与 full-tree audit 均为 0。
+- **修 lockfile 复现性银发 bug**：
+  - `build-test.yml:37` `pnpm install` → `pnpm install --frozen-lockfile`
+  - `build-test.yml:40` `cargo build --release` → `cargo build --release --locked`
+  - `release.yml:67` 同上
+  - `release.yml:70` 同上
+- 这是独立于 audit 工作之外、本来就存在的复现性 bug：CI 会静默 rewrite 锁文件并发出非 reproducible build。本 PR 顺手修复。
+
+---
+
 ## [1.2.4] — 2026-04-25 · **Zone UX Real Fix v4 + 丝滑静默升级**
 
 v1.2.3 用户实测仍残留 10 个问题（zone reconcile 假 overlay、桌面残骸、菜单链断、堆叠卡死、边缘闪烁、名称截断、显示模式 picker 不持久化等）。本版逐个真实复现 → 真实修复，并把升级流程打磨到"无需手动卸载、无图标缓存刷屏"级别。

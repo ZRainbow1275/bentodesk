@@ -30,6 +30,12 @@ body {
   height: 100%;
 }
 
+#desktop-overlay {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+}
+
 /* Scrollbar base styles */
 ::-webkit-scrollbar {
   width: 4px;

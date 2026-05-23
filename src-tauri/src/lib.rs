@@ -14,6 +14,11 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::useless_format)]
 #![allow(clippy::needless_borrows_for_generic_args)]
+// A1: hybrid lock refactor — forbid holding any lock guard across an .await.
+// This catches both std::sync::Mutex / parking_lot guards and is the load-
+// bearing invariant that lets us mix sync locks (timeline / icon_backup) with
+// parking_lot::RwLock (layout / settings) in async Tauri command bodies.
+#![deny(clippy::await_holding_lock)]
 
 // Theme B — mimalloc replaces the MSVC CRT allocator. Lower working set on
 // small-string workloads (paths, hashes, JSON keys) and better fragmentation
@@ -50,13 +55,34 @@ mod tray;
 mod updater;
 mod watcher;
 
+use parking_lot::RwLock;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Listener, Manager};
+use tokio::sync::mpsc;
+
+/// Message sent to the persist worker task. Carries an *owned* snapshot
+/// produced by `read().clone()` so the producing command does not have
+/// to hold a lock across the disk write.
+#[derive(Debug)]
+pub(crate) enum PersistMsg {
+    Layout(layout::persistence::LayoutData),
+    Settings(config::settings::AppSettings),
+}
 
 /// Shared application state managed by Tauri.
+///
+/// Lock strategy (A1 — see `.trellis/tasks/04-29-04-29-perf-arch-overhaul/research/rust-async-mutex-patterns.md`):
+/// - `layout`/`settings` use `parking_lot::RwLock` — read-heavy, task-fair,
+///   no `Result` from `read()`/`write()`, ~1.5x-50x faster than `std::sync`.
+/// - `timeline`/`icon_backup` keep `std::sync::Mutex` — write-mostly or
+///   rarely-touched paths where async-safety doesn't apply.
+/// - The former `write_lock: Mutex<()>` is gone: disk I/O is serialised by
+///   a single-consumer `tokio::mpsc` worker spawned in `setup()`. Producers
+///   `read().clone()` then `try_send` so no command path holds any lock
+///   across `.save()`.
 pub struct AppState {
-    pub layout: Mutex<layout::persistence::LayoutData>,
-    pub settings: Mutex<config::settings::AppSettings>,
+    pub layout: RwLock<layout::persistence::LayoutData>,
+    pub settings: RwLock<config::settings::AppSettings>,
     pub icon_cache: icon::cache::IconCache,
     pub icon_backup: Mutex<Option<icon_positions::SavedIconLayout>>,
     pub app_handle: AppHandle,
@@ -64,58 +90,44 @@ pub struct AppState {
     /// layer + background debounce thread; the ring buffer holds both auto
     /// captures and user-pinned permanent checkpoints.
     pub timeline: Mutex<timeline::TimelineBuffer>,
-    /// Serialises disk writes from `persist_layout` / `persist_settings` so
-    /// concurrent Tauri commands cannot interleave file I/O.
-    write_lock: Mutex<()>,
+    /// Bounded channel into the persist worker. `try_send` never blocks.
+    /// On overflow we log a warning — the in-memory state is still the
+    /// source of truth, and the next mutation re-enqueues a fresh snapshot.
+    pub(crate) persist_tx: mpsc::Sender<PersistMsg>,
 }
 
 impl AppState {
-    /// Persist the current layout to disk.
+    /// Persist the current layout to disk via the background worker.
     ///
-    /// Call this after any mutation to `self.layout` to ensure changes survive
-    /// application restarts. Errors are logged but not propagated so that the
-    /// in-memory state remains authoritative.
+    /// Reads a snapshot under the `parking_lot::RwLock` read guard, releases
+    /// the lock, and ships the owned snapshot to the persist worker. Never
+    /// holds any lock across the actual disk write.
     pub fn persist_layout(&self) {
-        let _write = match self.write_lock.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("Failed to acquire write_lock for layout persistence: {}", e);
-                return;
+        let snapshot = self.layout.read().clone();
+        if let Err(e) = self.persist_tx.try_send(PersistMsg::Layout(snapshot)) {
+            match e {
+                mpsc::error::TrySendError::Full(_) => tracing::warn!(
+                    "persist queue full — layout save deferred (next mutation will re-enqueue)"
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    tracing::error!("persist queue closed — layout will not reach disk")
+                }
             }
-        };
-        let layout = match self.layout.lock() {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to acquire layout lock for persistence: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = layout.save(&self.app_handle) {
-            tracing::error!("Failed to persist layout: {}", e);
         }
     }
 
-    /// Persist the current settings to disk.
+    /// Persist the current settings to disk via the background worker.
     pub fn persist_settings(&self) {
-        let _write = match self.write_lock.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to acquire write_lock for settings persistence: {}",
-                    e
-                );
-                return;
+        let snapshot = self.settings.read().clone();
+        if let Err(e) = self.persist_tx.try_send(PersistMsg::Settings(snapshot)) {
+            match e {
+                mpsc::error::TrySendError::Full(_) => tracing::warn!(
+                    "persist queue full — settings save deferred (next mutation will re-enqueue)"
+                ),
+                mpsc::error::TrySendError::Closed(_) => {
+                    tracing::error!("persist queue closed — settings will not reach disk")
+                }
             }
-        };
-        let settings = match self.settings.lock() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Failed to acquire settings lock for persistence: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = settings.save(&self.app_handle) {
-            tracing::error!("Failed to persist settings: {}", e);
         }
     }
 }
@@ -177,16 +189,47 @@ pub fn run() {
             // back to the desktop, preventing invisible-file data loss.
             crash_handler::install(std::path::PathBuf::from(&settings.desktop_path));
 
+            // A1 — Spawn the bounded persist worker BEFORE registering AppState
+            // so the channel sender embedded in AppState is live as soon as
+            // any subsequent setup step (e.g. startup migration) touches it.
+            //
+            // Capacity 64 covers user-driven write storms (drag, bulk rename)
+            // with margin to spare; on overflow we log and drop, since the
+            // in-memory state is authoritative and any further mutation will
+            // re-enqueue a fresh snapshot that subsumes the dropped one.
+            let (persist_tx, mut persist_rx) = mpsc::channel::<PersistMsg>(64);
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tracing::info!("persist queue worker started");
+                    while let Some(msg) = persist_rx.recv().await {
+                        match msg {
+                            PersistMsg::Layout(data) => {
+                                if let Err(e) = data.save(&handle) {
+                                    tracing::error!("persist worker: layout save failed: {e}");
+                                }
+                            }
+                            PersistMsg::Settings(data) => {
+                                if let Err(e) = data.save(&handle) {
+                                    tracing::error!("persist worker: settings save failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!("persist queue worker exiting (channel closed)");
+                });
+            }
+
             // Register AppState early so subsequent setup steps can access it.
             // icon_backup starts as None — populated asynchronously below.
             app.manage(AppState {
-                layout: Mutex::new(layout_data),
-                settings: Mutex::new(settings.clone()),
+                layout: RwLock::new(layout_data),
+                settings: RwLock::new(settings.clone()),
                 icon_cache,
                 icon_backup: Mutex::new(None),
                 app_handle: app.handle().clone(),
                 timeline: Mutex::new(timeline::TimelineBuffer::default()),
-                write_lock: Mutex::new(()),
+                persist_tx,
             });
 
             // --- Timeline bootstrap ---
@@ -266,7 +309,7 @@ pub fn run() {
             // moves them. Idempotent — a clean layout is a no-op.
             {
                 let state = app.state::<AppState>();
-                let mut layout = state.layout.lock().expect("layout lock poisoned at startup migration");
+                let mut layout = state.layout.write();
                 let mut cleaned = 0u32;
                 for zone in layout.zones.iter_mut() {
                     for item in zone.items.iter_mut() {
@@ -334,7 +377,7 @@ pub fn run() {
                 let missing = hidden_items::verify_references(app.handle());
                 if !missing.is_empty() {
                     let state = app.state::<AppState>();
-                    let mut layout = state.layout.lock().expect("layout lock poisoned at startup");
+                    let mut layout = state.layout.write();
                     let mut marked = 0u32;
                     for zone in &mut layout.zones {
                         for item in &mut zone.items {
@@ -396,7 +439,7 @@ pub fn run() {
             {
                 let desktop = {
                     let state = app.state::<AppState>();
-                    let s = state.settings.lock().expect("settings lock");
+                    let s = state.settings.read();
                     std::path::PathBuf::from(&s.desktop_path)
                 };
 
@@ -1044,13 +1087,28 @@ pub fn run() {
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 // Exit lifecycle order:
-                // 0. Flush the recovery bundle so a crash during restore has
+                // 0. Final SYNC flush of layout + settings — bypasses the
+                //    persist queue so the user's last mutation is on disk
+                //    even if the runtime tears down before the worker
+                //    drains. Atomic-write semantics in storage.rs make
+                //    this race-free against any in-flight worker writes.
+                // 1. Flush the recovery bundle so a crash during restore has
                 //    the latest state to recover from.
-                // 1. Move all hidden files from .bentodesk/ back to their
+                // 2. Move all hidden files from .bentodesk/ back to their
                 //    original Desktop paths.
-                // 2. THEN restore icon positions -- the icons must be visible on
+                // 3. THEN restore icon positions -- the icons must be visible on
                 //    the desktop before we can set their positions via COM.
                 if let Some(state) = app_handle.try_state::<AppState>() {
+                    // A1 fix — final sync flush before recovery bundle.
+                    let final_layout = state.layout.read().clone();
+                    if let Err(e) = final_layout.save(app_handle) {
+                        tracing::error!("Final layout flush on exit failed: {e}");
+                    }
+                    let final_settings = state.settings.read().clone();
+                    if let Err(e) = final_settings.save(app_handle) {
+                        tracing::error!("Final settings flush on exit failed: {e}");
+                    }
+
                     if let Err(e) = recovery_bundle::refresh_from_state(&state) {
                         tracing::error!("Failed to refresh recovery bundle on exit: {e}");
                     }

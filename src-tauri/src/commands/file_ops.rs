@@ -123,7 +123,7 @@ fn validate_allowed_path_with_app_data(
 /// outside the allowed boundaries.
 fn validate_allowed_path(path: &str, state: &AppState) -> Result<(), String> {
     let desktop_path = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.read();
         settings.desktop_path.clone()
     };
     let app_data = crate::storage::state_data_dir(&state.app_handle);

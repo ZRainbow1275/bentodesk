@@ -62,9 +62,7 @@ pub async fn check_for_updates(app: AppHandle) -> Result<Option<UpdateInfo>, Ben
 
             if let Some(state) = app.try_state::<AppState>() {
                 let skipped = {
-                    let settings = state.settings.lock().map_err(|e| {
-                        BentoDeskError::ConfigError(format!("settings lock poisoned: {e}"))
-                    })?;
+                    let settings = state.settings.read();
                     settings.updates.skipped_version.clone()
                 };
                 if skipped.as_deref() == Some(version.as_str()) {
@@ -149,10 +147,7 @@ pub fn skip_update_version(app: &AppHandle, version: String) -> Result<(), Bento
         .try_state::<AppState>()
         .ok_or_else(|| BentoDeskError::ConfigError("AppState not yet initialized".to_string()))?;
     {
-        let mut settings = state
-            .settings
-            .lock()
-            .map_err(|e| BentoDeskError::ConfigError(format!("settings lock poisoned: {e}")))?;
+        let mut settings = state.settings.write();
         settings.updates.skipped_version = Some(version.clone());
     }
     state.persist_settings();

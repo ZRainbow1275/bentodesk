@@ -52,7 +52,7 @@ pub async fn save_snapshot(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<DesktopSnapshot, String> {
-    let layout = state.layout.lock().map_err(|e| e.to_string())?;
+    let layout = state.layout.read();
     let res = resolution::get_current_resolution();
     let dpi = resolution::get_dpi_scale();
 
@@ -83,7 +83,7 @@ pub async fn load_snapshot(state: State<'_, AppState>, id: String) -> Result<(),
     let snapshot = manager.load(&id).map_err(|e| e.to_string())?;
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         layout.zones = snapshot.zones;
         layout.last_modified = chrono::Utc::now().to_rfc3339();
     }
@@ -145,7 +145,7 @@ pub async fn reconcile_all_zone_items(
     // that easily blocks every other IPC for minutes. Snapshot, drop lock,
     // do IO, then merge back by item id.
     let zone_snapshots: Vec<(String, Vec<crate::layout::persistence::BentoItem>)> = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         layout
             .zones
             .iter()
@@ -159,16 +159,12 @@ pub async fn reconcile_all_zone_items(
         Vec::with_capacity(zone_snapshots.len());
 
     for (zone_id, mut items) in zone_snapshots {
-        let report =
-            crate::hidden_items::reconcile_zone_items(&app_handle, &mut items, &zone_id);
+        let report = crate::hidden_items::reconcile_zone_items(&app_handle, &mut items, &zone_id);
         aggregate.reconciled_count += report.reconciled_count;
         aggregate.already_managed_count += report.already_managed_count;
         aggregate.missing_count += report.missing_count;
         aggregate.unknown_count += report.unknown_count;
-        if report.reconciled_count > 0
-            || report.missing_count > 0
-            || report.unknown_count > 0
-        {
+        if report.reconciled_count > 0 || report.missing_count > 0 || report.unknown_count > 0 {
             touched_zone_ids.push(zone_id.clone());
         }
         updated_snapshots.push((zone_id, items));
@@ -180,14 +176,12 @@ pub async fn reconcile_all_zone_items(
     // mutable hidden_path / file_missing fields on items we actually saw).
     let did_mutate = !touched_zone_ids.is_empty();
     if did_mutate {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
 
         for (zone_id, snapshot_items) in updated_snapshots {
             if let Some(zone) = layout.zones.iter_mut().find(|z| z.id == zone_id) {
                 for snap_item in snapshot_items {
-                    if let Some(live) =
-                        zone.items.iter_mut().find(|i| i.id == snap_item.id)
-                    {
+                    if let Some(live) = zone.items.iter_mut().find(|i| i.id == snap_item.id) {
                         // Only fields that reconcile is allowed to touch.
                         // Anything else (icon_hash, grid_position, etc.) may
                         // have been mutated by a concurrent IPC and must
@@ -223,7 +217,7 @@ pub async fn normalize_zone_layout(
     state: State<'_, AppState>,
 ) -> Result<LayoutNormalizeReport, String> {
     let normalized_zone_ids = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let normalized_zone_ids = normalize_layout_data(&mut layout);
         if !normalized_zone_ids.is_empty() {
             layout.last_modified = chrono::Utc::now().to_rfc3339();
@@ -456,7 +450,11 @@ mod tests {
 
         assert_eq!(
             changed,
-            vec!["solo-a".to_string(), "solo-b".to_string(), "solo-c".to_string()]
+            vec![
+                "solo-a".to_string(),
+                "solo-b".to_string(),
+                "solo-c".to_string()
+            ]
         );
         for zone in &layout.zones {
             assert!(
@@ -464,7 +462,11 @@ mod tests {
                 "zone {} should drop singleton stack badge",
                 zone.id
             );
-            assert_eq!(zone.stack_order, 0, "zone {} should reset stack_order", zone.id);
+            assert_eq!(
+                zone.stack_order, 0,
+                "zone {} should reset stack_order",
+                zone.id
+            );
         }
     }
 

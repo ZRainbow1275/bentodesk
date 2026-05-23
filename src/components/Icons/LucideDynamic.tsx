@@ -8,6 +8,7 @@
  */
 import { Component, createResource, Show } from "solid-js";
 import { sanitizeSvg } from "../../services/svgSanitize";
+import "./LucideDynamic.css";
 
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
@@ -66,19 +67,12 @@ const LucideDynamic: Component<LucideDynamicProps> = (props) => {
 
   return (
     <span
-      class={props.class}
-      style={{
-        display: "inline-flex",
-        "align-items": "center",
-        "justify-content": "center",
-        width: `${size()}px`,
-        height: `${size()}px`,
-        color: "currentColor",
-      }}
+      class={`lucide-dynamic ${props.class ?? ""}`.trim()}
+      style={{ "--lucide-dynamic-size": `${size()}px` }}
     >
       <Show when={svg() && svg()!.length > 0}>
         <span
-          style={{ width: "100%", height: "100%", display: "inline-block" }}
+          class="lucide-dynamic__svg"
           // eslint-disable-next-line solid/no-innerhtml
           innerHTML={svg()}
         />

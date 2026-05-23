@@ -5,6 +5,9 @@
   align-items: center;
   justify-content: center;
   position: relative;
+  width: var(--item-icon-container-size, 36px);
+  height: var(--item-icon-container-size, 36px);
+  flex-shrink: 0;
 }
 
 .item-icon__img {
@@ -18,4 +21,5 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: calc(var(--item-icon-render-size, 24px) - 4px);
 }

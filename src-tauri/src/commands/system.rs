@@ -128,7 +128,7 @@ pub async fn get_system_info(state: State<'_, AppState>) -> Result<SystemInfo, S
     let mem = query_memory_info();
 
     let custom = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.read();
         settings.desktop_path.clone()
     };
     let sources = collect_desktop_sources(Some(&custom));
@@ -152,7 +152,7 @@ pub async fn get_desktop_sources(
     state: State<'_, AppState>,
 ) -> Result<Vec<DesktopSourceInfo>, String> {
     let custom = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.read();
         settings.desktop_path.clone()
     };
     Ok(collect_desktop_sources(Some(&custom)))

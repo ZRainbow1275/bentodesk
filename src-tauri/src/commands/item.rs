@@ -24,7 +24,7 @@ pub async fn add_item(
     // from moving arbitrary system files into .bentodesk/.
     {
         let desktop_path = {
-            let settings = state.settings.lock().map_err(|e| e.to_string())?;
+            let settings = state.settings.read();
             settings.desktop_path.clone()
         };
         if !hidden_items::is_desktop_path_with_custom(&path, Some(&desktop_path)) {
@@ -46,8 +46,8 @@ pub async fn add_item(
 
     // Guardrail: verify item count stays within the safety envelope.
     {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
+        let settings = state.settings.read();
         guardrails::ensure_can_add_items(&layout, &settings, &zone_id, 1)?;
     }
 
@@ -103,7 +103,7 @@ pub async fn add_item(
         };
 
     let item = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -161,7 +161,7 @@ pub async fn remove_item(
 ) -> Result<(), String> {
     // Extract hidden file info and icon position before removing from layout
     let hidden_info: Option<(String, String, Option<i32>, Option<i32>, bool)> = {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         let zone = layout
             .zones
             .iter()
@@ -207,7 +207,7 @@ pub async fn remove_item(
     }
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -236,13 +236,13 @@ pub async fn move_item(
 ) -> Result<(), String> {
     // Guardrail: verify target zone can accept one more item.
     {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
+        let settings = state.settings.read();
         guardrails::ensure_can_move_item_into_zone(&layout, &settings, &to_zone_id)?;
     }
 
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
 
         // Find and remove from source zone
         let from_zone = layout
@@ -327,7 +327,7 @@ pub async fn reorder_items(
     item_ids: Vec<String>,
 ) -> Result<(), String> {
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -374,7 +374,7 @@ pub async fn toggle_item_wide(
     item_id: String,
 ) -> Result<BentoItem, String> {
     let result = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone_idx = layout
             .zones
             .iter()

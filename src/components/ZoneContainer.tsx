@@ -27,6 +27,7 @@ import {
   clearMultiSelection,
 } from "../stores/selection";
 import SelectionFloatingBar from "./shared/SelectionFloatingBar";
+import "./ZoneContainer.css";
 
 const ZoneContainer: Component = () => {
   // Split zones into (free-standing) + (grouped by stack_id). The stackMap
@@ -114,17 +115,7 @@ const ZoneContainer: Component = () => {
   });
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        top: "0",
-        left: "0",
-        width: "100vw",
-        height: "100vh",
-        "pointer-events": "none",
-        overflow: "hidden",
-      }}
-    >
+    <div class="zone-container">
       <For each={freeZones()}>
         {(zone) => <BentoZone zone={zone} />}
       </For>
@@ -142,12 +133,7 @@ const ZoneContainer: Component = () => {
         */}
       <div
         class="zone-container__marquee-surface"
-        style={{
-          position: "fixed",
-          inset: 0,
-          "pointer-events": canActivateMarquee() ? "auto" : "none",
-          "z-index": 5,
-        }}
+        classList={{ "zone-container__marquee-surface--active": canActivateMarquee() }}
         onMouseDown={onMarqueeMouseDown}
       />
       <Show when={marquee()}>
@@ -158,16 +144,10 @@ const ZoneContainer: Component = () => {
             <div
               class="zone-container__marquee-box"
               style={{
-                position: "fixed",
-                left: `${box.left}px`,
-                top: `${box.top}px`,
-                width: `${box.width}px`,
-                height: `${box.height}px`,
-                "pointer-events": "none",
-                border: "1px dashed rgba(59, 130, 246, 0.9)",
-                background: "rgba(59, 130, 246, 0.08)",
-                "border-radius": "2px",
-                "z-index": 1000,
+                "--marquee-left": `${box.left}px`,
+                "--marquee-top": `${box.top}px`,
+                "--marquee-width": `${box.width}px`,
+                "--marquee-height": `${box.height}px`,
               }}
             />
           );

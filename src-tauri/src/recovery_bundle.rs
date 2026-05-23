@@ -52,20 +52,8 @@ pub fn write_bundle(data_root: &Path, bundle: &RecoveryBundle) -> Result<(), Ben
 }
 
 pub fn refresh_from_state(state: &AppState) -> Result<(), BentoDeskError> {
-    let layout = state
-        .layout
-        .lock()
-        .map_err(|e| {
-            BentoDeskError::Generic(format!("Failed to lock layout for recovery bundle: {e}"))
-        })?
-        .clone();
-    let settings = state
-        .settings
-        .lock()
-        .map_err(|e| {
-            BentoDeskError::Generic(format!("Failed to lock settings for recovery bundle: {e}"))
-        })?
-        .clone();
+    let layout = state.layout.read().clone();
+    let settings = state.settings.read().clone();
     let icon_backup = state
         .icon_backup
         .lock()

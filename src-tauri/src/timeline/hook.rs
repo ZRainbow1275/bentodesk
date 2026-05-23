@@ -67,13 +67,7 @@ pub fn timeline_dir(app: &AppHandle) -> std::path::PathBuf {
 
 fn capture_current_snapshot(app: &AppHandle) -> crate::layout::snapshot::DesktopSnapshot {
     let state = app.state::<crate::AppState>();
-    let layout = match state.layout.lock() {
-        Ok(l) => l.clone(),
-        Err(e) => {
-            tracing::error!("Timeline: layout lock poisoned: {e}");
-            crate::layout::persistence::LayoutData::default()
-        }
-    };
+    let layout = state.layout.read().clone();
     let res = crate::layout::resolution::get_current_resolution();
     let dpi = crate::layout::resolution::get_dpi_scale();
     crate::layout::snapshot::DesktopSnapshot {

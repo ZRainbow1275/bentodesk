@@ -1,0 +1,22 @@
+/**
+ * LucideDynamic — CSP-safe icon layout styles.
+ *
+ * Keep static layout in CSS so production Solid templates do not emit
+ * inline style attributes; dynamic size is supplied through CSSOM via
+ * --lucide-dynamic-size.
+ */
+
+.lucene-dynamic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--lucide-dynamic-size, 20px);
+  height: var(--lucide-dynamic-size, 20px);
+  color: currentColor;
+}
+
+.lucene-dynamic__svg {
+  display: inline-block;
+  width: 100%;
+  height: 100%;
+}

@@ -276,7 +276,7 @@ impl Default for SafetyManifest {
 pub fn hidden_dir(app_handle: &AppHandle) -> PathBuf {
     let state = app_handle.state::<crate::AppState>();
     let desktop_path = {
-        let settings = state.settings.lock().expect("settings lock poisoned");
+        let settings = state.settings.read();
         settings.desktop_path.clone()
     };
 
@@ -755,24 +755,23 @@ pub fn sync_zone_metadata(app_handle: &AppHandle) {
 
     // Read current zone data from AppState
     if let Some(state) = app_handle.try_state::<crate::AppState>() {
-        if let Ok(layout) = state.layout.lock() {
-            manifest.zones = layout
-                .zones
-                .iter()
-                .map(|z| ManifestZone {
-                    id: z.id.clone(),
-                    name: z.name.clone(),
-                    icon: z.icon.clone(),
-                    x_percent: z.position.x_percent,
-                    y_percent: z.position.y_percent,
-                    w_percent: z.expanded_size.w_percent,
-                    h_percent: z.expanded_size.h_percent,
-                    sort_order: z.sort_order as u32,
-                    grid_columns: z.grid_columns,
-                    item_count: z.items.len(),
-                })
-                .collect();
-        }
+        let layout = state.layout.read();
+        manifest.zones = layout
+            .zones
+            .iter()
+            .map(|z| ManifestZone {
+                id: z.id.clone(),
+                name: z.name.clone(),
+                icon: z.icon.clone(),
+                x_percent: z.position.x_percent,
+                y_percent: z.position.y_percent,
+                w_percent: z.expanded_size.w_percent,
+                h_percent: z.expanded_size.h_percent,
+                sort_order: z.sort_order as u32,
+                grid_columns: z.grid_columns,
+                item_count: z.items.len(),
+            })
+            .collect();
     }
 
     // Add screen resolution
@@ -1080,17 +1079,8 @@ pub fn restore_all_hidden(app_handle: &AppHandle) {
     let state = app_handle.state::<crate::AppState>();
 
     let (layout, desktop_path) = {
-        let l = match state.layout.lock() {
-            Ok(l) => l.clone(),
-            Err(e) => {
-                tracing::error!("Failed to lock layout for restore: {}", e);
-                crate::layout::persistence::LayoutData::default()
-            }
-        };
-        let dp = match state.settings.lock() {
-            Ok(s) => s.desktop_path.clone(),
-            Err(_) => String::new(),
-        };
+        let l = state.layout.read().clone();
+        let dp = state.settings.read().desktop_path.clone();
         (l, dp)
     };
 
@@ -1226,7 +1216,7 @@ pub fn restore_zone_items(
     let hdir = hidden_dir(app_handle);
     let desktop_dir = {
         let state = app_handle.state::<crate::AppState>();
-        let settings = state.settings.lock().expect("settings lock poisoned");
+        let settings = state.settings.read();
         PathBuf::from(&settings.desktop_path)
     };
 
@@ -1301,15 +1291,12 @@ pub fn restore_zone_items_with_dirs(
                 // name so the user sees the file again instead of
                 // losing track of it.
                 let source = path.to_string_lossy().to_string();
-                let dest = item
-                    .original_path
-                    .clone()
-                    .unwrap_or_else(|| {
-                        desktop_dir
-                            .join(path.file_name().unwrap_or_default())
-                            .to_string_lossy()
-                            .to_string()
-                    });
+                let dest = item.original_path.clone().unwrap_or_else(|| {
+                    desktop_dir
+                        .join(path.file_name().unwrap_or_default())
+                        .to_string_lossy()
+                        .to_string()
+                });
                 tracing::info!("  Zone delete restore (Tier 2): {} -> {}", source, dest);
                 if restore_file(&dest, &source) {
                     restored += 1;
@@ -1455,10 +1442,7 @@ pub fn reconcile_zone_items_with_dirs(
         let original = match item.original_path.as_deref() {
             Some(o)
                 if Path::new(o).exists()
-                    && paths_match(
-                        Path::new(o).parent().unwrap_or(Path::new("")),
-                        desktop_dir,
-                    ) =>
+                    && paths_match(Path::new(o).parent().unwrap_or(Path::new("")), desktop_dir) =>
             {
                 Some(o.to_string())
             }
@@ -1580,16 +1564,13 @@ pub fn reconcile_zone_items(
     let hdir = hidden_dir(app_handle);
     let desktop_dir = {
         let state = app_handle.state::<crate::AppState>();
-        let settings = state.settings.lock().expect("settings lock poisoned");
+        let settings = state.settings.read();
         PathBuf::from(&settings.desktop_path)
     };
 
     // Capture pre-pass state of which items had a hidden_path so we can
     // detect which ones were moved by the helper and add manifest entries.
-    let prev_hidden: Vec<Option<String>> = items
-        .iter()
-        .map(|i| i.hidden_path.clone())
-        .collect();
+    let prev_hidden: Vec<Option<String>> = items.iter().map(|i| i.hidden_path.clone()).collect();
 
     let report = reconcile_zone_items_with_dirs(items, zone_id, &desktop_dir, &hdir);
 
@@ -1686,13 +1667,7 @@ pub fn reapply_hidden_on_startup(app_handle: &AppHandle) -> u32 {
 /// paths whose hidden files are missing.
 pub fn verify_references(app_handle: &AppHandle) -> Vec<String> {
     let state = app_handle.state::<crate::AppState>();
-    let layout = match state.layout.lock() {
-        Ok(l) => l.clone(),
-        Err(e) => {
-            tracing::error!("Failed to lock layout for reference verification: {}", e);
-            return Vec::new();
-        }
-    };
+    let layout = state.layout.read().clone();
 
     let mut missing = Vec::new();
 
@@ -1795,11 +1770,8 @@ fn migrate_old_move_dir(app_handle: &AppHandle, old_dir: &Path) -> u32 {
 
     let desktop = {
         let state = app_handle.state::<crate::AppState>();
-        let result = match state.settings.lock() {
-            Ok(s) => Some(PathBuf::from(&s.desktop_path)),
-            Err(_) => dirs::desktop_dir(),
-        };
-        result
+        let dp = state.settings.read().desktop_path.clone();
+        Some(PathBuf::from(dp))
     };
 
     let mut migrated = 0u32;
@@ -1924,13 +1896,7 @@ fn migrate_old_move_dir(app_handle: &AppHandle, old_dir: &Path) -> u32 {
 /// This is called AFTER layout is loaded but BEFORE reapply_hidden_on_startup.
 fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
     let state = app_handle.state::<crate::AppState>();
-    let layout = match state.layout.lock() {
-        Ok(l) => l.clone(),
-        Err(e) => {
-            tracing::error!("Failed to lock layout for attrib migration: {}", e);
-            return 0;
-        }
-    };
+    let layout = state.layout.read().clone();
 
     // Detect attrib-mode items: original_path == hidden_path (or hidden_path is
     // None but original_path is set), meaning the file was never moved.
@@ -2040,7 +2006,7 @@ fn migrate_attrib_hidden_files(app_handle: &AppHandle) -> u32 {
 
             // Update layout item with new hidden_path and path
             {
-                let mut layout = state.layout.lock().expect("layout lock poisoned");
+                let mut layout = state.layout.write();
                 if let Some(zone) = layout.zones.iter_mut().find(|z| z.id == *zone_id) {
                     if let Some(item) = zone.items.iter_mut().find(|i| i.id == *item_id) {
                         item.hidden_path = Some(hidden_path_str.clone());
@@ -2139,13 +2105,7 @@ pub fn migrate_flat_to_zone_dirs(app_handle: &AppHandle) -> u32 {
 
     // Build a lookup: hidden_path -> zone_id from current layout
     let hidden_to_zone: Vec<(String, String)> = {
-        let layout = match state.layout.lock() {
-            Ok(l) => l.clone(),
-            Err(e) => {
-                tracing::error!("Failed to lock layout for zone migration: {}", e);
-                return 0;
-            }
-        };
+        let layout = state.layout.read();
         let mut map = Vec::new();
         for zone in &layout.zones {
             for item in &zone.items {
@@ -2205,7 +2165,7 @@ pub fn migrate_flat_to_zone_dirs(app_handle: &AppHandle) -> u32 {
 
                 // Update layout item's hidden_path and path
                 {
-                    let mut layout = state.layout.lock().expect("layout lock poisoned");
+                    let mut layout = state.layout.write();
                     for zone in &mut layout.zones {
                         if zone.id == zone_id {
                             for item in &mut zone.items {
@@ -2672,8 +2632,11 @@ mod tests {
                 touch_file(&original);
                 // Mimic the user's broken layout.json: hidden_path is
                 // populated but the file at that path does NOT exist.
-                let stale_hidden =
-                    hidden.join(zone_id).join(name).to_string_lossy().to_string();
+                let stale_hidden = hidden
+                    .join(zone_id)
+                    .join(name)
+                    .to_string_lossy()
+                    .to_string();
                 restore_test_item(
                     &format!("item-{idx}"),
                     name,

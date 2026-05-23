@@ -8,6 +8,21 @@ import { render } from "solid-js/web";
 // Dev-only Tauri IPC mock. Tree-shaken in production via import.meta.env.DEV.
 import "./dev-mock";
 
+// C2 — Surface CSP violations loudly so the dev catches them before users do.
+// In production we still log: a violation in the wild is a real signal that
+// either Tauri's nonce injection failed (broken WebView) or someone is
+// shipping new inline-style markup that should be moved into a stylesheet.
+window.addEventListener("securitypolicyviolation", (e) => {
+  // eslint-disable-next-line no-console
+  console.error("[CSP violation]", {
+    directive: e.violatedDirective,
+    blockedURI: e.blockedURI,
+    sourceFile: e.sourceFile,
+    lineNumber: e.lineNumber,
+    sample: e.sample?.slice(0, 200),
+  });
+});
+
 // Global CSS — imported here so Vite processes and bundles them in production.
 // Order matters: variables → reset → utilities → animations.
 import "./styles/variables.css";

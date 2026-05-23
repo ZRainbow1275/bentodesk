@@ -39,12 +39,9 @@ pub fn handle_resume(app_handle: tauri::AppHandle) {
             use tauri::Manager;
             app_handle
                 .try_state::<crate::AppState>()
-                .and_then(|state| {
-                    state
-                        .settings
-                        .lock()
-                        .ok()
-                        .map(|s| (s.hibernate_resume_delay_ms, s.safe_start_after_hibernation))
+                .map(|state| {
+                    let s = state.settings.read();
+                    (s.hibernate_resume_delay_ms, s.safe_start_after_hibernation)
                 })
                 .unwrap_or((2000, true))
         };

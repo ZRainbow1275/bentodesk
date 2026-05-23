@@ -146,21 +146,24 @@ describe("v8 round-14 — overflow cap (≤ 23 real petals + indicator)", () => 
   });
 });
 
-describe("v8 round-14 — stagger cap (total entry ≤ 360 ms / exit ≤ 240 ms)", () => {
+describe("v9 stack-wake-mutex — stagger cap (total entry ≤ 360 ms / exit ≤ 120 ms)", () => {
   it("CSS animation-delay uses the (360ms / count) cap formula for entry", () => {
     const css = readFile(CSS_PATH);
     // The entry rule lives under `.stack-wrapper--bloomed
     // .stack-bloom__petal`. We accept any whitespace variation in the
-    // calc() expression but require the 360ms total cap.
+    // calc() expression but require the 360ms total cap. The entry
+    // budget is unchanged in v9 — only the exit was tightened.
     expect(css).toMatch(
       /\.stack-wrapper--bloomed\s*\.stack-bloom__petal\s*\{[\s\S]*?animation-delay:\s*calc\(\s*\(\s*360ms\s*\/\s*max\(1\s*,\s*var\(--bloom-petal-count[\s\S]*?\)\s*\)\s*\)\s*\*\s*var\(--petal-index/m,
     );
   });
 
-  it("CSS animation-delay uses the (240ms / count) cap formula for exit", () => {
+  it("CSS animation-delay uses the (120ms / count) cap formula for exit (v9 tightening)", () => {
     const css = readFile(CSS_PATH);
+    // v9 stack-wake-mutex: exit total tightened 240 → 120 ms so the
+    // collapse path lands inside the v9 acceptance budget.
     expect(css).toMatch(
-      /\.stack-bloom__petal--leaving\s*\{[\s\S]*?animation-delay:\s*calc\(\s*\(\s*240ms\s*\/\s*max\(1\s*,\s*var\(--bloom-petal-count[\s\S]*?\)\s*\)\s*\)\s*\*\s*\(/m,
+      /\.stack-bloom__petal--leaving\s*\{[\s\S]*?animation-delay:\s*calc\(\s*\(\s*120ms\s*\/\s*max\(1\s*,\s*var\(--bloom-petal-count[\s\S]*?\)\s*\)\s*\)\s*\*\s*\(/m,
     );
   });
 
@@ -182,6 +185,14 @@ describe("v8 round-14 — stagger cap (total entry ≤ 360 ms / exit ≤ 240 ms)
     const count = 24;
     const perPetalMs = totalCapMs / count;
     expect(perPetalMs).toBe(15);
+    expect(perPetalMs * (count - 1)).toBeLessThanOrEqual(totalCapMs);
+  });
+
+  it("v9 exit cap holds for a 24-petal stack: total stagger ≤ 120 ms", () => {
+    const totalCapMs = 120;
+    const count = 24;
+    const perPetalMs = totalCapMs / count;
+    expect(perPetalMs).toBe(5);
     expect(perPetalMs * (count - 1)).toBeLessThanOrEqual(totalCapMs);
   });
 });
@@ -228,12 +239,23 @@ describe("v8 round-14 — unified hover-intent constants in StackWrapper", () =>
   });
 });
 
-describe("v8 round-14 — sanity values from the shared module", () => {
+describe("v9 stack-wake-mutex — sanity values from the shared module", () => {
   it("HOVER_INTENT_MS resolves to 150", () => {
     expect(HOVER_INTENT_MS).toBe(150);
   });
 
-  it("LEAVE_GRACE_MS resolves to 80", () => {
+  it("LEAVE_GRACE_MS resolves to 80 (family-internal traversal cushion; non-family hit collapses synchronously)", () => {
+    // v9 PR3 originally tightened this to 0 ms on the assumption
+    // that the new hoveredZone$ effect's non-family-immediate-
+    // collapse branch covered every leave case. Live testing
+    // surfaced the regression: the cursor spends ~16–32 ms in
+    // hovered === null while crossing the 12 px capsule→petal
+    // halo gap, and a 0 ms grace tore the bloom down before the
+    // cursor reached the petal. The post-PR3 fix restores the
+    // 80 ms grace for the hovered === null branch only — the
+    // non-family-hit branch in StackWrapper's hoveredZone$
+    // effect remains synchronous so neighbour-zone wake handoff
+    // is still instant.
     expect(LEAVE_GRACE_MS).toBe(80);
   });
 });

@@ -1,24 +1,54 @@
 /**
- * v8 round-5 — bloom hit-test registration contract.
+ * v9 stack-wake-mutex — bloom hit-test registration contract.
  *
- * Round-4 made the bloom petals `position: fixed` so they could fan out
- * polar-coordinate around the cursor anywhere on screen. The visual
- * radial layout worked, but every petal click silently fell through to
- * the desktop because the cursor passthrough poller in services/hitTest
- * only saw the wrapper's natural bounding rect — petals far from the
- * capsule were "outside" any registered zone, so the state machine
- * dropped to PASSTHROUGH and the webview ignored the petal mouseenter /
- * click events.
+ * Pre-v9 (rounds 5–v8) the StackWrapper registered both a
+ * `.stack-bloom-buffer` halo (initially circular, later 100 vw × 100 vh)
+ * AND every `.stack-bloom__petal` with the cursor hit-test poller while
+ * the bloom was active. The buffer's `pointer-events: auto` plus its
+ * z-index 49 silently shadowed neighbouring zones' hover & click wake.
  *
- * Fix: register the `.stack-bloom-buffer` halo + every `.stack-bloom__petal`
- * with the hit-test poller while the bloom is active, and unregister
- * them when the bloom collapses. This test mirrors the registration
- * lifecycle in isolation so it breaks loudly if the StackWrapper
- * stops registering bloom elements.
+ * v9 deletes the buffer entirely. Hit-test coverage now comes from:
+ *   - the wrapper element itself (registered on mount with the
+ *     edge-aware inflate from `computeInflateForPosition`)
+ *   - each visible petal (registered when the bloom is active with a
+ *     12 px directional inflate halo so adjacent petals' hit rects
+ *     bridge the visible row gap)
+ *   - the floating FocusedZonePreview (registered by the preview
+ *     itself when anchored to a petal rect — unchanged from pre-v9)
+ *
+ * The contract under test:
+ *
+ *   1. NO bloom buffer is registered (the singleton hit-test map
+ *      should never carry a buffer-shaped entry while the bloom is
+ *      active).
+ *   2. Each petal IS registered with a 12 px inflate halo on all four
+ *      sides — the constant lives in StackWrapper.tsx as
+ *      `PETAL_HALO_PX` and the registration call passes the inflate
+ *      object via the `RegisterZoneOpts` shape.
+ *   3. petalRefs map removes entries when a petal unmounts.
+ *   4. unmount tears every registration down even if bloom was active.
+ *
+ * Tests use the source-text contract pattern (matching
+ * stackBloomAnimation.test.tsx + stackDragWhileBloomed.test.tsx)
+ * because mounting StackWrapper requires bootstrapping zonesStore +
+ * selection + ipc + settings + i18n + the cursor hit-test poller —
+ * heavy and orthogonal to the hit-test registration invariants this
+ * file pins.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error — node:fs is provided by the vitest Node runner.
+import { readFileSync } from "node:fs";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error — see note above.
+import { fileURLToPath } from "node:url";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-expect-error — see note above.
+import { dirname, resolve } from "node:path";
 
-const mockSetIgnoreCursorEvents = vi.fn<(ignore: boolean) => Promise<void>>().mockResolvedValue(undefined);
+const mockSetIgnoreCursorEvents = vi
+  .fn<(ignore: boolean) => Promise<void>>()
+  .mockResolvedValue(undefined);
 const mockOuterPosition = vi.fn().mockResolvedValue({ x: 0, y: 0 });
 
 vi.mock("@tauri-apps/api/window", () => ({
@@ -29,23 +59,31 @@ vi.mock("@tauri-apps/api/window", () => ({
   cursorPosition: vi.fn().mockResolvedValue({ x: 0, y: 0 }),
 }));
 
-import { registerZoneElement, unregisterZoneElement } from "../../../services/hitTest";
+import {
+  registerZoneElement,
+  unregisterZoneElement,
+} from "../../../services/hitTest";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TSX_PATH = resolve(HERE, "../StackWrapper.tsx");
+const CSS_PATH = resolve(HERE, "../StackWrapper.css");
+
+function readFile(path: string): string {
+  return readFileSync(path, "utf8");
+}
 
 /**
- * Mirrors the StackWrapper registration lifecycle: when the bloom is
- * active, both the buffer halo + every petal must be registered;
- * when the bloom collapses, all of them must be unregistered. The
- * map-of-petals shape matches the component's `petalRefs` Map<string,
- * HTMLButtonElement>.
+ * Mirrors the StackWrapper v9 registration lifecycle: when the bloom
+ * is active, every petal is registered with a 12 px inflate halo;
+ * when it collapses, the registrations are torn down. There is NO
+ * separate buffer registration — the v9 implementation deletes the
+ * buffer entirely.
  */
 function createBloomLifecycle() {
   let bloomActive = false;
-  let bufferEl: HTMLElement | null = null;
   const petalEls = new Map<string, HTMLElement>();
+  const PETAL_HALO_PX = 12;
 
-  const setBufferRef = (el: HTMLElement | null): void => {
-    bufferEl = el;
-  };
   const setPetalRef = (id: string, el: HTMLElement | null): void => {
     if (el) {
       petalEls.set(id, el);
@@ -56,10 +94,17 @@ function createBloomLifecycle() {
 
   const syncRegistrations = (): void => {
     if (bloomActive) {
-      if (bufferEl) registerZoneElement(bufferEl);
-      for (const el of petalEls.values()) registerZoneElement(el);
+      for (const el of petalEls.values()) {
+        registerZoneElement(el, {
+          inflate: {
+            top: PETAL_HALO_PX,
+            right: PETAL_HALO_PX,
+            bottom: PETAL_HALO_PX,
+            left: PETAL_HALO_PX,
+          },
+        });
+      }
     } else {
-      if (bufferEl) unregisterZoneElement(bufferEl);
       for (const el of petalEls.values()) unregisterZoneElement(el);
     }
   };
@@ -70,50 +115,47 @@ function createBloomLifecycle() {
   };
 
   const unmount = (): void => {
-    if (bufferEl) unregisterZoneElement(bufferEl);
     for (const el of petalEls.values()) unregisterZoneElement(el);
     petalEls.clear();
   };
 
-  return { setBufferRef, setPetalRef, setBloom, unmount, syncRegistrations };
+  return {
+    setPetalRef,
+    setBloom,
+    unmount,
+    syncRegistrations,
+  };
 }
 
 function makeFakeElement(): HTMLElement {
   // Minimal stub — the hit-test only stores element refs in a Map and
   // calls getBoundingClientRect() during polling. We never poll in this
   // test, so the rect never needs to exist.
-  return { getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }) } as unknown as HTMLElement;
+  return {
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }),
+  } as unknown as HTMLElement;
 }
 
-describe("StackWrapper bloom hit-test registration (v8 round-5)", () => {
+describe("v9 stack-wake-mutex — bloom hit-test registration lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  // No afterEach hook needed — every `it` block either calls
-  // `lc.unmount()` directly OR calls `setBloom(false)` at the tail,
-  // both of which drain every fake element from the singleton
-  // hit-test registration map. Tests sharing a registration would
-  // surface as a thrown unregister on the second run, which the
-  // lifecycle tests below explicitly prove does not happen.
-
-  it("registers buffer + petals when bloom activates, drops them on collapse", () => {
+  it("registers each petal when bloom activates, drops them on collapse", () => {
     const lc = createBloomLifecycle();
-    const buffer = makeFakeElement();
     const petalA = makeFakeElement();
     const petalB = makeFakeElement();
 
-    lc.setBufferRef(buffer);
     lc.setPetalRef("a", petalA);
     lc.setPetalRef("b", petalB);
 
-    // Bloom opens — every bloom element must be hit-test registered.
+    // Bloom opens — every petal must be hit-test registered.
     lc.setBloom(true);
 
     // The hit-test module is a singleton; we can verify registration by
     // toggling bloom off and asserting unregisterZoneElement runs without
-    // throwing. The contract is that the lifecycle wires register/unregister
-    // calls in lock-step with bloomActive transitions.
+    // throwing. The contract is that the lifecycle wires register/
+    // unregister calls in lock-step with bloomActive transitions.
     expect(() => lc.setBloom(false)).not.toThrow();
 
     // Re-opening the bloom must re-register the same refs.
@@ -124,10 +166,8 @@ describe("StackWrapper bloom hit-test registration (v8 round-5)", () => {
 
   it("petalRefs map removes entries when the petal unmounts", () => {
     const lc = createBloomLifecycle();
-    const buffer = makeFakeElement();
     const petal = makeFakeElement();
 
-    lc.setBufferRef(buffer);
     lc.setPetalRef("only", petal);
     lc.setBloom(true);
 
@@ -142,11 +182,9 @@ describe("StackWrapper bloom hit-test registration (v8 round-5)", () => {
 
   it("unmount cleans up every registration even if bloom was active", () => {
     const lc = createBloomLifecycle();
-    const buffer = makeFakeElement();
     const petalA = makeFakeElement();
     const petalB = makeFakeElement();
 
-    lc.setBufferRef(buffer);
     lc.setPetalRef("a", petalA);
     lc.setPetalRef("b", petalB);
     lc.setBloom(true);
@@ -155,19 +193,105 @@ describe("StackWrapper bloom hit-test registration (v8 round-5)", () => {
     expect(() => lc.unmount()).not.toThrow();
   });
 
-  it("re-syncing during bloom (e.g. cursor moved → effect refires) is idempotent", () => {
+  it("re-syncing during bloom (effect refires) is idempotent", () => {
     const lc = createBloomLifecycle();
-    const buffer = makeFakeElement();
-    lc.setBufferRef(buffer);
+    const petal = makeFakeElement();
+    lc.setPetalRef("only", petal);
     lc.setBloom(true);
 
-    // Effect fires multiple times as cursor moves. Each pass should
-    // re-register the same ref harmlessly — the underlying Map.set is
-    // idempotent and the second call replaces the first.
+    // Effect fires multiple times as petals re-position. Each pass
+    // should re-register the same ref harmlessly — the underlying
+    // Map.set is idempotent and the second call replaces the first.
     expect(() => lc.syncRegistrations()).not.toThrow();
     expect(() => lc.syncRegistrations()).not.toThrow();
     expect(() => lc.syncRegistrations()).not.toThrow();
 
     lc.setBloom(false);
+  });
+});
+
+describe("v9 stack-wake-mutex — bloom buffer removal (source contract)", () => {
+  it("StackWrapper.tsx no longer declares a bloomBufferRef", () => {
+    const tsx = readFile(TSX_PATH);
+    // The pre-v9 declaration `let bloomBufferRef: HTMLDivElement |
+    // undefined;` is gone. A future regression that re-introduces the
+    // buffer (and its 100 vw `pointer-events: auto` overlay) would
+    // shadow neighbouring zones' wake; this assertion catches it
+    // immediately.
+    expect(tsx).not.toMatch(/bloomBufferRef/);
+  });
+
+  it("StackWrapper.tsx no longer renders a .stack-bloom-buffer element", () => {
+    const tsx = readFile(TSX_PATH);
+    // The JSX `class="stack-bloom-buffer"` is gone — only documentation
+    // comments may mention the historical name. We strip block + line
+    // comments before searching so the historical narrative doesn't
+    // false-match.
+    const codeOnly = tsx
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    expect(codeOnly).not.toMatch(/class="stack-bloom-buffer"/);
+  });
+
+  it("StackWrapper.css no longer declares a .stack-bloom-buffer rule body", () => {
+    const css = readFile(CSS_PATH);
+    // The pre-v9 selector body `.stack-bloom-buffer { ... }` is gone.
+    // Documentation comments referencing the historical name are
+    // allowed (so future maintainers can find the v9 ADR), but no
+    // rule selector should target the deleted element.
+    const ruleRegex = /\.stack-bloom-buffer\s*\{/m;
+    expect(ruleRegex.test(css)).toBe(false);
+  });
+});
+
+describe("v9 stack-wake-mutex — petal inflate halo (source contract)", () => {
+  it("StackWrapper.tsx declares a PETAL_HALO_PX constant", () => {
+    const tsx = readFile(TSX_PATH);
+    // The 12 px halo is the load-bearing piece that bridges the gap
+    // between adjacent petals' hit rects. If a future edit drops the
+    // constant or sets it to 0, the cursor sweeping between two
+    // petals would land in PASSTHROUGH and the bloom would collapse
+    // mid-sweep.
+    expect(tsx).toMatch(/const\s+PETAL_HALO_PX\s*=\s*12/m);
+  });
+
+  it("StackWrapper.tsx registers each petal with the 12 px inflate halo", () => {
+    const tsx = readFile(TSX_PATH);
+    // Locate the bloom-active createEffect that does petal
+    // registration. The inflate object must carry top/right/bottom/
+    // left = PETAL_HALO_PX (the assertion accepts arbitrary
+    // whitespace + property ordering inside the object literal).
+    const effectMatch = /createEffect\(\(\)\s*=>\s*\{[\s\S]*?bloomActive\(\)[\s\S]*?registerZoneElement\(\s*el\s*,\s*\{([\s\S]*?)\}\s*\)/m.exec(
+      tsx,
+    );
+    expect(effectMatch).not.toBeNull();
+    const optsBody = effectMatch![1];
+    expect(optsBody).toMatch(/top\s*:\s*PETAL_HALO_PX/m);
+    expect(optsBody).toMatch(/right\s*:\s*PETAL_HALO_PX/m);
+    expect(optsBody).toMatch(/bottom\s*:\s*PETAL_HALO_PX/m);
+    expect(optsBody).toMatch(/left\s*:\s*PETAL_HALO_PX/m);
+  });
+
+  it("StackWrapper.tsx maintains a bloomElements Set for the hoveredZone$ effect", () => {
+    const tsx = readFile(TSX_PATH);
+    // The Set membership check is what decides whether a hovered
+    // element is part of the bloom family (cursor on capsule /
+    // petal / floating preview → keep bloom alive) vs an unrelated
+    // zone (immediate collapse). If a future refactor drops the
+    // Set, the hoveredZone$ effect can't tell the difference.
+    expect(tsx).toMatch(/const\s+bloomElements\s*=\s*new\s+Set<HTMLElement>\(\)/m);
+    // The set must be populated on petal registration AND drained
+    // on cleanup. Look for both calls inside the bloom-active effect.
+    expect(tsx).toMatch(/bloomElements\.add\(\s*el\s*\)/m);
+    expect(tsx).toMatch(/bloomElements\.delete\(\s*el\s*\)/m);
+  });
+
+  it("StackWrapper.tsx subscribes to hoveredZone$ inside a createEffect", () => {
+    const tsx = readFile(TSX_PATH);
+    // The collapse trigger must come from the poller signal — not a
+    // bare DOM mouseleave timer (which the deleted buffer used to
+    // race against neighbour hover events).
+    expect(tsx).toMatch(/import\s*\{[\s\S]*?hoveredZone\$[\s\S]*?\}\s*from\s*"\.\.\/\.\.\/services\/hitTest"/m);
+    expect(tsx).toMatch(/createEffect\(\(\)\s*=>\s*\{[\s\S]*?hoveredZone\$\(\)/m);
   });
 });

@@ -118,7 +118,8 @@ pub fn start_resolution_monitor(handle: &AppHandle) {
 
                 // Clamp zones to the new screen bounds and persist.
                 if let Some(state) = handle.try_state::<AppState>() {
-                    if let Ok(mut layout) = state.layout.lock() {
+                    {
+                        let mut layout = state.layout.write();
                         clamp_zones_to_screen(&mut layout);
                         layout.last_modified = chrono::Utc::now().to_rfc3339();
                     }

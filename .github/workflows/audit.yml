@@ -1,0 +1,112 @@
+name: Supply Chain Audit
+
+# C3 — Three-tool supply-chain check:
+#   1. cargo-audit (RustSec DB)
+#   2. cargo-deny (licenses + bans + sources)
+#   3. pnpm audit (npm vulnerability DB)
+#
+# Day 1 rollout: continue-on-error: true everywhere — surfaces findings
+# without blocking PRs. Week 2: flip advisories+sources to enforce. Week 3:
+# flip bans+licenses to enforce. The deny.toml at src-tauri/deny.toml is
+# the single source of truth for cargo-deny policy.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly Monday 09:00 UTC re-audit so new RustSec advisories surface
+    # even when no PR is open.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    name: cargo-audit (RustSec)
+    # Audit jobs are OS-agnostic; ubuntu-latest is ~8x cheaper than windows-latest.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + advisory db
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/advisory-db
+          key: cargo-audit-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-audit-
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # Day 1: continue-on-error so CI surfaces findings without blocking.
+        # Week 2: flip to false.
+        continue-on-error: true
+        run: cargo audit --file src-tauri/Cargo.lock
+
+  cargo-deny:
+    name: cargo-deny (licenses + bans + sources)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deny-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-deny-
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Run cargo deny — advisories + sources
+        # Week 2: drop continue-on-error here.
+        continue-on-error: true
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check --config src-tauri/deny.toml advisories sources
+
+      - name: Run cargo deny — bans + licenses
+        # Week 3: drop continue-on-error here.
+        continue-on-error: true
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check --config src-tauri/deny.toml bans licenses
+
+  pnpm-audit:
+    name: pnpm audit (npm DB)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: pnpm audit — production dependencies
+        # `--prod` gates the shipped app graph; `--audit-level high` ignores moderate/low.
+        # Day 1: continue-on-error so CI surfaces findings without blocking.
+        continue-on-error: true
+        run: pnpm audit --audit-level high --prod
+
+      - name: pnpm audit — full tree warning
+        # Dev-server/tooling findings remain visible without blocking release packaging.
+        continue-on-error: true
+        run: pnpm audit --audit-level high

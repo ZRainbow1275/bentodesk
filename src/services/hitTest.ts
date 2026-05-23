@@ -21,6 +21,7 @@
  *   MODAL_OPEN   → (previous)   (releaseModalLock, modalLockCount becomes 0)
  */
 import { getCurrentWindow, cursorPosition, type Window as TauriWindow } from "@tauri-apps/api/window";
+import { createSignal, type Accessor } from "solid-js";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -112,8 +113,50 @@ let modalLockCount = 0;
 /** When > 0, a drag operation locks passthrough off. */
 let dragLockCount = 0;
 
-/** Currently hovered zone element (null if cursor is not over any zone). */
-let hoveredZone: HTMLElement | null = null;
+/**
+ * Currently hovered zone element (null if cursor is not over any zone).
+ *
+ * Stored as a Solid signal so reactive consumers (e.g. StackWrapper's
+ * bloom-collapse effect) can subscribe to hover transitions without
+ * polling. The setter is module-private; readers use either the
+ * imperative {@link getHoveredZoneEl} (one-shot read) or the reactive
+ * {@link hoveredZone$} accessor (createEffect / createMemo subscriber).
+ *
+ * Internal call sites that previously read/wrote the bare `hoveredZone`
+ * variable now use `hoveredZoneSignal()` / `setHoveredZoneSignal(...)`.
+ * The state machine semantics (transitionTo calls, grace timer, modal /
+ * drag lock priority) are unchanged — Solid's signal write is a plain
+ * assignment plus subscriber notification, identical in cost to the
+ * pre-signal `hoveredZone = ...` plus `setIgnoreCursorEvents` IPC that
+ * already runs on the same path.
+ */
+const [hoveredZoneSignal, setHoveredZoneSignal] = createSignal<HTMLElement | null>(null);
+
+/**
+ * Imperative one-shot read of the current hovered zone element. Use
+ * this when you only need a snapshot (e.g. inside an event handler);
+ * for reactive subscriptions use {@link hoveredZone$} instead.
+ */
+export function getHoveredZoneEl(): HTMLElement | null {
+  return hoveredZoneSignal();
+}
+
+/**
+ * Reactive accessor for the current hovered zone element. Designed to
+ * be consumed inside Solid `createEffect` / `createMemo`:
+ *
+ * ```ts
+ * createEffect(() => {
+ *   const hovered = hoveredZone$();
+ *   if (hovered === someBloomFamilyEl) cancelCollapse();
+ * });
+ * ```
+ *
+ * The trailing `$` follows the project's reactive-accessor naming
+ * convention. Notification timing matches the cursor-position poller
+ * (one frame on rAF, ~30 fps in PASSTHROUGH, ~60 fps elsewhere).
+ */
+export const hoveredZone$: Accessor<HTMLElement | null> = hoveredZoneSignal;
 
 /** Grace period timer ID. */
 let graceTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -281,8 +324,8 @@ export function computeInflateForPosition(
  */
 export function unregisterZoneElement(el: HTMLElement): void {
   zoneElements.delete(el);
-  if (hoveredZone === el) {
-    hoveredZone = null;
+  if (hoveredZoneSignal() === el) {
+    setHoveredZoneSignal(null);
   }
 }
 
@@ -308,7 +351,7 @@ export function acquireDragLock(): () => void {
       // After drag ends, check if cursor is still over a zone
       if (modalLockCount > 0) {
         transitionTo("MODAL_OPEN");
-      } else if (hoveredZone !== null) {
+      } else if (hoveredZoneSignal() !== null) {
         transitionTo("ZONE_HOVER");
       } else {
         // Start grace period so DOM events can fire
@@ -340,7 +383,7 @@ export function acquireModalLock(): () => void {
       // Restore appropriate state
       if (dragLockCount > 0) {
         transitionTo("DRAGGING");
-      } else if (hoveredZone !== null) {
+      } else if (hoveredZoneSignal() !== null) {
         transitionTo("ZONE_HOVER");
       } else {
         transitionTo("PASSTHROUGH");
@@ -475,16 +518,24 @@ async function pollCursorPosition(): Promise<void> {
       }
     }
 
+    const previousHover = hoveredZoneSignal();
     if (foundZone !== null) {
-      // Cursor is over a zone
-      hoveredZone = foundZone;
+      // Cursor is over a zone — only write the signal if the target
+      // changed so reactive subscribers (e.g. StackWrapper's
+      // bloom-collapse effect) don't re-fire on every poll tick when
+      // the cursor sits stationary over the same element.
+      if (previousHover !== foundZone) {
+        setHoveredZoneSignal(foundZone);
+      }
       if (state !== "ZONE_HOVER") {
         clearGraceTimer();
         transitionTo("ZONE_HOVER");
       }
-    } else if (hoveredZone !== null || state === "ZONE_HOVER") {
+    } else if (previousHover !== null || state === "ZONE_HOVER") {
       // Cursor left all zones — start grace period instead of immediate passthrough
-      hoveredZone = null;
+      if (previousHover !== null) {
+        setHoveredZoneSignal(null);
+      }
       if (state === "ZONE_HOVER") {
         startGracePeriod();
       }

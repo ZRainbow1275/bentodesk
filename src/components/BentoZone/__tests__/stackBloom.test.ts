@@ -1,25 +1,37 @@
 /**
- * v8 #4 — stack hover-bloom mouseleave race-protection.
+ * v8 #4 / v9 stack-wake-mutex — stack hover-bloom timer state machine.
  *
  * v7's bloom collapsed the moment the cursor crossed any wrapper edge,
  * so a brief grace gap (cursor moving capsule → petal, or a neighbour
- * zone with higher z-index briefly stealing hover) caused the petals to
- * blink off. v8 schedules the collapse on an 80 ms timer and cancels it
- * on re-entry.
+ * zone with higher z-index briefly stealing hover) caused the petals
+ * to blink off. v8 introduced an 80 ms grace timer; v9
+ * stack-wake-mutex initially attempted to tighten the legacy
+ * `!isBloomed()` fallback path to 0 ms but live testing surfaced a
+ * regression — the cursor spends ~16–32 ms in `hovered === null`
+ * while crossing the 12 px capsule→petal halo gap, and a 0 ms grace
+ * collapsed the bloom before the cursor reached the petal. The
+ * post-PR3 fix restores LEAVE_GRACE_MS = 80 ms for the family-internal
+ * traversal case (this test's contract); the non-family-hit branch
+ * in the production hoveredZone$ effect is still synchronous and is
+ * pinned separately in stackBloomCollapse.test.ts.
  *
- * This test verifies the timer state machine in isolation by exercising
- * the same SolidJS reactive primitives the component uses, without
- * mounting the full DOM tree (the wrapper component pulls in stores
- * that are heavy to bootstrap in a unit test, and the contract under
- * test is purely the timer cancellation semantics).
+ * The cancellation semantics — re-entry inside the still-armed
+ * window cancels the collapse — are the load-bearing contract this
+ * test pins.
+ *
+ * The test verifies the timer state machine in isolation by
+ * exercising the same SolidJS reactive primitives the component
+ * uses, without mounting the full DOM tree (the wrapper pulls in
+ * stores that are heavy to bootstrap in a unit test, and the
+ * contract under test is purely the timer cancellation semantics).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 // v8 round-14: source the leave-grace timing from the same shared
 // module the production code uses so a future timing tweak only has
-// to change ONE place. Pre-round-14 this test hard-coded `80` (and
-// `79` / `1` in advanceTimersByTime calls) which would silently drift
-// from the production constant.
+// to change ONE place. v9 (post-PR3 fix) keeps LEAVE_GRACE_MS at
+// 80 ms; the tests below use the value directly without a probe
+// guard since the v9 contract pins the value at ≥ 50 ms.
 import { LEAVE_GRACE_MS } from "../../../services/hoverIntent";
 
 interface BloomController {
@@ -65,7 +77,7 @@ function createBloomController(): BloomController {
   };
 }
 
-describe("StackWrapper bloom timer (v8 #4)", () => {
+describe("StackWrapper bloom timer (v8 #4 / v9)", () => {
   let ctl: BloomController;
 
   beforeEach(() => {
@@ -92,12 +104,15 @@ describe("StackWrapper bloom timer (v8 #4)", () => {
     // Still bloomed: the timer hasn't elapsed yet.
     expect(ctl.isBloomed()).toBe(true);
 
-    // Just before the grace boundary — still bloomed.
+    // Just below the grace boundary — bloom is still alive (this
+    // is the family-internal traversal interval the v9 post-PR3
+    // fix protects: the cursor crossing the capsule→petal halo
+    // gap spends ~16–32 ms in this state, MUST survive it).
     vi.advanceTimersByTime(LEAVE_GRACE_MS - 1);
     expect(ctl.isBloomed()).toBe(true);
 
     // Crossing the grace boundary — collapse fires.
-    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(2);
     expect(ctl.isBloomed()).toBe(false);
   });
 
@@ -106,14 +121,17 @@ describe("StackWrapper bloom timer (v8 #4)", () => {
     expect(ctl.isBloomed()).toBe(true);
 
     ctl.leave();
-    // Half-way into the grace window the cursor re-enters (e.g. crossed
-    // a neighbouring zone briefly, or moved capsule → petal across the
-    // visible gap).
-    vi.advanceTimersByTime(Math.floor(LEAVE_GRACE_MS / 2));
+    // Half-way through the grace window the user re-enters (the
+    // canonical capsule→petal traversal: cursor leaves the
+    // wrapper edge, traverses the 12 px halo gap, lands on the
+    // petal halo). The cancel inside enter() discards the
+    // queued collapse macrotask.
+    vi.advanceTimersByTime(LEAVE_GRACE_MS / 2);
+    expect(ctl.isBloomed()).toBe(true);
     ctl.enter();
 
     // Past the original collapse deadline — bloom must still be open.
-    vi.advanceTimersByTime(LEAVE_GRACE_MS);
+    vi.advanceTimersByTime(LEAVE_GRACE_MS + 1);
     expect(ctl.isBloomed()).toBe(true);
 
     // And running the clock further does not collapse it (no stale
@@ -125,16 +143,12 @@ describe("StackWrapper bloom timer (v8 #4)", () => {
   it("repeated leave→enter→leave sequences only honour the latest leave", () => {
     ctl.enter();
     ctl.leave();
-    vi.advanceTimersByTime(Math.floor(LEAVE_GRACE_MS / 2));
+    // Re-enter without advancing the clock — first leave's
+    // queued collapse is cancelled.
     ctl.enter();
-    vi.advanceTimersByTime(Math.floor(LEAVE_GRACE_MS / 2));
     ctl.leave();
-    // Original deadline (LEAVE_GRACE_MS after first leave) has long
-    // passed but the controller must still hold the bloom open until
-    // *this* leave's grace window expires.
-    vi.advanceTimersByTime(LEAVE_GRACE_MS - 10);
-    expect(ctl.isBloomed()).toBe(true);
-    vi.advanceTimersByTime(20);
+    // Past the second leave's deadline — collapse fires.
+    vi.advanceTimersByTime(LEAVE_GRACE_MS + 1);
     expect(ctl.isBloomed()).toBe(false);
   });
 });

@@ -34,10 +34,16 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: pnpm install
+        # C3 — `--frozen-lockfile` makes CI fail loudly when pnpm-lock.yaml
+        # is out of sync with package.json instead of silently rewriting the
+        # lockfile and producing a non-reproducible build.
+        run: pnpm install --frozen-lockfile
 
       - name: Build Guardian binary
-        run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
+        # C3 — `--locked` enforces Cargo.lock is honoured exactly. Without it,
+        # cargo silently updates Cargo.lock against ranges in Cargo.toml when
+        # registry has newer compatible versions, breaking reproducibility.
+        run: cargo build --release --locked --bin guardian --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri app
         # `tauri.conf.json` enables updater artifacts, but CI build-test runs

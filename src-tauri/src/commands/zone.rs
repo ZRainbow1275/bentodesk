@@ -20,8 +20,8 @@ pub async fn create_zone(
 ) -> Result<BentoZone, String> {
     // Guardrail: verify zone count stays within the safety envelope.
     {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
+        let settings = state.settings.read();
         guardrails::ensure_can_create_zone(&layout, &settings)?;
     }
 
@@ -49,7 +49,7 @@ pub async fn create_zone(
     };
 
     let result = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let mut zone = zone;
         zone.sort_order = layout.zones.len() as i32;
         layout.zones.push(zone.clone());
@@ -69,7 +69,7 @@ pub async fn update_zone(
     updates: ZoneUpdate,
 ) -> Result<BentoZone, String> {
     let result = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -137,7 +137,7 @@ pub async fn delete_zone(state: State<'_, AppState>, id: String) -> Result<(), S
     // SAFETY: Restore all zone items (move from .bentodesk/ back to Desktop)
     // BEFORE removing from layout. This ensures files become visible again.
     {
-        let layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let layout = state.layout.read();
         let zone = layout
             .zones
             .iter()
@@ -162,7 +162,7 @@ pub async fn delete_zone(state: State<'_, AppState>, id: String) -> Result<(), S
 
     // Now remove the zone from layout
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let len_before = layout.zones.len();
         layout.zones.retain(|z| z.id != id);
         if layout.zones.len() == len_before {
@@ -177,7 +177,7 @@ pub async fn delete_zone(state: State<'_, AppState>, id: String) -> Result<(), S
 
 #[tauri::command]
 pub async fn list_zones(state: State<'_, AppState>) -> Result<Vec<BentoZone>, String> {
-    let layout = state.layout.lock().map_err(|e| e.to_string())?;
+    let layout = state.layout.read();
     Ok(layout.zones.clone())
 }
 
@@ -187,7 +187,7 @@ pub async fn reorder_zones(
     zone_ids: Vec<String>,
 ) -> Result<(), String> {
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         for (i, id) in zone_ids.iter().enumerate() {
             if let Some(zone) = layout.zones.iter_mut().find(|z| &z.id == id) {
                 zone.sort_order = i as i32;
@@ -220,7 +220,7 @@ pub async fn stack_zones(
 ) -> Result<String, String> {
     let stack_id = uuid::Uuid::new_v4().to_string();
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_stack_zones(&mut layout, &zone_ids, &stack_id)?;
     }
     state.persist_layout();
@@ -275,7 +275,7 @@ pub(crate) fn apply_stack_zones(
 #[tauri::command]
 pub async fn unstack_zones(state: State<'_, AppState>, stack_id: String) -> Result<(), String> {
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_unstack_zones(&mut layout, &stack_id);
     }
     state.persist_layout();
@@ -311,7 +311,7 @@ pub async fn set_zone_alias(
     alias: Option<String>,
 ) -> Result<(), String> {
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let zone = layout
             .zones
             .iter_mut()
@@ -336,7 +336,7 @@ pub async fn reorder_stack(
     new_order: u32,
 ) -> Result<(), String> {
     {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_reorder_stack(&mut layout, &stack_id, &zone_id, new_order)?;
     }
     state.persist_layout();
@@ -449,11 +449,7 @@ mod stack_tests {
     /// `stack_order` 0/1/2 in receive order.
     #[test]
     fn stack_zones_three_zones_assigns_uniform_id_and_contiguous_order() {
-        let mut layout = layout_with(vec![
-            sample_zone("a"),
-            sample_zone("b"),
-            sample_zone("c"),
-        ]);
+        let mut layout = layout_with(vec![sample_zone("a"), sample_zone("b"), sample_zone("c")]);
         let stack_id = "stack-fresh";
 
         apply_stack_zones(
@@ -591,12 +587,8 @@ mod stack_tests {
         let mut layout = layout_with(vec![a, b, keeper]);
 
         let new_stack = "new-stack";
-        apply_stack_zones(
-            &mut layout,
-            &["a".to_string(), "b".to_string()],
-            new_stack,
-        )
-        .expect("re-stacking must succeed");
+        apply_stack_zones(&mut layout, &["a".to_string(), "b".to_string()], new_stack)
+            .expect("re-stacking must succeed");
 
         let by_id = |id: &str| layout.zones.iter().find(|z| z.id == id).unwrap();
         assert_eq!(

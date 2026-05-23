@@ -168,12 +168,7 @@ const ContextMenu: Component = () => {
         <div
           ref={menuRef}
           class="context-menu scale-in"
-          style={{
-            ...menuPosition(),
-            position: "fixed",
-            "z-index": "1000",
-            "pointer-events": "auto",
-          }}
+          style={menuPosition()}
         >
           <For each={buildMenuItems()}>
             {(item) => (

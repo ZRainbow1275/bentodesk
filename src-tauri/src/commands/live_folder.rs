@@ -87,10 +87,7 @@ fn update_zone_live_path(
         .try_state::<AppState>()
         .ok_or_else(|| "AppState unavailable".to_string())?;
     {
-        let mut layout = state
-            .layout
-            .lock()
-            .map_err(|e| format!("layout lock poisoned: {e}"))?;
+        let mut layout = state.layout.write();
         if let Some(zone) = layout
             .zones
             .iter_mut()

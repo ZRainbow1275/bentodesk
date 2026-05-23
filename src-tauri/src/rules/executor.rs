@@ -23,13 +23,10 @@ struct EvalContext {
 
 fn build_context(app: &AppHandle) -> EvalContext {
     let state = app.state::<AppState>();
-    let desktop_path = state
-        .settings
-        .lock()
-        .map(|s| s.desktop_path.clone())
-        .unwrap_or_default();
+    let desktop_path = state.settings.read().desktop_path.clone();
     let mut map = std::collections::HashMap::new();
-    if let Ok(layout) = state.layout.lock() {
+    {
+        let layout = state.layout.read();
         for zone in &layout.zones {
             for item in &zone.items {
                 map.insert(item.path.clone(), zone.id.clone());
@@ -193,13 +190,7 @@ fn apply_move_to_zone(
     }
 
     {
-        let mut layout = match state.layout.lock() {
-            Ok(l) => l,
-            Err(e) => {
-                errors.push(format!("layout lock poisoned: {e}"));
-                return String::new();
-            }
-        };
+        let mut layout = state.layout.write();
         let zone = match layout.zones.iter_mut().find(|z| z.id == zone_id) {
             Some(z) => z,
             None => {

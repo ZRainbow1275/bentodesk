@@ -62,21 +62,10 @@ const VirtualItemGrid: Component<VirtualItemGridProps> = (props) => {
   });
 
   return (
-    <div
-      ref={scrollEl}
-      class="item-grid item-grid--virtual"
-      style={{
-        "overflow-y": "auto",
-        // Full-height so the virtualizer has a stable scroll container.
-        height: "100%",
-      }}
-    >
+    <div ref={scrollEl} class="item-grid item-grid--virtual">
       <div
-        style={{
-          height: `${rowVirtualizer.getTotalSize()}px`,
-          width: "100%",
-          position: "relative",
-        }}
+        class="item-grid__virtual-spacer"
+        style={{ "--virtual-grid-height": `${rowVirtualizer.getTotalSize()}px` }}
       >
         <For each={rowVirtualizer.getVirtualItems()}>
           {(virtualRow) => {
@@ -85,16 +74,10 @@ const VirtualItemGrid: Component<VirtualItemGridProps> = (props) => {
             const rowItems = props.items.slice(rowStart, rowStart + cols);
             return (
               <div
+                class="item-grid__virtual-row"
                 style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  transform: `translateY(${virtualRow.start}px)`,
-                  display: "grid",
-                  "grid-template-columns": `repeat(${cols}, 1fr)`,
-                  gap: "var(--item-grid-gap, 12px)",
-                  padding: "0 var(--item-grid-pad-x, 0)",
+                  "--virtual-row-y": `${virtualRow.start}px`,
+                  "--virtual-grid-columns": `repeat(${cols}, 1fr)`,
                 }}
               >
                 <For each={rowItems}>

@@ -169,7 +169,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("v8 round-14 — hover-intent constants come from the shared module", () => {
+describe("v9 stack-wake-mutex — hover-intent constants come from the shared module", () => {
   it("PREVIEW_HOVER_INTENT_MS mirrors HOVER_INTENT_MS from services/hoverIntent.ts", () => {
     // The round-13 lifecycle test was originally written against
     // local hard-coded 150/80 numbers. Round-14 unified them with the
@@ -179,8 +179,18 @@ describe("v8 round-14 — hover-intent constants come from the shared module", (
     expect(PREVIEW_HOVER_INTENT_MS).toBe(150);
   });
 
-  it("ACTIVE_PETAL_GRACE_MS mirrors LEAVE_GRACE_MS from services/hoverIntent.ts", () => {
+  it("ACTIVE_PETAL_GRACE_MS mirrors LEAVE_GRACE_MS from services/hoverIntent.ts (v9 post-PR3 fix = 80 ms)", () => {
     expect(ACTIVE_PETAL_GRACE_MS).toBe(LEAVE_GRACE_MS);
+    // v9 PR3 originally pushed this to 0 ms on the assumption
+    // that the StackWrapper hoveredZone$ effect's non-family
+    // immediate-collapse branch covered every leave case. Live
+    // testing surfaced the regression: the cursor crossing the
+    // 12 px capsule→petal halo gap spends ~16–32 ms in
+    // hovered === null and a 0 ms grace collapsed the bloom
+    // before the cursor reached the petal. The post-PR3 fix
+    // restores 80 ms; the non-family-hit branch in the
+    // hoveredZone$ effect remains synchronous so neighbour-
+    // zone wake handoff is still instant.
     expect(ACTIVE_PETAL_GRACE_MS).toBe(80);
   });
 });
@@ -220,7 +230,10 @@ describe("v8 round-13 — bloom petal hover-intent debounce", () => {
     // Even after the original timer would have fired, no preview opens.
     vi.advanceTimersByTime(PREVIEW_HOVER_INTENT_MS + 50);
     expect(lc.state.previewZoneId).toBeNull();
-    // Active reverts after the 80 ms grace.
+    // v9 (post-PR3 fix) ACTIVE_PETAL_GRACE_MS = 80 ms — the
+    // activeRevertTimer fires at leave + 80 ms (well inside the
+    // 200 ms advance above), so activePetalId has reverted to null
+    // by the time we assert.
     expect(lc.state.activePetalId).toBeNull();
   });
 
@@ -259,9 +272,14 @@ describe("v8 round-13 — bloom petal hover-intent debounce", () => {
     expect(lc.state.previewSticky).toBe(true);
     expect(lc.state.activePetalId).toBe("A");
 
-    // Cursor briefly leaves the petal — within the active-grace
-    // window — and re-enters. The active state should NOT have
-    // reverted, and the sticky preview should still be on A.
+    // Cursor briefly leaves the petal and re-enters. v9 (post-PR3
+    // fix) ACTIVE_PETAL_GRACE_MS = 80 ms, so the activeRevertTimer
+    // armed by handlePetalLeave is still pending at +40 ms — the
+    // re-entry's cancelActiveRevertTimer() inside handlePetalEnter
+    // clears it before activePetalId could ever flip to null.
+    // Either way, the sticky preview state (previewZoneId +
+    // previewSticky) is independent of activePetalId and stays on
+    // "A" through the entire transient.
     lc.handlePetalLeave("A");
     vi.advanceTimersByTime(40);
     lc.handlePetalEnter("A");

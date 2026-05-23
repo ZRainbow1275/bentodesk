@@ -64,10 +64,12 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: pnpm install
+        # C3 — frozen lockfile for reproducible release builds.
+        run: pnpm install --frozen-lockfile
 
       - name: Build Guardian binary
-        run: cargo build --release --bin guardian --manifest-path src-tauri/Cargo.toml
+        # C3 — `--locked` enforces Cargo.lock is honoured exactly.
+        run: cargo build --release --locked --bin guardian --manifest-path src-tauri/Cargo.toml
 
       - name: Build + sign Tauri app
         uses: tauri-apps/tauri-action@v0.6

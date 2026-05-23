@@ -48,7 +48,8 @@ pub fn restore_settings_backup(app: AppHandle, backup_id: String) -> Result<(), 
         .try_state::<AppState>()
         .ok_or_else(|| "AppState not initialized".to_string())?;
     let reloaded = AppSettings::load_or_default(&app).map_err(|e| e.to_string())?;
-    if let Ok(mut settings) = state.settings.lock() {
+    {
+        let mut settings = state.settings.write();
         *settings = reloaded;
     }
     Ok(())
@@ -80,10 +81,7 @@ pub fn set_encryption_mode(app: AppHandle, request: EncryptionModeRequest) -> Re
     // Update the persisted mode flag first so a crash mid-rewrite does not
     // strand a DPAPI-wrapped file with a `mode: None` hint.
     {
-        let mut settings = state
-            .settings
-            .lock()
-            .map_err(|e| format!("settings lock poisoned: {e}"))?;
+        let mut settings = state.settings.write();
         settings.encryption.mode = target_mode;
     }
     state.persist_settings();

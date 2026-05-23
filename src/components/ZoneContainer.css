@@ -1,0 +1,35 @@
+/** ZoneContainer - full-screen shell and marquee primitives. */
+
+.zone-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.zone-container__marquee-surface {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.zone-container__marquee-surface--active {
+  pointer-events: auto;
+}
+
+.zone-container__marquee-box {
+  position: fixed;
+  left: var(--marquee-left, 0px);
+  top: var(--marquee-top, 0px);
+  width: var(--marquee-width, 0px);
+  height: var(--marquee-height, 0px);
+  pointer-events: none;
+  border: 1px dashed rgba(59, 130, 246, 0.9);
+  background: rgba(59, 130, 246, 0.08);
+  border-radius: 2px;
+  z-index: 1000;
+}

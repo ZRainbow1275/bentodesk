@@ -65,7 +65,7 @@ pub async fn bulk_update_zones(
         return Ok(0);
     }
     let touched = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_bulk_updates(&mut layout, &updates)
     };
     state.persist_layout();
@@ -140,7 +140,7 @@ pub async fn bulk_delete_zones(
         return Ok(0);
     }
     let removed = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         let before = layout.zones.len();
         layout.zones.retain(|z| !ids.contains(&z.id));
         layout.last_modified = chrono::Utc::now().to_rfc3339();
@@ -168,7 +168,7 @@ pub async fn apply_layout_algorithm(
         return Ok(0);
     }
     let touched = {
-        let mut layout = state.layout.lock().map_err(|e| e.to_string())?;
+        let mut layout = state.layout.write();
         apply_layout_algorithm_to_layout(&mut layout, algo, &zone_ids)
     };
     state.persist_layout();
@@ -497,7 +497,10 @@ mod tests {
         ];
 
         let touched = apply_bulk_updates(&mut layout, &updates);
-        assert_eq!(touched, 3, "every matched id must be touched even if icon was a no-op");
+        assert_eq!(
+            touched, 3,
+            "every matched id must be touched even if icon was a no-op"
+        );
 
         let by_id = |id: &str| layout.zones.iter().find(|z| z.id == id).unwrap();
 
@@ -601,8 +604,7 @@ mod tests {
 
     #[test]
     fn apply_layout_algorithm_spiral_distributes_distinct_positions() {
-        let mut layout =
-            layout_with((0..6).map(|i| make_zone(&format!("z{i}"))).collect());
+        let mut layout = layout_with((0..6).map(|i| make_zone(&format!("z{i}"))).collect());
         let ids: Vec<String> = (0..6).map(|i| format!("z{i}")).collect();
 
         let touched = apply_layout_algorithm_to_layout(&mut layout, LayoutAlgorithm::Spiral, &ids);
@@ -621,8 +623,7 @@ mod tests {
 
     #[test]
     fn apply_layout_algorithm_organic_stays_inside_viewport() {
-        let mut layout =
-            layout_with((0..5).map(|i| make_zone(&format!("o{i}"))).collect());
+        let mut layout = layout_with((0..5).map(|i| make_zone(&format!("o{i}"))).collect());
         let ids: Vec<String> = (0..5).map(|i| format!("o{i}")).collect();
 
         let touched = apply_layout_algorithm_to_layout(&mut layout, LayoutAlgorithm::Organic, &ids);

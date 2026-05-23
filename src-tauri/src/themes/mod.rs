@@ -95,7 +95,7 @@ pub async fn get_theme(state: State<'_, AppState>, id: String) -> Result<Theme, 
 #[tauri::command]
 pub async fn get_active_theme(state: State<'_, AppState>) -> Result<Theme, String> {
     let active_id = {
-        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let settings = state.settings.read();
         settings.active_theme.clone()
     };
 
@@ -126,7 +126,7 @@ pub async fn set_active_theme(state: State<'_, AppState>, id: String) -> Result<
 
     // Update settings
     {
-        let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+        let mut settings = state.settings.write();
         settings.active_theme = Some(id);
     }
     state.persist_settings();

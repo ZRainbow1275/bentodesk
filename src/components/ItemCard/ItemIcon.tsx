@@ -105,9 +105,8 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
       ref={containerEl}
       class={`item-icon ${!primed() && !error() ? "pulse" : ""}`}
       style={{
-        width: `${containerSize()}px`,
-        height: `${containerSize()}px`,
-        "flex-shrink": "0",
+        "--item-icon-container-size": `${containerSize()}px`,
+        "--item-icon-render-size": `${renderSize()}px`,
       }}
     >
       <Show when={visible() && primed() && !error() ? resolvedSrc() : null} keyed>
@@ -135,7 +134,7 @@ const ItemIcon: Component<ItemIconProps> = (props) => {
         )}
       </Show>
       <Show when={error()}>
-        <span class="item-icon__fallback" style={{ "font-size": `${renderSize() - 4}px` }}>
+        <span class="item-icon__fallback">
           {getFallbackEmoji(props.path)}
         </span>
       </Show>

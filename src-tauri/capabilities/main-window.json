@@ -1,7 +1,7 @@
 {
-  "identifier": "default",
-  "description": "Default permissions for BentoDesk",
-  "windows": ["main", "minibar-*"],
+  "identifier": "main-window",
+  "description": "Permissions for the BentoDesk main overlay window. Includes tray + updater + global-shortcut + dialog APIs that the settings UI exercises but minibar windows should never reach.",
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",

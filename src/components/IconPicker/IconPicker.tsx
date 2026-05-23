@@ -170,7 +170,7 @@ const IconPicker: Component<IconPickerProps> = (props) => {
             type="file"
             accept=".svg,.png,.ico"
             onChange={handleFileUpload}
-            style={{ display: "none" }}
+            class="icon-picker__upload-input"
           />
         </label>
       </div>

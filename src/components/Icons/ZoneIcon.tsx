@@ -11,6 +11,7 @@ import { Component, Show, createMemo } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { ZONE_ICONS } from "./ZoneIcons";
 import LucideDynamic from "./LucideDynamic";
+import "./ZoneIcon.css";
 
 interface ZoneIconProps {
   icon: string;
@@ -34,31 +35,22 @@ const ZoneIcon: Component<ZoneIconProps> = (props) => {
     return { kind: "text" as const, value: raw };
   });
 
-  const wrapperStyle = () => ({
-    display: "inline-flex",
-    "align-items": "center",
-    "justify-content": "center",
-    width: `${size()}px`,
-    height: `${size()}px`,
-  });
-
   return (
     <Show
       when={parsed().kind !== "text"}
       fallback={
         <span
-          class={props.class}
-          style={{
-            "font-size": `${size()}px`,
-            "line-height": "1",
-            ...wrapperStyle(),
-          }}
+          class={`zone-icon zone-icon--text ${props.class ?? ""}`.trim()}
+          style={{ "--zone-icon-size": `${size()}px` }}
         >
           {(parsed() as { kind: "text"; value: string }).value}
         </span>
       }
     >
-      <span class={props.class} style={wrapperStyle()}>
+      <span
+        class={`zone-icon ${props.class ?? ""}`.trim()}
+        style={{ "--zone-icon-size": `${size()}px` }}
+      >
         <Show when={parsed().kind === "builtin"}>
           <Dynamic component={(parsed() as { kind: "builtin"; component: Component }).component} />
         </Show>
@@ -71,7 +63,7 @@ const ZoneIcon: Component<ZoneIconProps> = (props) => {
             alt=""
             width={size()}
             height={size()}
-            style={{ "object-fit": "contain" }}
+            class="zone-icon__custom-img"
           />
         </Show>
       </span>

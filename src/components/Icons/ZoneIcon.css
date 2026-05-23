@@ -1,0 +1,18 @@
+/** ZoneIcon - CSP-safe static icon wrapper styles. */
+
+.zone-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--zone-icon-size, 20px);
+  height: var(--zone-icon-size, 20px);
+}
+
+.zone-icon--text {
+  font-size: var(--zone-icon-size, 20px);
+  line-height: 1;
+}
+
+.zone-icon__custom-img {
+  object-fit: contain;
+}

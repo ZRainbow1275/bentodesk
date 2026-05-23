@@ -19,3 +19,27 @@
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* VirtualItemGrid - static layout moved out of JSX for strict CSP. */
+.item-grid--virtual {
+  overflow-y: auto;
+  height: 100%;
+}
+
+.item-grid__virtual-spacer {
+  height: var(--virtual-grid-height, 0px);
+  width: 100%;
+  position: relative;
+}
+
+.item-grid__virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  transform: translateY(var(--virtual-row-y, 0px));
+  display: grid;
+  grid-template-columns: var(--virtual-grid-columns, repeat(1, 1fr));
+  gap: var(--item-grid-gap, 12px);
+  padding: 0 var(--item-grid-pad-x, 0);
+}

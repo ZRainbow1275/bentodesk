@@ -210,13 +210,7 @@ pub fn rehydrate_from_layout(handle: &AppHandle) {
         Some(s) => s,
         None => return,
     };
-    let layout = match state.layout.lock() {
-        Ok(l) => l.clone(),
-        Err(e) => {
-            tracing::warn!("live_folder rehydrate: layout lock poisoned: {e}");
-            return;
-        }
-    };
+    let layout = state.layout.read().clone();
     for zone in &layout.zones {
         if let Some(path) = &zone.live_folder_path {
             let pb = PathBuf::from(path);

@@ -14,12 +14,18 @@ import { loadZones, updateZone, zonesStore } from "../../stores/zones";
 import { getViewportSize } from "../../stores/ui";
 import {
   acquireDragLock,
+  acquireModalLock,
   registerZoneElement,
   unregisterZoneElement,
   computeInflateForPosition,
   getCapsuleBoxPx,
+  hoveredZone$,
 } from "../../services/hitTest";
 import { resolvePetalRow, pickPetalSize } from "../../services/petalLayout";
+import {
+  computeScatterPositions,
+  type ScatterMember,
+} from "../../utils/scatterPositions";
 import {
   HOVER_INTENT_MS,
   LEAVE_GRACE_MS,
@@ -109,18 +115,34 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
   // bloomCursor/bloomCenter.
 
   let wrapperRef: HTMLDivElement | undefined;
-  // v8 round-5 (Bug B real-fix): the bloom buffer + every petal needs to
-  // be registered with the cursor hit-test poller while the bloom is
-  // active. Without this, the polar petals fly OUTSIDE the wrapper's
-  // bounding rect (because they are `position: fixed`), so the only
-  // hit-test target the poller sees is the original capsule rect. The
-  // moment the cursor sits over a petal far from the capsule, the
-  // state machine drops to PASSTHROUGH → the webview ignores every
-  // petal mouseenter / click → the user sees petals fan out but cannot
-  // operate on any of them. Registering the buffer halo + each petal
-  // every render keeps the cursor "captured" anywhere inside the bloom.
-  let bloomBufferRef: HTMLDivElement | undefined;
+  // v9 stack-wake-mutex (history): rounds 5–v8 used a 100vw × 100vh
+  // `.stack-bloom-buffer` halo to keep the cursor hit-test poller
+  // "registered" anywhere on screen while the bloom was open. The
+  // halo had `pointer-events: auto` and z-index 49 — high enough to
+  // shadow neighbouring zones' capsules, which silently broke their
+  // hover & click wake. v9 deletes the buffer entirely; petal hit-test
+  // coverage now comes from per-petal `inflate` haloes (12 px on each
+  // side, registered with the singleton hit-test map alongside the
+  // wrapper rect itself), and bloom collapse is driven by the
+  // hoveredZone$ Solid signal exposed from services/hitTest.ts.
   const petalRefs = new Map<string, HTMLButtonElement>();
+  /**
+   * Local set of DOM elements that participate in the bloom family for
+   * the hoveredZone$ collapse effect. Members include:
+   *   - the wrapper itself (always — registered on mount)
+   *   - each rendered petal (added in the bloom-active createEffect)
+   *   - the floating FocusedZonePreview element when bloom-anchored
+   *     (added via the onElementMount/Unmount callbacks)
+   *
+   * Read inside the hoveredZone$-driven createEffect to decide whether
+   * a hover transition should cancel a pending collapse (cursor still
+   * on a bloom-family element) or trigger an immediate collapse
+   * (cursor moved to an unrelated zone). Kept as a plain Set rather
+   * than a reactive signal because the createEffect already re-runs
+   * on hoveredZone$ writes — wrapping the Set in a signal would just
+   * add unnecessary subscriber bookkeeping.
+   */
+  const bloomElements = new Set<HTMLElement>();
   // v8 #4: mouseleave race-protection. v7's bloom collapsed the moment the
   // cursor crossed the wrapper edge — including the brief gap when the
   // cursor moved between capsule and a petal, or grazed a neighbouring
@@ -134,6 +156,34 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     if (bloomCollapseTimer !== null) {
       clearTimeout(bloomCollapseTimer);
       bloomCollapseTimer = null;
+    }
+  };
+
+  // Post-deploy fix (Bug A — context menu loses focus):
+  //
+  // The right-click `.stack-context-menu` is `position: fixed`, lives
+  // OUTSIDE the wrapper's natural rect, and is NOT registered with
+  // the cursor hit-test poller. While the cursor sits over a menu
+  // item the poller's hoveredZone$ flips to null, the state machine
+  // drops to GRACE_PERIOD (350 ms — `services/hitTest.ts:165`), and
+  // then to PASSTHROUGH; `setIgnoreCursorEvents(true)` makes
+  // subsequent clicks fall through to the desktop. The user reported
+  // exactly this 350 ms timing: "鼠标悬浮在'解散堆栈'选项后过一段时间
+  // 会失焦，无法选中".
+  //
+  // Fix: hold a `acquireModalLock()` for the menu's lifetime. The
+  // modal lock force-disables passthrough regardless of the poller's
+  // hoveredZone$ value, so the menu remains clickable indefinitely.
+  // The lock is acquired in `handleContextMenu` AFTER setting the
+  // open coords (so the lock pairs with a visible menu) and released
+  // by every code path that closes the menu — see `closeContextMenu`
+  // and the `onCleanup` symmetric tear-down below.
+  let releaseContextMenuLock: (() => void) | null = null;
+  const closeContextMenu = (): void => {
+    setContextMenuOpen(null);
+    if (releaseContextMenuLock !== null) {
+      releaseContextMenuLock();
+      releaseContextMenuLock = null;
     }
   };
 
@@ -432,7 +482,21 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     setIsBloomed(false);
     setPreviewZoneId(null);
     setTrayOpen(false);
+    // Defensive release: a re-right-click while the menu is already
+    // open would otherwise leave the previous lock orphaned (the
+    // existing `setContextMenuOpen({...})` write doesn't go through
+    // closeContextMenu — it just updates the coords).
+    if (releaseContextMenuLock !== null) {
+      releaseContextMenuLock();
+      releaseContextMenuLock = null;
+    }
     setContextMenuOpen({ x: e.clientX, y: e.clientY });
+    // Post-deploy fix (Bug A): acquire a modal lock for the menu's
+    // lifetime so the hit-test poller keeps passthrough disabled while
+    // the cursor sits over the (unregistered, position: fixed) menu.
+    // Released by closeContextMenu / onCleanup. See the field
+    // declaration above for the full rationale.
+    releaseContextMenuLock = acquireModalLock();
     debugStack("contextmenu:menu-set", {
       cursor: { x: e.clientX, y: e.clientY },
     });
@@ -440,7 +504,16 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
 
   const handleDissolve = async (): Promise<void> => {
     debugStack("dissolve:click");
-    setContextMenuOpen(null);
+    // Post-deploy fix (Bug B — dissolve scatter):
+    //
+    // Snapshot the anchor zone + member list BEFORE closing the menu /
+    // awaiting IPC. After `unstackZonesAction` resolves, `loadZones`
+    // re-derives the store and `props.zones` may already point at
+    // freshly-unstacked free zones — but we still want their original
+    // ids and the original stack capsule footprint to compute the row.
+    const anchor = baseZone();
+    const memberSnapshot: ScatterMember[] = props.zones.map((z) => ({ id: z.id }));
+    closeContextMenu();
     setPreviewZoneId(null);
     setTrayOpen(false);
     setIsBloomed(false);
@@ -462,6 +535,49 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
         (z) => z.stack_id === props.stackId,
       ),
     });
+    // Post-deploy fix (Bug B — option B "scatter on dissolve"): the
+    // user's complaint "点击'解散堆栈'不够丝滑" was rooted in every
+    // member retaining the stack's recorded position — they all sat
+    // under the original capsule and the user had to drag them apart
+    // by hand. We now compute a row layout anchored on the original
+    // stack position and push each new position through `updateZone`,
+    // which keeps the IPC-first mutation contract in
+    // `stores/zones.ts:133` (every position write goes server-side
+    // first; the local store is updated from the IPC return value).
+    if (ok && anchor && memberSnapshot.length > 1) {
+      const capsule = getCapsulePixelSize(anchor);
+      const positions = computeScatterPositions(
+        {
+          x_percent: anchor.position.x_percent,
+          y_percent: anchor.position.y_percent,
+          capsule_width_px: capsule.width,
+          capsule_height_px: capsule.height,
+        },
+        memberSnapshot,
+        {
+          width: window.innerWidth || 1920,
+          height: window.innerHeight || 1080,
+        },
+      );
+      // Skip the anchor (index 0) — it already sits at the recorded
+      // position, so we'd just round-trip the same numbers. Updating
+      // only the members that actually moved keeps the IPC chatter
+      // proportional to the visible motion.
+      const moves = positions.slice(1);
+      if (moves.length > 0) {
+        await Promise.all(
+          moves.map((p) =>
+            updateZone(p.id, {
+              position: {
+                x_percent: p.x_percent,
+                y_percent: p.y_percent,
+              },
+            }),
+          ),
+        );
+        debugStack("dissolve:scattered", { count: moves.length });
+      }
+    }
   };
 
   const handleDetach = async (zoneId: string): Promise<void> => {
@@ -473,7 +589,7 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     if (activePetalId() === zoneId) {
       setActivePetalId(null);
     }
-    setContextMenuOpen(null);
+    closeContextMenu();
     const ok = await detachZoneFromStackAction(props.stackId, zoneId);
     debugStack("detach:ipc-returned", { zoneId, ok });
   };
@@ -878,29 +994,38 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     if (stackDisplayMode() === "hover") {
       closeTray();
     }
-    // v8 #4: defer bloom + preview teardown by LEAVE_GRACE_MS so a brief
-    // re-entry (cursor crossing the buffer edge, or a neighbouring zone
-    // briefly stealing hover via higher z-index) cancels it via
-    // clearTimeout. v8 round-14: the hard-coded 80 ms moved to the
-    // shared `services/hoverIntent.ts` constants so external-zone
-    // hover-leave and bloom collapse share a single source of truth.
+    // v9 stack-wake-mutex: when the bloom is active, the
+    // hoveredZone$-driven createEffect owns collapse semantics —
+    // immediate teardown when the cursor moves to a non-bloom
+    // zone, LEAVE_GRACE_MS / STICKY_GRACE_MS bounded grace when
+    // the cursor exits every zone (hovered === null). The
+    // wrapper's DOM mouseleave fires the moment the cursor
+    // crosses the wrapper's natural rect (which excludes the
+    // `position: fixed` petals + floating preview), so wiring a
+    // grace timer here would race the effect's same-tick
+    // decision and could either double-collapse or stall a
+    // bloom that the effect already kept alive.
     //
-    // Sticky-preview escalation: when the user has explicitly clicked a
-    // petal to commit a sticky preview, the leave-grace window extends
-    // to STICKY_GRACE_MS (200 ms) — the user has made a deliberate
-    // choice and the threshold for tearing down their committed surface
-    // should be more lenient than a transient hover-off. A regular
-    // hover-only bloom collapses in LEAVE_GRACE_MS (80 ms) as before.
+    // Hover-tray mode (no bloom: stackDisplayMode === "hover"
+    // with bloom suppressed by lock / drag / etc.) still wants
+    // the legacy grace because there's no petal hit-test layer
+    // to drive the collapse — the tray itself is the only
+    // surface and DOM mouseleave is the canonical "user left"
+    // signal.
+    if (isBloomed()) {
+      // The bloom-active createEffect handles collapse end-to-end.
+      // We intentionally leave any pending bloomCollapseTimer
+      // (started below by a prior !isBloomed() leave) to its own
+      // armed deadline — the effect will cancel it on the next
+      // hover transition if appropriate.
+      return;
+    }
     cancelBloomCollapse();
     const collapseGrace = previewSticky() ? STICKY_GRACE_MS : LEAVE_GRACE_MS;
     bloomCollapseTimer = setTimeout(() => {
       bloomCollapseTimer = null;
       setIsBloomed(false);
       setPreviewZoneId(null);
-      // v8 round-13: full bloom collapse drops every transient
-      // selection — active petal + sticky flag + pending hover-intent
-      // timer — so a re-bloom starts from the same blank slate as the
-      // first bloom of the session.
       cancelPreviewOpenTimer();
       cancelActiveRevertTimer();
       setActivePetalId(null);
@@ -1051,7 +1176,7 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     const insideContext = target?.closest?.(".stack-context-menu");
     const insideWrapper = wrapperRef?.contains(target ?? null) ?? false;
     if (contextMenuOpen() && !insideContext) {
-      setContextMenuOpen(null);
+      closeContextMenu();
     }
     if (
       stackDisplayMode() === "click" &&
@@ -1084,6 +1209,11 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
       registerZoneElement(wrapperRef, {
         inflate: computeInflateForPosition(pos, { kind: "stack", boxPx }),
       });
+      // v9 stack-wake-mutex: the wrapper rect is the always-present
+      // anchor of the bloom family (capsule lives inside it). Adding
+      // it to bloomElements unconditionally lets the hoveredZone$
+      // collapse effect treat capsule-hover as "still inside bloom".
+      bloomElements.add(wrapperRef);
     }
   });
 
@@ -1100,19 +1230,25 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     if (wrapperRef) {
       unregisterZoneElement(wrapperRef);
     }
-    // v8 round-5 (Bug B): symmetric cleanup for the bloom hit-test
-    // registrations. Unmounting the StackWrapper while the bloom is
-    // open (e.g. dissolve via context menu, drag-merge into another
-    // stack) must drop the buffer + petal refs from the poller; leaving
-    // them registered would keep the cursor "captured" over a stale
-    // rect even after the elements have detached from the DOM.
-    if (bloomBufferRef) {
-      unregisterZoneElement(bloomBufferRef);
-    }
+    // v9 stack-wake-mutex: symmetric cleanup. The bloom-active
+    // createEffect's onCleanup already drops petal registrations the
+    // moment bloomActive flips false; this fallback handles the
+    // dissolve-while-bloomed case (effect cleanup hasn't run yet
+    // because the stack itself is being torn down).
     for (const el of petalRefs.values()) {
       unregisterZoneElement(el);
     }
     petalRefs.clear();
+    bloomElements.clear();
+    // Post-deploy fix (Bug A): release any outstanding context-menu
+    // modal lock if the stack is dissolved / unmounted while the
+    // menu is still open. Without this, the lock counter in
+    // `services/hitTest.ts` would leak and the cursor would stay
+    // captured by the webview indefinitely.
+    if (releaseContextMenuLock !== null) {
+      releaseContextMenuLock();
+      releaseContextMenuLock = null;
+    }
   });
 
   createEffect(() => {
@@ -1243,7 +1379,13 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
       return;
     }
     // Inactive — flip the leaving flag so the exit keyframe runs, then
-    // schedule the unmount after the keyframe finishes.
+    // schedule the unmount after the keyframe finishes. v9
+    // stack-wake-mutex: window tightened 240 → 160 ms in lockstep with
+    // the new exit keyframe (140 ms) + capped stagger tail (120 ms /
+    // count). The 160 ms gives ≤ 8-petal stacks a 20 ms safety margin
+    // past the longest exit-delay-plus-duration; larger stacks have
+    // proportionally smaller per-petal delays (cap / count) so the
+    // tail still finishes inside the window.
     if (bloomVisible()) {
       cancelBloomUnmount();
       setBloomLeaving(true);
@@ -1251,7 +1393,7 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
         bloomUnmountTimer = null;
         setBloomVisible(false);
         setBloomLeaving(false);
-      }, 240);
+      }, 160);
     }
   });
   onCleanup(() => {
@@ -1264,21 +1406,34 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     debugBloom("bloomActive:transition", { bloomActive: bloomActive() });
   });
 
-  // v8 round-5 (Bug B real-fix): keep the bloom-buffer halo + every petal
-  // registered with the cursor hit-test poller while the bloom is active.
-  // Petals + buffer use `position: fixed` and live OUTSIDE the wrapper's
-  // bounding rect; without registration the poller's hit-test only sees
-  // the capsule rect, so cursor-over-petal lands in PASSTHROUGH and the
-  // webview never receives the click that opens FocusedZonePreview. We
-  // re-register on every reactive tick (members, cursor, bloomActive) so
-  // newly-mounted petals are picked up the same frame they appear, and
-  // we tear them down via onCleanup so the unregister fires immediately
-  // when bloomActive flips false (instead of waiting for the next tick).
+  // v9 stack-wake-mutex: register every visible petal with the
+  // cursor hit-test poller while the bloom is active. Petals are
+  // `position: fixed` and live OUTSIDE the wrapper's bounding rect,
+  // so without registration the poller would only see the capsule
+  // rect and cursor-over-petal would land in PASSTHROUGH (which
+  // silently swallows the petal mouseenter / click).
+  //
+  // Each petal registers with a 12 px directional inflate halo so
+  // adjacent petals' hit rects bridge the visible row gap — the
+  // cursor sweeping between two petals never crosses an
+  // unregistered region, which (combined with the bloomElements
+  // membership check in the hoveredZone$ collapse effect below)
+  // keeps the bloom open during natural cursor paths through the
+  // row.
+  //
+  // The petal Set membership in `bloomElements` is what
+  // distinguishes "cursor on a bloom-family element" from "cursor
+  // on a neighbouring zone" in the collapse effect. It's
+  // intentionally a plain Set (not a reactive signal) — the
+  // collapse effect already re-runs on hoveredZone$ writes, and
+  // reactive tracking of Set membership would add subscriber
+  // overhead without changing behaviour.
+  const PETAL_HALO_PX = 12;
   createEffect(() => {
     if (!bloomActive()) return;
     // Touch the layout tick + member count so the effect re-runs
     // whenever petals re-position (and thus may extend beyond the
-    // previous halo). v8 round-12: cursor signal removed.
+    // previous halo).
     bloomedTick();
     void props.zones.length;
     // Snapshot the registrations so onCleanup can undo exactly the set
@@ -1286,19 +1441,101 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
     // the register pass and the cleanup phase (e.g. a zone unmounting
     // mid-effect leaves a stale Map entry).
     const registered: HTMLElement[] = [];
-    if (bloomBufferRef) {
-      registerZoneElement(bloomBufferRef);
-      registered.push(bloomBufferRef);
-    }
     for (const el of petalRefs.values()) {
-      registerZoneElement(el);
+      registerZoneElement(el, {
+        inflate: {
+          top: PETAL_HALO_PX,
+          right: PETAL_HALO_PX,
+          bottom: PETAL_HALO_PX,
+          left: PETAL_HALO_PX,
+        },
+      });
+      bloomElements.add(el);
       registered.push(el);
     }
     onCleanup(() => {
       for (const el of registered) {
         unregisterZoneElement(el);
+        bloomElements.delete(el);
       }
     });
+  });
+
+  // v9 stack-wake-mutex: poller-driven bloom collapse. The
+  // hoveredZone$ accessor wakes this effect every time the cursor
+  // crosses a hit-test region boundary; the membership check
+  // against bloomElements decides immediately (no grace timer)
+  // whether to keep the bloom alive (cursor on capsule / petal /
+  // floating preview) or tear it down (cursor on an unrelated
+  // zone). The legacy LEAVE_GRACE_MS / STICKY_GRACE_MS path in
+  // handleMouseLeave stays armed as a fallback for the
+  // hovered === null case (cursor moved off every registered
+  // zone — no signal there to discriminate "left bloom for
+  // empty space"), but for the bloom-vs-neighbour case the
+  // collapse is now synchronous on hover.
+  //
+  // This is the load-bearing piece that fixes Bug 1 (neighbour
+  // zones obscured by the deleted 100vw buffer): with the
+  // buffer gone, neighbours regain hit-test priority; with this
+  // effect, switching to a neighbour also tears the bloom down
+  // without waiting for handleMouseLeave's grace timer.
+  createEffect(() => {
+    const hovered = hoveredZone$();
+    if (!isBloomed()) return;
+    if (hovered === null) {
+      // Cursor left every registered zone — no signal here can
+      // distinguish "stepping into a 1 px gap between two petals"
+      // from "leaving the cluster entirely". Arm a short grace
+      // timer (LEAVE_GRACE_MS for hover, STICKY_GRACE_MS for
+      // click-committed sticky previews) so a fast re-entry on
+      // any bloom element cancels the teardown via
+      // cancelBloomCollapse below. This is the only path that
+      // schedules bloomCollapseTimer in the v9 model — the
+      // wrapper's DOM mouseleave no longer touches it while
+      // bloom is active.
+      if (bloomCollapseTimer !== null) return;
+      const collapseGrace = previewSticky() ? STICKY_GRACE_MS : LEAVE_GRACE_MS;
+      bloomCollapseTimer = setTimeout(() => {
+        bloomCollapseTimer = null;
+        setIsBloomed(false);
+        setPreviewZoneId(null);
+        cancelPreviewOpenTimer();
+        cancelActiveRevertTimer();
+        setActivePetalId(null);
+        setPreviewSticky(false);
+        debugBloom("hoveredZone$:null-grace-collapse-fired");
+      }, collapseGrace);
+      return;
+    }
+    if (bloomElements.has(hovered)) {
+      // Cursor on a bloom-family element — keep the bloom alive by
+      // cancelling the cursor-left-everything grace timer. We
+      // intentionally DO NOT cancel `previewOpenTimer` /
+      // `activeRevertTimer` here: those are petal-level state
+      // machines owned by `handlePetalEnter` / `handlePetalLeave`
+      // (see round-13 hover-intent contract). The poller's
+      // hoveredZone$ write fires whenever the cursor crosses a
+      // registered zone boundary — including the moment the cursor
+      // moves from the wrapper onto a petal, which is exactly when
+      // `handlePetalEnter` has just scheduled the 150 ms preview-
+      // open debounce. Calling cancelPreviewOpenTimer() in that
+      // branch would race the petal-level scheduling and the
+      // preview would never open. The bloom-family decision here
+      // is strictly about whether to TEAR THE BLOOM DOWN, not
+      // about which petal-level affordance is currently armed.
+      cancelBloomCollapse();
+      return;
+    }
+    // Cursor on a non-bloom zone (neighbour zone, another stack's
+    // capsule, …) — collapse immediately so the neighbour can wake
+    // without waiting for the deleted buffer's mouseleave grace.
+    cancelBloomCollapse();
+    setIsBloomed(false);
+    setPreviewZoneId(null);
+    setActivePetalId(null);
+    setPreviewSticky(false);
+    cancelPreviewOpenTimer();
+    cancelActiveRevertTimer();
   });
 
   return (
@@ -1350,56 +1587,25 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
         </Show>
       </div>
       {/*
-        * v8 round-12 (bloom-row-layout): the petal row.
+        * v9 stack-wake-mutex: the petal row.
         *
         * The user model is "stack members appear neatly under the
         * capsule" — a horizontal row of petal tiles directly below
         * (or above, when the capsule sits near the bottom edge) the
         * stack capsule, side by side. The row clamps to the viewport
         * edges with a 16 px inset, and wraps to multiple rows when
-        * the petal count is too large to fit horizontally. Two
-        * layers, both `position: fixed` so they escape the wrapper's
-        * stacking context entirely:
+        * the petal count is too large to fit horizontally.
         *
-        *   1. `.stack-bloom-buffer` — invisible viewport-sized halo
-        *      (100vw × 100vh) registered with the cursor hit-test
-        *      poller so the bloom stays open as long as the cursor
-        *      is anywhere in the viewport. Petals sit on top via
-        *      z-index 51, so clicks land on the petal not the buffer.
-        *
-        *   2. `.stack-bloom__petal` (× N) — each petal is placed at
-        *      its row-resolved top-left corner. The 108×96 box gives
-        *      the icon room to breathe and matches the user's "real
-        *      ZenCapsule tile" feel. Hover/click still opens
-        *      FocusedZonePreview for that member.
+        * Each `.stack-bloom__petal` is `position: fixed` so it
+        * escapes the wrapper's stacking context. Hit-test coverage
+        * is supplied by per-petal `inflate` haloes (12 px on each
+        * side, set by the bloom-active createEffect above) — the
+        * pre-v9 `.stack-bloom-buffer` 100vw halo was deleted because
+        * its `pointer-events: auto` shadowed neighbouring zones'
+        * hover & click wake. Hover/click on a petal still opens
+        * FocusedZonePreview for that member.
         */}
       <Show when={bloomVisible() && petalRow() !== null}>
-        {/*
-          * v8 round-12: the bloom buffer is now a viewport-sized
-          * invisible halo (full 100vw × 100vh) so multi-row wrap
-          * layouts still get hit-test coverage anywhere the petals
-          * may render. Pre-round-12 the buffer was a circle sized
-          * around the cursor radius, which broke when the row layout
-          * extended outside that circle. The buffer's pointer-events
-          * are still `auto` so cursor-anywhere-near-petals keeps the
-          * bloom open via the registered hit-test entry; clicks pass
-          * through to the petals (which sit on top via z-index: 51).
-          */}
-        <div
-          class="stack-bloom-buffer"
-          aria-hidden="true"
-          ref={(el) => {
-            bloomBufferRef = el;
-          }}
-          style={{
-            position: "fixed",
-            left: "0px",
-            top: "0px",
-            width: "100vw",
-            height: "100vh",
-          }}
-          onMouseEnter={cancelBloomCollapse}
-        />
         <div
           class="stack-bloom"
           role="menu"
@@ -1616,6 +1822,15 @@ const StackWrapper: Component<StackWrapperProps> = (props) => {
               setPreviewSticky(false);
             }}
             onMouseEnter={cancelBloomCollapse}
+            // v9 stack-wake-mutex: register the floating preview as a
+            // bloom-family member so the hoveredZone$-driven collapse
+            // effect treats cursor-over-preview as "still inside
+            // bloom" rather than "left bloom for a non-bloom zone".
+            // Only fires when the preview is anchored to a petal rect
+            // (the floating variant); the legacy tray-driven preview
+            // shares the wrapper's natural rect already on file.
+            onElementMount={(el) => bloomElements.add(el)}
+            onElementUnmount={(el) => bloomElements.delete(el)}
           />
         )}
       </Show>

@@ -50,10 +50,7 @@ pub fn check_onedrive_exclusion_needed(app: AppHandle) -> OneDriveExclusionCheck
     use tauri::Manager;
     let desktop_path = {
         let state = app.state::<crate::AppState>();
-        let settings = match state.settings.lock() {
-            Ok(s) => s,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let settings = state.settings.read();
         settings.desktop_path.clone()
     };
 

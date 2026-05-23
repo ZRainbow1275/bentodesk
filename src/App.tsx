@@ -297,14 +297,7 @@ const App: Component = () => {
   });
 
   return (
-    <div
-      id="desktop-overlay"
-      style={{
-        width: "100vw",
-        height: "100vh",
-        position: "relative",
-      }}
-    >
+    <div id="desktop-overlay">
       <Show
         when={!zonesStore.loading}
         fallback={null}
