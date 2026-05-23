@@ -1,0 +1,6262 @@
+//! Render orchestrator.
+//!
+//! Walks the laid-out tree, dispatches each [`WidgetNode`] to its D2D draw
+//! call. All resources are created lazily and cached on the `Renderer`; per
+//! frame we only do `BeginDraw`/`Clear`/`Fill*`/`EndDraw`/`Present` (spec §10
+//! hot-path discipline — no heap, no `format!`).
+//!
+//! ### Multi-window state split (T-009 / Wave B)
+//!
+//! Per Phase 1 / T-009 ruling, resources fall into two tiers:
+//!
+//! | Tier              | Owner                                    | Cardinality |
+//! |-------------------|------------------------------------------|-------------|
+//! | Process singleton | `bento-nano-platform` `OnceLock`s        | 1 per process |
+//! |                   | — `d2d::factory()` (D2D factory + device)|             |
+//! |                   | — `d3d::device()` (D3D11 device + ctx)   |             |
+//! |                   | — `dwrite::factory()` (DWrite shared)    |             |
+//! |                   | — `dcomp::device()` (DComp v2/v3)        |             |
+//! | Per window        | `Renderer` instance (this struct)        | N per process |
+//! |                   | — `comp: WindowComp` (DComp visual tree, swap chain) |   |
+//! |                   | — `surface: WindowSurface` (D2D RT bound to backbuffer) | |
+//! |                   | — `text_format: IDWriteTextFormat`       |             |
+//! |                   | — `utf16_scratch`, `base_scale` (per-frame state)    |    |
+//!
+//! `text_format` lives per-renderer rather than as a singleton because
+//! Phase 2 themes will let each window kind pick its own font (e.g. Settings
+//! uses Segoe UI Variable while MiniBar stays on Microsoft YaHei UI). The
+//! per-window cost is one COM ref (~1 KB) — well below the 100 MB ceiling
+//! even at the §11 R7 max of 8 + 1 windows.
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use bento_nano_backend::{
+    layout::{BentoZone as SnapshotZone, DesktopSnapshot},
+    system::get_memory_usage,
+};
+use bento_nano_layout::LayoutError;
+use bento_nano_platform::{
+    PlatformError, WindowKind,
+    d2d::{self, WindowSurface},
+    dcomp::WindowComp,
+    dwrite, ok, svg,
+    svg_cache::SvgCache,
+};
+use bento_nano_style::{BorderRadius, Color, Rect};
+use bento_nano_widget::{ImageSource, WidgetNode};
+use bento_nano_zone::{Zone, ZoneId, ZoneItem, ZoneItemId};
+use smallvec::SmallVec;
+use smol_str::SmolStr;
+use windows::Win32::Foundation::HWND as W_HWND;
+use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1RenderTarget,
+    ID2D1SolidColorBrush,
+};
+use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat};
+use windows::core::Interface;
+
+use crate::business::{
+    bulk_manager_panel, capsule_picker, debug_overlay, highlight_overlay, icon_picker,
+    icons::{ALL_ICON_KINDS, IconKind},
+    item_card, item_grid, item_icon, minibar, palette_picker,
+    rules_wizard::{self, ActionKind, PredicateKind, RunModeChoice, WizardStep},
+    search_bar, smart_group_suggestor, stack_tray,
+    timeline::{panel as timeline_panel, snapshot_picker},
+    tooltip,
+};
+use crate::animator;
+use crate::dispatcher::PaletteTarget;
+use crate::picker_geometry;
+use crate::zone_pill_geometry::{self, ZonePillLayout};
+use crate::{AppState, WindowState};
+use crate::{
+    expanded_zone_grid, item_file_rename_geometry, zone_editor_geometry, zone_surface_geometry,
+};
+
+const TEXT_FORMAT_CACHE_CAPACITY: usize = 8;
+const IMAGE_WIDGET_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActiveItemDragVisual {
+    zone_id: ZoneId,
+    item_id: ZoneItemId,
+    last_x: f32,
+    last_y: f32,
+}
+
+#[derive(Clone)]
+struct CachedTextFormat {
+    family: SmolStr,
+    size_pt: f32,
+    weight: u16,
+    line_height: f32,
+    format: IDWriteTextFormat,
+}
+
+/// Render-pipeline error variants.
+#[derive(Debug)]
+pub enum RenderError {
+    Platform(PlatformError),
+    Layout(LayoutError),
+}
+
+impl From<PlatformError> for RenderError {
+    fn from(e: PlatformError) -> Self {
+        RenderError::Platform(e)
+    }
+}
+
+impl From<LayoutError> for RenderError {
+    fn from(e: LayoutError) -> Self {
+        RenderError::Layout(e)
+    }
+}
+
+impl core::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RenderError::Platform(e) => write!(f, "render: {e}"),
+            RenderError::Layout(e) => write!(f, "render: layout {e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// Per-window renderer owning the D2D surface + DComp tree + brush cache.
+///
+/// `surface` is `Option` so T-099 can release the D2D bitmap target alongside
+/// the DXGI swap chain when the window hibernates. The render hot path
+/// short-circuits with `Ok(())` when the surface is absent — paint requests
+/// for hidden windows are no-ops until `ensure_swap_chain` rebuilds.
+pub struct Renderer {
+    pub comp: WindowComp,
+    pub surface: Option<WindowSurface>,
+    text_format: IDWriteTextFormat,
+    text_format_family: SmolStr,
+    text_format_size_pt: f32,
+    text_format_weight: u16,
+    text_format_line_height: f32,
+    text_format_cache: SmallVec<[CachedTextFormat; TEXT_FORMAT_CACHE_CAPACITY]>,
+    /// RC-5 Gap A — DWrite ellipsis trimming sign cached against
+    /// `text_format`. Lazily created on first `draw_text_no_wrap` call and
+    /// invalidated whenever `ensure_text_format_for_active_theme` swaps the
+    /// underlying format so the `…` glyph stays in sync with theme typography.
+    /// Spec §10 — one COM allocation per format recreate, zero per frame.
+    ellipsis_sign: Option<IDWriteInlineObject>,
+    pub width: u32,
+    pub height: u32,
+    /// Reusable UTF-16 scratch buffer (spec §10).
+    utf16_scratch: SmallVec<[u16; 256]>,
+    /// Phase 2.3.1b — scale factor applied to D2D's world transform for the
+    /// current frame. Equal to `dpi / 96` (1.0 at 96 DPI). Stashed on the
+    /// renderer so per-glyph SVG transforms can compose against it instead
+    /// of clobbering the base scale with `SetTransform(identity)`.
+    /// Updated once per `render()` call.
+    base_scale: f32,
+    /// D2D bitmap cache keyed by backend icon hash. This is the runtime bridge
+    /// that makes `LoadIcon` visible in the selected-stack executable instead
+    /// of falling back to emoji placeholders forever.
+    icon_bitmaps: HashMap<String, ID2D1Bitmap1>,
+    /// Hashes that failed cache lookup or WIC decode. Avoids retrying disk/WIC
+    /// work every frame while preserving fallback rendering.
+    icon_bitmap_failures: HashSet<String>,
+    /// D2D bitmap cache keyed by file path for retained Image widgets.
+    image_file_bitmaps: HashMap<String, ID2D1Bitmap1>,
+    /// File paths that failed read or WIC decode during this renderer lifetime.
+    image_file_failures: HashSet<String>,
+    /// Full SVG document geometry cache for source Tauri zone icons.
+    svg_cache: SvgCache,
+    /// Monotonic clock base for DebugOverlay RSS sampling. Stored on the
+    /// renderer so the HUD never depends on wall-clock time changes.
+    debug_overlay_started_at: Instant,
+}
+
+impl Renderer {
+    pub fn create(hwnd: W_HWND, width: u32, height: u32) -> Result<Self, RenderError> {
+        let comp = WindowComp::create(hwnd, width, height)?;
+        // `WindowComp::create` always installs a swap chain; the only path
+        // that nulls it is T-099 hibernation, which can't run during
+        // construction.
+        let swap = comp.swap_chain.as_ref().ok_or(RenderError::Platform(
+            bento_nano_platform::PlatformError::Init(
+                "Renderer::create: swap_chain missing immediately after WindowComp::create",
+            ),
+        ))?;
+        let surface = WindowSurface::create(swap)?;
+        let text_format = dwrite::text_format_from_family_name_with_metrics(
+            "Microsoft YaHei UI",
+            16.0,
+            400,
+            1.4,
+            dwrite::locale_zh_cn(),
+        )?;
+        Ok(Self {
+            comp,
+            surface: Some(surface),
+            text_format,
+            text_format_family: SmolStr::new_static("Microsoft YaHei UI"),
+            text_format_size_pt: 16.0,
+            text_format_weight: 400,
+            text_format_line_height: 1.4,
+            text_format_cache: SmallVec::new(),
+            ellipsis_sign: None,
+            width,
+            height,
+            utf16_scratch: SmallVec::new(),
+            // 1.0 = 96 DPI baseline. `render()` overwrites this each frame
+            // from `WindowState.dpi` before any draw call observes it.
+            base_scale: 1.0,
+            icon_bitmaps: HashMap::new(),
+            icon_bitmap_failures: HashSet::new(),
+            image_file_bitmaps: HashMap::new(),
+            image_file_failures: HashSet::new(),
+            svg_cache: SvgCache::default(),
+            debug_overlay_started_at: Instant::now(),
+        })
+    }
+
+    /// Re-create the swap chain backbuffer surface after a resize.
+    pub fn resize(&mut self, w: u32, h: u32) -> Result<(), RenderError> {
+        if let Some(s) = self.surface.as_mut() {
+            s.release_target();
+        }
+        self.comp.resize(w, h)?;
+        // When the chain was hibernated, ensure_chain has to be the call site
+        // that recreates it — but we still re-bind the surface here so a
+        // resize between hibernate-and-show keeps width/height in sync.
+        if let Some(swap) = self.comp.swap_chain.as_ref() {
+            self.surface = Some(WindowSurface::create(swap)?);
+        } else {
+            self.surface = None;
+        }
+        self.width = w;
+        self.height = h;
+        Ok(())
+    }
+
+    /// T-099 — drop the per-window backbuffer (largest per-window allocation,
+    /// ~1.2 MB at 480×320×4×2). Surface and swap chain go; visual tree +
+    /// DComp target stay so a subsequent `ensure_swap_chain` rebinds without
+    /// re-creating the composition. Idempotent: a second call is a no-op.
+    pub fn release_swap_chain(&mut self) {
+        if let Some(s) = self.surface.as_mut() {
+            s.release_target();
+        }
+        self.surface = None;
+        self.comp.release_chain();
+    }
+
+    /// T-099 — recreate the backbuffer + D2D surface after `release_swap_chain`.
+    /// Idempotent: returns `Ok(())` immediately if already resident. Called by
+    /// the wndproc paint guard before each paint to lift hibernation lazily.
+    pub fn ensure_swap_chain(&mut self, w: u32, h: u32) -> Result<(), RenderError> {
+        if self.surface.is_some() && self.comp.swap_chain.is_some() {
+            return Ok(());
+        }
+        self.comp.ensure_chain(w.max(1), h.max(1))?;
+        let swap = self.comp.swap_chain.as_ref().ok_or(RenderError::Platform(
+            bento_nano_platform::PlatformError::Init(
+                "Renderer::ensure_swap_chain: chain still missing after ensure_chain",
+            ),
+        ))?;
+        self.surface = Some(WindowSurface::create(swap)?);
+        self.width = w;
+        self.height = h;
+        Ok(())
+    }
+
+    /// Whether this renderer currently owns a swap chain. Diagnostics +
+    /// the wndproc paint guard read this to decide if a paint should
+    /// trigger `ensure_swap_chain` first.
+    #[inline]
+    pub fn is_resident(&self) -> bool {
+        self.surface.is_some() && self.comp.swap_chain.is_some()
+    }
+
+    /// Run one frame: layout + draw + present. `win` carries the per-HWND
+    /// `LayoutEngine` (cache lives there — Ruling 5 / C3).
+    ///
+    /// Phase 2.3.1b — `self.width / self.height` are **device pixels** (the
+    /// swap chain backbuffer dimensions reported by `WM_SIZE` /
+    /// `GetClientRect`). The layout engine + zone collection live in
+    /// **logical** units (DIPs), so we divide by `dpi/96` once to obtain the
+    /// logical viewport. A single `SetTransform(Scale)` after `BeginDraw`
+    /// then projects every logical coordinate onto the right device pixel
+    /// without per-call multiplication.
+    pub fn render(
+        &mut self,
+        app: &mut AppState,
+        win: &mut WindowState,
+        kind: WindowKind,
+    ) -> Result<(), RenderError> {
+        // §10 hot-path: read once, no allocation.
+        let frame_started_at = Instant::now();
+        let dpi = win.dpi.get();
+        let scale = bento_nano_style::dpi::scale_factor(dpi);
+        let device_size = bento_nano_style::Size {
+            width: self.width as f32,
+            height: self.height as f32,
+        };
+        // Phase 2.3.1b — viewport flipped from device-pixel to logical-DIP.
+        // At 96 DPI the conversion is identity (regression-safe); at 192
+        // DPI a 960×640 backbuffer becomes a 480×320 logical viewport so
+        // the same layout source produces the same logical rects.
+        app.viewport = bento_nano_style::dpi::device_size_to_logical(device_size, dpi);
+        self.ensure_text_format_for_active_theme(app)?;
+        // Phase 2.1 / Ruling A + Q2 — first-paint zone load.
+        //
+        // Error-class routing:
+        //   Ok(list)                  → adopt the list.
+        //   Err(Storage(_))           → structural corruption (bad magic /
+        //                               version mismatch / truncated). Rename
+        //                               the file so the user can recover it,
+        //                               start empty.
+        //   Err(StorageIo { kind: NotFound, .. })
+        //                             → handled inside `read_zones` itself
+        //                               (returns Ok(empty)); never reaches
+        //                               this arm.
+        //   Err(StorageIo { .. })     → access issue (permission denied,
+        //                               sharing violation). DON'T rename —
+        //                               the file is probably fine, we just
+        //                               can't open it now. Start empty.
+        //
+        // Either branch flips `loaded` so the paint hot path never retries.
+        if !win.loaded.get() {
+            if !app.zones_path.as_os_str().is_empty() {
+                match bento_nano_platform::storage::read_zones(&app.zones_path) {
+                    Ok(loaded) => {
+                        app.zones = loaded;
+                    }
+                    Err(bento_nano_platform::PlatformError::Storage(_)) => {
+                        let _ = bento_nano_platform::storage::quarantine_corrupt(&app.zones_path);
+                    }
+                    Err(_) => {
+                        // IO / permission / other — leave the file in place.
+                    }
+                }
+            }
+            win.loaded.set(true);
+        }
+        // Phase 2.3.1b — record `base_scale` for the frame so SVG draw paths
+        // can compose against it instead of resetting to identity.
+        self.base_scale = scale;
+
+        // T-099 — paint guard. When the swap chain is hibernated, return
+        // `Ok(())`. The wndproc's WM_PAINT arm calls `ensure_swap_chain`
+        // before paint when a window becomes visible again, so this only
+        // fires for genuine "skip this frame" cases (e.g. paint queued
+        // between hibernate and the next show event).
+        let Some(surface) = self.surface.as_ref() else {
+            return Ok(());
+        };
+        let ctx = &surface.ctx;
+
+        // SAFETY: surface valid (just unwrapped); D2D draw sequence
+        //         BeginDraw → ... → EndDraw, no re-entry between calls.
+        unsafe {
+            ctx.BeginDraw();
+            let clear = D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
+            ctx.Clear(Some(&clear));
+            // Phase 2.3.1b — single SetTransform projects the entire logical
+            // coordinate space onto device pixels. Every fill / draw call
+            // below this point uses logical units; D2D multiplies by `scale`
+            // automatically. SVG paths re-establish this base scale via
+            // `base_scale_matrix()` because their per-glyph transforms also
+            // need the projection.
+            let base = base_scale_matrix(scale);
+            ctx.SetTransform(&base);
+        }
+
+        let rendered_aux_window = match kind {
+            WindowKind::ZoneEditor => {
+                self.draw_zone_editor_window(app)?;
+                true
+            }
+            WindowKind::ItemFileRename => {
+                self.draw_item_file_rename_window(app)?;
+                true
+            }
+            WindowKind::IconPicker => {
+                self.draw_icon_picker_window(app)?;
+                true
+            }
+            WindowKind::PalettePicker => {
+                self.draw_palette_picker_window(app)?;
+                true
+            }
+            WindowKind::CapsulePicker => {
+                self.draw_capsule_picker_window(app)?;
+                true
+            }
+            WindowKind::RulesWizard => {
+                self.draw_rules_wizard_window(app)?;
+                true
+            }
+            WindowKind::BulkManager => {
+                self.draw_bulk_manager_window(app)?;
+                true
+            }
+            WindowKind::Timeline => {
+                self.draw_timeline_window(app)?;
+                true
+            }
+            WindowKind::SnapshotPicker => {
+                self.draw_snapshot_picker_window(app)?;
+                true
+            }
+            WindowKind::Suggestor => {
+                self.draw_suggestor_window(app)?;
+                true
+            }
+            WindowKind::Search => {
+                self.draw_search_window(app)?;
+                true
+            }
+            WindowKind::MiniBar => {
+                self.draw_minibar_window(app)?;
+                true
+            }
+            WindowKind::Tooltip => {
+                self.draw_tooltip_window(app)?;
+                true
+            }
+            WindowKind::About => {
+                self.draw_about_panel(app)?;
+                true
+            }
+            WindowKind::Settings => {
+                self.draw_settings_window(app)?;
+                true
+            }
+            _ => false,
+        };
+        if rendered_aux_window {
+            let end_ctx = self.ctx()?;
+            // SAFETY: surface valid (guarded at the top of render); this
+            // closes the auxiliary frame started by BeginDraw above.
+            let end = unsafe { end_ctx.EndDraw(None, None) };
+            ok("EndDraw", end)?;
+            self.comp.present()?;
+            return Ok(());
+        }
+
+        // Collect (id, rect) pairs into a stack-inlined buffer so the layout
+        // result borrow doesn't outlive the dispatch loop (which mutably
+        // borrows `self` via `draw_node`).
+        let mut ids: SmallVec<[(bento_nano_tree::NodeId, bento_nano_style::Rect); 32]> =
+            SmallVec::new();
+        {
+            let result = win.layout.layout(&app.tree, app.viewport)?;
+            for (id, rect) in result.iter() {
+                ids.push((*id, *rect));
+            }
+        }
+
+        for (id, rect) in ids.iter() {
+            let node = match app.tree.get(*id) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            self.draw_node(node, *rect)?;
+        }
+        self.draw_theme_base_accent(app)?;
+
+        // Phase 2 — zones live outside the widget tree (they're a domain
+        // collection, not a tree-mounted card). Render after the tree so
+        // they paint on top of the toolbar card; geometry comes straight
+        // from `Zone.x/y/w/h` (DIPs).
+        self.draw_zones(app)?;
+        self.draw_highlight_overlay(app)?;
+        if !app.settings_open.get() && !app.about_open.get() {
+            self.draw_stack_tray_overlay(app)?;
+        }
+
+        // Wave K1b — Settings and About each own a dedicated aux HWND (the
+        // `WindowKind::Settings` / `WindowKind::About` arms above route to
+        // `draw_settings_window` / `draw_about_panel`). Painting the modal a
+        // second time on the Main HWND duplicates the panel chrome onto the
+        // overlay (two scrims, two cards) which becomes visible after H4
+        // raised both surfaces to `WS_EX_TOPMOST`. Skip the legacy Main-side
+        // fallback here.
+        self.poll_debug_overlay_rss(app);
+        self.draw_debug_overlay(app)?;
+
+        // SAFETY: surface valid (guarded at the top of this fn); EndDraw
+        //         signals the end of this frame's work.
+        let end_ctx = self.ctx()?;
+        let end = unsafe { end_ctx.EndDraw(None, None) };
+        ok("EndDraw", end)?;
+        self.comp.present()?;
+        self.record_debug_overlay_frame(app, kind, frame_started_at);
+        Ok(())
+    }
+
+    fn debug_overlay_elapsed_ms(&self) -> u32 {
+        u32::try_from(self.debug_overlay_started_at.elapsed().as_millis()).unwrap_or(u32::MAX)
+    }
+
+    fn ensure_text_format_for_active_theme(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let typography = app.active_theme_typography();
+        let family = typography.font_family;
+        let size_pt = typography.sizes.md.max(1.0);
+        let weight = dwrite::normalize_font_weight(typography.weights.normal);
+        let line_height = dwrite::normalize_line_height(typography.line_heights.normal);
+        if self.text_format_family == family
+            && (self.text_format_size_pt - size_pt).abs() < f32::EPSILON
+            && self.text_format_weight == weight
+            && (self.text_format_line_height - line_height).abs() < f32::EPSILON
+        {
+            return Ok(());
+        }
+        self.text_format = dwrite::text_format_from_family_name_with_metrics(
+            family.as_str(),
+            size_pt,
+            weight,
+            line_height,
+            dwrite::locale_zh_cn(),
+        )?;
+        self.text_format_family = family;
+        self.text_format_size_pt = size_pt;
+        self.text_format_weight = weight;
+        self.text_format_line_height = line_height;
+        self.text_format_cache.clear();
+        // RC-5 Gap A — the ellipsis sign captures the *previous* format's
+        // typography (size/weight/family); drop it so the next no-wrap
+        // draw lazily re-creates a sign against the new format. One COM
+        // allocation per theme/font swap, none per frame.
+        self.ellipsis_sign = None;
+        Ok(())
+    }
+
+    fn poll_debug_overlay_rss(&self, app: &AppState) {
+        let now_ms = self.debug_overlay_elapsed_ms();
+        let should_poll = {
+            let state = app.debug_overlay.borrow();
+            state.visible && state.rss_sample_due(now_ms)
+        };
+        if !should_poll {
+            return;
+        }
+        let memory = get_memory_usage();
+        let rss_mb = (memory.working_set_bytes / 1024) as f32 / 1024.0;
+        let _recorded = app
+            .debug_overlay
+            .borrow_mut()
+            .record_rss_if_due(now_ms, rss_mb);
+    }
+
+    fn record_debug_overlay_frame(
+        &self,
+        app: &AppState,
+        kind: WindowKind,
+        frame_started_at: Instant,
+    ) {
+        if kind != WindowKind::Main {
+            return;
+        }
+        let elapsed_us = u32::try_from(frame_started_at.elapsed().as_micros()).unwrap_or(u32::MAX);
+        app.debug_overlay.borrow_mut().record_frame(elapsed_us);
+    }
+
+    fn draw_debug_overlay(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let (fps, rss_mb, frame_us) = {
+            let state = app.debug_overlay.borrow();
+            if !state.visible {
+                return Ok(());
+            }
+            (state.fps(), state.last_rss_mb, state.last_frame_us)
+        };
+        let chrome = debug_overlay::DebugOverlayChrome::from_tokens(
+            app.active_theme_palette(),
+            app.active_theme_radius(),
+            app.active_theme_spacing(),
+            app.active_theme_shadow(),
+        );
+        let panel = Rect {
+            x: (app.viewport.width - debug_overlay::OVERLAY_WIDTH - debug_overlay::EDGE_MARGIN)
+                .max(debug_overlay::EDGE_MARGIN),
+            y: debug_overlay::EDGE_MARGIN,
+            width: debug_overlay::OVERLAY_WIDTH,
+            height: debug_overlay::OVERLAY_HEIGHT,
+        };
+        let shadow = debug_overlay::panel_shadow_rect(panel, chrome.shadow);
+        self.fill_rounded_rect(shadow, chrome.shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel, chrome.panel_radius)?;
+        let text_width = panel.width - chrome.text_inset_x * 2.0;
+        self.draw_text(
+            "Debug Overlay",
+            Rect {
+                x: panel.x + chrome.text_inset_x,
+                y: panel.y + chrome.title_top,
+                width: text_width,
+                height: chrome.title_height,
+            },
+            chrome.title,
+        )?;
+        let fps_line = format!("FPS: {fps:>3}");
+        let rss_line = format!("RSS: {rss_mb:>4.1} MB");
+        let frame_line = format!("Frame: {:>5.2} ms", frame_us as f32 / 1000.0);
+        self.draw_text(
+            &fps_line,
+            Rect {
+                x: panel.x + chrome.text_inset_x,
+                y: panel.y + chrome.metric_first_top,
+                width: text_width,
+                height: chrome.metric_row_height,
+            },
+            chrome.body,
+        )?;
+        self.draw_text(
+            &rss_line,
+            Rect {
+                x: panel.x + chrome.text_inset_x,
+                y: panel.y + chrome.metric_first_top + chrome.metric_row_gap,
+                width: text_width,
+                height: chrome.metric_row_height,
+            },
+            chrome.body,
+        )?;
+        self.draw_text(
+            &frame_line,
+            Rect {
+                x: panel.x + chrome.text_inset_x,
+                y: panel.y + chrome.metric_first_top + chrome.metric_row_gap * 2.0,
+                width: text_width,
+                height: chrome.metric_row_height,
+            },
+            chrome.muted,
+        )
+    }
+
+    fn draw_highlight_overlay(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let overlay = app.highlight_overlay.borrow();
+        if !overlay.has_targets() {
+            return Ok(());
+        }
+        // Wave E: Tauri SSoT tokens for highlight overlay accents.
+        use bento_nano_style::tokens as style_tokens;
+        let fill = highlight_overlay::fill_color_from_tauri_palette(style_tokens::PALETTE_DARK);
+        let outline = highlight_overlay::outline_color_from_tauri_palette(style_tokens::PALETTE_DARK);
+        let radius = highlight_overlay::target_radius_from_tauri_tokens(style_tokens::RADIUS);
+        for target in overlay.targets().iter().copied() {
+            let paint = highlight_overlay::paint_rect(target);
+            if paint.width <= 0.0 || paint.height <= 0.0 {
+                continue;
+            }
+            if overlay.show_outline() {
+                self.fill_rounded_rect(paint, outline, radius)?;
+                let inner = inset_rect(paint, highlight_overlay::OUTLINE_WIDTH_PX);
+                self.fill_rounded_rect(inner, fill, radius)?;
+            } else {
+                self.fill_rounded_rect(paint, fill, radius)?;
+            }
+        }
+        if !overlay.pulses().is_empty() {
+            let phase = overlay.current_pulse_phase();
+            let halo =
+                highlight_overlay::pulse_halo_color_from_tauri_palette(style_tokens::PALETTE_DARK, phase);
+            let core =
+                highlight_overlay::pulse_core_color_from_tauri_palette(style_tokens::PALETTE_DARK);
+            for target in overlay.pulses() {
+                let halo_rect = highlight_overlay::pulse_halo_rect(target, phase);
+                if halo_rect.width > 0.0 && halo_rect.height > 0.0 {
+                    self.fill_rounded_rect(
+                        halo_rect,
+                        halo,
+                        BorderRadius::all(halo_rect.width * 0.5),
+                    )?;
+                }
+                let core_rect = highlight_overlay::pulse_core_rect(target);
+                if core_rect.width > 0.0 && core_rect.height > 0.0 {
+                    self.fill_rounded_rect(
+                        core_rect,
+                        core,
+                        BorderRadius::all(core_rect.width * 0.5),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_node(
+        &mut self,
+        node: &WidgetNode,
+        rect: bento_nano_style::Rect,
+    ) -> Result<(), RenderError> {
+        match node {
+            WidgetNode::Container(c) => {
+                self.fill_rounded_rect(rect, c.background, c.radius)?;
+            }
+            WidgetNode::Button(b) => {
+                self.fill_rounded_rect(rect, b.background, b.radius)?;
+                if !b.label.is_empty() {
+                    self.draw_text(&b.label, rect, b.label_color)?;
+                }
+            }
+            WidgetNode::Text(t) => {
+                self.draw_text_with_style(
+                    t.resolved(),
+                    rect,
+                    t.color,
+                    t.font_size_pt,
+                    t.font_weight,
+                    t.line_height,
+                )?;
+            }
+            WidgetNode::Image(img) => {
+                if let ImageSource::SvgPath(path) = &img.source {
+                    if !path.is_empty() {
+                        self.draw_svg(path.as_str(), rect, img.tint)?;
+                    }
+                } else if let ImageSource::File(path) = &img.source {
+                    self.draw_image_file(path.as_str(), rect)?;
+                }
+            }
+            WidgetNode::BentoCard(card) => {
+                // Shadow rendering hooks into D2D's shadow effect in PHASE_2;
+                // for now we draw the rounded fill so the card geometry is
+                // visible in the spike. Spec §17 — shadow is non-lever
+                // visual polish and stays out of Phase 1.2's binary budget.
+                self.fill_rounded_rect(rect, card.background, card.border_radius)?;
+            }
+            WidgetNode::Toolbar(_) => {
+                // Toolbar is a flex container with no own visual — children
+                // are dispatched by the outer iter loop. Nothing to draw
+                // here, intentionally.
+            }
+            WidgetNode::IconButton(ib) => {
+                // Hover background — interpolate alpha by hover_progress.
+                let p = ib.hover_progress();
+                if p > 0.0 {
+                    let bg = bento_nano_style::Color {
+                        a: ib.hover_background.a * p,
+                        ..ib.hover_background
+                    };
+                    self.fill_rounded_rect(rect, bg, ib.hover_radius)?;
+                }
+                // SVG glyph — `svg_path` is a 24×24 viewbox path. `draw_svg`
+                // applies scale-to-fit using the icon's source viewbox.
+                if !ib.svg_path.is_empty() {
+                    self.draw_svg_fit(ib.svg_path, rect, ib.tint, 24.0)?;
+                }
+            }
+            WidgetNode::ScrollContainer(_) => {
+                // Container with no own visual — content clipping happens
+                // when the layout engine grows clip-rect support
+                // (PHASE_2). Children are dispatched by the outer iter
+                // loop, so the static frame is correct today.
+            }
+            WidgetNode::Checkbox(c) => {
+                let p = c.fill_progress();
+                let bg = bento_nano_style::Color {
+                    r: c.box_color.r + (c.box_color_checked.r - c.box_color.r) * p,
+                    g: c.box_color.g + (c.box_color_checked.g - c.box_color.g) * p,
+                    b: c.box_color.b + (c.box_color_checked.b - c.box_color.b) * p,
+                    a: c.box_color.a + (c.box_color_checked.a - c.box_color.a) * p,
+                };
+                self.fill_rounded_rect(rect, bg, c.radius)?;
+            }
+            WidgetNode::Toggle(t) => {
+                let p = t.thumb_anim.current();
+                let bg = bento_nano_style::Color {
+                    r: t.track_off.r + (t.track_on.r - t.track_off.r) * p,
+                    g: t.track_off.g + (t.track_on.g - t.track_off.g) * p,
+                    b: t.track_off.b + (t.track_on.b - t.track_off.b) * p,
+                    a: t.track_off.a + (t.track_on.a - t.track_off.a) * p,
+                };
+                self.fill_rounded_rect(rect, bg, t.track_radius)?;
+                let thumb_x = rect.x
+                    + bento_nano_widget::toggle::THUMB_INSET_PX
+                    + (rect.width
+                        - bento_nano_widget::toggle::THUMB_DIAMETER_PX
+                        - 2.0 * bento_nano_widget::toggle::THUMB_INSET_PX)
+                        * p;
+                let thumb_rect = bento_nano_style::Rect {
+                    x: thumb_x,
+                    y: rect.y + bento_nano_widget::toggle::THUMB_INSET_PX,
+                    width: bento_nano_widget::toggle::THUMB_DIAMETER_PX,
+                    height: bento_nano_widget::toggle::THUMB_DIAMETER_PX,
+                };
+                self.fill_rounded_rect(thumb_rect, t.thumb, t.thumb_radius)?;
+            }
+            WidgetNode::Radio(r) => {
+                let selected = r.is_selected();
+                let ring = if selected { r.ring_selected } else { r.ring };
+                self.fill_rounded_rect(rect, ring, r.radius)?;
+                let dot_progress = r.dot_progress();
+                if dot_progress > 0.0 {
+                    let dot_d = (rect.width * 0.5).max(0.0) * dot_progress;
+                    let inset = (rect.width - dot_d) * 0.5;
+                    let dot = bento_nano_style::Rect {
+                        x: rect.x + inset,
+                        y: rect.y + inset,
+                        width: dot_d,
+                        height: dot_d,
+                    };
+                    self.fill_rounded_rect(dot, r.dot, r.dot_radius_for_diameter(dot_d))?;
+                }
+            }
+            WidgetNode::Slider(s) => {
+                self.fill_rounded_rect(rect, s.track_color, s.track_radius)?;
+                let value = (*s.value.get()).clamp(0.0, 1.0);
+                let fill_rect = bento_nano_style::Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width * value,
+                    height: rect.height,
+                };
+                self.fill_rounded_rect(fill_rect, s.fill_color, s.track_radius)?;
+                let thumb_x = rect.x + rect.width * value
+                    - bento_nano_widget::slider::THUMB_DIAMETER_PX * 0.5;
+                let thumb_y =
+                    rect.y + rect.height * 0.5 - bento_nano_widget::slider::THUMB_DIAMETER_PX * 0.5;
+                let thumb = bento_nano_style::Rect {
+                    x: thumb_x,
+                    y: thumb_y,
+                    width: bento_nano_widget::slider::THUMB_DIAMETER_PX,
+                    height: bento_nano_widget::slider::THUMB_DIAMETER_PX,
+                };
+                self.fill_rounded_rect(thumb, s.thumb_color, s.thumb_radius)?;
+            }
+            WidgetNode::Input(i) => {
+                let border = if i.focused { i.border_focus } else { i.border };
+                self.fill_rounded_rect(rect, border, i.radius)?;
+                self.fill_rounded_rect(rect, i.background, i.radius)?;
+                let text_str = i.text.get().clone();
+                if !text_str.is_empty() {
+                    self.draw_text(text_str.as_str(), rect, i.text_color)?;
+                } else if !i.placeholder.is_empty() {
+                    self.draw_text(i.placeholder.as_str(), rect, i.placeholder_color)?;
+                }
+            }
+            WidgetNode::Dropdown(d) => {
+                let border = if d.popup.visible {
+                    d.border_focus
+                } else {
+                    d.border
+                };
+                self.fill_rounded_rect(rect, border, d.radius)?;
+                self.fill_rounded_rect(rect, d.background, d.radius)?;
+                if let Some(label) = d.selected_label() {
+                    self.draw_text(label, rect, d.text)?;
+                }
+            }
+            WidgetNode::Tab(t) => {
+                self.fill_rounded_rect(rect, t.header_color, BorderRadius::ZERO)?;
+                let underline_x = rect.x + t.underline_anim.current();
+                let underline_w = t.active_underline_width();
+                let underline = bento_nano_style::Rect {
+                    x: underline_x,
+                    y: rect.y + rect.height - bento_nano_widget::tab::UNDERLINE_THICKNESS_PX,
+                    width: underline_w,
+                    height: bento_nano_widget::tab::UNDERLINE_THICKNESS_PX,
+                };
+                self.fill_rounded_rect(underline, t.underline_color, t.underline_radius)?;
+            }
+            WidgetNode::Collapsible(_) => {
+                // Header + body are children dispatched by the outer loop;
+                // the collapsible itself owns no fill — only the height
+                // animation, which the layout engine reads directly.
+            }
+            WidgetNode::Modal(m) => {
+                let alpha = m.fade_progress();
+                if alpha > 0.0 {
+                    let scrim = bento_nano_style::Color {
+                        a: m.scrim.a * alpha,
+                        ..m.scrim
+                    };
+                    self.fill_rounded_rect(rect, scrim, BorderRadius::ZERO)?;
+                }
+            }
+            WidgetNode::Popup(_)
+            | WidgetNode::Tooltip(_)
+            | WidgetNode::ContextMenu(_)
+            | WidgetNode::DragPreview(_) => {
+                // Overlay primitives — they live in their own HWNDs (T-011
+                // Window factory). The main-window render walk does not
+                // paint them; per-window renderers handle their geometry.
+            }
+            WidgetNode::List(_)
+            | WidgetNode::Grid(_)
+            | WidgetNode::VirtualList(_)
+            | WidgetNode::VirtualGrid(_)
+            | WidgetNode::Row(_)
+            | WidgetNode::Column(_)
+            | WidgetNode::GridLayout(_) => {
+                // Pure layout containers — children dispatched by the outer
+                // iter loop. No own fill.
+            }
+            WidgetNode::SvgIcon(s) => {
+                self.draw_svg_fit(s.source.as_str(), rect, s.tint, s.size)?;
+            }
+            WidgetNode::FileIcon(f) => {
+                if !f.is_pending() {
+                    // PHASE_2: pull bitmap from platform icon cache by
+                    // `f.cache_hash`. Until the platform cache lands the
+                    // background placeholder is correct.
+                }
+                if f.background.a > 0.0 {
+                    self.fill_rounded_rect(rect, f.background, f.border_radius)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_stack_tray_overlay(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let Some(state) = app.stack_tray.borrow().clone() else {
+            return Ok(());
+        };
+        let Some(anchor) = app.zones.get(state.anchor_zone_id) else {
+            return Ok(());
+        };
+        let Some(member_ids) = app.zones.stack_member_ids(anchor.id) else {
+            return Ok(());
+        };
+        // Wave D: consume Wave B Tauri-token SSoT for the tray panel chrome
+        // instead of the legacy `bento-nano-theme` palette.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = stack_tray::StackTrayChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let member_count = member_ids.len();
+        let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
+        let tray_shadow = stack_tray::panel_shadow_rect(tray, chrome.panel_shadow);
+        self.fill_rounded_rect(tray_shadow, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(tray, chrome.panel_background, chrome.panel_radius)?;
+
+        self.draw_text(
+            "StackTray",
+            bento_nano_style::Rect {
+                x: tray.x + stack_tray::TRAY_INSET_PX,
+                y: tray.y + 10.0,
+                width: 92.0,
+                height: 18.0,
+            },
+            chrome.text_primary,
+        )?;
+        let count_label = format!("{member_count} members");
+        self.draw_text(
+            count_label.as_str(),
+            bento_nano_style::Rect {
+                x: tray.x + stack_tray::TRAY_INSET_PX + 96.0,
+                y: tray.y + 11.0,
+                width: 96.0,
+                height: 16.0,
+            },
+            chrome.text_muted,
+        )?;
+
+        let dissolve = stack_tray::stack_tray_dissolve_rect(app.viewport, anchor, member_count);
+        self.fill_rounded_rect(dissolve, chrome.danger_background, chrome.button_radius)?;
+        self.draw_text("Dissolve", inset_rect(dissolve, 5.0), chrome.text_primary)?;
+        let close = stack_tray::stack_tray_close_rect(app.viewport, anchor, member_count);
+        self.fill_rounded_rect(close, chrome.button_background, chrome.button_radius)?;
+        self.draw_text("Close", inset_rect(close, 5.0), chrome.text_primary)?;
+
+        let selected_id = if member_ids.contains(&state.selected_member_id) {
+            state.selected_member_id
+        } else {
+            member_ids[0]
+        };
+        let drag_state = app.stack_tray_drag.get();
+        for (row_index, member_id) in member_ids
+            .iter()
+            .copied()
+            .take(stack_tray::TRAY_VISIBLE_ROW_LIMIT)
+            .enumerate()
+        {
+            let Some(member) = app.zones.get(member_id) else {
+                continue;
+            };
+            let row_rect =
+                stack_tray::stack_tray_row_rect(app.viewport, anchor, member_count, row_index);
+            self.fill_rounded_rect(
+                row_rect,
+                if drag_state.is_some_and(|drag| {
+                    drag.anchor_zone_id == anchor.id && drag.member_id == member_id
+                }) {
+                    chrome.dragged_background
+                } else if member_id == selected_id {
+                    chrome.selected_background
+                } else {
+                    chrome.row_background
+                },
+                chrome.row_radius,
+            )?;
+            let icon_rect = bento_nano_style::Rect {
+                x: row_rect.x + 8.0,
+                y: row_rect.y + 8.0,
+                width: 28.0,
+                height: 22.0,
+            };
+            self.fill_rounded_rect(icon_rect, chrome.button_background, chrome.button_radius)?;
+            self.draw_text(
+                member.icon.as_ref(),
+                bento_nano_style::Rect {
+                    x: icon_rect.x + 6.0,
+                    y: icon_rect.y + 3.0,
+                    width: icon_rect.width - 12.0,
+                    height: 14.0,
+                },
+                chrome.text_primary,
+            )?;
+            self.draw_text(
+                member.title.as_ref(),
+                bento_nano_style::Rect {
+                    x: row_rect.x + 44.0,
+                    y: row_rect.y + 7.0,
+                    width: (row_rect.width - 128.0).max(0.0),
+                    height: 16.0,
+                },
+                chrome.text_primary,
+            )?;
+            let item_count = member.items.len();
+            let item_label = format!("{item_count} items");
+            self.draw_text(
+                item_label.as_str(),
+                bento_nano_style::Rect {
+                    x: row_rect.x + 44.0,
+                    y: row_rect.y + 22.0,
+                    width: (row_rect.width - 128.0).max(0.0),
+                    height: 14.0,
+                },
+                chrome.text_muted,
+            )?;
+            let detach =
+                stack_tray::stack_tray_detach_rect(app.viewport, anchor, member_count, row_index);
+            self.fill_rounded_rect(detach, chrome.button_background, chrome.button_radius)?;
+            self.draw_text("Detach", inset_rect(detach, 5.0), chrome.text_primary)?;
+        }
+
+        if member_count > stack_tray::TRAY_VISIBLE_ROW_LIMIT {
+            let hidden = member_count - stack_tray::TRAY_VISIBLE_ROW_LIMIT;
+            let label = format!("+{hidden} more members");
+            self.draw_text(
+                label.as_str(),
+                bento_nano_style::Rect {
+                    x: tray.x + stack_tray::TRAY_INSET_PX,
+                    y: tray.bottom() - 18.0,
+                    width: tray.width - stack_tray::TRAY_INSET_PX * 2.0,
+                    height: 14.0,
+                },
+                chrome.text_muted,
+            )?;
+        } else if app.stack_tray_drag.get().is_some() {
+            self.draw_text(
+                "Drag over a row to reorder",
+                bento_nano_style::Rect {
+                    x: tray.x + stack_tray::TRAY_INSET_PX,
+                    y: tray.bottom() - 18.0,
+                    width: tray.width - stack_tray::TRAY_INSET_PX * 2.0,
+                    height: 14.0,
+                },
+                chrome.text_accent,
+            )?;
+        } else if let Some(status) = state.status.as_ref() {
+            self.draw_text(
+                status.as_str(),
+                bento_nano_style::Rect {
+                    x: tray.x + stack_tray::TRAY_INSET_PX,
+                    y: tray.bottom() - 18.0,
+                    width: tray.width - stack_tray::TRAY_INSET_PX * 2.0,
+                    height: 14.0,
+                },
+                chrome.text_accent,
+            )?;
+        }
+
+        let Some(preview_zone) = app.zones.get(selected_id) else {
+            return Ok(());
+        };
+        let preview = stack_tray::focused_preview_rect(app.viewport, tray);
+        let preview_shadow = stack_tray::panel_shadow_rect(preview, chrome.panel_shadow);
+        self.fill_rounded_rect(
+            preview_shadow,
+            chrome.panel_shadow.color,
+            chrome.panel_radius,
+        )?;
+        self.fill_rounded_rect(preview, chrome.preview_background, chrome.panel_radius)?;
+        self.draw_text(
+            "FocusedZonePreview",
+            bento_nano_style::Rect {
+                x: preview.x + 16.0,
+                y: preview.y + 12.0,
+                width: preview.width - 32.0,
+                height: 18.0,
+            },
+            chrome.text_accent,
+        )?;
+        self.draw_text(
+            preview_zone.title.as_ref(),
+            bento_nano_style::Rect {
+                x: preview.x + 16.0,
+                y: preview.y + 36.0,
+                width: preview.width - 32.0,
+                height: 18.0,
+            },
+            chrome.text_primary,
+        )?;
+        let geometry_label = format!(
+            "{} · {}×{} · {} items",
+            preview_zone.icon,
+            preview_zone.w,
+            preview_zone.h,
+            preview_zone.items.len()
+        );
+        self.draw_text(
+            geometry_label.as_str(),
+            bento_nano_style::Rect {
+                x: preview.x + 16.0,
+                y: preview.y + 58.0,
+                width: preview.width - 32.0,
+                height: 16.0,
+            },
+            chrome.text_muted,
+        )?;
+        if preview_zone.items.is_empty() {
+            self.draw_text(
+                "No captured desktop items in this member.",
+                bento_nano_style::Rect {
+                    x: preview.x + 16.0,
+                    y: preview.y + 92.0,
+                    width: preview.width - 32.0,
+                    height: 18.0,
+                },
+                chrome.text_muted,
+            )?;
+        } else {
+            for (idx, item) in preview_zone.items.iter().take(4).enumerate() {
+                let y = preview.y + 88.0 + idx as f32 * 24.0;
+                let row = bento_nano_style::Rect {
+                    x: preview.x + 16.0,
+                    y,
+                    width: preview.width - 32.0,
+                    height: 20.0,
+                };
+                self.fill_rounded_rect(row, chrome.row_background, chrome.preview_item_radius)?;
+                self.draw_text(
+                    item.name.as_ref(),
+                    bento_nano_style::Rect {
+                        x: row.x + 8.0,
+                        y: row.y + 3.0,
+                        width: row.width - 16.0,
+                        height: 13.0,
+                    },
+                    chrome.text_primary,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_theme_base_accent(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let accent = app
+            .theme_base_accent
+            .borrow()
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or_else(|| with_alpha(app.active_theme_palette().accent, 0.92));
+        let rect = bento_nano_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: app.viewport.width,
+            height: 4.0,
+        };
+        self.fill_rounded_rect(rect, accent, BorderRadius::ZERO)
+    }
+
+    /// Draw all zones from `app.zones`. Each zone is a translucent rounded
+    /// rectangle with its title at top-left. Zones live in their own
+    /// collection (Ruling 2) and rendering walks the list directly — no
+    /// widget-tree mount.
+    fn draw_zones(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // V-8 — wall-clock used to sample the pill animator. We read
+        // `GetTickCount` once per frame so all pills share the same phase
+        // (the breathing dot looks broken if each pill samples a different
+        // `now`). Allocation-free per spec §10.
+        // SAFETY: `GetTickCount` is total + thread-safe.
+        let anim_now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        let palette = app.active_theme_palette();
+        let zone_chrome =
+            zone_surface_geometry::ZoneSurfaceChrome::from_radius(app.active_theme_radius());
+        let item_chrome =
+            item_card::ItemCardChrome::from_tokens(palette, app.active_theme_radius());
+        // V-9 round 4 (2026-05-21) — Tauri 1.2.4 reference (frame_010 / 015
+        // of resource/屏幕录制 2026-05-20 161936.mp4) paints the expanded
+        // zone surface with `--surface-dialog` (rgba 12,12,18,0.92) AND
+        // honours its natural 0xEB alpha so the desktop wallpaper bleeds
+        // through as a heavily dimmed acrylic-style veil. Round 3 forced
+        // alpha to 1.0 → completely opaque slab, fails parity (user audit
+        // 2026-05-21 said "这和原版动效完全不一样"). Drop the alpha clamp
+        // and use the token directly. The 0.38/0.34 baseline (pre-round-2)
+        // was the opposite failure: too transparent, desktop icons visible
+        // at full saturation. The 0.92 token alpha is the Tauri-pinned mid.
+        let zone_fill_idle = bento_nano_style::tokens::PALETTE_DARK.surface_dialog;
+        let zone_fill_active = with_alpha(palette.accent, 0.92);
+        let zone_title = with_alpha(palette.text, 0.88);
+        let zone_icon_chip = with_alpha(palette.surface_alt, 0.58);
+        let zone_icon_text = with_alpha(palette.text, 0.92);
+        let zone_live_folder_text = with_alpha(palette.text_muted, 0.94);
+        let stack_shadow = with_alpha(palette.accent, 0.14);
+        let stack_wrapper_halo = with_alpha(palette.accent, 0.10);
+        let stack_badge_fill = with_alpha(palette.accent, 0.82);
+        let stack_peek_fill = with_alpha(palette.surface_alt, 0.78);
+        let zone_drop_target_glow = with_alpha(palette.accent_hover, 0.30);
+        let drop_preview_fill = with_alpha(palette.accent, 0.20);
+        let drop_preview_core = with_alpha(palette.accent_hover, 0.34);
+        let radius = zone_chrome.zone_radius;
+        let active_id = app
+            .zone_drag
+            .get()
+            .map(|t| t.0)
+            .or_else(|| app.zone_resize.get().map(|t| t.0));
+        let item_drag = active_item_drag_visual(app);
+        let drag_target_id =
+            item_drag.and_then(|drag| hit_test_render_zone(app, drag.last_x, drag.last_y));
+        let dragged_item_wide = item_drag
+            .and_then(|drag| {
+                app.zones
+                    .item(drag.zone_id, drag.item_id)
+                    .map(|item| item.is_wide)
+            })
+            .unwrap_or(false);
+        let theme_base_accent = app.theme_base_accent.borrow().clone();
+        for zone in app.zones.iter() {
+            if !zone.is_visible() || zone.is_stacked_child() {
+                continue;
+            }
+            // Wave C (05-20 visual parity) — collapsed pill render path.
+            // Stack anchors keep the legacy halo + peek chrome below; every
+            // other zone whose `body_visible_for_mode` is false renders as a
+            // Tauri-style capsule pill at `(zone.x, zone.y)` consuming the
+            // Wave B token SSoT in `zone_pill_geometry`.
+            let pill_body_visible =
+                app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
+            // Wave G2 — morphing capsule. When the hover transition is
+            // in-flight for this zone, paint an intermediate rounded-rect
+            // instead of snapping between collapsed pill and expanded body.
+            // Stack anchors keep their bespoke chrome and skip the morph.
+            let pill_anim_active = app.zone_pill_anim_zone.get() == Some(zone.id)
+                && !zone.is_stack_anchor()
+                && {
+                    let p = app.zone_pill_anim_progress.get();
+                    p > 0.0 && p < 1.0
+                };
+            if pill_anim_active {
+                let count = zone.items.len();
+                let pill_layout =
+                    zone_pill_geometry::pill_layout_for_zone(zone, count);
+                let expanded_rect = bento_nano_style::Rect {
+                    x: zone.x as f32,
+                    y: zone.y as f32,
+                    width: zone.w as f32,
+                    height: zone.h as f32,
+                };
+                let raw = app.zone_pill_anim_progress.get();
+                let eased = zone_pill_geometry::ease_out_cubic_progress(raw);
+                // `expanding` true → morph from pill (0) to expanded (1);
+                // false → morph from expanded (0) to pill (1). We flip when
+                // collapsing so the same morph helper still produces the
+                // right intermediate rect.
+                let morph = if app.zone_pill_anim_expanding.get() {
+                    eased
+                } else {
+                    1.0 - eased
+                };
+                self.draw_zone_pill_morph(
+                    zone,
+                    &pill_layout,
+                    expanded_rect,
+                    morph,
+                    theme_base_accent.as_deref(),
+                )?;
+                continue;
+            }
+            if !pill_body_visible && !zone.is_stack_anchor() {
+                let count = zone.items.len();
+                let layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
+                // V-8 — sample hover / press channels at paint time. The
+                // animator borrow is released before any further mutation
+                // (the pill paint helpers are read-only on app state).
+                let (hover_t, press_t) = {
+                    let anim = app.pill_animator.borrow();
+                    (
+                        anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms),
+                        anim.sample(zone.id, animator::AnimChannel::PillPress, anim_now_ms),
+                    )
+                };
+                self.draw_zone_pill(
+                    zone,
+                    &layout,
+                    theme_base_accent.as_deref(),
+                    hover_t,
+                    press_t,
+                    anim_now_ms,
+                )?;
+                continue;
+            }
+            let rect = bento_nano_style::Rect {
+                x: zone.x as f32,
+                y: zone.y as f32,
+                width: zone.w as f32,
+                height: zone.h as f32,
+            };
+            // Wave I2 — expanded body chrome (panel shadow / header band /
+            // divider / status dot / footer thumbs). Stack anchors keep
+            // their bespoke halo + shadow chrome below so we feed the helper
+            // the same zone rect either way; the shadow band is suppressed
+            // for anchors so we don't double-stamp shadows.
+            let stack_member_ids_for_footer = app.zones.stack_member_ids(zone.id);
+            let footer_thumb_count = stack_member_ids_for_footer
+                .as_ref()
+                .map(|ids| {
+                    ids.iter()
+                        .filter(|member_id| **member_id != zone.id)
+                        .count()
+                })
+                .unwrap_or(0);
+            let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone, footer_thumb_count);
+            if !zone.is_stack_anchor() {
+                // SHADOW.expanded — single soft drop under the panel band so
+                // the expanded surface lifts off the desktop backdrop, mirror
+                // of the settings panel chrome (`SHADOW.expanded` SSoT).
+                self.fill_rounded_rect(
+                    expanded_layout.panel_shadow,
+                    bento_nano_style::tokens::SHADOW.expanded.color,
+                    radius,
+                )?;
+            }
+            if zone.is_stack_anchor() {
+                let member_count = stack_member_ids_for_footer
+                    .as_ref()
+                    .map(|ids| ids.len())
+                    .unwrap_or(1);
+                let halo_rect = stack_tray::stack_wrapper_halo_rect(zone, member_count);
+                self.fill_rounded_rect(
+                    halo_rect,
+                    stack_wrapper_halo,
+                    zone_chrome.stack_halo_radius,
+                )?;
+                for offset in [8.0_f32, 4.0_f32] {
+                    let shadow_rect = bento_nano_style::Rect {
+                        x: rect.x + offset,
+                        y: rect.y + offset,
+                        width: rect.width,
+                        height: rect.height,
+                    };
+                    self.fill_rounded_rect(shadow_rect, stack_shadow, radius)?;
+                }
+            }
+            if Some(zone.id) == drag_target_id {
+                let glow_rect = bento_nano_style::Rect {
+                    x: rect.x - 3.0,
+                    y: rect.y - 3.0,
+                    width: rect.width + 6.0,
+                    height: rect.height + 6.0,
+                };
+                self.fill_rounded_rect(
+                    glow_rect,
+                    zone_drop_target_glow,
+                    zone_chrome.drop_target_radius,
+                )?;
+            }
+            let fill = if Some(zone.id) == active_id {
+                zone_fill_active
+            } else {
+                zone_fill_idle
+            };
+            self.fill_rounded_rect(rect, fill, radius)?;
+            // V-9 round 2 (2026-05-21) — accent stripe across the expanded
+            // zone's top edge was a Wave-era affordance. Tauri 1.2.4 baseline
+            // does NOT paint a stripe here; user flagged the thin blue line
+            // as a regression. Removed. The expanded status dot (Wave I2)
+            // is also removed in the same wave so `accent_hex` has no other
+            // consumer in this branch — kept only as a `_` binding for
+            // potential future item-chip accents.
+            let _ = (zone
+                .accent_color
+                .as_deref())
+                .or(theme_base_accent.as_deref());
+            let icon_rect = bento_nano_style::Rect {
+                x: rect.x + 8.0,
+                y: rect.y + 14.0,
+                width: 68.0,
+                height: 18.0,
+            };
+            self.fill_rounded_rect(icon_rect, zone_icon_chip, zone_chrome.icon_chip_radius)?;
+            let icon_text_rect = bento_nano_style::Rect {
+                x: icon_rect.x + 6.0,
+                y: icon_rect.y + 2.0,
+                width: icon_rect.width - 12.0,
+                height: icon_rect.height - 4.0,
+            };
+            // RC-4 Gap 1 — render the zone icon as a line-art glyph rather
+            // than the raw wire-format name.
+            self.draw_icon_glyph(zone.icon.as_ref(), icon_text_rect, zone_icon_text)?;
+            let title_rect = bento_nano_style::Rect {
+                x: rect.x + 82.0,
+                y: rect.y + 12.0,
+                width: (rect.width - 90.0).max(0.0),
+                height: 18.0,
+            };
+            self.draw_text(&zone.title, title_rect, zone_title)?;
+            let body_visible = app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
+            // V-14 (2026-05-22) — Tauri 1.2.4 reference frames 005/006/007/008
+            // /088 (`resource/屏幕录制 2026-05-20 161936.mp4`) paint a bright
+            // green status dot on the EXPANDED zone's top-right corner — the
+            // same #22C55E dot that overlays the collapsed pill's badge slot.
+            // Mirrors the `draw_zone_pill` hover-dot at ~line 1854. We sample
+            // the same `PillHover` channel here so a zone that was hovered
+            // into expansion keeps its dot lit, and `body_visible` forces it
+            // on for `Always` / `Click` display modes that don't transit
+            // through hover. Skipped for stack anchors — the "Stack ×N" badge
+            // below claims the same top-right slot (avoids overlap).
+            if !zone.is_stack_anchor() {
+                let hover_t = {
+                    let anim = app.pill_animator.borrow();
+                    anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms)
+                };
+                let dot_alpha_scale = hover_t
+                    .max(if body_visible { 1.0 } else { 0.0 })
+                    .clamp(0.0, 1.0);
+                if dot_alpha_scale > 0.0 {
+                    let dot_rect = bento_nano_style::Rect {
+                        x: rect.right() - 20.0,
+                        y: rect.y + 14.0,
+                        width: 10.0,
+                        height: 10.0,
+                    };
+                    let accent_green = bento_nano_style::tokens::PALETTE_DARK.accent_green;
+                    let dot_color = bento_nano_style::Color {
+                        a: accent_green.a * dot_alpha_scale,
+                        ..accent_green
+                    };
+                    self.fill_rounded_rect(
+                        dot_rect,
+                        dot_color,
+                        bento_nano_style::BorderRadius::all(5.0),
+                    )?;
+                }
+            }
+            // V-11 (2026-05-21, round 2): the expanded-zone right-bottom
+            // display-mode chip ("Hover"/"Always"/"Click") was deleted.
+            // Tauri 1.2.4 baseline never paints a display-mode label on the
+            // zone surface — the mode is toggled exclusively through the
+            // Settings panel's ZoneDisplay row (SettingsHit::CycleZoneDisplayMode,
+            // dispatched at bento-nano-shell/src/main.rs:11465 and :12907).
+            // The `ZoneSurfaceChrome::display_chip_radius` token + the
+            // `effective_zone_display_mode` accessor on AppState are kept for
+            // log/test parity; M4 owns the K1 dead_code sweep for the now-
+            // unused chrome field.
+            if zone.is_stack_anchor() {
+                let member_ids = app.zones.stack_member_ids(zone.id);
+                let member_count = member_ids.as_ref().map(|ids| ids.len()).unwrap_or(1);
+                let badge_rect = bento_nano_style::Rect {
+                    x: rect.right() - 76.0,
+                    y: rect.y + 34.0,
+                    width: 68.0,
+                    height: 18.0,
+                };
+                self.fill_rounded_rect(
+                    badge_rect,
+                    stack_badge_fill,
+                    zone_chrome.stack_badge_radius,
+                )?;
+                let badge_label = format!("Stack ×{member_count}");
+                self.draw_text(
+                    badge_label.as_str(),
+                    bento_nano_style::Rect {
+                        x: badge_rect.x + 7.0,
+                        y: badge_rect.y + 2.0,
+                        width: badge_rect.width - 14.0,
+                        height: 12.0,
+                    },
+                    zone_icon_text,
+                )?;
+                if let Some(member_ids) = member_ids {
+                    if let Some(member) = member_ids
+                        .iter()
+                        .copied()
+                        .find(|member_id| *member_id != zone.id)
+                        .and_then(|member_id| app.zones.get(member_id))
+                    {
+                        let peek_rect = bento_nano_style::Rect {
+                            x: rect.x + 8.0,
+                            y: rect.y + 54.0,
+                            width: (rect.width - 16.0).max(0.0),
+                            height: 18.0,
+                        };
+                        self.fill_rounded_rect(
+                            peek_rect,
+                            stack_peek_fill,
+                            zone_chrome.stack_peek_radius,
+                        )?;
+                        let peek_label = format!("Peek: {}", member.title);
+                        self.draw_text(
+                            peek_label.as_str(),
+                            bento_nano_style::Rect {
+                                x: peek_rect.x + 7.0,
+                                y: peek_rect.y + 2.0,
+                                width: peek_rect.width - 14.0,
+                                height: 12.0,
+                            },
+                            zone_live_folder_text,
+                        )?;
+                    }
+                }
+            }
+            if !body_visible {
+                continue;
+            }
+            // Wave I2 — divider hairline between the header band and the
+            // item grid. `with_alpha(palette.text, 0.10)` matches the
+            // Tauri 1.2.4 expanded-panel divider tint.
+            self.fill_rounded_rect(
+                expanded_layout.divider,
+                with_alpha(palette.text, 0.10),
+                bento_nano_style::BorderRadius::ZERO,
+            )?;
+            // V-9 round 2 (2026-05-21) — expanded-body status dot removed.
+            // User flagged it as a stray blue ring above each pill ("4" / "10").
+            // Tauri 1.2.4 expanded panel has no top-right indicator; the
+            // collapsed pill keeps its Wave H2 dot since that one matches
+            // baseline.
+            if let Some(path) = zone.live_folder_path.as_deref() {
+                let live_text = live_folder_badge_text(path);
+                let live_rect = bento_nano_style::Rect {
+                    x: rect.x + 8.0,
+                    y: rect.y + 34.0,
+                    width: (rect.width - 16.0).max(0.0),
+                    height: 16.0,
+                };
+                self.fill_rounded_rect(live_rect, zone_icon_chip, zone_chrome.live_badge_radius)?;
+                self.draw_text(
+                    live_text.as_str(),
+                    bento_nano_style::Rect {
+                        x: live_rect.x + 6.0,
+                        y: live_rect.y + 2.0,
+                        width: (live_rect.width - 12.0).max(0.0),
+                        height: 12.0,
+                    },
+                    zone_live_folder_text,
+                )?;
+            }
+            if Some(zone.id) == drag_target_id {
+                if let Some(preview) =
+                    drop_preview_rect_for_zone(zone, item_drag, dragged_item_wide)
+                {
+                    self.fill_rounded_rect(preview, drop_preview_fill, item_chrome.card_radius)?;
+                    let core = inset_rect(preview, 4.0);
+                    self.fill_rounded_rect(
+                        core,
+                        drop_preview_core,
+                        zone_chrome.drop_preview_core_radius,
+                    )?;
+                }
+            }
+            for item in &zone.items {
+                let card_rect = item_card_rect_for_grid(zone, item.x, item.y, item.is_wide);
+                if card_rect.width <= 0.0 || card_rect.height <= 0.0 {
+                    continue;
+                }
+                let is_dragged_source = item_drag
+                    .map(|drag| drag.zone_id == zone.id && drag.item_id == item.id)
+                    .unwrap_or(false);
+                let item_fill = if is_dragged_source {
+                    item_chrome.drag_source_background
+                } else if item.file_missing {
+                    item_chrome.missing_background
+                } else {
+                    item_chrome.normal_background
+                };
+                self.draw_item_card(
+                    item,
+                    card_rect,
+                    item_fill,
+                    item_chrome.card_radius,
+                    item_chrome.text,
+                    item_chrome.icon_text,
+                )?;
+            }
+            // Wave I2 — sub-zone thumbnail strip at the bottom of an
+            // expanded stack anchor body. Mirrors frame_010's row of small
+            // 16×16 folder thumbnails. Non-stack zones produce zero
+            // thumbnails so the layout helper is a no-op for them.
+            if expanded_layout.footer_thumb_count > 0 {
+                if let Some(member_ids) = stack_member_ids_for_footer.as_ref() {
+                    let mut paint_index = 0usize;
+                    for member_id in member_ids
+                        .iter()
+                        .copied()
+                        .filter(|member_id| *member_id != zone.id)
+                    {
+                        if paint_index >= expanded_layout.footer_thumb_count {
+                            break;
+                        }
+                        let thumb_rect = expanded_layout.footer_thumbs[paint_index];
+                        if thumb_rect.width <= 0.0 || thumb_rect.height <= 0.0 {
+                            paint_index += 1;
+                            continue;
+                        }
+                        self.fill_rounded_rect(
+                            thumb_rect,
+                            zone_icon_chip,
+                            zone_chrome.icon_chip_radius,
+                        )?;
+                        if let Some(member) = app.zones.get(member_id) {
+                            self.draw_icon_glyph(
+                                member.icon.as_ref(),
+                                thumb_rect,
+                                zone_icon_text,
+                            )?;
+                        }
+                        paint_index += 1;
+                    }
+                }
+            }
+        }
+        if let Some(anchor_id) = app
+            .hovered_zone
+            .get()
+            .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
+        {
+            if let Some(anchor) = app.zones.get(anchor_id) {
+                if let Some(member_ids) = app.zones.stack_member_ids(anchor.id) {
+                    let reveal_progress = if app.stack_bloom_anchor.get() == Some(anchor.id) {
+                        app.stack_bloom_progress.get()
+                    } else {
+                        1.0
+                    };
+                    let frames = stack_tray::stack_bloom_frames_at(
+                        app.viewport,
+                        anchor,
+                        member_ids.len(),
+                        reveal_progress,
+                    );
+                    for (index, (member_id, frame)) in member_ids
+                        .iter()
+                        .copied()
+                        .zip(frames.iter().copied())
+                        .enumerate()
+                    {
+                        let Some(member) = app.zones.get(member_id) else {
+                            continue;
+                        };
+                        let petal_rect = frame.rect;
+                        if frame.connector.width > 0.5 && frame.connector.height > 0.5 {
+                            self.fill_rounded_rect(
+                                frame.connector,
+                                with_alpha(palette.accent, 0.16 * frame.alpha),
+                                zone_chrome.bloom_connector_radius,
+                            )?;
+                        }
+                        let shadow_rect = bento_nano_style::Rect {
+                            x: petal_rect.x + 3.0,
+                            y: petal_rect.y + 4.0,
+                            width: petal_rect.width,
+                            height: petal_rect.height,
+                        };
+                        self.fill_rounded_rect(
+                            shadow_rect,
+                            with_alpha(palette.scrim, 0.20 * frame.alpha),
+                            zone_chrome.bloom_petal_radius,
+                        )?;
+                        self.fill_rounded_rect(
+                            petal_rect,
+                            with_alpha(palette.surface_alt, 0.62 + 0.26 * frame.alpha),
+                            zone_chrome.bloom_petal_radius,
+                        )?;
+                        let border_rect = bento_nano_style::Rect {
+                            x: petal_rect.x + 2.0,
+                            y: petal_rect.y + 2.0,
+                            width: (petal_rect.width - 4.0).max(0.0),
+                            height: (petal_rect.height - 4.0).max(0.0),
+                        };
+                        self.fill_rounded_rect(
+                            border_rect,
+                            with_alpha(palette.accent, 0.16 + 0.12 * frame.alpha),
+                            zone_chrome.bloom_border_radius,
+                        )?;
+                        let core_rect = bento_nano_style::Rect {
+                            x: petal_rect.x + 4.0,
+                            y: petal_rect.y + 4.0,
+                            width: (petal_rect.width - 8.0).max(0.0),
+                            height: (petal_rect.height - 8.0).max(0.0),
+                        };
+                        self.fill_rounded_rect(
+                            core_rect,
+                            with_alpha(palette.surface_alt, 0.74 + 0.14 * frame.alpha),
+                            zone_chrome.bloom_core_radius,
+                        )?;
+                        let index_rect = bento_nano_style::Rect {
+                            x: petal_rect.x + 7.0,
+                            y: petal_rect.y + 6.0,
+                            width: 20.0,
+                            height: 16.0,
+                        };
+                        self.fill_rounded_rect(
+                            index_rect,
+                            with_alpha(palette.accent, 0.68 + 0.18 * frame.alpha),
+                            zone_chrome.bloom_index_radius,
+                        )?;
+                        let index_label = (index + 1).to_string();
+                        self.draw_text(
+                            index_label.as_str(),
+                            bento_nano_style::Rect {
+                                x: index_rect.x + 6.0,
+                                y: index_rect.y + 2.0,
+                                width: index_rect.width - 12.0,
+                                height: 10.0,
+                            },
+                            zone_icon_text,
+                        )?;
+                        let label = format!("{} {}", member.icon, member.title);
+                        self.draw_text(
+                            label.as_str(),
+                            bento_nano_style::Rect {
+                                x: petal_rect.x + 34.0,
+                                y: petal_rect.y + 6.0,
+                                width: (petal_rect.width - 42.0).max(0.0),
+                                height: 14.0,
+                            },
+                            zone_title,
+                        )?;
+                    }
+                    if member_ids.len() > stack_tray::BLOOM_VISIBLE_PETAL_LIMIT {
+                        let hidden = member_ids.len() - stack_tray::BLOOM_VISIBLE_PETAL_LIMIT;
+                        if let Some(last) = frames.last().copied() {
+                            let overflow_rect = bento_nano_style::Rect {
+                                x: last.rect.x,
+                                y: last.rect.bottom() + 4.0,
+                                width: last.rect.width,
+                                height: 18.0,
+                            };
+                            let overflow_label = format!("+{hidden} more stack members");
+                            self.draw_text(
+                                overflow_label.as_str(),
+                                overflow_rect,
+                                zone_live_folder_text,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(drag) = item_drag {
+            if let Some((zone, item)) = source_drag_item(app, drag) {
+                let source_rect = item_card_rect_for_grid(zone, item.x, item.y, item.is_wide);
+                let ghost_rect = drag_ghost_rect(app, drag, source_rect);
+                let shadow_rect = bento_nano_style::Rect {
+                    x: ghost_rect.x + 4.0,
+                    y: ghost_rect.y + 6.0,
+                    width: ghost_rect.width,
+                    height: ghost_rect.height,
+                };
+                self.fill_rounded_rect(
+                    shadow_rect,
+                    item_chrome.ghost_shadow,
+                    item_chrome.card_radius,
+                )?;
+                self.draw_item_card(
+                    item,
+                    ghost_rect,
+                    if item.file_missing {
+                        item_chrome.missing_background
+                    } else {
+                        item_chrome.ghost_background
+                    },
+                    item_chrome.card_radius,
+                    item_chrome.text,
+                    item_chrome.icon_text,
+                )?;
+            }
+        }
+        // V-11 (2026-05-21): bottom-left `item_operation_status` chip removed.
+        // Tauri 1.2.4 baseline never painted a status pill on item open/copy/etc;
+        // the `AppState::item_operation_status` cell + `ZoneSurfaceChrome::
+        // item_status_radius` token are kept for log/test parity (and a possible
+        // future toast surface) but are no longer rendered. M4 owns the dead_code
+        // sweep for the now-unused field.
+        Ok(())
+    }
+
+    /// Wave C (05-20 visual parity) — collapsed zone pill render path.
+    /// Tauri 1.2.4 shows each zone as a rounded capsule (icon + name + count
+    /// badge with `SHADOW.zen` outer / inner two-layer drop) by default; this
+    /// method consumes the Wave B token SSoT (`PALETTE_DARK`, `RADIUS`,
+    /// `SHADOW`, `ACRYLIC_FALLBACK`) and `zone_pill_geometry::ZonePillLayout`
+    /// to paint that surface in our D2D pump. Per parent PRD D5, acrylic is
+    /// the solid `ACRYLIC_FALLBACK` tint only.
+    fn draw_zone_pill(
+        &mut self,
+        zone: &Zone,
+        layout: &ZonePillLayout,
+        theme_base_accent: Option<&str>,
+        hover_t: f32,
+        press_t: f32,
+        anim_now_ms: u32,
+    ) -> Result<(), RenderError> {
+        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, PALETTE_DARK};
+        // V-8 — compose hover + press into the final scale multiplier and
+        // expand the pill rect about its center. Persisted geometry tokens
+        // are NEVER mutated (hard constraint) — `scale_rect_centered`
+        // returns a fresh `Rect` for paint only.
+        let scale = animator::pill_scale_for(hover_t, press_t);
+        let scaled_rect = animator::scale_rect_centered(layout.rect, scale);
+        let scaled_radius = layout.radius;
+        // V-9 (2026-05-21) — Tauri 1.2.4 reference pills have NO drop-shadow
+        // halo around the capsule. The previous SHADOW.zen / zen_inner fills
+        // produced a soft translucent "backdrop" that user flagged as
+        // "蒙版层 / backdrop". Removed entirely; the pill now reads as a
+        // clean capsule against the desktop. Shadow layout fields are kept
+        // in `ZonePillLayout` for the expanded morph path which still needs
+        // the geometry, but the collapsed paint no longer fills them.
+        // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
+        self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
+        // Surface fill on top of the glass — `PALETTE_DARK.surface_zen`.
+        // V-8 — hover brightens the surface tone subtly (+8% on hover).
+        let surface_brighten = 1.0 + hover_t * 0.08;
+        let surface_color = Color {
+            r: (PALETTE_DARK.surface_zen.r * surface_brighten).min(1.0),
+            g: (PALETTE_DARK.surface_zen.g * surface_brighten).min(1.0),
+            b: (PALETTE_DARK.surface_zen.b * surface_brighten).min(1.0),
+            a: PALETTE_DARK.surface_zen.a,
+        };
+        self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
+        // Accent stripe — zone's accent_color (or theme base accent) painted
+        // as a small chip behind the icon, mirroring Tauri's accent dot.
+        let accent_hex = zone
+            .accent_color
+            .as_deref()
+            .or(theme_base_accent);
+        if let Some(accent) = accent_hex.and_then(parse_hex_color) {
+            let accent_dot = bento_nano_style::Rect {
+                x: layout.icon.x + 2.0,
+                y: layout.icon.y + layout.icon.height - 5.0,
+                width: (layout.icon.width - 4.0).max(0.0),
+                height: 3.0,
+            };
+            self.fill_rounded_rect(
+                accent_dot,
+                accent,
+                BorderRadius::all(1.5),
+            )?;
+        }
+        // Icon glyph — Tauri renders zone.icon as a 24×24 line-art SVG.
+        // RC-4 Gap 1 — switched from `draw_text(zone.icon)` (which drew the
+        // raw name like "settings" → DWrite wrapped it to "set tin gs") to
+        // `draw_icon_glyph`, which looks up the built-in `IconKind` and
+        // renders the cached source SVG. Unknown names fall back to text.
+        self.draw_icon_glyph(zone.icon.as_ref(), layout.icon, PALETTE_DARK.text_primary)?;
+        // Label — zone.title in TEXT_PRIMARY.
+        self.draw_text(zone.title.as_ref(), layout.label, PALETTE_DARK.text_primary)?;
+        // Count badge — fill BADGE_BG, paint count in TEXT_SECONDARY.
+        let count = zone.items.len();
+        self.fill_rounded_rect(
+            layout.badge,
+            PALETTE_DARK.badge_bg,
+            layout.badge_radius,
+        )?;
+        let count_str = format_small_count(count);
+        let badge_text_rect = bento_nano_style::Rect {
+            x: layout.badge.x + 4.0,
+            y: layout.badge.y + 2.0,
+            width: (layout.badge.width - 8.0).max(0.0),
+            height: (layout.badge.height - 4.0).max(0.0),
+        };
+        self.draw_text(
+            count_str.as_str(),
+            badge_text_rect,
+            PALETTE_DARK.text_secondary,
+        )?;
+        // V-9 round 3 (2026-05-21) — Wave H2 status dot removed. User
+        // flagged the blue dot at the top of every collapsed pill as a
+        // regression vs Tauri 1.2.4 baseline (Tauri pills have no such
+        // indicator — `count > 0` is communicated entirely through the
+        // numeric badge on the right).
+        //
+        // V-14 (2026-05-21) — Tauri 1.2.4 reference frames 005/006/007/008
+        // paint a bright green status dot OVER the badge slot on the hovered
+        // / active / expanded zone. The dot fades in with hover_t and
+        // covers the numeric count while the cursor is parked on the pill.
+        // Position: centered on badge rect, diameter ~ badge height. Color:
+        // PALETTE_DARK.accent_green (#22C55E). The fill rounded-rect uses
+        // half-height radius to render a perfect circle. The count text is
+        // still painted underneath; the dot just overlays it on hover.
+        if hover_t > 0.0 {
+            let dot_size = layout.badge.height.min(layout.badge.width);
+            let dot_rect = bento_nano_style::Rect {
+                x: layout.badge.x + (layout.badge.width - dot_size) * 0.5,
+                y: layout.badge.y + (layout.badge.height - dot_size) * 0.5,
+                width: dot_size,
+                height: dot_size,
+            };
+            let dot_color = Color {
+                a: PALETTE_DARK.accent_green.a * hover_t.clamp(0.0, 1.0),
+                ..PALETTE_DARK.accent_green
+            };
+            self.fill_rounded_rect(
+                dot_rect,
+                dot_color,
+                BorderRadius::all(dot_size * 0.5),
+            )?;
+        }
+        let _ = (accent_hex, anim_now_ms, press_t);
+        Ok(())
+    }
+
+    /// Wave G2 — paint the in-flight capsule morph. `morph = 0` reproduces
+    /// the collapsed pill chrome, `morph = 1` reproduces the expanded zone
+    /// surface; values in between paint the lerped rect at lerped corner
+    /// radius + lerped fill alpha. Glyph + label + count badge fade in
+    /// proportional to `morph` so the transient frame doesn't show truncated
+    /// text. Allocation-free hot-path per spec §10.
+    fn draw_zone_pill_morph(
+        &mut self,
+        zone: &Zone,
+        pill_layout: &ZonePillLayout,
+        expanded_rect: bento_nano_style::Rect,
+        morph: f32,
+        theme_base_accent: Option<&str>,
+    ) -> Result<(), RenderError> {
+        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, PALETTE_DARK, RADIUS, SHADOW};
+        let morph_clamped = morph.clamp(0.0, 1.0);
+        let pill_rect = pill_layout.rect;
+        let rect =
+            zone_pill_geometry::morph_pill_to_rect(pill_rect, expanded_rect, morph_clamped);
+        // Capsule radius → expanded surface radius (RADIUS.expanded = 16 px,
+        // matches the legacy zone chrome rounding).
+        let radius_px = zone_pill_geometry::morph_pill_radius(
+            RADIUS.capsule,
+            RADIUS.expanded,
+            morph_clamped,
+        );
+        let border_radius = BorderRadius::all(radius_px);
+        let inv = 1.0 - morph_clamped;
+        // Shadow band — pill drop offsets shrink linearly toward 0 as we
+        // approach the expanded body (which carries its own legacy chrome).
+        let shadow_outer = bento_nano_style::Rect {
+            x: rect.x,
+            y: rect.y + zone_pill_geometry::PILL_SHADOW_OUTER_DY * inv,
+            width: rect.width,
+            height: rect.height,
+        };
+        let shadow_inner = bento_nano_style::Rect {
+            x: rect.x,
+            y: rect.y + zone_pill_geometry::PILL_SHADOW_INNER_DY * inv,
+            width: rect.width,
+            height: rect.height,
+        };
+        self.fill_rounded_rect(shadow_outer, SHADOW.zen.color, border_radius)?;
+        self.fill_rounded_rect(shadow_inner, SHADOW.zen_inner.color, border_radius)?;
+        self.fill_rounded_rect(rect, ACRYLIC_FALLBACK, border_radius)?;
+        self.fill_rounded_rect(rect, PALETTE_DARK.surface_zen, border_radius)?;
+        // Accent stripe (matches expanded chrome accent dot above the icon
+        // band — drawn at the top of the morph so the eye picks up the zone
+        // identity even during the transition).
+        let accent_hex = zone
+            .accent_color
+            .as_deref()
+            .or(theme_base_accent);
+        if let Some(accent) = accent_hex.and_then(parse_hex_color) {
+            let accent_rect = bento_nano_style::Rect {
+                x: rect.x + 8.0,
+                y: rect.y + 4.0,
+                width: (rect.width - 16.0).max(0.0),
+                height: 3.0,
+            };
+            self.fill_rounded_rect(accent_rect, accent, BorderRadius::all(1.5))?;
+        }
+        // Title fades in along the morph. Use a thin top-band that scales
+        // toward the expanded title area — anchored to the rect top-left so
+        // it tracks the morph smoothly.
+        let title_height = (12.0 + 6.0 * morph_clamped).min(rect.height - 8.0).max(8.0);
+        let title_rect = bento_nano_style::Rect {
+            x: rect.x + 10.0,
+            y: rect.y + 6.0,
+            width: (rect.width - 20.0).max(0.0),
+            height: title_height,
+        };
+        let title_color = with_alpha(PALETTE_DARK.text_primary, 0.6 + 0.4 * morph_clamped);
+        self.draw_text(zone.title.as_ref(), title_rect, title_color)?;
+        Ok(())
+    }
+
+    fn draw_item_card(
+        &mut self,
+        item: &ZoneItem,
+        card_rect: bento_nano_style::Rect,
+        fill: Color,
+        radius: BorderRadius,
+        text: Color,
+        icon_text: Color,
+    ) -> Result<(), RenderError> {
+        self.fill_rounded_rect(card_rect, fill, radius)?;
+        // Wave I2 — horizontally centre the icon glyph inside the card
+        // (Tauri frame_010 reference). Vertical position keeps the existing
+        // 6-DIP top inset so the label still sits in the bottom band of the
+        // 80-DIP-tall card.
+        let icon_side = item_icon::IconSize::Standard.container_px();
+        let icon_rect = bento_nano_style::Rect {
+            x: card_rect.x + ((card_rect.width - icon_side) * 0.5).max(0.0),
+            y: card_rect.y + 6.0,
+            width: icon_side,
+            height: icon_side,
+        };
+        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect)? {
+            // Wave I2 — prefer `draw_icon_glyph` so item icons that happen
+            // to name a built-in `IconKind` paint as line-art. When the
+            // path is not a known IconKind the helper falls through to
+            // `draw_text`, where we hand it the extension-keyed emoji
+            // fallback (the existing 1.x table) so unknown files still
+            // render a recognisable glyph.
+            let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
+            self.draw_icon_glyph(glyph.as_str(), icon_rect, icon_text)?;
+        }
+        let label_rect = bento_nano_style::Rect {
+            x: card_rect.x + 4.0,
+            y: card_rect.y + 44.0,
+            width: (card_rect.width - 8.0).max(0.0),
+            height: 28.0,
+        };
+        self.draw_text(item.name.as_ref(), label_rect, text)?;
+        Ok(())
+    }
+
+    /// Draw an item icon bitmap if the backend cache has bytes for the item's
+    /// icon hash. Returns `false` when fallback text should be used.
+    fn draw_item_bitmap(
+        &mut self,
+        icon_hash: &str,
+        rect: bento_nano_style::Rect,
+    ) -> Result<bool, RenderError> {
+        if icon_hash.is_empty() || self.icon_bitmap_failures.contains(icon_hash) {
+            return Ok(false);
+        }
+
+        if !self.icon_bitmaps.contains_key(icon_hash) {
+            let Some(cache) = bento_nano_backend::icon::cache_handle() else {
+                return Ok(false);
+            };
+            let Some(bytes) = cache.get(icon_hash) else {
+                let _ = self.icon_bitmap_failures.insert(icon_hash.to_owned());
+                return Ok(false);
+            };
+            let Some(surface) = self.surface.as_ref() else {
+                return Ok(false);
+            };
+            match d2d::bitmap_from_png_bytes(&surface.ctx, bytes.as_ref()) {
+                Ok(bitmap) => {
+                    let _ = self.icon_bitmaps.insert(icon_hash.to_owned(), bitmap);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "bentodesk::render::icon",
+                        %icon_hash,
+                        error = %e,
+                        "failed to decode cached icon bitmap; using fallback glyph"
+                    );
+                    let _ = self.icon_bitmap_failures.insert(icon_hash.to_owned());
+                    return Ok(false);
+                }
+            }
+        }
+
+        let Some(bitmap) = self.icon_bitmaps.get(icon_hash).cloned() else {
+            return Ok(false);
+        };
+        let d2d_rect = D2D_RECT_F {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.width,
+            bottom: rect.y + rect.height,
+        };
+        let Some(surface) = self.surface.as_ref() else {
+            return Ok(false);
+        };
+        d2d::draw_bitmap(&surface.ctx, &bitmap, d2d_rect, 1.0)?;
+        Ok(true)
+    }
+
+    fn draw_image_file(
+        &mut self,
+        path: &str,
+        rect: bento_nano_style::Rect,
+    ) -> Result<(), RenderError> {
+        if path.is_empty()
+            || rect.width <= 0.0
+            || rect.height <= 0.0
+            || self.image_file_failures.contains(path)
+        {
+            return Ok(());
+        }
+
+        if !self.image_file_bitmaps.contains_key(path) {
+            let bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bentodesk::render::image",
+                        %path,
+                        %error,
+                        "failed to read file-backed image widget"
+                    );
+                    let _ = self.image_file_failures.insert(path.to_owned());
+                    return Ok(());
+                }
+            };
+            if bytes.len() > IMAGE_WIDGET_MAX_BYTES {
+                tracing::warn!(
+                    target: "bentodesk::render::image",
+                    %path,
+                    bytes = bytes.len(),
+                    "file-backed image widget exceeds decode budget"
+                );
+                let _ = self.image_file_failures.insert(path.to_owned());
+                return Ok(());
+            }
+            let Some(surface) = self.surface.as_ref() else {
+                return Ok(());
+            };
+            match d2d::bitmap_from_image_bytes(&surface.ctx, &bytes) {
+                Ok(bitmap) => {
+                    let _ = self.image_file_bitmaps.insert(path.to_owned(), bitmap);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bentodesk::render::image",
+                        %path,
+                        error = %error,
+                        "failed to decode file-backed image widget"
+                    );
+                    let _ = self.image_file_failures.insert(path.to_owned());
+                    return Ok(());
+                }
+            }
+        }
+
+        let Some(bitmap) = self.image_file_bitmaps.get(path).cloned() else {
+            return Ok(());
+        };
+        let d2d_rect = D2D_RECT_F {
+            left: rect.x,
+            top: rect.y,
+            right: rect.x + rect.width,
+            bottom: rect.y + rect.height,
+        };
+        let Some(surface) = self.surface.as_ref() else {
+            return Ok(());
+        };
+        d2d::draw_bitmap(&surface.ctx, &bitmap, d2d_rect, 1.0)?;
+        Ok(())
+    }
+
+    /// Dedicated entry point for the `WindowKind::Settings` HWND. The HWND
+    /// has its own 800×600 viewport (vs the Main HWND's primary-monitor work
+    /// area), so painting the entire main UI tree + zones underneath the
+    /// modal scrim leaks Main-window geometry into the Settings frame and
+    /// causes overlap (button rects positioned for the Main viewport land
+    /// outside the Settings panel chrome). Render only the scrim + panel +
+    /// any open sub-modals, keeping the Settings HWND's frame self-contained.
+    fn draw_settings_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        self.draw_settings_panel(app)
+    }
+
+    /// Phase 2.1 Ruling C — draw the modal settings overlay. Triggered by
+    /// `app.settings_open == true`. Three layers:
+    ///   1. Full-viewport α=0.30 black scrim so the underlying UI fades.
+    ///   2. Centred 320×200 rounded panel with translucent dark fill.
+    ///   3. Title + real settings rows + close button.
+    fn draw_settings_panel(&mut self, app: &AppState) -> Result<(), RenderError> {
+        use crate::settings_panel::{
+            SETTINGS_ADV_ROW_COUNT, SETTINGS_OVERLAY_ROW_COUNT, SETTINGS_PANEL_RADIUS,
+            SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_ROW_PAD_X, SETTINGS_SOURCE_COUNT,
+            SETTINGS_TOP_TOGGLE_COUNT,
+            settings_active_theme_rect, settings_advanced_label_rect,
+            settings_advanced_num_value_rect, settings_advanced_row_rect,
+            settings_advanced_slider_rect, settings_advanced_toggle_hit_rect, settings_body_rect,
+            settings_cancel_button_rect, settings_close_button_rect_m1,
+            settings_desktop_path_input_rect, settings_desktop_path_label_rect,
+            settings_footer_rect, settings_header_rect, settings_language_chevron_rect,
+            settings_language_chip_label_rect, settings_language_chip_rect,
+            settings_language_row_rect, settings_overlay_label_rect, settings_overlay_row_rect,
+            settings_overlay_state_pill_rect, settings_overlay_version_input_rect,
+            settings_panel_rect_m1, settings_save_button_rect, settings_source_row_rect,
+            settings_source_toggle_hit_rect, settings_sources_label_rect,
+            settings_top_toggle_hit_rect, settings_top_toggle_row_rect,
+            settings_watch_label_rect, settings_watch_textarea_rect,
+        };
+        use crate::widgets::toggle_switch::toggle_switch_in_rect;
+        // Round-2 M1 — Tauri 1.2.4 frame_060/065/070/075 dark redesign.
+        //
+        // Three layers paint in order:
+        //   1. Full-viewport α=0.55 scrim so the underlying desk fades hard.
+        //   2. Dark dialog card (400 × min(700, viewport.h-padding), radius 14).
+        //   3. Sticky 48-DIP header + scrollable body + sticky 56-DIP footer.
+        //
+        // Body content for M1: 5 toggle rows + language chip row.
+        // K1 modal-opener arms (keybindings/plugins/theme picker) remain alive
+        // as orphan paint paths gated on their own `*_open` Cells. They never
+        // fire from M1 hit-test but compile-clean per Ruling B.
+        use bento_nano_style::tokens as style_tokens;
+        let palette = style_tokens::PALETTE_DARK;
+        // A-path + V-3 (TL Ruling 2026-05-21): no fullscreen scrim — Tauri
+        // 1.2.4 baseline (frame_060) leaves the desktop wallpaper visible
+        // around the floating 420×580 modal. Panel/header/footer surfaces
+        // ride at FULL opacity (1.0) so nothing behind the aux HWND (e.g.
+        // editor windows, other apps) bleeds through the panel chrome.
+        // Only the panel margin + drop shadow ring are translucent — those
+        // need to compose against the wallpaper. surface_dialog =
+        // #0C0C12EB, surface_subtle base alphas are ignored at 1.0.
+        let panel_bg = with_alpha(palette.surface_dialog, 1.0);
+        let header_bg = with_alpha(palette.surface_dialog, 1.0);
+        // Footer rides on the same surface_dialog as panel/header. surface_subtle
+        // in PALETTE_DARK is #FFFFFF×0x08 — a white-overlay token meant for
+        // small hover accents, NOT a card fill. Forcing it to 1.0 alpha would
+        // render the entire footer band white (regression observed in
+        // 05-v-fixes capture pre-fix).
+        let footer_bg = with_alpha(palette.surface_dialog, 1.0);
+        let title_color = palette.text_primary;
+        let label_color = palette.text_secondary;
+        let accent_on = palette.accent_blue;
+        let track_off = with_alpha(palette.surface_subtle, 0.80);
+        // V-4 (TL audit 2026-05-21): chip_bg backs every M2/M3 interactive
+        // surface — language dropdown, source cards, path input, watch
+        // textarea, num buttons, overlay version input, cancel button. Prior
+        // value `surface_hover×1.0` resolved to #FFFFFF×1.0 (pure white) which
+        // bled white panels across the modal (see 05-v-fixes capture pre-fix).
+        // surface_expanded = #0C0C12D1 — same hue as panel_bg, slightly
+        // lighter alpha so cards read as raised against the dialog surface.
+        let chip_bg = with_alpha(palette.surface_expanded, 1.0);
+        let chip_border = with_alpha(palette.border_zen, 0.60);
+        let knob_color = bento_nano_style::Color::WHITE;
+        let divider_color = with_alpha(palette.text_primary, 0.08);
+        let panel_radius = bento_nano_style::BorderRadius::all(SETTINGS_PANEL_RADIUS);
+        let chip_radius_tokens = style_tokens::RADIUS;
+        let chip_radius = bento_nano_style::BorderRadius::all(chip_radius_tokens.card);
+        let header_radius = bento_nano_style::BorderRadius {
+            top_left: SETTINGS_PANEL_RADIUS,
+            top_right: SETTINGS_PANEL_RADIUS,
+            bottom_left: 0.0,
+            bottom_right: 0.0,
+        };
+        let footer_radius = bento_nano_style::BorderRadius {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_left: SETTINGS_PANEL_RADIUS,
+            bottom_right: SETTINGS_PANEL_RADIUS,
+        };
+        let btn_radius = bento_nano_style::BorderRadius::all(8.0);
+
+        // RC-4 Gap 2 — derive a layout viewport from backbuffer + base_scale.
+        let base_scale = self.base_scale.max(0.01);
+        let viewport = bento_nano_style::Size {
+            width: (self.width as f32 / base_scale).max(1.0),
+            height: (self.height as f32 / base_scale).max(1.0),
+        };
+
+        // 1) Drop shadow — A-path 2026-05-21: no fullscreen scrim (Tauri
+        // baseline frame_060 keeps the desktop wallpaper visible around the
+        // panel). Instead paint an outer soft-black box 8 DIP each side of
+        // the panel so it reads as a floating modal lifted off the desktop.
+        // V-5 (TL Ruling 2026-05-21): alpha pinned to
+        // `SETTINGS_PANEL_SHADOW_ALPHA` (0.15) — the hard-edged
+        // `fill_rounded_rect` cannot reproduce Tauri's gaussian falloff, so a
+        // high alpha (pre-fix 0.45) reads as a "mask ring" against the
+        // wallpaper. 0.15 keeps the lifted cue without the halo.
+        let panel = settings_panel_rect_m1(viewport);
+        let shadow_rect = bento_nano_style::Rect {
+            x: panel.x - 8.0,
+            y: panel.y - 8.0,
+            width: panel.width + 16.0,
+            height: panel.height + 16.0,
+        };
+        let shadow = with_alpha(
+            bento_nano_style::Color::from_u8(0x00, 0x00, 0x00, 0xFF),
+            SETTINGS_PANEL_SHADOW_ALPHA,
+        );
+        let shadow_radius = bento_nano_style::BorderRadius::all(SETTINGS_PANEL_RADIUS + 4.0);
+        self.fill_rounded_rect(shadow_rect, shadow, shadow_radius)?;
+
+        // 2) Panel card — dark, radius 14, sits on top of the shadow.
+        self.fill_rounded_rect(panel, panel_bg, panel_radius)?;
+
+        // 3) Header (sticky, 48 DIP) — title + close ×.
+        let header = settings_header_rect(viewport);
+        self.fill_rounded_rect(header, header_bg, header_radius)?;
+        let title_rect = bento_nano_style::Rect {
+            x: header.x + SETTINGS_ROW_PAD_X,
+            y: header.y + (header.height - 20.0) * 0.5,
+            width: header.width * 0.5,
+            height: 20.0,
+        };
+        self.draw_text(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_TITLE),
+            title_rect,
+            title_color,
+        )?;
+        let close_rect = settings_close_button_rect_m1(viewport);
+        self.draw_text_no_wrap("×", close_rect, title_color)?;
+        let header_hairline = bento_nano_style::Rect {
+            x: header.x,
+            y: header.bottom() - 1.0,
+            width: header.width,
+            height: 1.0,
+        };
+        self.fill_rounded_rect(header_hairline, divider_color, BorderRadius::ZERO)?;
+
+        // 4) Body — paint rows scrolled by `app.scroll_offset_y`. No clip API
+        // available; rows that would fall outside `body_rect` skip paint.
+        let body = settings_body_rect(viewport);
+        let scroll = app.scroll_offset_y.get();
+
+        // Helper: skip if row falls fully outside the body band.
+        let row_visible = |row: Rect, body: Rect| -> bool {
+            row.bottom() > body.y && row.y < body.bottom()
+        };
+
+        // Toggle row labels by index (0..=4).
+        let toggle_labels: [u16; 5] = [
+            bento_nano_style::i18n_zh_cn::ids::SETTING_DESKTOP_EMBED.0,
+            bento_nano_style::i18n_zh_cn::ids::SETTING_AUTOSTART.0,
+            bento_nano_style::i18n_zh_cn::ids::SETTING_SHOW_IN_TASKBAR.0,
+            bento_nano_style::i18n_zh_cn::ids::SETTING_SMART_LAYOUT.0,
+            bento_nano_style::i18n_zh_cn::ids::SETTING_SPEED_MODE.0,
+        ];
+
+        for index in 0..SETTINGS_TOP_TOGGLE_COUNT {
+            let row = settings_top_toggle_row_rect(viewport, scroll, index);
+            if !row_visible(row, body) {
+                continue;
+            }
+            // Row label.
+            let label_rect = bento_nano_style::Rect {
+                x: row.x,
+                y: row.y + (row.height - 16.0) * 0.5,
+                width: row.width * 0.6,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::StringId(
+                    toggle_labels[index as usize],
+                )),
+                label_rect,
+                label_color,
+            )?;
+            // Toggle.
+            let hit = settings_top_toggle_hit_rect(viewport, scroll, index);
+            let on = match index {
+                0 => app.setting_desktop_embed.get(),
+                1 => app.setting_autostart.get(),
+                2 => app.setting_show_in_taskbar.get(),
+                3 => app.setting_smart_layout.get(),
+                4 => app.setting_speed_mode.get(),
+                _ => false,
+            };
+            let switch = toggle_switch_in_rect(hit);
+            self.fill_rounded_rect(
+                switch.track,
+                if on { accent_on } else { track_off },
+                BorderRadius::all(switch.track_radius()),
+            )?;
+            self.fill_rounded_rect(
+                switch.knob(on),
+                knob_color,
+                BorderRadius::all(switch.knob_radius()),
+            )?;
+        }
+
+        // Language row.
+        let locale_row = settings_language_row_rect(viewport, scroll);
+        if row_visible(locale_row, body) {
+            let label_rect = bento_nano_style::Rect {
+                x: locale_row.x,
+                y: locale_row.y + (locale_row.height - 16.0) * 0.5,
+                width: locale_row.width * 0.45,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_LANGUAGE),
+                label_rect,
+                label_color,
+            )?;
+            let chip = settings_language_chip_rect(viewport, scroll);
+            self.fill_rounded_rect(chip, chip_bg, chip_radius)?;
+            let chip_hairline = bento_nano_style::Rect {
+                x: chip.x,
+                y: chip.y,
+                width: chip.width,
+                height: 1.0,
+            };
+            self.fill_rounded_rect(chip_hairline, chip_border, BorderRadius::ZERO)?;
+            let locale_label =
+                if bento_nano_style::current_locale_is(&bento_nano_style::EN_US) {
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::LOCALE_LABEL_EN_US)
+                } else {
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::LOCALE_LABEL_ZH_CN)
+                };
+            self.draw_text_no_wrap(
+                locale_label,
+                settings_language_chip_label_rect(viewport, scroll),
+                title_color,
+            )?;
+            self.draw_text_no_wrap(
+                "▾",
+                settings_language_chevron_rect(viewport, scroll),
+                label_color,
+            )?;
+        }
+
+        // ── Round-2 M2 sections ──────────────────────────────────────────
+
+        // 桌面源 label.
+        let sources_label = settings_sources_label_rect(viewport, scroll);
+        if row_visible(sources_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_SOURCES),
+                sources_label,
+                label_color,
+            )?;
+        }
+
+        // 桌面源 cards (海桌面 + 公共桌面).
+        let source_card_radius = bento_nano_style::BorderRadius::all(10.0);
+        let source_labels: [u16; 2] = [
+            bento_nano_style::i18n_zh_cn::ids::SOURCE_PRIMARY_LABEL.0,
+            bento_nano_style::i18n_zh_cn::ids::SOURCE_PUBLIC_LABEL.0,
+        ];
+        for index in 0..SETTINGS_SOURCE_COUNT {
+            let row = settings_source_row_rect(viewport, scroll, index);
+            if !row_visible(row, body) {
+                continue;
+            }
+            // Card surface.
+            self.fill_rounded_rect(row, chip_bg, source_card_radius)?;
+            // D-1 (frame_060/085 parity, 2026-05-22): leading 24×24 coloured
+            // glyph chip — Tauri baseline paints a blue tile for 海桌面 and a
+            // green tile for 公共桌面 with a white leading-character glyph.
+            // The chip occupies a 24+12 = 36 DIP left gutter; downstream label
+            // and sub-text columns shift right by `icon_gutter` to clear it.
+            let icon_size: f32 = 24.0;
+            let icon_gutter: f32 = icon_size + 12.0;
+            let icon_radius = bento_nano_style::BorderRadius::all(6.0);
+            let icon_rect = bento_nano_style::Rect {
+                x: row.x + 14.0,
+                y: row.y + (row.height - icon_size) * 0.5,
+                width: icon_size,
+                height: icon_size,
+            };
+            let icon_bg = if index == 0 {
+                palette.accent_blue
+            } else {
+                palette.accent_green
+            };
+            self.fill_rounded_rect(icon_rect, icon_bg, icon_radius)?;
+            let source_label_text = bento_nano_style::t(bento_nano_style::StringId(
+                source_labels[index as usize],
+            ));
+            let icon_glyph: smol_str::SmolStr = source_label_text
+                .chars()
+                .next()
+                .map(|c| smol_str::SmolStr::from(c.to_string()))
+                .unwrap_or_else(|| smol_str::SmolStr::from("•"));
+            self.draw_text_no_wrap(
+                icon_glyph.as_str(),
+                icon_rect,
+                bento_nano_style::Color::WHITE,
+            )?;
+            // Card label (shifted right of the icon gutter).
+            let label_rect = bento_nano_style::Rect {
+                x: row.x + 14.0 + icon_gutter,
+                y: row.y + 8.0,
+                width: row.width * 0.6,
+                height: 18.0,
+            };
+            self.draw_text(
+                source_label_text,
+                label_rect,
+                title_color,
+            )?;
+            // Card secondary line (placeholder path — M3 wires real paths).
+            let sub_rect = bento_nano_style::Rect {
+                x: row.x + 14.0 + icon_gutter,
+                y: row.y + row.height - 22.0,
+                width: row.width * 0.6,
+                height: 14.0,
+            };
+            let sub_text = if index == 0 {
+                "C:\\Users\\HP\\Desktop"
+            } else {
+                "C:\\Users\\Public\\Desktop"
+            };
+            self.draw_text(sub_text, sub_rect, label_color)?;
+            // D-2 (frame_060/085 parity, 2026-05-22): right-anchored state
+            // pill (capsule, 60×22 DIP) replacing the iOS toggle switch —
+            // Tauri baseline shows a labelled "已启用"/"未启用" pill that
+            // mirrors the overlay-section state pill style at render.rs:2768.
+            // Hit-test rect (60×28) is untouched so click ergonomics survive.
+            let hit = settings_source_toggle_hit_rect(viewport, scroll, index);
+            let on = if index == 0 {
+                app.source_primary_enabled.get()
+            } else {
+                app.source_public_enabled.get()
+            };
+            let source_pill_w: f32 = 60.0;
+            let source_pill_h: f32 = 22.0;
+            let source_pill_radius =
+                bento_nano_style::BorderRadius::all(source_pill_h * 0.5);
+            let source_pill_rect = bento_nano_style::Rect {
+                x: hit.x + (hit.width - source_pill_w) * 0.5,
+                y: hit.y + (hit.height - source_pill_h) * 0.5,
+                width: source_pill_w,
+                height: source_pill_h,
+            };
+            // Mirror M3 overlay pill colours so the two pill renders stay
+            // visually consistent (#36C86B×0.9 ON, surface_subtle×0.85 OFF).
+            let source_pill_on_bg = with_alpha(
+                bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+                0.90,
+            );
+            let source_pill_off_bg = with_alpha(palette.surface_subtle, 0.85);
+            self.fill_rounded_rect(
+                source_pill_rect,
+                if on {
+                    source_pill_on_bg
+                } else {
+                    source_pill_off_bg
+                },
+                source_pill_radius,
+            )?;
+            let pill_text_id = if on {
+                bento_nano_style::i18n_zh_cn::ids::STATE_ENABLED_PILL
+            } else {
+                bento_nano_style::i18n_zh_cn::ids::STATE_DISABLED_PILL
+            };
+            self.draw_text_no_wrap(
+                bento_nano_style::t(pill_text_id),
+                source_pill_rect,
+                bento_nano_style::Color::WHITE,
+            )?;
+        }
+
+        // 桌面路径 label + input.
+        let path_label = settings_desktop_path_label_rect(viewport, scroll);
+        if row_visible(path_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_PATH),
+                path_label,
+                label_color,
+            )?;
+        }
+        let path_input = settings_desktop_path_input_rect(viewport, scroll);
+        if row_visible(path_input, body) {
+            self.fill_rounded_rect(path_input, chip_bg, source_card_radius)?;
+            let path_text = app.desktop_path_draft.borrow();
+            let text_rect = bento_nano_style::Rect {
+                x: path_input.x + 12.0,
+                y: path_input.y + (path_input.height - 16.0) * 0.5,
+                width: (path_input.width - 24.0).max(0.0),
+                height: 16.0,
+            };
+            self.draw_text_no_wrap(path_text.as_str(), text_rect, title_color)?;
+            drop(path_text);
+        }
+
+        // 监控值 label + textarea.
+        let watch_label = settings_watch_label_rect(viewport, scroll);
+        if row_visible(watch_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_WATCH_VALUES),
+                watch_label,
+                label_color,
+            )?;
+        }
+        let watch_area = settings_watch_textarea_rect(viewport, scroll);
+        if row_visible(watch_area, body) {
+            self.fill_rounded_rect(watch_area, chip_bg, source_card_radius)?;
+            let watch_text = app.watch_paths_draft.borrow();
+            if watch_text.is_empty() {
+                // Hint placeholder.
+                let hint_rect = bento_nano_style::Rect {
+                    x: watch_area.x + 12.0,
+                    y: watch_area.y + 10.0,
+                    width: (watch_area.width - 24.0).max(0.0),
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::WATCH_HINT_LINE_EACH,
+                    ),
+                    hint_rect,
+                    label_color,
+                )?;
+            } else {
+                let text_rect = bento_nano_style::Rect {
+                    x: watch_area.x + 12.0,
+                    y: watch_area.y + 10.0,
+                    width: (watch_area.width - 24.0).max(0.0),
+                    height: (watch_area.height - 20.0).max(0.0),
+                };
+                self.draw_text(watch_text.as_str(), text_rect, title_color)?;
+            }
+            drop(watch_text);
+        }
+
+        // ── Round-2 M3 sections — advanced + overlay version ─────────────
+
+        // 高级 section label.
+        let adv_label = settings_advanced_label_rect(viewport, scroll);
+        if row_visible(adv_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_ADVANCED),
+                adv_label,
+                label_color,
+            )?;
+        }
+
+        // Advanced row labels.
+        let adv_labels: [u16; 6] = [
+            bento_nano_style::i18n_zh_cn::ids::ROW_ADVANCED_STARTUP.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_MAGNET_SWITCH_HINT.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_MAX_MAGNET_COUNT.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_MAGNET_DURATION.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_ZONE_LAYOUT_SECTION.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_BAR_COUNT_DISPLAY.0,
+        ];
+        let num_btn_radius = bento_nano_style::BorderRadius::all(6.0);
+        let pill_radius = bento_nano_style::BorderRadius::all(11.0);
+        let slider_track_radius = bento_nano_style::BorderRadius::all(2.0);
+        let slider_thumb_radius = bento_nano_style::BorderRadius::all(6.0);
+
+        for index in 0..SETTINGS_ADV_ROW_COUNT {
+            let row = settings_advanced_row_rect(viewport, scroll, index);
+            if !row_visible(row, body) {
+                continue;
+            }
+            // Row label (left half).
+            let label_rect = bento_nano_style::Rect {
+                x: row.x,
+                y: row.y + (row.height - 16.0) * 0.5,
+                width: row.width * 0.6,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::StringId(adv_labels[index as usize])),
+                label_rect,
+                label_color,
+            )?;
+            // Right-anchored widget per row type.
+            match index {
+                0 | 1 | 4 => {
+                    let hit = settings_advanced_toggle_hit_rect(viewport, scroll, index);
+                    let on = match index {
+                        0 => app.setting_advanced_startup.get(),
+                        1 => app.setting_magnet_switch_hint.get(),
+                        4 => app.setting_zone_layout_section.get(),
+                        _ => false,
+                    };
+                    let switch = toggle_switch_in_rect(hit);
+                    self.fill_rounded_rect(
+                        switch.track,
+                        if on { accent_on } else { track_off },
+                        BorderRadius::all(switch.track_radius()),
+                    )?;
+                    self.fill_rounded_rect(
+                        switch.knob(on),
+                        knob_color,
+                        BorderRadius::all(switch.knob_radius()),
+                    )?;
+                }
+                2 | 3 => {
+                    // D-3 (frame_065 parity, 2026-05-22): Tauri baseline shows
+                    // ONLY a right-anchored bare numeric value — no visible − /
+                    // + chrome. The minus/plus hit-test rects survive in
+                    // `settings_panel.rs` (line 1102/1132) so keyboard arrow
+                    // keys + scroll-wheel handlers stay routable; we just
+                    // drop the on-canvas chip paint and the "−" / "+" glyphs.
+                    let value = settings_advanced_num_value_rect(viewport, scroll, index);
+                    let raw = if index == 2 {
+                        app.setting_max_magnet_count.get()
+                    } else {
+                        app.setting_magnet_duration_s.get()
+                    };
+                    let buf = smol_str::SmolStr::new(raw.to_string());
+                    self.draw_text_no_wrap(buf.as_str(), value, title_color)?;
+                }
+                5 => {
+                    // Slider track + filled segment + thumb.
+                    let track = settings_advanced_slider_rect(viewport, scroll);
+                    // Track band (4 px high centred inside the 12-px thumb rect).
+                    let track_band = bento_nano_style::Rect {
+                        x: track.x,
+                        y: track.y + (track.height - 4.0) * 0.5,
+                        width: track.width,
+                        height: 4.0,
+                    };
+                    self.fill_rounded_rect(track_band, track_off, slider_track_radius)?;
+                    // Value in [500, 5000]; map to fraction along the track.
+                    let v = app
+                        .setting_bar_count_display_ms
+                        .get()
+                        .clamp(500, 5000);
+                    let frac = (v - 500) as f32 / 4500.0;
+                    let filled = bento_nano_style::Rect {
+                        x: track_band.x,
+                        y: track_band.y,
+                        width: track_band.width * frac,
+                        height: track_band.height,
+                    };
+                    self.fill_rounded_rect(filled, accent_on, slider_track_radius)?;
+                    let thumb_d = track.height;
+                    let thumb = bento_nano_style::Rect {
+                        x: track.x + track.width * frac - thumb_d * 0.5,
+                        y: track.y,
+                        width: thumb_d,
+                        height: thumb_d,
+                    };
+                    self.fill_rounded_rect(thumb, knob_color, slider_thumb_radius)?;
+                }
+                _ => {}
+            }
+        }
+
+        // 未来集成验证 section label.
+        let overlay_label = settings_overlay_label_rect(viewport, scroll);
+        if row_visible(overlay_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_OVERLAY_VERSION),
+                overlay_label,
+                label_color,
+            )?;
+        }
+
+        let overlay_labels: [u16; 3] = [
+            bento_nano_style::i18n_zh_cn::ids::ROW_OVERLAY_VERSION.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_EQUIPMENT_STATE.0,
+            bento_nano_style::i18n_zh_cn::ids::ROW_MAGNET_STATE.0,
+        ];
+        let pill_on_bg = with_alpha(
+            bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+            0.90,
+        );
+        let pill_off_bg = with_alpha(palette.surface_subtle, 0.85);
+        for index in 0..SETTINGS_OVERLAY_ROW_COUNT {
+            let row = settings_overlay_row_rect(viewport, scroll, index);
+            if !row_visible(row, body) {
+                continue;
+            }
+            // Row label.
+            let label_rect = bento_nano_style::Rect {
+                x: row.x,
+                y: row.y + (row.height - 16.0) * 0.5,
+                width: row.width * 0.6,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::StringId(overlay_labels[index as usize])),
+                label_rect,
+                label_color,
+            )?;
+            match index {
+                0 => {
+                    let input = settings_overlay_version_input_rect(viewport, scroll);
+                    self.fill_rounded_rect(input, chip_bg, num_btn_radius)?;
+                    let v = app.overlay_version_draft.borrow();
+                    self.draw_text_no_wrap(
+                        v.as_str(),
+                        bento_nano_style::Rect {
+                            x: input.x + 8.0,
+                            y: input.y + (input.height - 16.0) * 0.5,
+                            width: (input.width - 16.0).max(0.0),
+                            height: 16.0,
+                        },
+                        title_color,
+                    )?;
+                    drop(v);
+                }
+                1 | 2 => {
+                    let pill = settings_overlay_state_pill_rect(viewport, scroll, index);
+                    let on = if index == 1 {
+                        app.equipment_state_enabled.get()
+                    } else {
+                        app.magnet_state_enabled.get()
+                    };
+                    self.fill_rounded_rect(
+                        pill,
+                        if on { pill_on_bg } else { pill_off_bg },
+                        pill_radius,
+                    )?;
+                    let text_id = if on {
+                        bento_nano_style::i18n_zh_cn::ids::STATE_ENABLED_PILL
+                    } else {
+                        bento_nano_style::i18n_zh_cn::ids::STATE_DISABLED_PILL
+                    };
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(text_id),
+                        pill,
+                        bento_nano_style::Color::WHITE,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+
+        // 5) Footer (sticky, 56 DIP) — [取消] [保存(accent)].
+        let footer = settings_footer_rect(viewport);
+        self.fill_rounded_rect(footer, footer_bg, footer_radius)?;
+        let footer_hairline = bento_nano_style::Rect {
+            x: footer.x,
+            y: footer.y,
+            width: footer.width,
+            height: 1.0,
+        };
+        self.fill_rounded_rect(footer_hairline, divider_color, BorderRadius::ZERO)?;
+        let cancel_btn = settings_cancel_button_rect(viewport);
+        self.fill_rounded_rect(cancel_btn, chip_bg, btn_radius)?;
+        self.draw_text_no_wrap(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_CANCEL),
+            cancel_btn,
+            title_color,
+        )?;
+        let save_btn = settings_save_button_rect(viewport);
+        self.fill_rounded_rect(save_btn, accent_on, btn_radius)?;
+        self.draw_text_no_wrap(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_SAVE),
+            save_btn,
+            bento_nano_style::Color::WHITE,
+        )?;
+
+        // K1 modal-opener paint paths — orphan-alive per Ruling B. They never
+        // fire from M1 hit-test (no SettingsHit→Open* arms) but compile and
+        // can still surface via keyboard shortcuts.
+        if app.settings_keybindings_open.get() {
+            self.draw_keybindings_modal(app)?;
+        }
+        if app.settings_plugins_open.get() {
+            self.draw_plugins_modal(app)?;
+        }
+        if app.theme_picker_open.get() {
+            let chip = settings_active_theme_rect(viewport);
+            let origin = crate::theme_picker::theme_picker_popup_origin(chip);
+            let layout = crate::theme_picker::theme_picker_layout(origin, viewport);
+            let selected = app.theme_picker_selected.get();
+            let mut adapter = ThemePickerAdapter { renderer: self };
+            crate::theme_picker::paint_into(&mut adapter, &layout, selected, None)?;
+        }
+
+        Ok(())
+    }
+
+    /// Draw the native selected-stack plugin lifecycle modal. This is the
+    /// Settings replacement for the Tauri plugin management surface: list rows
+    /// are registry-backed and Toggle/Remove emit real backend mutations.
+    fn draw_plugins_modal(&mut self, app: &AppState) -> Result<(), RenderError> {
+        use crate::settings_panel::{
+            SETTINGS_PLUGINS_ROW_VISIBLE_MAX, settings_panel_shadow_rect, settings_plugin_row_rect,
+            settings_plugin_toggle_rect, settings_plugin_uninstall_rect,
+            settings_plugins_close_rect, settings_plugins_install_rect,
+            settings_plugins_modal_rect, settings_plugins_refresh_rect,
+        };
+        let palette = app.active_theme_palette();
+        let radius_tokens = app.active_theme_radius();
+        let spacing_tokens = app.active_theme_spacing();
+        let shadow_tokens = app.active_theme_shadow();
+        let modal_scrim = with_alpha(palette.scrim, 0.45);
+        let modal_bg = with_alpha(palette.surface, 0.98);
+        let row_bg = with_alpha(palette.surface_alt, 0.82);
+        let title_color = with_alpha(palette.text, 0.96);
+        let label_color = with_alpha(palette.text, 0.90);
+        let muted_text = with_alpha(palette.text_muted, 0.95);
+        let success_text = with_alpha(palette.success, 0.95);
+        let error_text = with_alpha(palette.danger, 0.95);
+        let btn_bg = with_alpha(palette.accent, 0.82);
+        let btn_off_bg = with_alpha(palette.surface_alt, 0.92);
+        let danger_bg = with_alpha(palette.danger, 0.78);
+        let btn_text = with_alpha(palette.text, 0.96);
+        let modal_radius = radius_tokens.xl;
+        let control_radius = radius_tokens.md;
+        let panel_shadow = shadow_tokens.lg;
+        let title_pad_x = spacing_tokens.xl;
+        let title_pad_y = spacing_tokens.lg;
+        let control_pad_x = spacing_tokens.sm;
+        let control_pad_y = spacing_tokens.xs + 1.0;
+        let control_text_rect = |rect: Rect| Rect {
+            x: rect.x + control_pad_x,
+            y: rect.y + control_pad_y,
+            width: (rect.width - control_pad_x * 2.0).max(0.0),
+            height: (rect.height - control_pad_y * 2.0).max(0.0),
+        };
+
+        let viewport = app.viewport;
+        let scrim_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.width,
+            height: viewport.height,
+        };
+        self.fill_rounded_rect(scrim_rect, modal_scrim, BorderRadius::ZERO)?;
+
+        let modal = settings_plugins_modal_rect(viewport);
+        let modal_shadow_rect = settings_panel_shadow_rect(modal, panel_shadow);
+        self.fill_rounded_rect(modal_shadow_rect, panel_shadow.color, modal_radius)?;
+        self.fill_rounded_rect(modal, modal_bg, modal_radius)?;
+
+        let title_rect = Rect {
+            x: modal.x + title_pad_x,
+            y: modal.y + title_pad_y,
+            width: 118.0,
+            height: 24.0,
+        };
+        self.draw_text(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_PLUGINS),
+            title_rect,
+            title_color,
+        )?;
+
+        let status_rect = Rect {
+            x: modal.x + 132.0,
+            y: modal.y + title_pad_y,
+            width: (settings_plugins_install_rect(viewport).x - modal.x - 140.0).max(0.0),
+            height: 24.0,
+        };
+        let plugin_status = app.settings_plugin_status.borrow();
+        match plugin_status.as_ref() {
+            Some(crate::state::SettingsBackupStatus::Success(text)) => {
+                self.draw_text(text.as_str(), status_rect, success_text)?
+            }
+            Some(crate::state::SettingsBackupStatus::Error(text)) => {
+                self.draw_text(text.as_str(), status_rect, error_text)?
+            }
+            None => self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REGISTRY_HINT),
+                status_rect,
+                muted_text,
+            )?,
+        }
+        drop(plugin_status);
+
+        let install_rect = settings_plugins_install_rect(viewport);
+        self.fill_rounded_rect(install_rect, btn_off_bg, control_radius)?;
+        self.draw_text(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_INSTALL),
+            control_text_rect(install_rect),
+            btn_text,
+        )?;
+        let refresh_rect = settings_plugins_refresh_rect(viewport);
+        self.fill_rounded_rect(refresh_rect, btn_bg, control_radius)?;
+        self.draw_text(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REFRESH),
+            control_text_rect(refresh_rect),
+            btn_text,
+        )?;
+        let close_rect = settings_plugins_close_rect(viewport);
+        self.fill_rounded_rect(close_rect, btn_bg, control_radius)?;
+        self.draw_text("×", control_text_rect(close_rect), btn_text)?;
+
+        let plugins = app.settings_plugin_entries.borrow();
+        if plugins.is_empty() {
+            let empty_rect = Rect {
+                x: modal.x + title_pad_x,
+                y: modal.y + 76.0,
+                width: modal.width - title_pad_x * 2.0,
+                height: 42.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_EMPTY_HINT),
+                empty_rect,
+                muted_text,
+            )?;
+        } else {
+            for (row_index, plugin) in plugins
+                .iter()
+                .take(SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
+                .enumerate()
+            {
+                let row = settings_plugin_row_rect(viewport, row_index);
+                self.fill_rounded_rect(row, row_bg, control_radius)?;
+                let title = format!(
+                    "{} · {} · v{}",
+                    plugin.name, plugin.plugin_type, plugin.version
+                );
+                let title_rect = Rect {
+                    x: row.x + spacing_tokens.sm,
+                    y: row.y + 3.0,
+                    width: row.width - 146.0,
+                    height: 14.0,
+                };
+                self.draw_text(title.as_str(), title_rect, label_color)?;
+                let id_rect = Rect {
+                    x: row.x + spacing_tokens.sm,
+                    y: row.y + 17.0,
+                    width: row.width - 146.0,
+                    height: 12.0,
+                };
+                self.draw_text(plugin.id.as_str(), id_rect, muted_text)?;
+
+                let toggle_rect = settings_plugin_toggle_rect(viewport, row_index);
+                self.fill_rounded_rect(
+                    toggle_rect,
+                    if plugin.enabled { btn_bg } else { btn_off_bg },
+                    control_radius,
+                )?;
+                self.draw_text(
+                    if plugin.enabled {
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_ON)
+                    } else {
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_OFF)
+                    },
+                    control_text_rect(toggle_rect),
+                    btn_text,
+                )?;
+                let uninstall_rect = settings_plugin_uninstall_rect(viewport, row_index);
+                self.fill_rounded_rect(uninstall_rect, danger_bg, control_radius)?;
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REMOVE),
+                    control_text_rect(uninstall_rect),
+                    btn_text,
+                )?;
+            }
+        }
+        drop(plugins);
+
+        Ok(())
+    }
+
+    /// Draw the selected-stack keybindings recorder/reset modal. This is the
+    /// native D2D replacement for the Tauri KeybindingsSection portal: rows
+    /// come from the shared settings action catalog, current chords are read
+    /// from the real config vault, and capture/reset results are rendered
+    /// visibly per action.
+    fn draw_keybindings_modal(&mut self, app: &AppState) -> Result<(), RenderError> {
+        use crate::business::settings::keybindings_section;
+        use crate::settings_panel::{
+            settings_keybinding_record_rect, settings_keybinding_reset_rect,
+            settings_keybinding_row_rect, settings_keybindings_close_rect,
+            settings_keybindings_modal_rect, settings_panel_shadow_rect,
+        };
+        let palette = app.active_theme_palette();
+        let radius_tokens = app.active_theme_radius();
+        let spacing_tokens = app.active_theme_spacing();
+        let shadow_tokens = app.active_theme_shadow();
+        let modal_scrim = with_alpha(palette.scrim, 0.45);
+        let modal_bg = with_alpha(palette.surface, 0.98);
+        let title_color = with_alpha(palette.text, 0.96);
+        let label_color = with_alpha(palette.text, 0.94);
+        let muted_text = with_alpha(palette.text_muted, 0.95);
+        let btn_bg = with_alpha(palette.accent, 0.80);
+        let btn_disabled_bg = with_alpha(palette.surface_alt, 0.78);
+        let chip_bg = with_alpha(palette.surface_alt, 0.96);
+        let success_text = with_alpha(palette.success, 0.95);
+        let error_text = with_alpha(palette.danger, 0.95);
+        let modal_radius = radius_tokens.xl;
+        let control_radius = radius_tokens.md;
+        let panel_shadow = shadow_tokens.lg;
+        let title_pad_x = spacing_tokens.xl;
+        let title_pad_y = spacing_tokens.lg;
+        let control_pad_x = spacing_tokens.md;
+        let control_pad_y = spacing_tokens.xs + 1.0;
+        let close_pad_x = (spacing_tokens.lg - spacing_tokens.xs).max(0.0);
+        let control_text_rect = |rect: Rect| Rect {
+            x: rect.x + control_pad_x,
+            y: rect.y + control_pad_y,
+            width: (rect.width - control_pad_x * 2.0).max(0.0),
+            height: (rect.height - control_pad_y * 2.0).max(0.0),
+        };
+
+        let viewport = app.viewport;
+        let scrim_rect = bento_nano_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.width,
+            height: viewport.height,
+        };
+        self.fill_rounded_rect(scrim_rect, modal_scrim, BorderRadius::ZERO)?;
+
+        let modal = settings_keybindings_modal_rect(viewport);
+        let modal_shadow_rect = settings_panel_shadow_rect(modal, panel_shadow);
+        self.fill_rounded_rect(modal_shadow_rect, panel_shadow.color, modal_radius)?;
+        self.fill_rounded_rect(modal, modal_bg, modal_radius)?;
+
+        let title_rect = bento_nano_style::Rect {
+            x: modal.x + title_pad_x,
+            y: modal.y + title_pad_y,
+            width: modal.width - title_pad_x * 2.0,
+            height: 24.0,
+        };
+        self.draw_text(
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_TITLE),
+            title_rect,
+            title_color,
+        )?;
+        let close_rect = settings_keybindings_close_rect(viewport);
+        self.fill_rounded_rect(close_rect, btn_bg, control_radius)?;
+        self.draw_text(
+            "×",
+            bento_nano_style::Rect {
+                x: close_rect.x + close_pad_x,
+                y: close_rect.y + spacing_tokens.xs,
+                width: (close_rect.width - close_pad_x * 2.0).max(0.0),
+                height: (close_rect.height - spacing_tokens.sm).max(0.0),
+            },
+            title_color,
+        )?;
+
+        let recording = app.settings_keybinding_recording.borrow().clone();
+        let feedback = app.settings_keybinding_feedback.borrow().clone();
+        for (row_index, row) in keybindings_section::keybinding_rows().iter().enumerate() {
+            let row_rect = settings_keybinding_row_rect(viewport, row_index);
+            let record_rect = settings_keybinding_record_rect(viewport, row_index);
+            let reset_rect = settings_keybinding_reset_rect(viewport, row_index);
+            let recording_this = recording.as_deref() == Some(row.action);
+            let recording_other = recording.is_some() && !recording_this;
+
+            let label_rect = bento_nano_style::Rect {
+                x: row_rect.x,
+                y: row_rect.y + spacing_tokens.xs,
+                width: 138.0,
+                height: 16.0,
+            };
+            self.draw_text(row.label, label_rect, label_color)?;
+
+            let chip_rect = bento_nano_style::Rect {
+                x: row_rect.x + 146.0,
+                y: row_rect.y + spacing_tokens.xs,
+                width: 116.0,
+                height: 22.0,
+            };
+            self.fill_rounded_rect(chip_rect, chip_bg, control_radius)?;
+            let chord = if recording_this {
+                smol_str::SmolStr::new(bento_nano_style::t(
+                    bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_RECORDING,
+                ))
+            } else {
+                keybindings_section::current_chord_for_action(row.action).unwrap_or_else(|| {
+                    smol_str::SmolStr::new(bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_UNSUPPORTED,
+                    ))
+                })
+            };
+            self.draw_text(
+                chord.as_str(),
+                control_text_rect(chip_rect),
+                if recording_this {
+                    success_text
+                } else {
+                    muted_text
+                },
+            )?;
+
+            self.fill_rounded_rect(
+                record_rect,
+                if recording_other {
+                    btn_disabled_bg
+                } else {
+                    btn_bg
+                },
+                control_radius,
+            )?;
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_RECORD),
+                control_text_rect(record_rect),
+                if recording_other {
+                    muted_text
+                } else {
+                    title_color
+                },
+            )?;
+            self.fill_rounded_rect(reset_rect, btn_bg, control_radius)?;
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_RESET),
+                control_text_rect(reset_rect),
+                title_color,
+            )?;
+
+            if let Some(active_feedback) =
+                feedback.as_ref().filter(|msg| msg.action() == row.action)
+            {
+                let feedback_rect = bento_nano_style::Rect {
+                    x: row_rect.x,
+                    y: row_rect.y + 18.0,
+                    width: row_rect.width - 132.0,
+                    height: 10.0,
+                };
+                self.draw_text(
+                    active_feedback.message(),
+                    feedback_rect,
+                    if active_feedback.is_error() {
+                        error_text
+                    } else {
+                        success_text
+                    },
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Draw the selected-stack About modal. This is runtime-rendered, not
+    /// just `business::about::build()` reachability, so the tray About item
+    /// produces a visible desktop-software surface in the nano executable.
+    fn draw_about_panel(&mut self, app: &AppState) -> Result<(), RenderError> {
+        use crate::business::about;
+        let palette = app.active_theme_palette();
+        let radius_tokens = app.active_theme_radius();
+        let spacing_tokens = app.active_theme_spacing();
+        let shadow_tokens = app.active_theme_shadow();
+        let scrim_color = with_alpha(palette.scrim, 0.34);
+        let panel_bg = with_alpha(palette.surface, 0.96);
+        let title_color = with_alpha(palette.text, 0.96);
+        let body_color = with_alpha(palette.text, 0.90);
+        let muted_color = with_alpha(palette.text_muted, 0.92);
+        let btn_bg = with_alpha(palette.accent, 0.90);
+        let btn_text = with_alpha(palette.text, 0.96);
+        let panel_radius = radius_tokens.xl;
+        let button_radius = radius_tokens.md;
+        let panel_shadow = shadow_tokens.lg;
+
+        let viewport = app.viewport;
+        let scrim = bento_nano_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.width,
+            height: viewport.height,
+        };
+        self.fill_rounded_rect(scrim, scrim_color, BorderRadius::ZERO)?;
+
+        let panel = about::panel_rect(viewport);
+        let shadow_spread = panel_shadow.blur.max(0.0);
+        let shadow_rect = bento_nano_style::Rect {
+            x: panel.x + panel_shadow.offset_x - shadow_spread,
+            y: panel.y + panel_shadow.offset_y - shadow_spread,
+            width: panel.width + shadow_spread * 2.0,
+            height: panel.height + shadow_spread * 2.0,
+        };
+        self.fill_rounded_rect(shadow_rect, panel_shadow.color, panel_radius)?;
+        self.fill_rounded_rect(panel, panel_bg, panel_radius)?;
+
+        let title_rect = bento_nano_style::Rect {
+            x: panel.x + about::CONTENT_PADDING,
+            y: panel.y + spacing_tokens.xxl,
+            width: panel.width - about::CONTENT_PADDING * 2.0,
+            height: 34.0,
+        };
+        self.draw_text("BentoDesk", title_rect, title_color)?;
+
+        let version_rect = bento_nano_style::Rect {
+            x: title_rect.x,
+            y: title_rect.y + 42.0,
+            width: title_rect.width,
+            height: 24.0,
+        };
+        self.draw_text(about::VERSION, version_rect, body_color)?;
+
+        let build_rect = bento_nano_style::Rect {
+            x: title_rect.x,
+            y: version_rect.y + 28.0,
+            width: title_rect.width,
+            height: 24.0,
+        };
+        self.draw_text(about::BUILD_HASH, build_rect, muted_color)?;
+
+        let copy_rect = bento_nano_style::Rect {
+            x: title_rect.x,
+            y: build_rect.y + 32.0,
+            width: title_rect.width,
+            height: 44.0,
+        };
+        self.draw_text("Selected-stack desktop refactor", copy_rect, body_color)?;
+
+        let close = about::close_button_rect(viewport);
+        self.fill_rounded_rect(close, btn_bg, button_radius)?;
+        let close_text = bento_nano_style::Rect {
+            x: close.x + spacing_tokens.xl,
+            y: close.y + spacing_tokens.sm + spacing_tokens.xs,
+            width: (close.width - spacing_tokens.xl * 2.0).max(0.0),
+            height: (close.height - spacing_tokens.lg).max(0.0),
+        };
+        self.draw_text("Close", close_text, btn_text)?;
+        Ok(())
+    }
+
+    fn draw_tooltip_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let Some(session) = app.active_tooltip.borrow().clone() else {
+            return Ok(());
+        };
+        // Wave E: Tauri SSoT tokens for the tooltip pill.
+        use bento_nano_style::tokens as style_tokens;
+        let descriptor = tooltip::Tooltip::from_tauri_tokens(
+            session.text,
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SPACING,
+        );
+        let pill = tooltip::tooltip_pill_rect(app.viewport);
+        self.fill_rounded_rect(pill, descriptor.background, descriptor.border_radius)?;
+        let text_rect = tooltip::tooltip_text_rect(app.viewport, &descriptor);
+        self.draw_text(descriptor.text.as_str(), text_rect, descriptor.text_color)?;
+        Ok(())
+    }
+
+    fn draw_minibar_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let Some((zone_id, bar)) = app.active_minibar() else {
+            return Ok(());
+        };
+        // Wave D: paint the MiniBar from Wave B Tauri SSoT tokens (gradient
+        // top stop + 14 px radius — Wave A flagged gap).
+        use bento_nano_style::tokens as style_tokens;
+        let bar = bar.with_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SPACING,
+        );
+        let viewport = app.viewport;
+        let panel = minibar::minibar_panel_rect(viewport);
+        self.fill_rounded_rect(panel, bar.background, bar.border_radius)?;
+
+        let icon_rect = minibar::minibar_icon_rect(viewport, &bar);
+        self.draw_svg_fit(
+            bar.icon_svg_path,
+            icon_rect,
+            bar.unpin_button.tint,
+            bar.unpin_button.size,
+        )?;
+
+        let label_rect = minibar::minibar_label_rect(viewport, &bar);
+        match app.zones.get(zone_id) {
+            Some(zone) if zone.items.is_empty() => {
+                self.draw_text("Empty zone", label_rect, bar.unpin_button.tint)?;
+            }
+            Some(zone) => {
+                let capacity = minibar::minibar_item_capacity(viewport, &bar);
+                for (index, item) in zone
+                    .items
+                    .iter()
+                    .take(capacity.min(minibar::MINIBAR_SOURCE_MAX_ITEMS))
+                    .enumerate()
+                {
+                    if let Some(item_rect) = minibar::minibar_item_rect(viewport, &bar, index) {
+                        self.fill_rounded_rect(
+                            item_rect,
+                            bar.unpin_button.hover_background,
+                            BorderRadius::all(8.0),
+                        )?;
+                        // RC-4 Gap 1 — the 32×32 item capsule is far too narrow
+                        // for a full file name (the old "ite ite ite" symptom).
+                        // Mirror `draw_item_card`'s fallback path and draw the
+                        // extension-derived emoji instead — the capsule is a
+                        // glance affordance, the full name lives in the tray.
+                        let text_rect = bento_nano_style::Rect {
+                            x: item_rect.x + 4.0,
+                            y: item_rect.y + 6.0,
+                            width: item_rect.width - 8.0,
+                            height: item_rect.height - 8.0,
+                        };
+                        let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
+                        self.draw_text(glyph.as_str(), text_rect, bar.unpin_button.tint)?;
+                    }
+                }
+            }
+            None => {
+                self.draw_text(bar.label.as_str(), label_rect, bar.unpin_button.tint)?;
+            }
+        }
+
+        let unpin_rect = minibar::minibar_unpin_rect(viewport, &bar);
+        self.draw_svg_fit(
+            bar.unpin_button.svg_path,
+            unpin_rect,
+            bar.unpin_button.tint,
+            bar.unpin_button.size,
+        )?;
+        Ok(())
+    }
+
+    fn draw_zone_editor_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let chrome = zone_editor_geometry::ZoneEditorChrome::from_tokens(
+            app.active_theme_palette(),
+            app.active_theme_radius(),
+            app.active_theme_shadow(),
+        );
+        let viewport = app.viewport;
+        let panel = zone_editor_geometry::zone_editor_panel(viewport);
+        let shadow_rect =
+            zone_editor_geometry::zone_editor_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        let title_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 16.0,
+            width: panel.width - 36.0,
+            height: 28.0,
+        };
+        self.draw_text("Edit zone", title_rect, chrome.title_color)?;
+
+        let label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 60.0,
+            width: panel.width - 36.0,
+            height: 22.0,
+        };
+        self.draw_text("Name", label_rect, chrome.muted_color)?;
+
+        let input_rect = zone_editor_geometry::zone_editor_name_input_rect(viewport);
+        self.fill_rounded_rect(input_rect, chrome.accent_color, chrome.input_radius)?;
+        self.fill_rounded_rect(
+            inset_rect(input_rect, 2.0),
+            chrome.input_background,
+            chrome.input_inner_radius,
+        )?;
+
+        let session = app.zone_editor.borrow();
+        let draft = session
+            .as_ref()
+            .map(|s| s.draft_name.as_str())
+            .unwrap_or("No zone selected");
+        let draft_rect = bento_nano_style::Rect {
+            x: input_rect.x + 12.0,
+            y: input_rect.y + 9.0,
+            width: input_rect.width - 24.0,
+            height: 24.0,
+        };
+        self.draw_text(draft, draft_rect, chrome.body_color)?;
+
+        let icon_label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 146.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        self.draw_text("Icon", icon_label_rect, chrome.muted_color)?;
+        let icon_chip_rect = zone_editor_geometry::zone_editor_icon_rect(viewport);
+        self.fill_rounded_rect(icon_chip_rect, chrome.input_background, chrome.row_radius)?;
+        let icon_value_rect = bento_nano_style::Rect {
+            x: icon_chip_rect.x + 10.0,
+            y: icon_chip_rect.y + 4.0,
+            width: icon_chip_rect.width - 20.0,
+            height: icon_chip_rect.height - 8.0,
+        };
+        let accent_value = session
+            .as_ref()
+            .and_then(|s| s.draft_accent_color.as_deref())
+            .unwrap_or("None");
+        let icon_value = session
+            .as_ref()
+            .map(|s| s.draft_icon.as_str())
+            .unwrap_or("folder");
+        self.draw_text(icon_value, icon_value_rect, chrome.body_color)?;
+
+        let accent_label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 182.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        self.draw_text("Accent", accent_label_rect, chrome.muted_color)?;
+        let accent_row_rect = zone_editor_geometry::zone_editor_accent_rect(viewport);
+        self.fill_rounded_rect(accent_row_rect, chrome.input_background, chrome.row_radius)?;
+        let accent_swatch_rect = zone_editor_geometry::zone_editor_accent_swatch_rect(viewport);
+        self.fill_rounded_rect(
+            accent_swatch_rect,
+            chrome.input_background,
+            chrome.swatch_radius,
+        )?;
+        if let Some(color) = session
+            .as_ref()
+            .and_then(|s| s.draft_accent_color.as_deref())
+            .and_then(parse_hex_color)
+        {
+            self.fill_rounded_rect(
+                inset_rect(accent_swatch_rect, 3.0),
+                color,
+                chrome.swatch_inner_radius,
+            )?;
+        }
+        let accent_value_rect = bento_nano_style::Rect {
+            x: accent_row_rect.x + 36.0,
+            y: accent_row_rect.y + 4.0,
+            width: accent_row_rect.width - 46.0,
+            height: 18.0,
+        };
+        self.draw_text(accent_value, accent_value_rect, chrome.body_color)?;
+
+        let grid_label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 218.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        self.draw_text("Grid", grid_label_rect, chrome.muted_color)?;
+        let grid_value_rect = zone_editor_geometry::zone_editor_grid_rect(viewport);
+        self.fill_rounded_rect(grid_value_rect, chrome.input_background, chrome.row_radius)?;
+        let grid_text_rect = inset_rect(grid_value_rect, 5.0);
+        let grid_value = session
+            .as_ref()
+            .map(|s| grid_columns_label(s.draft_grid_columns))
+            .unwrap_or("4 columns");
+        self.draw_text(grid_value, grid_text_rect, chrome.body_color)?;
+
+        let capsule_size_label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 244.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        self.draw_text("Size", capsule_size_label_rect, chrome.muted_color)?;
+        let capsule_size_rect = zone_editor_geometry::zone_editor_capsule_size_rect(viewport);
+        self.fill_rounded_rect(
+            capsule_size_rect,
+            chrome.input_background,
+            chrome.row_radius,
+        )?;
+        let capsule_size_text_rect = inset_rect(capsule_size_rect, 5.0);
+        let capsule_size = session
+            .as_ref()
+            .map(|s| s.draft_capsule_size.as_str())
+            .unwrap_or("medium");
+        self.draw_text(capsule_size, capsule_size_text_rect, chrome.body_color)?;
+
+        let capsule_shape_label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 270.0,
+            width: 80.0,
+            height: 20.0,
+        };
+        self.draw_text("Shape", capsule_shape_label_rect, chrome.muted_color)?;
+        let capsule_shape_rect = zone_editor_geometry::zone_editor_capsule_shape_rect(viewport);
+        self.fill_rounded_rect(
+            capsule_shape_rect,
+            chrome.input_background,
+            chrome.row_radius,
+        )?;
+        let capsule_shape_text_rect = inset_rect(capsule_shape_rect, 5.0);
+        let capsule_shape = session
+            .as_ref()
+            .map(|s| s.draft_capsule_shape.as_str())
+            .unwrap_or("pill");
+        self.draw_text(capsule_shape, capsule_shape_text_rect, chrome.body_color)?;
+
+        let hint_rect = zone_editor_geometry::zone_editor_hint_rect(viewport);
+        self.draw_text(
+            "Type name; click Icon for picker; F2/F3/F4/F5 quick-cycle.",
+            hint_rect,
+            chrome.muted_color,
+        )?;
+        let save_rect = zone_editor_geometry::zone_editor_save_rect(viewport);
+        self.fill_rounded_rect(save_rect, chrome.accent_color, chrome.button_radius)?;
+        let save_text = inset_rect(save_rect, 4.0);
+        self.draw_text("Save", save_text, chrome.body_color)?;
+        let cancel_rect = zone_editor_geometry::zone_editor_cancel_rect(viewport);
+        self.fill_rounded_rect(cancel_rect, chrome.input_background, chrome.button_radius)?;
+        let cancel_text = inset_rect(cancel_rect, 4.0);
+        self.draw_text("Cancel", cancel_text, chrome.body_color)?;
+        Ok(())
+    }
+
+    fn draw_item_file_rename_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let chrome = item_file_rename_geometry::ItemFileRenameChrome::from_tokens(
+            app.active_theme_palette(),
+            app.active_theme_radius(),
+            app.active_theme_shadow(),
+        );
+        let viewport = app.viewport;
+        let panel = item_file_rename_geometry::item_file_rename_panel_rect(viewport);
+        let shadow_rect = item_file_rename_geometry::item_file_rename_panel_shadow_rect(
+            panel,
+            chrome.panel_shadow,
+        );
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+
+        let title_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 16.0,
+            width: panel.width - 36.0,
+            height: 26.0,
+        };
+        self.draw_text("Rename file", title_rect, chrome.title_color)?;
+
+        let session = app.item_file_rename.borrow();
+        let current_path = session
+            .as_ref()
+            .map(|entry| entry.current_path.as_str())
+            .unwrap_or("No item selected");
+        let path_rect = item_file_rename_geometry::item_file_rename_path_rect(viewport);
+        self.draw_text(current_path, path_rect, chrome.muted_color)?;
+
+        let label_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 84.0,
+            width: panel.width - 36.0,
+            height: 18.0,
+        };
+        self.draw_text("New file name", label_rect, chrome.muted_color)?;
+
+        let input_rect = item_file_rename_geometry::item_file_rename_input_rect(viewport);
+        self.fill_rounded_rect(input_rect, chrome.accent_color, chrome.input_radius)?;
+        self.fill_rounded_rect(
+            inset_rect(input_rect, 2.0),
+            chrome.input_background,
+            chrome.input_inner_radius,
+        )?;
+        let draft = session
+            .as_ref()
+            .map(|entry| entry.draft_name.as_str())
+            .unwrap_or("");
+        let draft_rect = bento_nano_style::Rect {
+            x: input_rect.x + 12.0,
+            y: input_rect.y + 9.0,
+            width: input_rect.width - 24.0,
+            height: 20.0,
+        };
+        self.draw_text(draft, draft_rect, chrome.body_color)?;
+
+        let status = session
+            .as_ref()
+            .and_then(|entry| entry.status.as_ref())
+            .map(|text| (text.as_str(), chrome.error_color))
+            .unwrap_or(("Enter to rename; Esc to cancel.", chrome.muted_color));
+        let status_rect = item_file_rename_geometry::item_file_rename_status_rect(viewport);
+        self.draw_text(status.0, status_rect, status.1)?;
+        Ok(())
+    }
+
+    fn draw_icon_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave D: consume Wave B Tauri-token SSoT.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = icon_picker::IconPickerChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = picker_geometry::picker_panel(viewport);
+        let shadow_rect = picker_geometry::picker_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        let title_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 16.0,
+            width: panel.width - 36.0,
+            height: 28.0,
+        };
+        self.draw_text("Icon picker", title_rect, chrome.title_color)?;
+
+        let session = app.icon_picker.borrow();
+        let selected_icon = session
+            .as_ref()
+            .map(|s| s.selected_icon.as_str())
+            .unwrap_or("No selection");
+        let target_label = match session.as_ref().and_then(|s| s.zone_id) {
+            Some(_) => "Target: zone icon",
+            None if session.is_some() => "Target: BulkManager selection",
+            None => "Target: none",
+        };
+
+        let target_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 58.0,
+            width: panel.width - 36.0,
+            height: 22.0,
+        };
+        self.draw_text(target_label, target_rect, chrome.muted_color)?;
+
+        let chip_rect = picker_geometry::icon_picker_selected_rect(viewport);
+        self.fill_rounded_rect(chip_rect, chrome.accent_color, chrome.chip_radius)?;
+        self.fill_rounded_rect(
+            inset_rect(chip_rect, 2.0),
+            chrome.chip_background,
+            chrome.chip_inner_radius,
+        )?;
+        let selected_rect = bento_nano_style::Rect {
+            x: chip_rect.x + 12.0,
+            y: chip_rect.y + 10.0,
+            width: chip_rect.width - 24.0,
+            height: 24.0,
+        };
+        self.draw_text(selected_icon, selected_rect, chrome.body_color)?;
+
+        for (index, kind) in ALL_ICON_KINDS.iter().enumerate() {
+            let slot_rect = picker_geometry::icon_picker_slot_rect(viewport, index);
+            let selected = kind.matches_wire(selected_icon);
+            let border_color = if selected {
+                chrome.accent_color
+            } else {
+                chrome.chip_background
+            };
+            self.fill_rounded_rect(slot_rect, border_color, chrome.slot_radius)?;
+            self.fill_rounded_rect(
+                inset_rect(slot_rect, 2.0),
+                chrome.chip_background,
+                chrome.slot_inner_radius,
+            )?;
+            let icon_rect = bento_nano_style::Rect {
+                x: slot_rect.x + (slot_rect.width - 24.0) * 0.5,
+                y: slot_rect.y + 7.0,
+                width: 24.0,
+                height: 24.0,
+            };
+            self.draw_svg_document_stroke_fit(
+                kind.source_svg(),
+                icon_rect,
+                chrome.body_color,
+                24.0,
+            )?;
+            let slug_rect = bento_nano_style::Rect {
+                x: slot_rect.x + 8.0,
+                y: slot_rect.y + 37.0,
+                width: slot_rect.width - 16.0,
+                height: 18.0,
+            };
+            self.draw_text(kind.as_str(), slug_rect, chrome.body_color)?;
+        }
+
+        let hint_rect = picker_geometry::icon_picker_hint_rect(viewport, ALL_ICON_KINDS.len());
+        self.draw_text(
+            "Click an icon to save. F2 or Right cycles icon. Enter saves. Esc cancels.",
+            hint_rect,
+            chrome.muted_color,
+        )?;
+        if session.is_none() {
+            let warning_rect = bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 184.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            };
+            self.draw_text(
+                "Open from a zone to commit the selected icon.",
+                warning_rect,
+                chrome.warning_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_palette_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave D: consume Wave B Tauri-token SSoT.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = palette_picker::PalettePickerChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = picker_geometry::picker_panel(viewport);
+        let shadow_rect = picker_geometry::picker_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        let title_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 16.0,
+            width: panel.width - 36.0,
+            height: 28.0,
+        };
+        self.draw_text("Palette picker", title_rect, chrome.title_color)?;
+
+        let session = app.palette_picker.borrow();
+        let target_label = match session.as_ref().map(|s| s.target) {
+            Some(PaletteTarget::ZoneAccent(_)) => "Target: zone accent",
+            Some(PaletteTarget::ThemeBase) => "Target: theme base accent",
+            Some(PaletteTarget::BulkManagerSelectedAccent) => "Target: BulkManager selection",
+            None => "Target: none",
+        };
+        let selected_accent = session
+            .as_ref()
+            .and_then(|s| s.selected_accent.as_deref())
+            .unwrap_or("None");
+
+        let target_rect = bento_nano_style::Rect {
+            x: panel.x + 18.0,
+            y: panel.y + 58.0,
+            width: panel.width - 36.0,
+            height: 22.0,
+        };
+        self.draw_text(target_label, target_rect, chrome.muted_color)?;
+
+        let selected = session.as_ref().and_then(|s| s.selected_accent.as_deref());
+        for (index, swatch) in palette_picker::swatch_table().iter().enumerate() {
+            let swatch_rect = picker_geometry::palette_picker_swatch_rect(viewport, index);
+            let is_selected = selected == Some(swatch.hex.as_str());
+            let border = if is_selected {
+                chrome.warning_color
+            } else {
+                chrome.chip_background
+            };
+            self.fill_rounded_rect(swatch_rect, border, chrome.swatch_radius)?;
+            if let Some(color) = parse_hex_color(swatch.hex.as_str()) {
+                self.fill_rounded_rect(
+                    inset_rect(swatch_rect, 3.0),
+                    color,
+                    chrome.swatch_inner_radius,
+                )?;
+            }
+        }
+        let clear_rect = picker_geometry::palette_picker_clear_rect(viewport);
+        let clear_border = if selected.is_none() {
+            chrome.warning_color
+        } else {
+            chrome.chip_background
+        };
+        self.fill_rounded_rect(clear_rect, clear_border, chrome.clear_radius)?;
+        self.fill_rounded_rect(
+            inset_rect(clear_rect, 2.0),
+            chrome.chip_background,
+            chrome.clear_inner_radius,
+        )?;
+        let clear_text_rect = bento_nano_style::Rect {
+            x: clear_rect.x + 8.0,
+            y: clear_rect.y + 5.0,
+            width: clear_rect.width - 16.0,
+            height: 20.0,
+        };
+        self.draw_text("Clear", clear_text_rect, chrome.body_color)?;
+
+        let value_rect = picker_geometry::palette_picker_value_rect(viewport);
+        self.draw_text(selected_accent, value_rect, chrome.body_color)?;
+
+        let hint_rect = picker_geometry::palette_picker_hint_rect(viewport);
+        self.draw_text(
+            "Click a swatch or Clear to save. F3/Right cycles. Esc cancels.",
+            hint_rect,
+            chrome.muted_color,
+        )?;
+        if session.as_ref().map(|s| s.target).is_none() {
+            let warning_rect = bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 184.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            };
+            self.draw_text(
+                "No palette target is active.",
+                warning_rect,
+                chrome.warning_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_capsule_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave D: consume Wave B Tauri-token SSoT.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = capsule_picker::CapsulePickerChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = capsule_picker::capsule_picker_panel_rect(viewport);
+        let shadow_rect =
+            capsule_picker::capsule_picker_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Context Capsules",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 36.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        self.draw_text(
+            "C captures current zones. Enter/R restores. Del/D deletes. Up/Down selects.",
+            capsule_picker::capsule_picker_hint_rect(viewport),
+            chrome.muted_color,
+        )?;
+
+        let state = app.capsule_picker.borrow();
+        if let Some(error) = state.last_error() {
+            self.draw_text(
+                error,
+                capsule_picker::capsule_picker_error_rect(viewport),
+                chrome.error_color,
+            )?;
+        }
+        if state.entries().is_empty() {
+            self.draw_text(
+                "No capsules yet. Press C to capture the current selected-stack layout.",
+                capsule_picker::capsule_picker_empty_rect(viewport),
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        for (index, entry) in state
+            .entries()
+            .iter()
+            .take(capsule_picker::CAPSULE_VISIBLE_ROW_LIMIT)
+            .enumerate()
+        {
+            let row = capsule_picker::capsule_picker_row_rect(viewport, index);
+            let bg = if index == state.selected_index() {
+                chrome.selected_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, bg, chrome.row_radius)?;
+            self.draw_text(
+                entry.name.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 5.0,
+                    width: row.width - 20.0,
+                    height: 18.0,
+                },
+                chrome.body_color,
+            )?;
+            self.draw_text(
+                entry.captured_at.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 22.0,
+                    width: row.width - 20.0,
+                    height: 16.0,
+                },
+                chrome.muted_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_bulk_manager_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave E: Tauri SSoT tokens for the BulkManager panel.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = bulk_manager_panel::BulkManagerChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = bulk_manager_panel::bulk_manager_panel_rect(viewport);
+        let search_rect = bulk_manager_panel::bulk_manager_search_rect(viewport);
+        let shadow_rect =
+            bulk_manager_panel::bulk_manager_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Bulk Manager",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: (search_rect.x - panel.x - 30.0).max(160.0),
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        // RC-4 Gap 3 — split the long helper into two lines so it never
+        // overpaints the status row below it. The original single-line
+        // version overflowed `panel.width - 36` at any reasonable font
+        // size, wrapped to 2 visual rows, and clashed with the status
+        // text at `panel.y + 80`.
+        let bulk_line_height = style_tokens::TYPOGRAPHY.sm.size_px
+            * style_tokens::TYPOGRAPHY.sm.line_height;
+        self.draw_text(
+            "F/click Search then type to filter · Up/Down cursor · Space select · A all · I invert",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 52.0,
+                width: panel.width - 36.0,
+                height: bulk_line_height,
+            },
+            chrome.muted_color,
+        )?;
+        self.draw_text(
+            "H hide · S show · G/R/C/P/O layout · U metadata · T text · D delete · M move",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 52.0 + bulk_line_height + style_tokens::SPACING.xs,
+                width: panel.width - 36.0,
+                height: bulk_line_height,
+            },
+            chrome.muted_color,
+        )?;
+
+        let state = app.bulk_manager.borrow();
+        let search_fill = if state.search_focused() {
+            chrome.cursor_background
+        } else {
+            chrome.row_background
+        };
+        self.fill_rounded_rect(search_rect, search_fill, chrome.search_radius)?;
+        let search_body = if state.search().is_empty() {
+            "Search zones..."
+        } else {
+            state.search()
+        };
+        let search_text = smol_str::SmolStr::new(format!("Search: {search_body}"));
+        self.draw_text(
+            search_text.as_str(),
+            bento_nano_style::Rect {
+                x: search_rect.x + 10.0,
+                y: search_rect.y + 7.0,
+                width: search_rect.width - 20.0,
+                height: 18.0,
+            },
+            chrome.body_color,
+        )?;
+        let rows = state.visible_rows();
+        let row_window_start =
+            bulk_manager_panel::bulk_manager_visible_window_start(state.cursor_index(), rows.len());
+        let row_window_summary =
+            bulk_manager_panel::bulk_manager_visible_window_summary(row_window_start, rows.len());
+        let selected_count = state.selected().len();
+        let base_status_text = app.bulk_manager_status.borrow().clone().unwrap_or_else(|| {
+            smol_str::SmolStr::new(format!(
+                "{} zones listed, {} selected",
+                rows.len(),
+                selected_count
+            ))
+        });
+        let status_text = if let Some(summary) = row_window_summary {
+            smol_str::SmolStr::new(format!("{base_status_text} — {summary}"))
+        } else {
+            base_status_text
+        };
+        // RC-4 Gap 3 — status row sits below the 2 helper lines (52 +
+        // 2*line_height + xs gap). The legacy `panel.y + 80.0` baseline
+        // pre-dated the helper split and now clashes with helper line 2.
+        let status_top = (panel.y
+            + 52.0
+            + bulk_line_height * 2.0
+            + style_tokens::SPACING.xs * 2.0)
+            .max(panel.y + 80.0);
+        self.draw_text(
+            status_text.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: status_top,
+                width: panel.width - 36.0,
+                height: bulk_line_height,
+            },
+            chrome.muted_color,
+        )?;
+        for spec in bulk_manager_panel::BULK_MANAGER_ACTION_BUTTONS {
+            let rect = bulk_manager_panel::bulk_manager_button_rect(viewport, *spec);
+            self.fill_rounded_rect(rect, chrome.row_background, chrome.button_radius)?;
+            // RC-4 Gap 3 — `draw_text_no_wrap` keeps the 4-letter button
+            // labels ("Show", "Move", "Close") on a single line and trims
+            // with an ellipsis if the layout box is too narrow, instead of
+            // wrapping them into "Sho/w", "Mov", "Clos/e" against the wide
+            // YaHei UI fallback Latin metrics. Shrink the horizontal pad
+            // from 7 px to SPACING.xs (4 px) each side to give the run an
+            // extra 6 px of room — enough for every label in the table to
+            // measure clean at the spec'd width without column changes.
+            self.draw_text_no_wrap(
+                spec.label,
+                bento_nano_style::Rect {
+                    x: rect.x + style_tokens::SPACING.xs,
+                    y: rect.y + 3.0,
+                    width: rect.width - style_tokens::SPACING.xs * 2.0,
+                    height: 16.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+        for key in bulk_manager_panel::SortKey::ALL {
+            let rect = bulk_manager_panel::bulk_manager_sort_header_rect(viewport, *key);
+            let active = state.sort_key() == *key;
+            let fill = if active {
+                chrome.cursor_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(rect, fill, chrome.sort_radius)?;
+            let suffix = if active {
+                match state.sort_direction() {
+                    bulk_manager_panel::SortDirection::Ascending => " ↑",
+                    bulk_manager_panel::SortDirection::Descending => " ↓",
+                }
+            } else {
+                ""
+            };
+            let label = smol_str::SmolStr::new(format!("{}{}", key.label(), suffix));
+            // RC-4 Gap 3 — same no-wrap protection as the action buttons.
+            self.draw_text_no_wrap(
+                label.as_str(),
+                bento_nano_style::Rect {
+                    x: rect.x + style_tokens::SPACING.xs,
+                    y: rect.y + 2.0,
+                    width: rect.width - style_tokens::SPACING.xs * 2.0,
+                    height: 14.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+        if let Some(edit) = state.text_edit() {
+            let draft = if edit.draft.is_empty() {
+                edit.field.placeholder()
+            } else {
+                edit.draft.as_str()
+            };
+            let edit_text = smol_str::SmolStr::new(format!(
+                "Text edit {}: {}    F2 field | Enter apply | Backspace edit | Esc cancel",
+                edit.field.label(),
+                draft
+            ));
+            self.fill_rounded_rect(
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: panel.y + 158.0,
+                    width: panel.width - 36.0,
+                    height: 16.0,
+                },
+                chrome.cursor_background,
+                chrome.edit_radius,
+            )?;
+            self.draw_text(
+                edit_text.as_str(),
+                bento_nano_style::Rect {
+                    x: panel.x + 26.0,
+                    y: panel.y + 159.0,
+                    width: panel.width - 52.0,
+                    height: 14.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        if rows.is_empty() {
+            self.draw_text(
+                "No zones available for bulk operations.",
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: panel.y + bulk_manager_panel::RUNTIME_ROW_TOP_PX,
+                    width: panel.width - 36.0,
+                    height: 24.0,
+                },
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        for (display_index, row_data) in rows
+            .iter()
+            .skip(row_window_start)
+            .take(bulk_manager_panel::RUNTIME_VISIBLE_ROW_LIMIT)
+            .enumerate()
+        {
+            let index = row_window_start + display_index;
+            let row = bulk_manager_panel::bulk_manager_row_rect(viewport, display_index);
+            let bg = if state.is_selected(row_data.id) {
+                chrome.selected_background
+            } else if index == state.cursor_index() {
+                chrome.cursor_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, bg, chrome.row_radius)?;
+            let marker = if state.is_selected(row_data.id) {
+                "[x]"
+            } else if index == state.cursor_index() {
+                "[>]"
+            } else {
+                "[ ]"
+            };
+            let text = smol_str::SmolStr::new(format!(
+                "{} {}  state={}  lock={}  mode={}  icon={}  cap={}  items={}  size={}x{}%  pos={},{}%",
+                marker,
+                row_data.display_name,
+                if row_data.visible {
+                    "visible"
+                } else {
+                    "hidden"
+                },
+                if row_data.locked { "on" } else { "off" },
+                row_data.display_mode,
+                row_data.icon_slug,
+                row_data.capsule_size,
+                row_data.item_count,
+                row_data.width_percent,
+                row_data.height_percent,
+                row_data.position_x_percent,
+                row_data.position_y_percent
+            ));
+            self.draw_text(
+                text.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 7.0,
+                    width: row.width - 20.0,
+                    height: 18.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_timeline_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave E: Tauri SSoT tokens for the Timeline panel.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = timeline_panel::TimelinePanelChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = timeline_panel::timeline_panel_rect(viewport);
+        let shadow_rect = timeline_panel::timeline_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Desktop Timeline",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 36.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        self.draw_text(
+            "Click rows to preview. Buttons save/pin/restore/delete. Ctrl+Z / Ctrl+Shift+Z undo-redo. Esc closes.",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 50.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            },
+            chrome.muted_color,
+        )?;
+
+        let state = app.timeline_panel.borrow();
+        let status = if let Some(error) = state.error() {
+            smol_str::SmolStr::new(format!("Error: {error}"))
+        } else if let Some(status) = state.status() {
+            status.clone()
+        } else {
+            smol_str::SmolStr::new(format!("Loaded {} checkpoints", state.entries().len()))
+        };
+        self.draw_text(
+            status.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 80.0,
+                width: panel.width - 36.0,
+                height: 22.0,
+            },
+            if state.error().is_some() {
+                chrome.error_color
+            } else {
+                chrome.muted_color
+            },
+        )?;
+
+        for spec in timeline_panel::TIMELINE_ACTION_BUTTONS {
+            let rect = timeline_panel::timeline_button_rect(viewport, *spec);
+            self.fill_rounded_rect(rect, chrome.action_background, chrome.button_radius)?;
+            self.draw_text(
+                spec.label,
+                bento_nano_style::Rect {
+                    x: rect.x + 8.0,
+                    y: rect.y + 6.0,
+                    width: rect.width - 16.0,
+                    height: 16.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        if state.entries().is_empty() {
+            self.draw_text(
+                "No checkpoints yet. Click Save or press S to save the current selected-stack layout.",
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: panel.y + timeline_panel::RUNTIME_ROW_TOP_PX,
+                    width: panel.width - 36.0,
+                    height: 24.0,
+                },
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        let list_w = panel.width * 0.56;
+        for (index, entry) in state
+            .entries()
+            .iter()
+            .take(timeline_panel::RUNTIME_VISIBLE_ROW_LIMIT)
+            .enumerate()
+        {
+            let row = timeline_panel::timeline_row_rect(viewport, index);
+            let bg = if index == state.cursor_index() {
+                chrome.selected_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, bg, chrome.row_radius)?;
+            let pin = if entry.pinned { "★" } else { " " };
+            let line = smol_str::SmolStr::new(format!(
+                "{pin} {}  zones={} items={}",
+                entry.captured_at, entry.zone_count, entry.item_count
+            ));
+            self.draw_text(
+                line.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 4.0,
+                    width: row.width - 20.0,
+                    height: 17.0,
+                },
+                chrome.body_color,
+            )?;
+            let delta = if entry.delta_summary.is_empty() {
+                "no change"
+            } else {
+                entry.delta_summary.as_str()
+            };
+            self.draw_text(
+                delta,
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 21.0,
+                    width: row.width - 20.0,
+                    height: 15.0,
+                },
+                chrome.muted_color,
+            )?;
+        }
+
+        let detail_x = panel.x + list_w + 12.0;
+        let detail_w = panel.width - (detail_x - panel.x) - 18.0;
+        if let Some(active) = state.active() {
+            let detail = smol_str::SmolStr::new(format!(
+                "Selected {}\ntrigger={} pinned={} zones={} captured={}",
+                active.id,
+                active.trigger,
+                active.pinned,
+                active.snapshot.zones.len(),
+                active.snapshot.captured_at
+            ));
+            self.draw_text(
+                detail.as_str(),
+                bento_nano_style::Rect {
+                    x: detail_x,
+                    y: panel.y + timeline_panel::RUNTIME_ROW_TOP_PX,
+                    width: detail_w,
+                    height: 72.0,
+                },
+                chrome.body_color,
+            )?;
+            let thumbnail_rect = timeline_detail_thumbnail_rect(panel, detail_x, detail_w);
+            // Wave E: Tauri SSoT tokens for the inline snapshot thumbnail.
+            use bento_nano_style::tokens as style_tokens;
+            let thumbnail_chrome = snapshot_picker::SnapshotThumbnailChrome::from_tauri_tokens(
+                style_tokens::PALETTE_DARK,
+                style_tokens::RADIUS,
+            );
+            self.draw_snapshot_thumbnail(&active.snapshot, thumbnail_rect, thumbnail_chrome)?;
+        }
+        Ok(())
+    }
+
+    fn draw_snapshot_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave E: Tauri SSoT tokens for the Snapshot picker panel.
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = snapshot_picker::SnapshotPickerChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = snapshot_picker::snapshot_picker_panel_rect(viewport);
+        let shadow_rect =
+            snapshot_picker::snapshot_picker_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Layout Snapshots",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 36.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        let helper_line_h = style_tokens::TYPOGRAPHY.sm.size_px
+            * style_tokens::TYPOGRAPHY.sm.line_height;
+        self.draw_text(
+            "Click rows to select. Buttons save/load/delete/open Timeline.",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 50.0,
+                width: panel.width - 36.0,
+                height: helper_line_h,
+            },
+            chrome.muted_color,
+        )?;
+        self.draw_text(
+            "D confirms delete. Esc closes.",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 50.0 + helper_line_h,
+                width: panel.width - 36.0,
+                height: helper_line_h,
+            },
+            chrome.muted_color,
+        )?;
+
+        let state = app.snapshot_picker.borrow();
+        let status = if let Some(error) = state.error() {
+            smol_str::SmolStr::new(format!("Error: {error}"))
+        } else if let Some(status) = state.status() {
+            status.clone()
+        } else {
+            smol_str::SmolStr::new(format!("Loaded {} snapshots", state.entries().len()))
+        };
+        let status_y = panel.y + 50.0 + helper_line_h * 2.0 + style_tokens::SPACING.xs;
+        self.draw_text(
+            status.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: status_y,
+                width: panel.width - 36.0,
+                height: 22.0,
+            },
+            if state.error().is_some() {
+                chrome.error_color
+            } else {
+                chrome.muted_color
+            },
+        )?;
+
+        for spec in snapshot_picker::SNAPSHOT_PICKER_ACTION_BUTTONS {
+            let rect = snapshot_picker::snapshot_picker_button_rect(viewport, *spec);
+            self.fill_rounded_rect(rect, chrome.action_background, chrome.button_radius)?;
+            self.draw_text_no_wrap(
+                spec.label,
+                bento_nano_style::Rect {
+                    x: rect.x + style_tokens::SPACING.xs,
+                    y: rect.y + 6.0,
+                    width: rect.width - style_tokens::SPACING.xs * 2.0,
+                    height: 16.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        if state.entries().is_empty() {
+            self.draw_text(
+                "No snapshots yet. Click Save or press S to save the current selected-stack layout.",
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: panel.y + snapshot_picker::RUNTIME_ROW_TOP_PX,
+                    width: panel.width - 36.0,
+                    height: 24.0,
+                },
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        for (index, snapshot) in state
+            .entries()
+            .iter()
+            .take(snapshot_picker::RUNTIME_VISIBLE_ROW_LIMIT)
+            .enumerate()
+        {
+            let row = snapshot_picker::snapshot_picker_row_rect(viewport, index);
+            let bg = if index == state.cursor_index() {
+                chrome.selected_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, bg, chrome.row_radius)?;
+            let preview_rect = snapshot_row_preview_rect(row);
+            self.draw_snapshot_thumbnail(snapshot, preview_rect, chrome.thumbnail_chrome)?;
+            let title = if snapshot.name.trim().is_empty() {
+                snapshot.id.as_str()
+            } else {
+                snapshot.name.as_str()
+            };
+            let text_width = (preview_rect.x - row.x - 22.0).max(48.0);
+            self.draw_text(
+                title,
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 4.0,
+                    width: text_width,
+                    height: 18.0,
+                },
+                chrome.body_color,
+            )?;
+            let meta = snapshot_picker::meta_line(snapshot, snapshot.captured_at.as_str(), "Zones");
+            let confirm = state.row_action().is_awaiting_for(snapshot.id.as_str());
+            let meta_text = if confirm {
+                smol_str::SmolStr::new(format!("{meta}  •  Confirm delete with D"))
+            } else {
+                meta
+            };
+            self.draw_text(
+                meta_text.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 10.0,
+                    y: row.y + 24.0,
+                    width: text_width,
+                    height: 16.0,
+                },
+                if confirm {
+                    chrome.error_color
+                } else {
+                    chrome.muted_color
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_snapshot_thumbnail(
+        &mut self,
+        snapshot: &DesktopSnapshot,
+        rect: bento_nano_style::Rect,
+        chrome: snapshot_picker::SnapshotThumbnailChrome,
+    ) -> Result<(), RenderError> {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        self.fill_rounded_rect(rect, chrome.border_color, chrome.border_radius)?;
+        let content_bg = inset_rect(rect, 1.0);
+        self.fill_rounded_rect(content_bg, chrome.background_color, chrome.content_radius)?;
+
+        let mut drew_any = false;
+        for zone in &snapshot.zones {
+            let Some(zone_rect) = snapshot_zone_thumbnail_rect(zone, rect) else {
+                continue;
+            };
+            let fill = zone
+                .accent_color
+                .as_deref()
+                .and_then(parse_hex_color)
+                .unwrap_or(chrome.fallback_zone_color);
+            self.fill_rounded_rect(zone_rect, fill, chrome.zone_radius)?;
+            drew_any = true;
+        }
+
+        if !drew_any {
+            self.draw_text("No zones", inset_rect(rect, 8.0), chrome.empty_text_color)?;
+        }
+        Ok(())
+    }
+
+    fn draw_rules_wizard_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        let chrome = rules_wizard::RulesWizardChrome::from_tokens(
+            app.active_theme_palette(),
+            app.active_theme_radius(),
+            app.active_theme_shadow(),
+        );
+        let viewport = app.viewport;
+        let panel = rules_wizard::rules_wizard_panel_rect(viewport);
+        let shadow_rect = rules_wizard::rules_wizard_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Rules Wizard",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 36.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        self.draw_text(
+            "Type edits current step. Click buttons or use F2/F3/F4, Enter, E/R/D, Esc.",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 50.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            },
+            chrome.muted_color,
+        )?;
+
+        let wizard = app.rules_wizard.borrow();
+        let rules = app.rules_wizard_rules.borrow();
+        let cursor = app.rules_wizard_rule_cursor.get();
+        let rule_window_start =
+            rules_wizard::rules_wizard_visible_rule_window_start(cursor, rules.len());
+        let rule_window_summary =
+            rules_wizard::rules_wizard_visible_rule_summary(rule_window_start, rules.len());
+        let status = app.rules_wizard_status.borrow().clone();
+        let step = wizard.step();
+        let step_line = smol_str::SmolStr::new(format!(
+            "Step {}/{}: {}   complete={}   enabled={}",
+            step.index(),
+            WizardStep::TOTAL,
+            wizard_step_label(step),
+            wizard.is_complete(),
+            wizard.enabled()
+        ));
+        self.draw_text(
+            step_line.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 82.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            },
+            chrome.body_color,
+        )?;
+
+        let base_status_text = if let Some(error) = wizard.last_error() {
+            smol_str::SmolStr::new(format!("Error: {error}"))
+        } else if let Some(status) = status {
+            status
+        } else {
+            smol_str::SmolStr::new(format!("Loaded {} persisted rules", rules.len()))
+        };
+        let status_text = if let Some(summary) = rule_window_summary {
+            smol_str::SmolStr::new(format!("{base_status_text} — {summary}"))
+        } else {
+            base_status_text
+        };
+        self.draw_text(
+            status_text.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 108.0,
+                width: panel.width - 36.0,
+                height: 24.0,
+            },
+            if wizard.last_error().is_some() {
+                chrome.error_color
+            } else {
+                chrome.muted_color
+            },
+        )?;
+
+        for spec in rules_wizard::RULES_WIZARD_ACTION_BUTTONS {
+            let rect = rules_wizard::rules_wizard_button_rect(viewport, *spec);
+            self.fill_rounded_rect(rect, chrome.action_background, chrome.button_radius)?;
+            self.draw_text(
+                spec.label,
+                bento_nano_style::Rect {
+                    x: rect.x + 8.0,
+                    y: rect.y + 5.0,
+                    width: rect.width - 16.0,
+                    height: 16.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        let form_x = panel.x + 18.0;
+        let list_x = panel.x + panel.width * 0.54;
+        let top = panel.y + rules_wizard::RUNTIME_FORM_TOP_PX;
+        let form_w = (panel.width * 0.50).max(260.0);
+        let list_w = panel.width - (list_x - panel.x) - 18.0;
+        let condition_index = wizard.condition_cursor();
+        let condition_count = wizard.conditions().len();
+        let condition_window_start = rules_wizard::rules_wizard_visible_condition_window_start(
+            condition_index,
+            condition_count,
+        );
+        let condition_window_summary = rules_wizard::rules_wizard_visible_condition_summary(
+            condition_window_start,
+            condition_count,
+        );
+        let action = wizard.action();
+        let action_text = smol_str::SmolStr::new(format!(
+            "Action: {} = {}",
+            action_label(action.kind),
+            if action.value.trim().is_empty() {
+                "<type value>"
+            } else {
+                action.value.as_str()
+            }
+        ));
+        let name_text = smol_str::SmolStr::new(format!(
+            "Name: {}",
+            if wizard.name().trim().is_empty() {
+                "<type name>"
+            } else {
+                wizard.name()
+            }
+        ));
+        let run_text = smol_str::SmolStr::new(format!(
+            "Run: {}  interval={}m",
+            run_mode_label(wizard.run_mode()),
+            wizard.interval_minutes()
+        ));
+        let preview_text = smol_str::SmolStr::new(format!(
+            "Preview: {}{} hits",
+            if wizard.preview_busy() { "busy, " } else { "" },
+            wizard.preview_hits().len()
+        ));
+
+        let conditions_heading = if let Some(summary) = condition_window_summary {
+            smol_str::SmolStr::new(format!(
+                "Conditions [{}] — {summary}",
+                combine_label(wizard.combine())
+            ))
+        } else {
+            smol_str::SmolStr::new(format!("Conditions [{}]", combine_label(wizard.combine())))
+        };
+        self.draw_text(
+            conditions_heading.as_str(),
+            bento_nano_style::Rect {
+                x: form_x,
+                y: top,
+                width: form_w,
+                height: 24.0,
+            },
+            chrome.title_color,
+        )?;
+        if condition_count == 0 {
+            self.draw_text(
+                "No conditions",
+                bento_nano_style::Rect {
+                    x: form_x,
+                    y: top + 32.0,
+                    width: form_w,
+                    height: 22.0,
+                },
+                chrome.muted_color,
+            )?;
+        } else {
+            for (display_index, row_index) in (condition_window_start
+                ..condition_count
+                    .min(condition_window_start + rules_wizard::RUNTIME_VISIBLE_CONDITION_LIMIT))
+                .enumerate()
+            {
+                let Some(row) = wizard.conditions().get(row_index) else {
+                    continue;
+                };
+                let rect = rules_wizard::rules_wizard_condition_row_rect(viewport, display_index);
+                let selected = row_index == condition_index.min(condition_count.saturating_sub(1));
+                self.fill_rounded_rect(
+                    rect,
+                    if selected {
+                        chrome.selected_background
+                    } else {
+                        chrome.row_background
+                    },
+                    chrome.row_radius,
+                )?;
+                let text = smol_str::SmolStr::new(format!(
+                    "{} {}. {} = {}",
+                    if selected { "[>]" } else { "[ ]" },
+                    row_index + 1,
+                    predicate_label(row.kind),
+                    if row.value.trim().is_empty() {
+                        "<type value>"
+                    } else {
+                        row.value.as_str()
+                    }
+                ));
+                self.draw_text(
+                    text.as_str(),
+                    bento_nano_style::Rect {
+                        x: rect.x + 10.0,
+                        y: rect.y + 4.0,
+                        width: rect.width - 20.0,
+                        height: 16.0,
+                    },
+                    chrome.body_color,
+                )?;
+            }
+        }
+
+        let detail_top = top
+            + 44.0
+            + rules_wizard::RUNTIME_VISIBLE_CONDITION_LIMIT as f32
+                * rules_wizard::RUNTIME_CONDITION_ROW_STRIDE_PX;
+        for (idx, line) in [
+            action_text.as_str(),
+            preview_text.as_str(),
+            name_text.as_str(),
+            run_text.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            self.draw_text(
+                line,
+                bento_nano_style::Rect {
+                    x: form_x,
+                    y: detail_top + idx as f32 * 24.0,
+                    width: form_w,
+                    height: 20.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        self.draw_text(
+            "Persisted rules",
+            bento_nano_style::Rect {
+                x: list_x,
+                y: top,
+                width: list_w,
+                height: 24.0,
+            },
+            chrome.title_color,
+        )?;
+        if rules.is_empty() {
+            self.draw_text(
+                "No rules saved yet. Complete the wizard and press Enter on Review.",
+                bento_nano_style::Rect {
+                    x: list_x,
+                    y: top + 32.0,
+                    width: list_w,
+                    height: 42.0,
+                },
+                chrome.muted_color,
+            )?;
+        } else {
+            for (display_index, rule) in rules
+                .iter()
+                .skip(rule_window_start)
+                .take(rules_wizard::RUNTIME_VISIBLE_RULE_LIMIT)
+                .enumerate()
+            {
+                let index = rule_window_start + display_index;
+                let row = rules_wizard::rules_wizard_rule_row_rect(viewport, display_index);
+                let selected = index == cursor.min(rules.len().saturating_sub(1));
+                self.fill_rounded_rect(
+                    row,
+                    if selected {
+                        chrome.selected_background
+                    } else {
+                        chrome.row_background
+                    },
+                    chrome.row_radius,
+                )?;
+                let text = smol_str::SmolStr::new(format!(
+                    "{} {}  id={}  enabled={}",
+                    if selected { "[>]" } else { "[ ]" },
+                    rule.name,
+                    rule.id,
+                    rule.enabled
+                ));
+                self.draw_text(
+                    text.as_str(),
+                    bento_nano_style::Rect {
+                        x: row.x + 10.0,
+                        y: row.y + 6.0,
+                        width: row.width - 20.0,
+                        height: 18.0,
+                    },
+                    chrome.body_color,
+                )?;
+            }
+        }
+
+        for (index, hit) in wizard.preview_hits().iter().take(4).enumerate() {
+            let line = smol_str::SmolStr::new(format!("hit: {hit}"));
+            self.draw_text(
+                line.as_str(),
+                bento_nano_style::Rect {
+                    x: form_x,
+                    y: detail_top + 104.0 + index as f32 * 22.0,
+                    width: form_w,
+                    height: 18.0,
+                },
+                chrome.muted_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_search_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave E: source visual chrome from the Wave B Tauri SSoT
+        // (`bento_nano_style::tokens::PALETTE_DARK / RADIUS / SHADOW`) so the
+        // selected-stack runtime panels render against the same tokens the
+        // Tauri 1.2.4 baseline used. Legacy `from_tokens` constructor is
+        // retained for back-compat callers (theme palette mutation tests).
+        use bento_nano_style::tokens as style_tokens;
+        let chrome = search_bar::SearchBarChrome::from_tauri_tokens(
+            style_tokens::PALETTE_DARK,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = search_bar::search_panel_rect(viewport);
+        let shadow_rect = search_bar::search_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Search",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 110.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        let close = search_bar::search_close_rect(viewport);
+        self.fill_rounded_rect(close, chrome.danger_background, chrome.close_radius)?;
+        self.draw_text(
+            "Close",
+            bento_nano_style::Rect {
+                x: close.x + 8.0,
+                y: close.y + 5.0,
+                width: close.width - 16.0,
+                height: 16.0,
+            },
+            chrome.body_color,
+        )?;
+
+        let state = app.search_bar.borrow();
+        let input = search_bar::search_input_rect(viewport);
+        self.fill_rounded_rect(input, chrome.input_background, chrome.input_radius)?;
+        let query_text = if state.query.is_empty() {
+            "Type to search zones, files, settings, actions"
+        } else {
+            state.query.as_str()
+        };
+        self.draw_text(
+            query_text,
+            bento_nano_style::Rect {
+                x: input.x + 14.0,
+                y: input.y + 12.0,
+                width: input.width - 28.0,
+                height: 24.0,
+            },
+            if state.query.is_empty() {
+                chrome.muted_color
+            } else {
+                chrome.body_color
+            },
+        )?;
+
+        let status = app.search_status.borrow().clone().unwrap_or_else(|| {
+            smol_str::SmolStr::new_static(
+                "Type to search live zones, items, settings, and actions.",
+            )
+        });
+        self.draw_text(
+            status.as_str(),
+            bento_nano_style::Rect {
+                x: input.x,
+                y: input.bottom() + 8.0,
+                width: input.width,
+                height: 22.0,
+            },
+            chrome.muted_color,
+        )?;
+
+        if state.results.is_empty() {
+            self.draw_text(
+                "No results are currently visible. Results are populated from live AppState only.",
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: input.bottom() + 48.0,
+                    width: panel.width - 36.0,
+                    height: 24.0,
+                },
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        for (index, hit) in state
+            .results
+            .iter()
+            .take(search_bar::MAX_VISIBLE_RESULTS)
+            .enumerate()
+        {
+            let row = search_bar::search_row_rect(viewport, index);
+            let row_bg = if state.selected_index() == Some(index) {
+                chrome.selected_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, row_bg, chrome.row_radius)?;
+            self.draw_text(
+                hit.icon.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 12.0,
+                    y: row.y + 12.0,
+                    width: 44.0,
+                    height: 20.0,
+                },
+                chrome.body_color,
+            )?;
+            self.draw_text(
+                hit.name.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 58.0,
+                    y: row.y + 6.0,
+                    width: row.width - 180.0,
+                    height: 18.0,
+                },
+                chrome.body_color,
+            )?;
+            self.draw_text(
+                hit.breadcrumb.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 58.0,
+                    y: row.y + 25.0,
+                    width: row.width - 180.0,
+                    height: 16.0,
+                },
+                chrome.muted_color,
+            )?;
+            let kind_label = match &hit.kind {
+                bento_nano_backend::search::SearchItemKind::File => "File",
+                bento_nano_backend::search::SearchItemKind::Folder => "Folder",
+                bento_nano_backend::search::SearchItemKind::Zone => "Zone",
+                bento_nano_backend::search::SearchItemKind::Setting => "Setting",
+                bento_nano_backend::search::SearchItemKind::Action => "Action",
+            };
+            self.draw_text(
+                kind_label,
+                bento_nano_style::Rect {
+                    x: row.right() - 112.0,
+                    y: row.y + 14.0,
+                    width: 100.0,
+                    height: 18.0,
+                },
+                chrome.muted_color,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn draw_suggestor_window(&mut self, app: &AppState) -> Result<(), RenderError> {
+        // Wave E: Tauri SSoT tokens for the Smart-group suggestor panel.
+        // Confidence-badge colours route through the dedicated Tauri tone
+        // helper so badges use `accent_green` / `accent_orange` / `text_muted`
+        // per Wave A `search-bar-and-suggestor.md`.
+        use bento_nano_style::tokens as style_tokens;
+        let palette = style_tokens::PALETTE_DARK;
+        let chrome = smart_group_suggestor::SmartGroupSuggestorChrome::from_tauri_tokens(
+            palette,
+            style_tokens::RADIUS,
+            style_tokens::SHADOW,
+        );
+        let viewport = app.viewport;
+        let panel = smart_group_suggestor::suggestor_panel_rect(viewport);
+        let shadow_rect =
+            smart_group_suggestor::suggestor_panel_shadow_rect(panel, chrome.panel_shadow);
+        self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
+        self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
+        self.draw_text(
+            "Smart grouping",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: panel.y + 18.0,
+                width: panel.width - 110.0,
+                height: 28.0,
+            },
+            chrome.title_color,
+        )?;
+        let close = smart_group_suggestor::suggestor_close_rect(viewport);
+        self.fill_rounded_rect(close, chrome.danger_background, chrome.close_radius)?;
+        self.draw_text_no_wrap(
+            "Close",
+            bento_nano_style::Rect {
+                x: close.x + 8.0,
+                y: close.y + 5.0,
+                width: close.width - 16.0,
+                height: 16.0,
+            },
+            chrome.body_color,
+        )?;
+        // RC-4 Gap 3 — the long helper string wraps to ≥2 lines at panel
+        // width (≈608 px @ 16pt YaHei), and the next status row starts at
+        // `RUNTIME_STATUS_TOP_PX = 74` — only 24 px below the helper top.
+        // Result: helper line 2 overpaints the status row. Split the
+        // helper into two short lines, advance each by one line_height +
+        // SPACING.xs, and push the status row below the second helper line.
+        let line_height = style_tokens::TYPOGRAPHY.sm.size_px
+            * style_tokens::TYPOGRAPHY.sm.line_height;
+        let helper_row_advance = line_height + style_tokens::SPACING.xs;
+        let helper_top = panel.y + 50.0;
+        self.draw_text(
+            "Up/Down: suggestion · Left/Right: file · Space: toggle checkbox",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: helper_top,
+                width: panel.width - 36.0,
+                height: line_height,
+            },
+            chrome.muted_color,
+        )?;
+        self.draw_text(
+            "A: all · N: none · Enter: apply checked paths",
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: helper_top + helper_row_advance,
+                width: panel.width - 36.0,
+                height: line_height,
+            },
+            chrome.muted_color,
+        )?;
+
+        let state = app.suggestor.borrow();
+        let status = app.suggestor_status.borrow().clone().unwrap_or_else(|| {
+            smol_str::SmolStr::new(format!("Loaded {} suggestions", state.entries().len()))
+        });
+        // Status row sits one line_height below the second helper row so
+        // the three messages never share a baseline.
+        let status_top = (helper_top + helper_row_advance * 2.0)
+            .max(panel.y + smart_group_suggestor::RUNTIME_STATUS_TOP_PX);
+        self.draw_text(
+            status.as_str(),
+            bento_nano_style::Rect {
+                x: panel.x + 18.0,
+                y: status_top,
+                width: panel.width - 36.0,
+                height: line_height,
+            },
+            chrome.muted_color,
+        )?;
+
+        if state.entries().is_empty() {
+            self.draw_text(
+                "No suggestions are available from the current real Desktop scan.",
+                bento_nano_style::Rect {
+                    x: panel.x + 18.0,
+                    y: panel.y + smart_group_suggestor::RUNTIME_ROW_TOP_PX,
+                    width: panel.width - 36.0,
+                    height: 24.0,
+                },
+                chrome.body_color,
+            )?;
+            return Ok(());
+        }
+
+        for (index, entry) in state
+            .entries()
+            .iter()
+            .take(smart_group_suggestor::MAX_VISIBLE_SUGGESTIONS)
+            .enumerate()
+        {
+            let row = smart_group_suggestor::suggestor_row_rect(viewport, index);
+            let row_bg = if index == state.selected_index() {
+                chrome.selected_background
+            } else {
+                chrome.row_background
+            };
+            self.fill_rounded_rect(row, row_bg, chrome.row_radius)?;
+            self.draw_text(
+                entry.suggestion.icon.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 12.0,
+                    y: row.y + 15.0,
+                    width: smart_group_suggestor::ROW_ICON_SIZE_PX,
+                    height: 22.0,
+                },
+                chrome.body_color,
+            )?;
+            let apply = smart_group_suggestor::suggestor_apply_rect(viewport, index);
+            let dismiss = smart_group_suggestor::suggestor_dismiss_rect(viewport, index);
+            let badge = bento_nano_style::Rect {
+                x: apply.x - 104.0,
+                y: row.y + 17.0,
+                width: 94.0,
+                height: 24.0,
+            };
+            // Wave F carry-over #2: title must respect badge's left edge.
+            // Drop the .max(96.0) floor so we never paint into the badge;
+            // route through no-wrap so an over-wide title is character-trimmed
+            // inside its box instead of stamping a fragment across the badge.
+            let text_width = (badge.x - (row.x + 50.0) - 12.0).max(0.0);
+            self.draw_text_no_wrap(
+                entry.suggestion.name.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 50.0,
+                    y: row.y + 7.0,
+                    width: text_width,
+                    height: 19.0,
+                },
+                chrome.body_color,
+            )?;
+            let summary = smart_group_suggestor::rule_summary(&entry.suggestion);
+            let meta = smol_str::SmolStr::new(format!(
+                "{}/{} selected - {}",
+                entry.selected_path_count(),
+                entry.total_path_count(),
+                summary
+            ));
+            self.draw_text_no_wrap(
+                meta.as_str(),
+                bento_nano_style::Rect {
+                    x: row.x + 50.0,
+                    y: row.y + 31.0,
+                    width: text_width,
+                    height: 17.0,
+                },
+                chrome.muted_color,
+            )?;
+
+            let tone = smart_group_suggestor::confidence_tone(entry.suggestion.confidence);
+            let (badge_bg, badge_text) =
+                smart_group_suggestor::tone_colors_from_tauri_palette(tone, palette);
+            self.fill_rounded_rect(badge, badge_bg, chrome.badge_radius)?;
+            let confidence = smol_str::SmolStr::new(format!(
+                "{} {}%",
+                tone.label(),
+                (entry.suggestion.confidence * 100.0).round() as i32
+            ));
+            self.draw_text(
+                confidence.as_str(),
+                bento_nano_style::Rect {
+                    x: badge.x + 7.0,
+                    y: badge.y + 5.0,
+                    width: badge.width - 14.0,
+                    height: 15.0,
+                },
+                badge_text,
+            )?;
+
+            self.fill_rounded_rect(apply, chrome.action_background, chrome.action_radius)?;
+            let apply_text = if state.applying_id() == Some(&entry.id) {
+                "Applying"
+            } else {
+                "Apply"
+            };
+            self.draw_text_no_wrap(
+                apply_text,
+                bento_nano_style::Rect {
+                    x: apply.x + style_tokens::SPACING.xs,
+                    y: apply.y + 5.0,
+                    width: apply.width - style_tokens::SPACING.xs * 2.0,
+                    height: 15.0,
+                },
+                chrome.body_color,
+            )?;
+            self.fill_rounded_rect(dismiss, chrome.danger_background, chrome.action_radius)?;
+            self.draw_text_no_wrap(
+                "X",
+                bento_nano_style::Rect {
+                    x: dismiss.x + 10.0,
+                    y: dismiss.y + 5.0,
+                    width: dismiss.width - 20.0,
+                    height: 15.0,
+                },
+                chrome.body_color,
+            )?;
+        }
+
+        if let Some(entry) = state.selected_entry() {
+            let preview = smart_group_suggestor::suggestor_preview_rect(viewport);
+            self.fill_rounded_rect(preview, chrome.preview_background, chrome.preview_radius)?;
+            let title = smol_str::SmolStr::new(format!(
+                "Manual apply selection: {}/{} checked",
+                entry.selected_path_count(),
+                entry.total_path_count()
+            ));
+            self.draw_text(
+                title.as_str(),
+                bento_nano_style::Rect {
+                    x: preview.x + 8.0,
+                    y: preview.y + 8.0,
+                    width: preview.width - 128.0,
+                    height: 16.0,
+                },
+                chrome.body_color,
+            )?;
+
+            let all = smart_group_suggestor::suggestor_select_all_rect(viewport);
+            self.fill_rounded_rect(all, chrome.action_background, chrome.preview_button_radius)?;
+            self.draw_text_no_wrap(
+                "All",
+                bento_nano_style::Rect {
+                    x: all.x + 12.0,
+                    y: all.y + 4.0,
+                    width: all.width - 16.0,
+                    height: 13.0,
+                },
+                chrome.body_color,
+            )?;
+            let none = smart_group_suggestor::suggestor_select_none_rect(viewport);
+            self.fill_rounded_rect(none, chrome.action_background, chrome.preview_button_radius)?;
+            self.draw_text_no_wrap(
+                "None",
+                bento_nano_style::Rect {
+                    x: none.x + 4.0,
+                    y: none.y + 4.0,
+                    width: none.width - 8.0,
+                    height: 13.0,
+                },
+                chrome.body_color,
+            )?;
+
+            for offset in 0..entry.preview_file_count() {
+                let Some(path_index) = entry.preview_path_index(offset) else {
+                    continue;
+                };
+                let Some(path) = entry.suggestion.matching_files.get(path_index) else {
+                    continue;
+                };
+                let rect = smart_group_suggestor::suggestor_preview_file_rect(viewport, offset);
+                let focused = path_index == entry.focused_path_index();
+                let checked = entry.is_path_selected(path_index);
+                let marker = match (focused, checked) {
+                    (true, true) => "> [x]",
+                    (true, false) => "> [ ]",
+                    (false, true) => "  [x]",
+                    (false, false) => "  [ ]",
+                };
+                let label = smol_str::SmolStr::new(format!(
+                    "{} {}",
+                    marker,
+                    smart_group_suggestor::path_basename(path)
+                ));
+                self.draw_text(
+                    label.as_str(),
+                    bento_nano_style::Rect {
+                        x: rect.x,
+                        y: rect.y + 1.0,
+                        width: rect.width,
+                        height: rect.height,
+                    },
+                    if checked {
+                        chrome.body_color
+                    } else {
+                        chrome.muted_color
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Borrow the resident D2D context, or return an error when the surface
+    /// has been hibernated. All inner draw helpers funnel through this
+    /// accessor so the §11 R5 hibernation guard is one-shot, not scattered.
+    fn ctx(&self) -> Result<&windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, RenderError> {
+        match self.surface.as_ref() {
+            Some(s) => Ok(&s.ctx),
+            None => Err(RenderError::Platform(
+                bento_nano_platform::PlatformError::Init(
+                    "Renderer: draw call on hibernated surface (T-099)",
+                ),
+            )),
+        }
+    }
+
+    fn fill_rounded_rect(
+        &self,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        radius: BorderRadius,
+    ) -> Result<(), RenderError> {
+        if color.a <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let brush = self.solid_brush(color)?;
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.right(),
+                bottom: rect.bottom(),
+            },
+            radiusX: radius.top_left,
+            radiusY: radius.top_left,
+        };
+        let ctx = self.ctx()?;
+        // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        // SAFETY: rt valid; rr lives for the call; brush COM-ref-counted.
+        unsafe {
+            rt.FillRoundedRectangle(&rr, &brush);
+        }
+        Ok(())
+    }
+
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), RenderError> {
+        let format = self.text_format.clone();
+        self.draw_text_with_format(text, rect, color, &format)
+    }
+
+    /// RC-4 Gap 3 — single-line variant of `draw_text` that disables DWrite
+    /// word-wrap and character-trims with an ellipsis when the glyph run
+    /// exceeds `rect.width`. Used by BulkManager action buttons whose
+    /// 4-letter Latin labels ("Show", "Move", "Close") were wrapping into
+    /// "Sho/w", "Mov", "Clos/e" against the wider YaHei UI fallback metrics.
+    fn draw_text_no_wrap(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), RenderError> {
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.text_format.clone();
+        // RC-5 Gap A — lazy-create the `…` trimming sign on first paint after
+        // a format recreate. Without a sign, `SetTrimming(_, None)` silently
+        // drops trailing glyphs and users can't tell the label was clipped.
+        if self.ellipsis_sign.is_none() {
+            self.ellipsis_sign = Some(dwrite::create_ellipsis_sign(&format)?);
+        }
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            self.ellipsis_sign.as_ref(),
+        )?;
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    fn draw_text_with_style(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+        weight: u16,
+        line_height: f32,
+    ) -> Result<(), RenderError> {
+        let format = self.text_format_for_style(size_pt, weight, line_height)?;
+        self.draw_text_with_format(text, rect, color, &format)
+    }
+
+    fn draw_text_with_format(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        format: &IDWriteTextFormat,
+    ) -> Result<(), RenderError> {
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        // Reuse the UTF-16 scratch buffer (spec §10 hot-path).
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout(
+            &self.utf16_scratch,
+            format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+        )?;
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    fn text_format_for_style(
+        &mut self,
+        size_pt: f32,
+        weight: u16,
+        line_height: f32,
+    ) -> Result<IDWriteTextFormat, RenderError> {
+        let size_pt = size_pt.max(1.0);
+        let weight = dwrite::normalize_font_weight(weight);
+        let line_height = dwrite::normalize_line_height(line_height);
+        if (self.text_format_size_pt - size_pt).abs() < f32::EPSILON
+            && self.text_format_weight == weight
+            && (self.text_format_line_height - line_height).abs() < f32::EPSILON
+        {
+            return Ok(self.text_format.clone());
+        }
+        for cached in &self.text_format_cache {
+            if cached.family == self.text_format_family
+                && (cached.size_pt - size_pt).abs() < f32::EPSILON
+                && cached.weight == weight
+                && (cached.line_height - line_height).abs() < f32::EPSILON
+            {
+                return Ok(cached.format.clone());
+            }
+        }
+        let family = self.text_format_family.clone();
+        let format = dwrite::text_format_from_family_name_with_metrics(
+            family.as_str(),
+            size_pt,
+            weight,
+            line_height,
+            dwrite::locale_zh_cn(),
+        )?;
+        let entry = CachedTextFormat {
+            family,
+            size_pt,
+            weight,
+            line_height,
+            format: format.clone(),
+        };
+        if self.text_format_cache.len() >= TEXT_FORMAT_CACHE_CAPACITY {
+            self.text_format_cache[0] = entry;
+        } else {
+            self.text_format_cache.push(entry);
+        }
+        Ok(format)
+    }
+
+    /// Draw a 1:1 SVG path translated into `rect.origin`. Caller takes
+    /// responsibility for sizing — `draw_svg_fit` is the safer entry when
+    /// the path's viewbox doesn't match the destination rect.
+    fn draw_svg(
+        &self,
+        path_d: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), RenderError> {
+        let factory = &d2d::factory()?.factory;
+        let geom = svg::build(factory, path_d)?;
+        let brush = self.solid_brush(color)?;
+        let ctx = self.ctx()?;
+        // 1:1 translate — the path is already the right size.
+        // Phase 2.3.1b — compose against `base_scale` so high-DPI frames
+        // still project the glyph onto the correct device pixel grid.
+        // `base_scale * translate(rect.x, rect.y) * identity-glyph-scale`.
+        let s = self.base_scale;
+        let m = windows::Foundation::Numerics::Matrix3x2 {
+            M11: s,
+            M12: 0.0,
+            M21: 0.0,
+            M22: s,
+            M31: rect.x * s,
+            M32: rect.y * s,
+        };
+        // SAFETY: ctx valid; brush + geom outlive the call; matrix on stack.
+        unsafe {
+            ctx.SetTransform(&m);
+            ctx.FillGeometry(&geom, &brush, None);
+            // Restore the per-frame base scale so subsequent draw calls
+            // (e.g., the next SVG glyph or fill_rounded_rect) keep using
+            // logical coords without extra bookkeeping.
+            let base = base_scale_matrix(s);
+            ctx.SetTransform(&base);
+        }
+        Ok(())
+    }
+
+    /// Draw an SVG path scaled-to-fit inside `rect`. `view_size` is the
+    /// edge length of the source viewbox (typical Lucide / Material glyphs
+    /// are 24). Uniform scale preserves the icon's aspect ratio; the glyph
+    /// is centred on whichever axis has spare room.
+    fn draw_svg_fit(
+        &self,
+        path_d: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        view_size: f32,
+    ) -> Result<(), RenderError> {
+        if view_size <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let factory = &d2d::factory()?.factory;
+        let geom = svg::build(factory, path_d)?;
+        let brush = self.solid_brush(color)?;
+        let ctx = self.ctx()?;
+        let scale = (rect.width / view_size).min(rect.height / view_size);
+        let glyph_w = view_size * scale;
+        let glyph_h = view_size * scale;
+        let dx = rect.x + (rect.width - glyph_w) * 0.5;
+        let dy = rect.y + (rect.height - glyph_h) * 0.5;
+        // Phase 2.3.1b — compose `base_scale * (glyph_scale, translate(dx, dy))`.
+        // `M11 = base_scale * glyph_scale` collapses both projections into a
+        // single 3×2 multiply on the stack — no extra `Matrix3x2::multiply`
+        // call (§10 hot-path: float ops in registers, no alloc).
+        let bs = self.base_scale;
+        let combined = scale * bs;
+        let m = windows::Foundation::Numerics::Matrix3x2 {
+            M11: combined,
+            M12: 0.0,
+            M21: 0.0,
+            M22: combined,
+            M31: dx * bs,
+            M32: dy * bs,
+        };
+        // SAFETY: ctx valid; brush + geom outlive the call; matrix on stack.
+        unsafe {
+            ctx.SetTransform(&m);
+            ctx.FillGeometry(&geom, &brush, None);
+            // Restore the per-frame base scale so subsequent draw calls
+            // keep using logical coords.
+            let base = base_scale_matrix(bs);
+            ctx.SetTransform(&base);
+        }
+        Ok(())
+    }
+
+    /// RC-4 Gap 1 — render a zone-icon name as a real line-art glyph.
+    ///
+    /// `name` is the wire-format icon string from `Zone.icon` (e.g. "folder",
+    /// "settings", "search"). When it resolves to a built-in `IconKind`, the
+    /// matching 24×24 source SVG document is drawn via
+    /// `draw_svg_document_stroke_fit` (cached geometry). When it doesn't,
+    /// we fall back to the legacy text path so unknown / emoji / lucide
+    /// names keep rendering as a single text run.
+    fn draw_icon_glyph(
+        &mut self,
+        name: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), RenderError> {
+        if let Some(kind) = IconKind::from_str_opt(name) {
+            // 24-unit viewbox per `IconKind::source_svg` — every built-in is
+            // hand-rolled around 0–24 just like the 1.x Tauri sources.
+            return self.draw_svg_document_stroke_fit(kind.source_svg(), rect, color, 24.0);
+        }
+        self.draw_text(name, rect, color)
+    }
+
+    fn draw_svg_document_stroke_fit(
+        &mut self,
+        svg_document: &'static str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        view_size: f32,
+    ) -> Result<(), RenderError> {
+        if view_size <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let factory = &d2d::factory()?.factory;
+        let geom = {
+            let cached = self
+                .svg_cache
+                .get_or_insert(svg_document.as_bytes(), factory)?;
+            cached.clone()
+        };
+        let brush = self.solid_brush(color)?;
+        let ctx = self.ctx()?;
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        let scale = (rect.width / view_size).min(rect.height / view_size);
+        let glyph_w = view_size * scale;
+        let glyph_h = view_size * scale;
+        let dx = rect.x + (rect.width - glyph_w) * 0.5;
+        let dy = rect.y + (rect.height - glyph_h) * 0.5;
+        let bs = self.base_scale;
+        let combined = scale * bs;
+        let m = windows::Foundation::Numerics::Matrix3x2 {
+            M11: combined,
+            M12: 0.0,
+            M21: 0.0,
+            M22: combined,
+            M31: dx * bs,
+            M32: dy * bs,
+        };
+        // SAFETY: rt valid; geometry and brush are COM references alive for
+        // the call; matrix lives on the stack; `None` uses D2D's default
+        // round-cap/round-join behavior encoded by the source line art.
+        unsafe {
+            rt.SetTransform(&m);
+            rt.DrawGeometry(&geom, &brush, 1.5, None);
+            let base = base_scale_matrix(bs);
+            rt.SetTransform(&base);
+        }
+        Ok(())
+    }
+
+    fn solid_brush(&self, c: Color) -> Result<ID2D1SolidColorBrush, RenderError> {
+        Ok(d2d::solid_brush(self.ctx()?, c.r, c.g, c.b, c.a)?)
+    }
+}
+
+// =============================================================================
+// Wave J1b — ThemePicker paint adapter
+// =============================================================================
+//
+// Forwards `crate::theme_picker::RendererLike` calls onto a borrowed
+// `&mut Renderer`. The adapter is a plain newtype around the renderer
+// reference: zero heap, no `String`/`Vec`, no per-call state. The single
+// allocation-sensitive sink (`draw_text`) routes through the renderer's
+// reusable `utf16_scratch` buffer per spec §10 hot-path discipline.
+//
+// Lives in `render.rs` rather than `theme_picker.rs` because the trait impl
+// must reach `Renderer`'s `pub(super)` paint helpers without re-exporting
+// them.
+struct ThemePickerAdapter<'a> {
+    renderer: &'a mut Renderer,
+}
+
+impl<'a> crate::theme_picker::RendererLike for ThemePickerAdapter<'a> {
+    type Error = RenderError;
+
+    #[inline]
+    fn fill_rounded_rect(
+        &mut self,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        radius: BorderRadius,
+    ) -> Result<(), Self::Error> {
+        self.renderer.fill_rounded_rect(rect, color, radius)
+    }
+
+    #[inline]
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), Self::Error> {
+        // `draw_text_no_wrap` is the right choice for the picker's short
+        // single-line labels ("强调色", "重置", "保存") — it ellipsizes
+        // rather than wrapping into a second line that would spill onto the
+        // accent dot / footer chrome.
+        self.renderer.draw_text_no_wrap(text, rect, color)
+    }
+}
+
+/// Phase 2.3.1b — pure-scale 3×2 matrix used as the per-frame base
+/// transform. Free function so caller sites avoid an extra `&self` borrow
+/// when they only need the matrix value (e.g., between back-to-back SVG
+/// transform restores).
+#[inline]
+fn base_scale_matrix(scale: f32) -> windows::Foundation::Numerics::Matrix3x2 {
+    windows::Foundation::Numerics::Matrix3x2 {
+        M11: scale,
+        M12: 0.0,
+        M21: 0.0,
+        M22: scale,
+        M31: 0.0,
+        M32: 0.0,
+    }
+}
+
+fn active_item_drag_visual(app: &AppState) -> Option<ActiveItemDragVisual> {
+    let drag = app.item_drag.borrow();
+    let candidate = drag.as_ref()?;
+    if !candidate.is_internal_dragging {
+        return None;
+    }
+    Some(ActiveItemDragVisual {
+        zone_id: candidate.zone_id,
+        item_id: candidate.item_id,
+        last_x: candidate.last_x as f32,
+        last_y: candidate.last_y as f32,
+    })
+}
+
+fn hit_test_render_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+    for zone in app.zones.iter().rev() {
+        if !zone.is_visible() || zone.is_stacked_child() {
+            continue;
+        }
+        let left = zone.x as f32;
+        let top = zone.y as f32;
+        let right = left + zone.w as f32;
+        let bottom = top + zone.h as f32;
+        if x >= left && x < right && y >= top && y < bottom {
+            return Some(zone.id);
+        }
+    }
+    None
+}
+
+fn drop_preview_rect_for_zone(
+    zone: &Zone,
+    drag: Option<ActiveItemDragVisual>,
+    is_wide: bool,
+) -> Option<bento_nano_style::Rect> {
+    let drag = drag?;
+    let (grid_x, grid_y) = item_grid_position_for_zone(zone, drag.last_x, drag.last_y);
+    let rect = item_card_rect_for_grid(zone, grid_x, grid_y, is_wide);
+    (rect.width > 0.0 && rect.height > 0.0).then_some(rect)
+}
+
+fn item_grid_position_for_zone(zone: &Zone, x: f32, y: f32) -> (i32, i32) {
+    let columns = zone.grid_columns.max(1) as i32;
+    let columns_f = columns as f32;
+    let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    let cell_w = ((zone.w as f32 - 16.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
+    let col_stride = cell_w + gap;
+    let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
+    let raw_col = ((x - zone.x as f32 - 8.0) / col_stride).floor() as i32;
+    let raw_row = ((y - zone.y as f32 - 30.0) / row_stride).floor() as i32;
+    (raw_col.clamp(0, columns - 1), raw_row.max(0))
+}
+
+fn item_card_rect_for_grid(
+    zone: &Zone,
+    grid_x: i32,
+    grid_y: i32,
+    is_wide: bool,
+) -> bento_nano_style::Rect {
+    highlight_overlay::item_card_rect_for_grid(zone, grid_x, grid_y, is_wide)
+}
+
+fn source_drag_item(app: &AppState, drag: ActiveItemDragVisual) -> Option<(&Zone, &ZoneItem)> {
+    let zone = app.zones.get(drag.zone_id)?;
+    let item = zone.item(drag.item_id)?;
+    Some((zone, item))
+}
+
+fn drag_ghost_rect(
+    app: &AppState,
+    drag: ActiveItemDragVisual,
+    source_rect: bento_nano_style::Rect,
+) -> bento_nano_style::Rect {
+    let width = source_rect.width.max(64.0);
+    let height = source_rect.height.max(48.0);
+    let max_x = (app.viewport.width - width).max(0.0);
+    let max_y = (app.viewport.height - height).max(0.0);
+    bento_nano_style::Rect {
+        x: (drag.last_x - width * 0.5).clamp(0.0, max_x),
+        y: (drag.last_y - 18.0).clamp(0.0, max_y),
+        width,
+        height,
+    }
+}
+
+fn inset_rect(rect: bento_nano_style::Rect, inset: f32) -> bento_nano_style::Rect {
+    bento_nano_style::Rect {
+        x: rect.x + inset,
+        y: rect.y + inset,
+        width: (rect.width - inset * 2.0).max(0.0),
+        height: (rect.height - inset * 2.0).max(0.0),
+    }
+}
+
+fn timeline_detail_thumbnail_rect(
+    panel: bento_nano_style::Rect,
+    detail_x: f32,
+    detail_w: f32,
+) -> bento_nano_style::Rect {
+    let y = panel.y + timeline_panel::RUNTIME_ROW_TOP_PX + 86.0;
+    let max_h = (panel.bottom() - y - 18.0).max(64.0);
+    let max_w = detail_w.clamp(0.0, timeline_panel::THUMBNAIL_MAX_WIDTH);
+    let mut width = max_w;
+    let mut height = (width / timeline_panel::THUMBNAIL_ASPECT_RATIO).min(max_h);
+    if height * timeline_panel::THUMBNAIL_ASPECT_RATIO < width {
+        width = height * timeline_panel::THUMBNAIL_ASPECT_RATIO;
+    }
+    if width < 1.0 || height < 1.0 {
+        width = 0.0;
+        height = 0.0;
+    }
+    bento_nano_style::Rect {
+        x: detail_x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn snapshot_row_preview_rect(row: bento_nano_style::Rect) -> bento_nano_style::Rect {
+    let height = (row.height - 8.0).max(0.0);
+    let width = (height * timeline_panel::THUMBNAIL_ASPECT_RATIO).min(76.0);
+    bento_nano_style::Rect {
+        x: (row.right() - width - 8.0).max(row.x + 8.0),
+        y: row.y + 4.0,
+        width,
+        height,
+    }
+}
+
+fn snapshot_zone_thumbnail_rect(
+    zone: &SnapshotZone,
+    thumbnail: bento_nano_style::Rect,
+) -> Option<bento_nano_style::Rect> {
+    if !zone.visible {
+        return None;
+    }
+    let canvas = inset_rect(thumbnail, 8.0);
+    if canvas.width <= 0.0 || canvas.height <= 0.0 {
+        return None;
+    }
+    let x = canvas.x + canvas.width * percent_ratio(zone.position.x_percent);
+    let y = canvas.y + canvas.height * percent_ratio(zone.position.y_percent);
+    let right_limit = canvas.right();
+    let bottom_limit = canvas.bottom();
+    if x >= right_limit || y >= bottom_limit {
+        return None;
+    }
+    let width = (canvas.width * percent_ratio(zone.expanded_size.w_percent))
+        .max(3.0)
+        .min(right_limit - x);
+    let height = (canvas.height * percent_ratio(zone.expanded_size.h_percent))
+        .max(3.0)
+        .min(bottom_limit - y);
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(bento_nano_style::Rect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn percent_ratio(value: f64) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 100.0) as f32 * 0.01
+    } else {
+        0.0
+    }
+}
+
+fn grid_columns_label(columns: u32) -> &'static str {
+    match columns {
+        2 => "2 columns",
+        3 => "3 columns",
+        4 => "4 columns",
+        5 => "5 columns",
+        6 => "6 columns",
+        _ => "4 columns",
+    }
+}
+
+/// Wave C — format a zone item count for the collapsed pill badge. Caps
+/// the display at "99+" so the badge geometry doesn't need to grow past
+/// `PILL_BADGE_MIN_WIDTH` for typical zones; >999 items is still rendered
+/// as "999+" so the result fits the 4-digit budget in
+/// `zone_pill_geometry::badge_width_for_count`.
+fn format_small_count(count: usize) -> smol_str::SmolStr {
+    if count < 100 {
+        smol_str::SmolStr::new(count.to_string())
+    } else if count < 1000 {
+        smol_str::SmolStr::new(count.to_string())
+    } else {
+        smol_str::SmolStr::new_static("999+")
+    }
+}
+
+fn live_folder_badge_text(path: &str) -> smol_str::SmolStr {
+    const MAX_PATH_CHARS: usize = 96;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return smol_str::SmolStr::new_static("Live folder: <invalid path>");
+    }
+    let char_count = trimmed.chars().count();
+    if char_count <= MAX_PATH_CHARS {
+        return smol_str::SmolStr::new(format!("Live: {trimmed}"));
+    }
+    let head: String = trimmed.chars().take(44).collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(44)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    smol_str::SmolStr::new(format!("Live: {head}…{tail}"))
+}
+
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    Color {
+        a: alpha.clamp(0.0, 1.0),
+        ..color
+    }
+}
+
+/// G3 — locale-aware mapping for `SettingsEncryptionMode::as_wire()`. The wire
+/// variant returns the SmolStr/SerDe token; this returns the user-visible
+/// translation while preserving the same set of distinct states.
+fn localized_encryption_mode(mode: crate::state::SettingsEncryptionMode) -> &'static str {
+    use crate::state::SettingsEncryptionMode;
+    match mode {
+        SettingsEncryptionMode::None => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE)
+        }
+        SettingsEncryptionMode::Dpapi => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI)
+        }
+        SettingsEncryptionMode::Passphrase => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE)
+        }
+    }
+}
+
+/// G3 — locale-aware version of `SettingsUpdaterStatus::summary()`. The static
+/// `Idle` / `Checking` tokens are translated; the version-bearing variants
+/// keep the existing `format!` shape (with a localized prefix) so the
+/// "Available 2.1.0" / "Downloading 4096/8192 B" inline-test expectations in
+/// `bento-nano-shell` still hold for the en-US locale.
+fn localized_updater_summary(status: &crate::state::SettingsUpdaterStatus) -> smol_str::SmolStr {
+    use crate::state::SettingsUpdaterStatus;
+    match status {
+        SettingsUpdaterStatus::Idle => smol_str::SmolStr::new(bento_nano_style::t(
+            bento_nano_style::i18n_zh_cn::ids::UPDATER_IDLE,
+        )),
+        SettingsUpdaterStatus::Checking => smol_str::SmolStr::new(bento_nano_style::t(
+            bento_nano_style::i18n_zh_cn::ids::UPDATER_CHECKING,
+        )),
+        // Version-bearing variants fall through to the wire summary so we
+        // don't fork the format strings (those carry SemVer / byte counts
+        // that downstream tests rely on verbatim).
+        _ => status.summary(),
+    }
+}
+
+/// G3 — locale-aware version of `SettingsUpdaterStatus::action_label()`.
+fn localized_updater_action_label(status: &crate::state::SettingsUpdaterStatus) -> &'static str {
+    use crate::state::SettingsUpdaterStatus;
+    match status {
+        SettingsUpdaterStatus::Available { .. } => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_DOWNLOAD)
+        }
+        SettingsUpdaterStatus::Ready { .. } => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_INSTALL)
+        }
+        SettingsUpdaterStatus::Installing { .. } | SettingsUpdaterStatus::Downloading { .. } => {
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_WAIT)
+        }
+        _ => bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_DOWNLOAD),
+    }
+}
+
+fn parse_hex_color(raw: &str) -> Option<Color> {
+    let bytes = raw.as_bytes();
+    if bytes.len() != 7 || bytes.first().copied() != Some(b'#') {
+        return None;
+    }
+    let r = parse_hex_byte(bytes[1], bytes[2])?;
+    let g = parse_hex_byte(bytes[3], bytes[4])?;
+    let b = parse_hex_byte(bytes[5], bytes[6])?;
+    Some(Color::from_u8(r, g, b, 0xE0))
+}
+
+fn parse_hex_byte(hi: u8, lo: u8) -> Option<u8> {
+    Some((parse_hex_nibble(hi)? << 4) | parse_hex_nibble(lo)?)
+}
+
+fn parse_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn wizard_step_label(step: WizardStep) -> &'static str {
+    match step {
+        WizardStep::Conditions => "Conditions",
+        WizardStep::Action => "Action",
+        WizardStep::Preview => "Preview",
+        WizardStep::Name => "Name",
+        WizardStep::Review => "Review",
+    }
+}
+
+fn combine_label(mode: rules_wizard::CombineMode) -> &'static str {
+    match mode {
+        rules_wizard::CombineMode::All => "all",
+        rules_wizard::CombineMode::Any => "any",
+    }
+}
+
+fn predicate_label(kind: PredicateKind) -> &'static str {
+    match kind {
+        PredicateKind::NameStartsWith => "name starts with",
+        PredicateKind::NameContains => "name contains",
+        PredicateKind::NameEndsWith => "name ends with",
+        PredicateKind::ExtensionIn => "extension in",
+        PredicateKind::CreatedBefore => "created before days",
+        PredicateKind::ModifiedBefore => "modified before days",
+        PredicateKind::SizeGreaterThan => "size greater than",
+        PredicateKind::InZone => "in zone",
+        PredicateKind::OnDesktop => "on desktop",
+    }
+}
+
+fn action_label(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::MoveToZone => "move to zone",
+        ActionKind::MoveToFolder => "move to folder",
+        ActionKind::DeleteToRecycleBin => "delete to recycle bin",
+        ActionKind::Tag => "tag",
+        ActionKind::Notify => "notify",
+    }
+}
+
+fn run_mode_label(mode: RunModeChoice) -> &'static str {
+    match mode {
+        RunModeChoice::OnDemand => "on demand",
+        RunModeChoice::OnFileChange => "on file change",
+        RunModeChoice::Interval => "interval",
+    }
+}
+
+#[cfg(test)]
+mod item_drag_visual_tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    fn snapshot_zone(
+        visible: bool,
+        x_percent: f64,
+        y_percent: f64,
+        w_percent: f64,
+        h_percent: f64,
+    ) -> SnapshotZone {
+        SnapshotZone {
+            id: smol_str::SmolStr::new_static("z1"),
+            name: "Zone".to_owned(),
+            icon: smol_str::SmolStr::new_static("folder"),
+            position: bento_nano_backend::layout::RelativePosition {
+                x_percent,
+                y_percent,
+            },
+            expanded_size: bento_nano_backend::layout::RelativeSize {
+                w_percent,
+                h_percent,
+            },
+            items: Vec::new(),
+            accent_color: Some(smol_str::SmolStr::new_static("#3b82f6")),
+            sort_order: 0,
+            auto_group: None,
+            grid_columns: 4,
+            created_at: smol_str::SmolStr::new_static(""),
+            updated_at: smol_str::SmolStr::new_static(""),
+            capsule_size: smol_str::SmolStr::new_static("medium"),
+            capsule_shape: smol_str::SmolStr::new_static("pill"),
+            locked: false,
+            visible,
+            stack_id: None,
+            stack_order: 0,
+            alias: None,
+            display_mode: None,
+            live_folder_path: None,
+        }
+    }
+
+    #[test]
+    fn drop_preview_uses_renderer_grid_geometry() {
+        let zone = Zone::new(ZoneId(7), Cow::Borrowed("z"), 10, 20, 240, 180);
+        let drag = ActiveItemDragVisual {
+            zone_id: ZoneId(1),
+            item_id: ZoneItemId(1),
+            last_x: 130.0,
+            last_y: 116.0,
+        };
+
+        let rect = drop_preview_rect_for_zone(&zone, Some(drag), false).expect("preview");
+
+        assert!(rect.x >= 10.0);
+        assert!(rect.y >= 20.0);
+        assert!(rect.right() <= 250.0);
+        assert!(rect.bottom() <= 200.0);
+    }
+
+    #[test]
+    fn live_folder_badge_text_preserves_visible_path_and_compacts_long_paths() {
+        let short = live_folder_badge_text("C:/Users/HP/Documents/Live");
+        assert_eq!(short.as_str(), "Live: C:/Users/HP/Documents/Live");
+
+        let long = live_folder_badge_text(
+            "C:/Users/HP/Documents/VeryLongLiveFolderPath/with/many/segments/that/should/still/show/both/prefix/and/suffix",
+        );
+        assert!(long.as_str().starts_with("Live: C:/Users/HP/"));
+        assert!(long.as_str().contains('…'));
+        assert!(long.as_str().ends_with("show/both/prefix/and/suffix"));
+    }
+
+    #[test]
+    fn drag_ghost_is_clamped_to_viewport() {
+        let mut app = AppState::new();
+        app.viewport = bento_nano_style::Size {
+            width: 120.0,
+            height: 96.0,
+        };
+        let drag = ActiveItemDragVisual {
+            zone_id: ZoneId(1),
+            item_id: ZoneItemId(1),
+            last_x: 400.0,
+            last_y: 400.0,
+        };
+        let source = bento_nano_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 64.0,
+        };
+
+        let ghost = drag_ghost_rect(&app, drag, source);
+
+        assert_eq!(ghost.x, 40.0);
+        assert_eq!(ghost.y, 32.0);
+    }
+
+    #[test]
+    fn snapshot_thumbnail_maps_zone_percentages_into_canvas() {
+        let thumbnail = bento_nano_style::Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 160.0,
+            height: 96.0,
+        };
+        let zone = snapshot_zone(true, 50.0, 25.0, 25.0, 50.0);
+
+        let rect = snapshot_zone_thumbnail_rect(&zone, thumbnail).expect("visible zone");
+
+        assert!((rect.x - 90.0).abs() < 0.01);
+        assert!((rect.y - 48.0).abs() < 0.01);
+        assert!((rect.width - 36.0).abs() < 0.01);
+        assert!((rect.height - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn snapshot_thumbnail_skips_hidden_and_out_of_bounds_zones() {
+        let thumbnail = bento_nano_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 90.0,
+        };
+
+        assert!(
+            snapshot_zone_thumbnail_rect(&snapshot_zone(false, 0.0, 0.0, 20.0, 20.0), thumbnail)
+                .is_none()
+        );
+        assert!(
+            snapshot_zone_thumbnail_rect(&snapshot_zone(true, 100.0, 100.0, 20.0, 20.0), thumbnail)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn snapshot_row_preview_stays_inside_row() {
+        let row = bento_nano_style::Rect {
+            x: 20.0,
+            y: 40.0,
+            width: 300.0,
+            height: 44.0,
+        };
+
+        let rect = snapshot_row_preview_rect(row);
+
+        assert!(rect.x >= row.x);
+        assert!(rect.y >= row.y);
+        assert!(rect.right() <= row.right());
+        assert!(rect.bottom() <= row.bottom());
+        assert!((rect.width / rect.height - timeline_panel::THUMBNAIL_ASPECT_RATIO).abs() < 0.01);
+    }
+}

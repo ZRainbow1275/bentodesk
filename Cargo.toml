@@ -1,0 +1,250 @@
+#
+# BentoDesk Nano — self-built minimal-RSS framework workspace.
+#
+# SPEC LOCK (D:/Desktop/CREATOR FOUR/.trellis/spec/guides/architecture-principles.md):
+#   §6  mimalloc default-features = false (per-crate where allocator lives)
+#   §7  profile.release = opt-z / lto=fat / codegen-units=1 / panic=abort / strip=symbols / incremental=false
+#   §8  whitelist only — NO tauri/wry/slint/iced/floem/egui/tokio/reqwest/rustls/skia/wgpu/regex/lru/anyhow/image
+#   §14 MSVC + crt-static (set in .cargo/config.toml)
+#   §15 workspace inheritance via [workspace.package]
+#
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/bento-nano-platform",
+    "crates/bento-nano-tree",
+    "crates/bento-nano-layout",
+    "crates/bento-nano-style",
+    "crates/bento-nano-theme",
+    "crates/bento-nano-animation",
+    "crates/bento-nano-zone",
+    "crates/bento-nano-widget",
+    "crates/bento-nano-app",
+    "crates/bento-nano-shell",
+    "crates/bento-nano-backend",
+]
+
+[workspace.package]
+version      = "0.0.1"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+publish      = false
+authors      = ["BentoDesk Authors"]
+
+# -----------------------------------------------------------------------------
+# Workspace dependencies (spec §8 whitelist).
+# Every entry has a one-line justification. Adding any dep without
+# justification = PR auto-reject (spec §17 "先这样后面优化是死罪").
+# -----------------------------------------------------------------------------
+[workspace.dependencies]
+
+# Note: SVG → D2D conversion is a hand-rolled 200-LOC parser in
+# `bento-nano-platform::svg`, not a third-party crate (`lunasvg-rs` does not
+# exist; `resvg`/`usvg` are §8 forbidden — see svg.rs comment for the rationale).
+#
+# --- Win32 plain API surface (spec §3.1.1, §3.2) ---
+# windows-sys 0.59 dropped all COM-typed graphics interfaces; it is the lighter
+# binding for plain C Win32 (kernel32 / user32 / GDI / DPI / message loop).
+windows-sys = { version = "0.59", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    # Wave 19 — `OutputDebugStringA` for pre-main probe trigger logging
+    # from `bento-nano-platform::allocator`'s `.CRT$XCU` ctor. Stderr is
+    # not addressable at CRT init in `/SUBSYSTEM:WINDOWS` builds (no
+    # console attached, `GetStdHandle(STD_ERROR_HANDLE)` returns NULL);
+    # `OutputDebugStringA` routes to the attached debugger AND to the
+    # system-wide debug stream that DebugView monitors, which is the
+    # documented way to inspect pre-main diagnostics for GUI processes.
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_DataExchange",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    # Wave 15 — `EmptyWorkingSet` (psapi.dll) is the cheapest API to
+    # trim cold pages off the working set after first paint. Tier 0 #29/#31.
+    "Win32_System_ProcessStatus",
+    # Wave 15 — `GetCurrentProcess` (kernel32) returns the pseudo-handle
+    # consumed by EmptyWorkingSet. Pseudo-handle is never CloseHandle'd.
+    "Win32_System_Threading",
+    # T-092 system module — `RegGetValueW` for WebView2 runtime version
+    # discovery (HKLM lookup of EdgeUpdate `pv` value). Read-only registry
+    # access; no admin required.
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    # 0505 theme import UX — GetOpenFileNameW native JSON picker; no webview
+    # or third-party file-dialog crate.
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
+    # 0505 live-folder bind producer — SHBrowseForFolderW / ITEMIDLIST /
+    # SHGetPathFromIDListW for native folder selection. Binding metadata only;
+    # no new runtime framework and still on the plain Win32 windows-sys path.
+    "Win32_UI_Shell_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Storage_FileSystem",
+    # F1.1 config_vault — DPAPI (`CryptProtectData` / `CryptUnprotectData` in
+    # crypt32.dll) and BCrypt primitives (`BCryptOpenAlgorithmProvider`,
+    # `BCryptGenerateSymmetricKey`, `BCryptEncrypt` / `BCryptDecrypt` with
+    # `BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO` for AES-256-GCM,
+    # `BCryptGenRandom` for salt + nonce). Q2=C ruling: zero new crates;
+    # all crypto rides on the windows-sys binding metadata only.
+    "Win32_Security_Cryptography",
+    # F1.1 config_vault — `LocalFree` for the LocalAlloc'd output buffers
+    # that DPAPI returns from `CryptProtectData` / `CryptUnprotectData`.
+    "Win32_System_Memory",
+    # 0505 updater manifest slice — WinHTTP is the mandated Windows HTTP
+    # surface for selected-stack update checks; no reqwest/hyper/tokio.
+    "Win32_Networking_WinHttp",
+] }
+
+# --- COM-typed graphics surfaces (spec §3.1.1) ---
+# windows 0.58 is the only mainstream crate shipping typed bindings for D2D /
+# DComp / DWrite / DXGI / D3D11 in the post-0.59 split. Required for COM cast.
+windows = { version = "0.58", default-features = false, features = [
+    "implement",
+    "Foundation_Numerics",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Com",
+    # T-083 backend port — OLE drag-drop COM (`IDataObject`, `IDropSource`,
+    # `DoDragDrop`); HGLOBAL allocator for the CF_HDROP buffer; ModifierKeys
+    # flag type for mouse-button polling. `implement` activates the proc-macro
+    # that generates the IUnknown vtable boilerplate (spec §8.1 sanctioned
+    # exception, build-time only, zero runtime symbols). STGMEDIUM is gated
+    # behind both `Win32_Graphics_Gdi` and `Win32_System_Com_StructuredStorage`
+    # in windows 0.58's feature graph, so both must be enabled here.
+    "Win32_System_Ole",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Graphics_Gdi",
+    # T-084 ghost_layer port — DwmExtendFrameIntoClientArea + Shell subclass.
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    # T-086 icon_positions port — IFolderView / IShellFolder enumerate desktop
+    # icons via STRRET / ITEMIDLIST + StrRetToStrW (all gated under
+    # Win32_UI_Shell_Common). Win32_UI_HiDpi exposes GetDpiForSystem so the
+    # save/restore path can persist + scale icon coordinates across DPI
+    # changes. Both features are zero-runtime-cost (binding metadata only).
+    "Win32_UI_Shell_Common",
+    "Win32_UI_HiDpi",
+    # T-090 storage port — `ReplaceFileW` + `MoveFileExW` for atomic JSON
+    # state writes with backup recovery. `Win32_Storage_FileSystem` is the
+    # only Win32_Storage submodule used here; zero-runtime-cost binding
+    # metadata only.
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    # T-080 icon subsystem — WIC (Windows Imaging Component) for PNG decode/encode.
+    # Replaces the §8-forbidden `image` crate. CLSID_WICImagingFactory +
+    # IWICImagingFactory2 + IWICBitmapEncoder/Decoder live under this feature.
+    # `Win32_System_Com_StructuredStorage` is also required for `IStream`-based
+    # WIC encode round-trip (already enabled above for OLE drag-drop).
+    "Win32_Graphics_Imaging",
+] }
+
+# windows-core 0.58 — required as a top-level dep because the `#[implement]`
+# proc-macro from `windows` 0.58 expands to absolute `::windows_core::...`
+# paths (not `::windows::core::...`). Pulling `windows` as a dep alone leaves
+# `windows_core` reachable only as `windows::core`, so the macro emit fails to
+# resolve. This is the same exception §8.1 already grants `windows-implement`
+# / `windows-interface` — both ship as transitive deps of `windows`.
+windows-core = { version = "0.58", default-features = false }
+
+# Allocator (spec §6) — only enabled in the shell binary crate.
+mimalloc = { version = "0.1", default-features = false }
+
+# Hot-path strings (spec §10) — SmolStr inline ≤22 bytes.
+# `serde` feature toggled ON per ΔB ruling: dispatcher Command surface derives
+# Serialize/Deserialize on SmolStr-bearing variants for v2.x scripting shape.
+# Build-time proc-macro only — never serialized at runtime in single-process.
+smol_str = { version = "0.3", default-features = false, features = ["serde"] }
+
+# Hot-path containers (spec §10) — stack-inlined Vec.
+# `serde` feature toggled ON per ΔB ruling — same rationale as smol_str above.
+smallvec = { version = "1", default-features = false, features = ["serde"] }
+
+# Cross-thread channels (spec §9 / §2) — replaces Tokio. `std` feature
+# is required for Sender/Receiver/unbounded; default-features pulls in std.
+crossbeam-channel = { version = "0.5", default-features = false, features = ["std"] }
+
+# --- Phase 5 backend ports (spec §8 whitelist) ---
+# Serde + JSON for the v2.x scripting forward-compat surface (master plan
+# §11 ΔB ruling: derive on every public command struct even though the
+# single-process build never serializes at runtime). serde_derive proc-macro
+# is the only sanctioned proc-macro besides windows-implement (spec §8.1).
+serde      = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+# Tracing (no-op log-style facade) — required by 1.x backend ports for
+# warn/info diagnostics. Spec §8 explicitly whitelists `tracing 0.1`.
+# We do NOT pull `tracing-subscriber` (forbidden via env-filter); shell
+# crate already configures the subscriber once.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+# Filesystem watcher (spec §8 whitelist row "文件监听: notify 7 — 默认无 debouncer").
+# `notify-debouncer-full` is forbidden (§8 forbidden list); the watcher
+# module hand-rolls its own debouncer over `crossbeam-channel`.
+# Default features pull the platform-appropriate backend (ReadDirectoryChangesW
+# on Windows). `notify` is a build-time only crate from the BentoDesk binary's
+# perspective: no async runtime, no extra channels — it talks over the std
+# `mpsc` channel that the watcher module bridges to crossbeam.
+notify = "7"
+
+# Plugin archive install parity (0505) — selected-stack replacement for the
+# source Tauri `install_plugin(path)` command. Default features stay off; only
+# ZIP read/write plus deflate support is enabled so `.bdplugin` archives can be
+# safely extracted without reintroducing Tauri/WebView or async networking.
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+# Updater authenticity parity (0505) — verifies Tauri/minisign signature
+# strings against the embedded BentoDesk public key without pulling an async
+# updater framework, TLS stack, or general-purpose crypto dependency tree.
+minisign-verify = "0.2.5"
+
+# -----------------------------------------------------------------------------
+# Profile (spec §7 — locked, do not modify).
+# -----------------------------------------------------------------------------
+[profile.release]
+opt-level        = "z"
+lto              = "fat"
+codegen-units    = 1
+panic            = "abort"
+strip            = "symbols"
+overflow-checks  = false
+incremental      = false
+debug            = false
+debug-assertions = false
+
+[profile.dev]
+# Faster dev iteration without changing release shape.
+opt-level     = 0
+debug         = 1
+incremental   = true
+
+# -----------------------------------------------------------------------------
+# Workspace-wide lints (spec §11, §11.1, §15).
+# -----------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "forbid"
+
+[workspace.lints.clippy]
+# Spec §11 — only the panic-shaped forms are denied; unwrap_or* family is allowed.
+unwrap_used  = "deny"
+expect_used  = "deny"
+panic        = "deny"
+todo         = "deny"
+unimplemented = "deny"

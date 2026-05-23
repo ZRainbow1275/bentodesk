@@ -1,0 +1,29 @@
+#
+# Spec §14 — MSVC toolchain only, static CRT, dead-code/identical-COMDAT folding.
+#
+
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+# Static CRT eliminates VCRUNTIME140.dll private commit (~0.5 MB).
+# /OPT:REF             — strip unreferenced functions/data.
+# /OPT:ICF             — identical COMDAT folding.
+# /INCREMENTAL:NO      — kill IAT padding & jump-thunk tables.
+# /DYNAMICBASE         — ASLR.
+# /NXCOMPAT            — DEP.
+# /SUBSYSTEM:WINDOWS + /ENTRY:mainCRTStartup — no console pop-up.
+# /MERGE:.rdata=.text  — fold read-only data into the code section to drop one
+#                        page-aligned section header + reduce alignment slack
+#                        (spec §14; saves ~4-12 KB on small executables).
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/OPT:REF",
+    "-C", "link-arg=/OPT:ICF",
+    "-C", "link-arg=/INCREMENTAL:NO",
+    "-C", "link-arg=/DYNAMICBASE",
+    "-C", "link-arg=/NXCOMPAT",
+    "-C", "link-arg=/SUBSYSTEM:WINDOWS",
+    "-C", "link-arg=/ENTRY:mainCRTStartup",
+    "-C", "link-arg=/MERGE:.rdata=.text",
+]

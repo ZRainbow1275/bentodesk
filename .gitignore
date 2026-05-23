@@ -1,0 +1,46 @@
+# Rust
+/target/
+**/target/
+
+# Logs / runtime proof artifacts
+*.log
+runtime-proof-*.txt
+runtime-proof-*.csv
+runtime-proof-*.summary.txt
+runtime-proof-*-stderr.log
+runtime-proof-*-stdout.log
+
+# Manual test state
+manual-test-state/
+runtime-proof-*/
+debug_frames/
+
+# Ad-hoc wave benchmark artifacts (regenerable)
+wave*_vmscan*.csv
+wave*_vmscan*.ps1
+wave*_measure.ps1
+wave*_orchestrate.ps1
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Env / secrets
+.env
+.env.*
+
+# AI tools cache
+.serena/
+.claude/
+.gitnexus/
+
+# Crash dumps
+bash.exe.stackdump
+*.stackdump

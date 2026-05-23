@@ -1,0 +1,17 @@
+[package]
+name         = "bento-nano-tree"
+description  = "Arena-allocated widget tree for BentoDesk Nano."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+bento-nano-style = { path = "../bento-nano-style" }
+smol_str = { workspace = true }
+smallvec = { workspace = true }
+
+[lints]
+workspace = true

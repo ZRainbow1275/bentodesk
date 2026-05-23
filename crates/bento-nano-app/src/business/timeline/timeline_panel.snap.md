@@ -1,0 +1,25 @@
+# TimelinePanel — Visual Spec
+
+Source: `bentodesk/src/components/Timeline/TimelinePanel.tsx` (360 LOC) + `TimelinePanel.css`.
+
+- **Modal scrim (`.timeline-overlay`):** `position: fixed`, `inset: 0`, `rgba(0,0,0,0.45)` bg, flex centered, `z-index: 1500`. Click on the overlay (NOT the panel) calls `closeTimeline`.
+- **Panel (`.timeline-panel`):** `width: min(820px, 92vw)`, `max-height: 80vh`, `padding: 24px`, `border-radius: 16px`, `var(--color-bg-elevated, #1e1f24)` bg, `var(--color-fg, #eef0f4)` fg, `box-shadow: 0 24px 60px rgba(0,0,0,0.45)`. Flex column with **16 px gap** between header / body / details. Has a `scale-in` open animation matching all other modals (200 ms `cubic-bezier(0.16, 1, 0.3, 1)`).
+- **Header (`.timeline-panel__header`):** flex space-between, no own padding (inherits panel's 24 px). Title `<h2>` 16 px Semibold. Right side `.timeline-panel__actions`: 8 px gap, contains "Save Now" primary button + close icon button.
+- **Save Now button (`.timeline-btn--primary`):** `var(--color-accent, #6488ff)` bg, transparent border, white text, `padding: 6px 12px`, `border-radius: 8px`, 12 px. Hover: `filter: brightness(1.1)`.
+- **Close icon button (`.timeline-panel__close`):** transparent bg, `padding: 4px`, `border-radius: 6px`, inherits color. Hover: `rgba(255,255,255,0.08)` bg. Renders an inline SVG ✕ (16×16 px).
+- **Body (`.timeline-panel__body`):** flex column with 16 px gap, `overflow-y: auto`.
+- **Loading / Empty (`.timeline-panel__loading`, `.timeline-panel__empty`):** centered, `padding: 32px 16px`, `opacity: 0.7`.
+- **Slider wrap (`.timeline-slider-wrap`):** `position: relative`, `padding: 28px 8px 16px`. Houses `<input type="range">` + the absolute-positioned markers row.
+- **Slider input (`.timeline-slider`):** `width: 100%`, `accent-color: var(--color-accent)`. Native browser range, `min={0} max={length-1} value={activeIdx}`. `onInput` updates dragIndex; `onChange` (release) commits restore.
+- **Markers (`.timeline-markers`):** `position: absolute`, `left: 8px`, `right: 8px`, `top: 8px`, `height: 20px`, `pointer-events: none` on the wrap. Each marker (`.timeline-marker`) is `pointer-events: auto`, transparent button, `transform: translateX(-50%)`, `padding: 2px 4px`, positioned via `left: <pct>%`.
+- **Auto marker dot (`.timeline-marker .dot`):** 6×6 px circle, `rgba(255,255,255,0.45)` bg. Active: 9×9 px, `var(--color-accent)` bg. Hover: `var(--color-accent)` bg.
+- **Pinned marker (`.timeline-marker--pinned .pin-label`):** `★` glyph, `#ffcf4d`, 13 px.
+- **Details card (`.timeline-details__card`):** `rgba(255,255,255,0.04)` bg, `border-radius: 12px`, `padding: 14px 16px`, flex column with 10 px gap.
+  - Top row (`.timeline-details__row`): flex space-between, 12 px text, `opacity: 0.9`. Left: timestamp (`Date.toLocaleString()`). Right (only when pinned): `★ Pinned` in `#ffcf4d`.
+  - Delta line (`.timeline-details__delta`): 14 px Semibold (`delta_summary` or fallback "no change" copy).
+  - Trigger line (`.timeline-details__trigger`): 11 px `opacity: 0.6` ("Trigger: <name>" or "—").
+  - Thumbnail (`.timeline-thumbnail`): centered, `max-width: 480px`, `aspect-ratio: 16/9`, `rgba(255,255,255,0.04)` bg, 1 px `rgba(255,255,255,0.08)` border, `border-radius: 8px`. Each `.timeline-thumbnail__zone` is absolute-positioned coloured rect (`accent_color` fill, `border-radius: 4px`, `opacity: 0.7`, 1 px inset shadow).
+  - Buttons row (`.timeline-details__buttons`): flex right-aligned, 8 px gap. "Pin" (`.timeline-btn`) + "Delete" (`.timeline-btn--danger` — `#ff7c87` text). Standard `.timeline-btn` is `rgba(255,255,255,0.06)` bg, 1 px `rgba(255,255,255,0.12)` border, `border-radius: 8px`, `padding: 6px 12px`, 12 px. Disabled: `opacity: 0.5`.
+- **Empty hint (`.timeline-hint`):** 12 px `opacity: 0.5`, `padding: 16px`, centered.
+- **Behaviour:** `onMount` → `listen("timeline_updated")` for backend push notifications. `createEffect` triggered by `isTimelineOpen()` → `refresh()` calls `ipc.listCheckpoints()`, sorts newest-first, mirrors into `reversed()` memo (oldest-left for the slider). Hovering / scrubbing prefetches `getCheckpoint(id)` into `previewCache`. Slider release → `restoreCheckpoint(meta.id)`. Pin button → `saveCheckpointPermanent(id, null)` then refresh. Delete → `deleteCheckpoint(id)` then refresh. Save Now → `saveCheckpointPermanent(null, "manual save")`. Escape closes. Backend dep: `bento-nano-backend::timeline::{list_checkpoints, get_checkpoint, restore_checkpoint, save_checkpoint_permanent, delete_checkpoint}` (T-089, in flight). Dispatcher hooks: open via `Command::ShowWindow(WindowKind::Timeline)`, close via `Command::HideWindow(WindowKind::Timeline)`. Restore + Delete + Pin + ManualSave fire as direct backend calls (no Command — reads/writes are bounded by the timeline backend's internal mutex; UI only emits a dispatcher Command if the restore mutates zone state, in which case the backend re-emits the corresponding `Command::*Zone` variants on completion).
+- **Reduced motion:** scale-in collapses to instant per the modal-wide `prefers-reduced-motion` rule.
