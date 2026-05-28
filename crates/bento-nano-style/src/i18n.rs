@@ -174,4 +174,24 @@ mod tests {
         // locales would silently shift ids.
         assert_eq!(ZH_CN.len(), EN_US.len());
     }
+
+    /// M1a 2026-05-29 — id 141 `SETTING_PORTABLE_MODE` was appended to BOTH
+    /// tables (the Tauri General row 5, `SettingsPanel.tsx:294`). A blank slot
+    /// would render an empty toggle label in the panel, so pin that both
+    /// locales carry a non-empty string at this id. `.get()` reads the table
+    /// directly (no process-global locale install) to stay ordering-free,
+    /// mirroring the `lookup_table_*` tests above. `zh_ids` and `en_ids` are
+    /// the same numeric id by construction (the length test enforces parity).
+    #[test]
+    fn setting_portable_mode_id_141_present_in_both_locales() {
+        assert_eq!(zh_ids::SETTING_PORTABLE_MODE, en_ids::SETTING_PORTABLE_MODE);
+        assert!(
+            !ZH_CN.get(zh_ids::SETTING_PORTABLE_MODE).is_empty(),
+            "zh-CN SETTING_PORTABLE_MODE (id 141) must not be blank"
+        );
+        assert!(
+            !EN_US.get(en_ids::SETTING_PORTABLE_MODE).is_empty(),
+            "en-US SETTING_PORTABLE_MODE (id 141) must not be blank"
+        );
+    }
 }

@@ -141,6 +141,11 @@ pub mod ids {
     pub const STATE_DISABLED_PILL: StringId = StringId(139);
     // 140 Wave I-α / R14 (2026-05-25) — picker row caption matching zh-CN.
     pub const SETTINGS_ZONE_DISPLAY_MODE_LABEL: StringId = StringId(140);
+
+    // 141 M1a (2026-05-29) — Tauri 1:1 parity, General section row 5.
+    // Mirrors zh-CN id 141. Lockstep with `SETTING_SPEED_MODE` (117), which
+    // is now orphan in both tables.
+    pub const SETTING_PORTABLE_MODE: StringId = StringId(141);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -284,8 +289,11 @@ pub static EN_US: LookupTable = LookupTable {
         "Desktop embed",     // SETTING_DESKTOP_EMBED (113)
         "Run at startup",    // SETTING_AUTOSTART (114)
         "Show in taskbar",   // SETTING_SHOW_IN_TASKBAR (115)
-        "Smart auto-layout", // SETTING_SMART_LAYOUT (116)
-        "Mode (speed mode)", // SETTING_SPEED_MODE (117)
+        // M1a 2026-05-29 — text retargeted to Tauri "Smart Auto Group"
+        // (`en.ts` `settingsAutoGroup:24`).
+        "Smart Auto Group",  // SETTING_SMART_LAYOUT (116)
+        // M1a 2026-05-29 — orphan slot. See zh-CN sibling comment.
+        "",                  // SETTING_SPEED_MODE (117) — orphan
         "Language",          // SETTING_LANGUAGE (118)
         "Cancel",            // SETTING_CANCEL (119)
         "Save",              // SETTING_SAVE (120)
@@ -312,5 +320,7 @@ pub static EN_US: LookupTable = LookupTable {
         "Disabled",                   // STATE_DISABLED_PILL (139)
         // 140 Wave I-α / R14 — picker row caption.
         "Default display mode",       // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
+        // 141 M1a (2026-05-29) — General section row 5 (Tauri parity).
+        "Portable Mode (restart required)", // SETTING_PORTABLE_MODE (141)
     ],
 };

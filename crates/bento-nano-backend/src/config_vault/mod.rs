@@ -540,6 +540,58 @@ mod tests {
         assert_eq!(v2.mode_tag(), ModeTag::None);
     }
 
+    /// M1a 2026-05-29 — Settings panel "Save" persists the 5 General-section
+    /// toggles as `general.*` boolean keys, then `flush()`es. On the next
+    /// launch the shell reads them back to restore the panel + apply them.
+    /// This pins that persistence contract in the DEFAULT (None) mode: write
+    /// the 5 keys with mixed booleans, flush, reopen the SAME path, and assert
+    /// each reads back identically. Key literals match
+    /// `bento-nano-shell/src/main.rs` (`SETTING_GENERAL_*` constants).
+    /// Deliberately uses None mode only — Passphrase flush is a quarantined
+    /// pre-existing crash and is never exercised here.
+    #[test]
+    fn round_trip_general_section_bool_keys_none_mode() {
+        const GHOST_LAYER_ENABLED: &str = "general.ghost_layer_enabled";
+        const LAUNCH_AT_STARTUP: &str = "general.launch_at_startup";
+        const SHOW_IN_TASKBAR: &str = "general.show_in_taskbar";
+        const AUTO_GROUP_ENABLED: &str = "general.auto_group_enabled";
+        const PORTABLE_MODE: &str = "general.portable_mode";
+
+        let dir = tempdir();
+        let path = dir.join("settings.vault");
+        {
+            let mut v = Vault::open(&path).unwrap();
+            v.set_setting(GHOST_LAYER_ENABLED, SettingValue::Bool(false));
+            v.set_setting(LAUNCH_AT_STARTUP, SettingValue::Bool(true));
+            v.set_setting(SHOW_IN_TASKBAR, SettingValue::Bool(false));
+            v.set_setting(AUTO_GROUP_ENABLED, SettingValue::Bool(true));
+            v.set_setting(PORTABLE_MODE, SettingValue::Bool(true));
+            v.flush().unwrap();
+        }
+        let v2 = Vault::open(&path).unwrap();
+        assert_eq!(
+            v2.get_setting(GHOST_LAYER_ENABLED),
+            Some(SettingValue::Bool(false))
+        );
+        assert_eq!(
+            v2.get_setting(LAUNCH_AT_STARTUP),
+            Some(SettingValue::Bool(true))
+        );
+        assert_eq!(
+            v2.get_setting(SHOW_IN_TASKBAR),
+            Some(SettingValue::Bool(false))
+        );
+        assert_eq!(
+            v2.get_setting(AUTO_GROUP_ENABLED),
+            Some(SettingValue::Bool(true))
+        );
+        assert_eq!(
+            v2.get_setting(PORTABLE_MODE),
+            Some(SettingValue::Bool(true))
+        );
+        assert_eq!(v2.mode_tag(), ModeTag::None);
+    }
+
     #[test]
     fn remove_setting_deletes_key_and_round_trips() {
         let dir = tempdir();

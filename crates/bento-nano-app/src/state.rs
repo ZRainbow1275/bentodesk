@@ -64,6 +64,23 @@ pub enum PassphraseEntryPurpose {
     Unlock,
 }
 
+/// M1a 2026-05-29 — snapshot of every persisted Settings toggle captured
+/// when the panel opens. Cancel/Escape/Close × replay this back onto the
+/// `AppState` Cells so a mid-edit dismissal never leaks into the vault.
+///
+/// Today this only covers the 5 General toggles (Tauri parity scope). Later
+/// milestones (Performance sliders, Startup management, etc.) extend this
+/// struct with additional fields; `snapshot_settings`/`restore_settings`
+/// stay the single round-trip surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsSnapshot {
+    pub ghost_layer_enabled: bool,
+    pub launch_at_startup: bool,
+    pub show_in_taskbar: bool,
+    pub auto_group_enabled: bool,
+    pub portable_mode: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsBackupStatus {
     Success(SmolStr),
@@ -324,6 +341,16 @@ pub struct AppState {
     /// `true` when the SETTINGS button has flipped the panel open. The
     /// modal overlay paints in `Renderer::draw_settings_panel`.
     pub settings_open: Cell<bool>,
+    /// M1a 2026-05-29 — `true` after the user mutates any persisted Settings
+    /// row in the open panel. Save dims when `false` (matches Tauri
+    /// `disabled={!dirty()}` at `SettingsPanel.tsx:799`); Save/Cancel clear it.
+    pub settings_dirty: Cell<bool>,
+    /// M1a 2026-05-29 — snapshot of the General-section toggle values taken
+    /// when the Settings panel opens. Cancel/Escape/Close × restore from
+    /// here so cancelled edits never leak into persisted state. `RefCell`
+    /// (not `Cell`) because `SettingsSnapshot` carries multiple bools and is
+    /// not `Copy`.
+    pub settings_snapshot: RefCell<Option<SettingsSnapshot>>,
     /// Round-2 M1 — scroll offset for the Settings panel body. Clamped to
     /// `[0, body_max_scroll]` by the wheel handler. Header + footer stay
     /// sticky (not scrolled); only the body content shifts.
@@ -334,10 +361,15 @@ pub struct AppState {
     pub setting_autostart: Cell<bool>,
     /// Round-2 M1 — top-section toggle: 显示在任务栏. Default on.
     pub setting_show_in_taskbar: Cell<bool>,
-    /// Round-2 M1 — top-section toggle: 智能自动布局. Default on.
+    /// Round-2 M1 — top-section toggle: 智能自动分组 (Tauri Smart Auto Group).
+    /// M1a 2026-05-29: label retargeted to Tauri parity, field name kept for
+    /// minimal blast radius. Default on.
     pub setting_smart_layout: Cell<bool>,
-    /// Round-2 M1 — top-section toggle: 使用模式 (速度模式). Default off.
-    pub setting_speed_mode: Cell<bool>,
+    /// M1a 2026-05-29 — top-section toggle: 便携模式 (需要重启). Renamed from
+    /// the bespoke `setting_speed_mode` so the General section reads 1:1 with
+    /// Tauri (`SettingsPanel.tsx:294`, bound field `portable_mode`).
+    /// Default off.
+    pub setting_portable_mode: Cell<bool>,
     /// Round-2 M2 — 桌面源 toggle: 海桌面 (the user's personal Desktop).
     /// Default on. Real backend wiring is M3 (`DesktopSourceProbe`).
     pub source_primary_enabled: Cell<bool>,
@@ -639,12 +671,14 @@ impl AppState {
             next_zone_id: Cell::new(1),
             is_pinned: Cell::new(false),
             settings_open: Cell::new(false),
+            settings_dirty: Cell::new(false),
+            settings_snapshot: RefCell::new(None),
             scroll_offset_y: Cell::new(0.0),
             setting_desktop_embed: Cell::new(true),
             setting_autostart: Cell::new(false),
             setting_show_in_taskbar: Cell::new(true),
             setting_smart_layout: Cell::new(true),
-            setting_speed_mode: Cell::new(false),
+            setting_portable_mode: Cell::new(false),
             source_primary_enabled: Cell::new(true),
             source_public_enabled: Cell::new(false),
             desktop_path_draft: RefCell::new(SmolStr::new_static("D:\\Desktop")),
@@ -734,6 +768,32 @@ impl AppState {
     /// Mark zones as mutated this cycle. `consume_dispatcher` reads + clears.
     pub fn mark_dirty(&self) {
         self.dirty.set(true);
+    }
+
+    /// M1a 2026-05-29 — capture the current persisted General-section toggle
+    /// values for later Cancel/Escape rollback. Shell wires this on the
+    /// `OpenSettings` path so even keyboard-driven launches snapshot before
+    /// the user can mutate any toggle.
+    pub fn snapshot_settings(&self) -> SettingsSnapshot {
+        SettingsSnapshot {
+            ghost_layer_enabled: self.setting_desktop_embed.get(),
+            launch_at_startup: self.setting_autostart.get(),
+            show_in_taskbar: self.setting_show_in_taskbar.get(),
+            auto_group_enabled: self.setting_smart_layout.get(),
+            portable_mode: self.setting_portable_mode.get(),
+        }
+    }
+
+    /// M1a 2026-05-29 — restore each General-section toggle Cell from a
+    /// snapshot. Used by Cancel/Escape/Close × so cancelled edits never leak
+    /// past the in-memory panel. Caller is responsible for clearing
+    /// `settings_dirty` and requesting a redraw.
+    pub fn restore_settings(&self, snap: &SettingsSnapshot) {
+        self.setting_desktop_embed.set(snap.ghost_layer_enabled);
+        self.setting_autostart.set(snap.launch_at_startup);
+        self.setting_show_in_taskbar.set(snap.show_in_taskbar);
+        self.setting_smart_layout.set(snap.auto_group_enabled);
+        self.setting_portable_mode.set(snap.portable_mode);
     }
 
     pub fn active_theme_palette(&self) -> PaletteTokens {
@@ -1112,6 +1172,87 @@ mod tests {
         app.selected_zone.set(None);
         app.set_zone_display_mode(ZoneDisplayMode::Always);
         assert!(app.zone_body_visible_for_mode(&zone));
+    }
+
+    /// M1a 2026-05-29 — `snapshot_settings`/`restore_settings` are the single
+    /// round-trip surface the Settings panel's Cancel/Escape/Close × path uses
+    /// to undo unsaved General-section edits. Set all 5 toggle Cells to
+    /// non-default values, snapshot, scribble different values, then restore
+    /// and assert every Cell is back to the snapshotted value. Also pins that
+    /// `settings_dirty` is `false` on a fresh AppState (Save dims until a row
+    /// is mutated — Tauri `disabled={!dirty()}`).
+    #[test]
+    fn settings_snapshot_restore_round_trips_general_toggles() {
+        let app = AppState::new();
+
+        assert!(
+            !app.settings_dirty.get(),
+            "settings_dirty must default to false so Save starts dimmed"
+        );
+
+        // Defaults are embed=on, autostart=off, taskbar=on, smart=on,
+        // portable=off. Pick the inverse of each so a no-op snapshot can't
+        // pass by accident.
+        app.setting_desktop_embed.set(false);
+        app.setting_autostart.set(true);
+        app.setting_show_in_taskbar.set(false);
+        app.setting_smart_layout.set(false);
+        app.setting_portable_mode.set(true);
+
+        let snap = app.snapshot_settings();
+        assert_eq!(
+            snap,
+            SettingsSnapshot {
+                ghost_layer_enabled: false,
+                launch_at_startup: true,
+                show_in_taskbar: false,
+                auto_group_enabled: false,
+                portable_mode: true,
+            }
+        );
+
+        // Mutate every Cell away from the snapshot (simulate cancelled edits).
+        app.setting_desktop_embed.set(true);
+        app.setting_autostart.set(false);
+        app.setting_show_in_taskbar.set(true);
+        app.setting_smart_layout.set(true);
+        app.setting_portable_mode.set(false);
+
+        app.restore_settings(&snap);
+
+        assert!(!app.setting_desktop_embed.get());
+        assert!(app.setting_autostart.get());
+        assert!(!app.setting_show_in_taskbar.get());
+        assert!(!app.setting_smart_layout.get());
+        assert!(app.setting_portable_mode.get());
+    }
+
+    /// M1a 2026-05-29 — the Cancel/Escape/Close × path stashes the snapshot in
+    /// `settings_snapshot: RefCell<Option<SettingsSnapshot>>` when the panel
+    /// opens and `take()`s it on restore. Pin that the container round-trips:
+    /// it starts `None`, holds the stored value, and reads back `None` after a
+    /// `take()` so a second restore can't replay a stale snapshot.
+    #[test]
+    fn settings_snapshot_cell_round_trips_through_refcell_option() {
+        let app = AppState::new();
+        assert!(app.settings_snapshot.borrow().is_none());
+
+        let snap = SettingsSnapshot {
+            ghost_layer_enabled: false,
+            launch_at_startup: true,
+            show_in_taskbar: false,
+            auto_group_enabled: true,
+            portable_mode: true,
+        };
+        app.settings_snapshot.borrow_mut().replace(snap);
+        assert_eq!(app.settings_snapshot.borrow().as_ref(), Some(&snap));
+
+        let taken = app.settings_snapshot.borrow_mut().take();
+        assert_eq!(taken, Some(snap));
+        assert!(
+            app.settings_snapshot.borrow().is_none(),
+            "after take() the slot must be empty so cancel can't replay a stale snapshot"
+        );
     }
 
     #[test]

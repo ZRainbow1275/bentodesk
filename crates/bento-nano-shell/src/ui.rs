@@ -570,8 +570,10 @@ pub enum SettingsHit {
     ToggleShowInTaskbar,
     /// Top-section row 3: 智能自动布局 (smart auto-layout).
     ToggleSmartLayout,
-    /// Top-section row 4: 使用模式 (speed mode).
-    ToggleSpeedMode,
+    /// Top-section row 4: 便携模式 (portable mode — restart required).
+    /// M1a 2026-05-29: renamed from `ToggleSpeedMode` to reach Tauri 1:1
+    /// parity with `SettingsPanel.tsx:294` (bound field `portable_mode`).
+    TogglePortableMode,
     /// Open the locale chooser (currently flips locale; M5 promotes this to
     /// a popup once the dropdown menu lands). Distinct from `SwitchLocale`
     /// only by intent — they dispatch identically in M1.
@@ -762,7 +764,7 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
                 1 => SettingsHit::ToggleAutostart,
                 2 => SettingsHit::ToggleShowInTaskbar,
                 3 => SettingsHit::ToggleSmartLayout,
-                4 => SettingsHit::ToggleSpeedMode,
+                4 => SettingsHit::TogglePortableMode,
                 _ => SettingsHit::Body,
             };
         }
@@ -1311,7 +1313,7 @@ mod phase21_tests {
         );
         assert_eq!(
             settings_hit(&app, r4.x + r4.width * 0.5, r4.y + r4.height * 0.5),
-            SettingsHit::ToggleSpeedMode
+            SettingsHit::TogglePortableMode
         );
 
         // Language chip → OpenLocaleMenu.

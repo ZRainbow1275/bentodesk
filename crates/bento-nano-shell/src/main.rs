@@ -1523,6 +1523,11 @@ fn dispatch_hotkey_command(root: &AppRoot, command: hotkey::HotkeyCommand) {
         hotkey::HotkeyCommand::Escape => {
             let settings_open = root.app.borrow().settings_open.get();
             if settings_open {
+                // M1a 2026-05-29 — Escape dismisses the Settings panel
+                // without persisting any pending General-section edits,
+                // matching Tauri's `handleClose` keyboard branch
+                // (`SettingsPanel.tsx:165-169`).
+                cancel_settings_general(root);
                 root.dispatcher.push(Command::CloseSettings);
             } else {
                 root.dispatcher.push(Command::HideWindow(WindowKind::Main));
@@ -1646,9 +1651,23 @@ fn handle_keydown(
                 request_redraw(hwnd);
             }
             AuxiliaryEscapeAction::HideAuxWindow => {
-                // SAFETY: hwnd is an auxiliary HWND owned by the registry. Esc
-                // dismisses that surface instead of hiding the main window.
-                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                // M1a 2026-05-29 — when the auxiliary HWND being dismissed
+                // is the Settings panel, route through `CloseSettings` so
+                // the dispatcher's close arm runs (clears `settings_open`,
+                // hides the HWND) AND restore the General-section snapshot
+                // first so cancelled edits never leak past Escape. Other
+                // auxiliary HWNDs (live context capsule, plugin modal, etc.)
+                // still take the direct ShowWindow(SW_HIDE) path.
+                if slot.kind == WindowKind::Settings {
+                    cancel_settings_general(root);
+                    root.dispatcher.push(Command::CloseSettings);
+                    consume_dispatcher(root, hwnd);
+                    request_redraw(hwnd);
+                } else {
+                    // SAFETY: hwnd is an auxiliary HWND owned by the registry. Esc
+                    // dismisses that surface instead of hiding the main window.
+                    unsafe { ShowWindow(hwnd, SW_HIDE) };
+                }
             }
         }
         return 0;
@@ -4714,6 +4733,167 @@ const SETTING_ACTIVE_THEME: &str = "active_theme";
 const SETTING_ZONE_DISPLAY_MODE: &str = "zone_display_mode";
 const SETTING_DEBUG_OVERLAY: &str = "debug_overlay";
 const SETTING_MINIBAR_PINNED_ZONES: &str = "minibar.pinned_zones";
+// M1a 2026-05-29 — General-section persistence keys. Names mirror Tauri's
+// `AppSettings` field names in dotted form (see `bentodesk/src/types/settings.ts`
+// and `updateSettingsStore` at `SettingsPanel.tsx:216-227`) so a future
+// vault file ported between the two builds reads back identically.
+const SETTING_GENERAL_GHOST_LAYER_ENABLED: &str = "general.ghost_layer_enabled";
+const SETTING_GENERAL_LAUNCH_AT_STARTUP: &str = "general.launch_at_startup";
+const SETTING_GENERAL_SHOW_IN_TASKBAR: &str = "general.show_in_taskbar";
+const SETTING_GENERAL_AUTO_GROUP_ENABLED: &str = "general.auto_group_enabled";
+const SETTING_GENERAL_PORTABLE_MODE: &str = "general.portable_mode";
+
+/// M1a 2026-05-29 — restore each General-section AppState Cell from the
+/// persisted vault values written by `save_settings_general`. Absent keys
+/// keep the AppState defaults so a fresh installation reads as the
+/// designed-default toggle layout (matches Tauri's `defaultAppSettings`
+/// fall-through in `stores/settings.ts`).
+///
+/// Called once from `apply_persisted_settings_from_vault` after the locale /
+/// updater frequency restores so the General section is in its persisted
+/// state before the panel can render. Returns silently when the vault
+/// global is not yet installed (early startup before `init_global` runs);
+/// callers must tolerate that branch without retrying.
+fn apply_general_settings_from_vault(app: &AppState) {
+    let Some(mtx) = bento_nano_backend::config_vault::Vault::global() else {
+        return;
+    };
+    let Ok(vault) = mtx.lock() else {
+        tracing::warn!(
+            target: "bentodesk::vault",
+            "general settings restore skipped: vault mutex poisoned"
+        );
+        return;
+    };
+    let ghost = vault.get_setting(SETTING_GENERAL_GHOST_LAYER_ENABLED);
+    let startup = vault.get_setting(SETTING_GENERAL_LAUNCH_AT_STARTUP);
+    let taskbar = vault.get_setting(SETTING_GENERAL_SHOW_IN_TASKBAR);
+    let auto_group = vault.get_setting(SETTING_GENERAL_AUTO_GROUP_ENABLED);
+    let portable = vault.get_setting(SETTING_GENERAL_PORTABLE_MODE);
+    drop(vault);
+
+    restore_general_bool_cell(&app.setting_desktop_embed, ghost, "ghost_layer_enabled");
+    restore_general_bool_cell(&app.setting_autostart, startup, "launch_at_startup");
+    restore_general_bool_cell(&app.setting_show_in_taskbar, taskbar, "show_in_taskbar");
+    restore_general_bool_cell(&app.setting_smart_layout, auto_group, "auto_group_enabled");
+    restore_general_bool_cell(&app.setting_portable_mode, portable, "portable_mode");
+}
+
+/// M1a 2026-05-29 — apply a `SettingValue::Bool` to one General-section
+/// `Cell<bool>`, logging if the persisted value has the wrong tag. `None`
+/// keeps the AppState default (silent — first-launch path).
+fn restore_general_bool_cell(
+    cell: &std::cell::Cell<bool>,
+    value: Option<bento_nano_backend::config_vault::SettingValue>,
+    label: &'static str,
+) {
+    match value {
+        Some(bento_nano_backend::config_vault::SettingValue::Bool(b)) => cell.set(b),
+        Some(_) => {
+            tracing::warn!(
+                target: "bentodesk::vault",
+                key = %label,
+                "general settings restore skipped: non-bool value"
+            );
+        }
+        None => {}
+    }
+}
+
+/// M1a 2026-05-29 — persist the 5 General toggle Cells to the config vault
+/// in one batched write + flush. Wired to the footer Save click (and only
+/// runs when `settings_dirty` is true; clean Save short-circuits). After
+/// the write completes the dirty flag clears, leaving the panel in a
+/// "just-saved" state until the next toggle.
+fn save_settings_general(root: &AppRoot) {
+    let (dirty, values) = {
+        let app = root.app.borrow();
+        let dirty = app.settings_dirty.get();
+        let values = (
+            app.setting_desktop_embed.get(),
+            app.setting_autostart.get(),
+            app.setting_show_in_taskbar.get(),
+            app.setting_smart_layout.get(),
+            app.setting_portable_mode.get(),
+        );
+        (dirty, values)
+    };
+    if !dirty {
+        return;
+    }
+    let Some(mtx) = bento_nano_backend::config_vault::Vault::global() else {
+        // Early-startup or vault-init-failure path: the user could still
+        // open Settings via the K1 paint paths before `init_global` runs.
+        // Tracing keeps an audit trail; the AppState mutation already
+        // happened in-memory so the visible toggles match what Save would
+        // have written.
+        tracing::warn!(
+            target: "bentodesk::vault",
+            "settings: SaveSettings dropped — vault global not installed"
+        );
+        let app = root.app.borrow();
+        app.settings_dirty.set(false);
+        app.settings_snapshot.borrow_mut().take();
+        return;
+    };
+    let Ok(mut vault) = mtx.lock() else {
+        tracing::warn!(
+            target: "bentodesk::vault",
+            "settings: SaveSettings dropped — vault mutex poisoned"
+        );
+        let app = root.app.borrow();
+        app.settings_dirty.set(false);
+        app.settings_snapshot.borrow_mut().take();
+        return;
+    };
+    let (ghost, startup, taskbar, auto_group, portable) = values;
+    vault.set_setting(
+        SETTING_GENERAL_GHOST_LAYER_ENABLED,
+        bento_nano_backend::config_vault::SettingValue::Bool(ghost),
+    );
+    vault.set_setting(
+        SETTING_GENERAL_LAUNCH_AT_STARTUP,
+        bento_nano_backend::config_vault::SettingValue::Bool(startup),
+    );
+    vault.set_setting(
+        SETTING_GENERAL_SHOW_IN_TASKBAR,
+        bento_nano_backend::config_vault::SettingValue::Bool(taskbar),
+    );
+    vault.set_setting(
+        SETTING_GENERAL_AUTO_GROUP_ENABLED,
+        bento_nano_backend::config_vault::SettingValue::Bool(auto_group),
+    );
+    vault.set_setting(
+        SETTING_GENERAL_PORTABLE_MODE,
+        bento_nano_backend::config_vault::SettingValue::Bool(portable),
+    );
+    if let Err(error) = vault.flush() {
+        tracing::warn!(
+            target: "bentodesk::vault",
+            %error,
+            "settings: SaveSettings flush failed"
+        );
+    }
+    drop(vault);
+
+    let app = root.app.borrow();
+    app.settings_dirty.set(false);
+    app.settings_snapshot.borrow_mut().take();
+}
+
+/// M1a 2026-05-29 — discard pending General-section edits by replaying the
+/// snapshot taken on `OpenSettings`. Called by Cancel, Escape, Close × and
+/// click-outside dismissals so a dropped panel never leaks unflushed
+/// toggles into the vault on next save. Idempotent when no snapshot
+/// exists (first call clears it).
+fn cancel_settings_general(root: &AppRoot) {
+    let app = root.app.borrow();
+    let snapshot = app.settings_snapshot.borrow_mut().take();
+    if let Some(snap) = snapshot {
+        app.restore_settings(&snap);
+    }
+    app.settings_dirty.set(false);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MinibarPinStateChange {
@@ -6066,6 +6246,12 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
         }
         None => {}
     }
+    // M1a 2026-05-29 — restore the 5 General-section toggles from the
+    // vault. Calling this AFTER the locale / updater / theme branches keeps
+    // the warn-on-poisoned-vault flow consistent with the existing reads
+    // and lets a partial-failure (e.g., missing keys) fall through to the
+    // AppState defaults defined in `AppState::new`.
+    apply_general_settings_from_vault(&root.app.borrow());
 }
 
 fn apply_locale_wire(locale: &str) -> bool {
@@ -11557,8 +11743,8 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         ui::SettingsHit::ToggleDesktopEmbed => Some(SmolStr::new_static("Toggle desktop embed")),
         ui::SettingsHit::ToggleAutostart => Some(SmolStr::new_static("Toggle run-at-startup")),
         ui::SettingsHit::ToggleShowInTaskbar => Some(SmolStr::new_static("Toggle show in taskbar")),
-        ui::SettingsHit::ToggleSmartLayout => Some(SmolStr::new_static("Toggle smart auto-layout")),
-        ui::SettingsHit::ToggleSpeedMode => Some(SmolStr::new_static("Toggle speed mode")),
+        ui::SettingsHit::ToggleSmartLayout => Some(SmolStr::new_static("Toggle smart auto-group")),
+        ui::SettingsHit::TogglePortableMode => Some(SmolStr::new_static("Toggle portable mode")),
         ui::SettingsHit::OpenLocaleMenu => Some(SmolStr::new_static("Switch language")),
         ui::SettingsHit::CancelSettings => Some(SmolStr::new_static("Cancel and close settings")),
         ui::SettingsHit::SaveSettings => Some(SmolStr::new_static("Save settings")),
@@ -13018,26 +13204,41 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 }
             }
             ui::SettingsHit::Close | ui::SettingsHit::Outside => {
+                // M1a 2026-05-29 — Close × (header) and Outside (click-out)
+                // discard pending General edits, matching Tauri's behaviour
+                // where dismissing the panel without Save reverts the React
+                // store (`SettingsPanel.tsx:208-214,250`).
+                cancel_settings_general(root);
                 root.dispatcher.push(Command::CloseSettings);
             }
             ui::SettingsHit::CancelSettings => {
+                // M1a 2026-05-29 — revert any in-memory General toggle edits
+                // from the snapshot taken at OpenSettings, clear dirty, then
+                // close. Mirrors Tauri Cancel which discards the React store
+                // diff (`SettingsPanel.tsx:208-214` `handleClose`).
+                cancel_settings_general(root);
                 root.dispatcher.push(Command::CloseSettings);
             }
             ui::SettingsHit::SaveSettings => {
-                // M1 — save is a no-op stub: state Cells are already mutated
-                // in-place by Toggle* arms. M2+ will add persistence here.
+                // M1a 2026-05-29 — persist General toggles to the vault, but
+                // only when `settings_dirty` flips true. Save dims (alpha
+                // 0.4) in the renderer when clean — clicking it through is
+                // a no-op short-circuit, matching Tauri `disabled={!dirty()}`.
+                save_settings_general(root);
                 root.dispatcher.push(Command::CloseSettings);
             }
             ui::SettingsHit::ToggleDesktopEmbed => {
                 let app = root.app.borrow();
                 app.setting_desktop_embed
                     .set(!app.setting_desktop_embed.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
             ui::SettingsHit::ToggleAutostart => {
                 let app = root.app.borrow();
                 app.setting_autostart.set(!app.setting_autostart.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
@@ -13045,6 +13246,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 let app = root.app.borrow();
                 app.setting_show_in_taskbar
                     .set(!app.setting_show_in_taskbar.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
@@ -13052,12 +13254,15 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 let app = root.app.borrow();
                 app.setting_smart_layout
                     .set(!app.setting_smart_layout.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::ToggleSpeedMode => {
+            ui::SettingsHit::TogglePortableMode => {
                 let app = root.app.borrow();
-                app.setting_speed_mode.set(!app.setting_speed_mode.get());
+                app.setting_portable_mode
+                    .set(!app.setting_portable_mode.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
@@ -15613,6 +15818,15 @@ fn show_settings_surface(root: &AppRoot) -> bool {
     {
         let app = root.app.borrow();
         app.settings_open.set(true);
+        // M1a 2026-05-29 — snapshot every persisted General-section toggle
+        // BEFORE the user can mutate any of them. Cancel/Escape/Close ×
+        // replay this back so cancelled edits never leak into a Save flush.
+        // Idempotent: re-opening Settings (e.g., toggling visibility from
+        // tray) re-captures fresh values, dropping any stale snapshot from
+        // a previously dismissed-but-not-saved session. `settings_dirty`
+        // resets here too so the Save button reads as clean on each open.
+        *app.settings_snapshot.borrow_mut() = Some(app.snapshot_settings());
+        app.settings_dirty.set(false);
     }
     // Round-2 RC-2 — DO NOT mount the K1 `business::settings::panel` widget
     // subtree. The new dark shell is hand-painted by `draw_settings_panel`

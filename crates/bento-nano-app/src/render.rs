@@ -2347,13 +2347,16 @@ impl Renderer {
             row.bottom() > body.y && row.y < body.bottom()
         };
 
-        // Toggle row labels by index (0..=4).
+        // Toggle row labels by index (0..=4). M1a 2026-05-29: row 4 text was
+        // retargeted to Tauri "智能自动分组" (still id 116, const name
+        // unchanged); row 5 swapped from the bespoke speed-mode id 117 to the
+        // new Tauri "便携模式" id 141 (`SETTING_PORTABLE_MODE`).
         let toggle_labels: [u16; 5] = [
             bento_nano_style::i18n_zh_cn::ids::SETTING_DESKTOP_EMBED.0,
             bento_nano_style::i18n_zh_cn::ids::SETTING_AUTOSTART.0,
             bento_nano_style::i18n_zh_cn::ids::SETTING_SHOW_IN_TASKBAR.0,
             bento_nano_style::i18n_zh_cn::ids::SETTING_SMART_LAYOUT.0,
-            bento_nano_style::i18n_zh_cn::ids::SETTING_SPEED_MODE.0,
+            bento_nano_style::i18n_zh_cn::ids::SETTING_PORTABLE_MODE.0,
         ];
 
         for index in 0..SETTINGS_TOP_TOGGLE_COUNT {
@@ -2382,7 +2385,7 @@ impl Renderer {
                 1 => app.setting_autostart.get(),
                 2 => app.setting_show_in_taskbar.get(),
                 3 => app.setting_smart_layout.get(),
-                4 => app.setting_speed_mode.get(),
+                4 => app.setting_portable_mode.get(),
                 _ => false,
             };
             let switch = toggle_switch_in_rect(hit);
@@ -2947,12 +2950,19 @@ impl Renderer {
             cancel_btn,
             title_color,
         )?;
+        // M1a 2026-05-29 — Save dims to ~0.4 alpha when no toggle has been
+        // touched since the panel opened, mirroring Tauri `disabled={!dirty()}`
+        // at `SettingsPanel.tsx:799`. The hit-tester treats the dimmed button
+        // as a no-op (`SaveSettings` dispatch arm short-circuits when
+        // `!settings_dirty`); Cancel stays always-active.
         let save_btn = settings_save_button_rect(viewport);
-        self.fill_rounded_rect(save_btn, accent_on, btn_radius)?;
+        let dirty = app.settings_dirty.get();
+        let save_alpha: f32 = if dirty { 1.0 } else { 0.4 };
+        self.fill_rounded_rect(save_btn, with_alpha(accent_on, save_alpha), btn_radius)?;
         self.draw_text_no_wrap(
             bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_SAVE),
             save_btn,
-            bento_nano_style::Color::WHITE,
+            with_alpha(bento_nano_style::Color::WHITE, save_alpha),
         )?;
 
         // K1 modal-opener paint paths — orphan-alive per Ruling B. They never

@@ -190,6 +190,14 @@ pub mod ids {
     // picker can render `默认显示模式  ○ 悬停  ○ 常显  ● 点击` without
     // duplicating the "模式:" prefix on every radio.
     pub const SETTINGS_ZONE_DISPLAY_MODE_LABEL: StringId = StringId(140);
+
+    // 141 M1a (2026-05-29) — Tauri 1:1 parity, General section row 5.
+    // Replaces the bespoke nano "使用模式 (速度模式)" (id 117) with the real
+    // Tauri "便携模式 (需要重启)" / "Portable Mode (restart required)" label
+    // bound to `setting_portable_mode`. Id 117 stays in the table (orphan)
+    // to preserve numbering lockstep with `i18n_en_us`; readers must
+    // reference 141 going forward.
+    pub const SETTING_PORTABLE_MODE: StringId = StringId(141);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -333,8 +341,15 @@ pub static ZH_CN: LookupTable = LookupTable {
         "桌面嵌入设",            // SETTING_DESKTOP_EMBED (113)
         "开机启动",              // SETTING_AUTOSTART (114)
         "显示在任务栏",          // SETTING_SHOW_IN_TASKBAR (115)
-        "智能自动布局",          // SETTING_SMART_LAYOUT (116)
-        "使用模式 (速度模式)",   // SETTING_SPEED_MODE (117)
+        // M1a 2026-05-29 — text retargeted from "智能自动布局" to Tauri
+        // "智能自动分组" (`zh-CN.ts` `settingsAutoGroup:22`). Const name kept
+        // for minimal blast radius — readers bind via id 116 regardless of
+        // the const's English wording.
+        "智能自动分组",          // SETTING_SMART_LAYOUT (116)
+        // M1a 2026-05-29 — orphan slot. The bespoke "速度模式" was replaced
+        // by Tauri "便携模式" at id 141; this row stays to keep zh-CN/en-US
+        // lengths in lockstep. No live code references id 117.
+        "",                       // SETTING_SPEED_MODE (117) — orphan
         "语言 / Language",       // SETTING_LANGUAGE (118)
         "取消",                  // SETTING_CANCEL (119)
         "保存",                  // SETTING_SAVE (120)
@@ -361,5 +376,7 @@ pub static ZH_CN: LookupTable = LookupTable {
         "未启用",                // STATE_DISABLED_PILL (139)
         // 140 Wave I-α / R14 — picker row caption.
         "默认显示模式",          // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
+        // 141 M1a (2026-05-29) — General section row 5 (Tauri parity).
+        "便携模式 (需要重启)",   // SETTING_PORTABLE_MODE (141)
     ],
 };
