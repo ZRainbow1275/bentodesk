@@ -123,6 +123,10 @@ impl StatusLevel {
     /// `(applied, retry_count, has_last_error)`. Tuple input keeps this
     /// callable from a future `bento-nano-backend::stealth::StealthStatus`
     /// without a circular dep on the backend crate.
+    ///
+    /// 1:1 with Tauri `StealthModeCard.tsx::deriveLevel` (`:27-31`):
+    /// `last_error && !applied → failed`; else `retry_count > 0 → pending`;
+    /// else `applied`.
     pub const fn derive(applied: bool, retry_count: u32, has_last_error: bool) -> Self {
         if has_last_error && !applied {
             Self::Failed
@@ -130,6 +134,26 @@ impl StatusLevel {
             Self::Pending
         } else {
             Self::Applied
+        }
+    }
+
+    /// M1e — single entry point mapping a live
+    /// `bento_nano_backend::stealth::StealthStatus` snapshot to the pill
+    /// bucket. Panic-free: reads `last_error.is_some()` via `Option::is_some`,
+    /// never `.unwrap()`. The renderer and the shell hit-tester both call this
+    /// so the conditional rows stay consistent.
+    pub fn from_status(s: &bento_nano_backend::stealth::StealthStatus) -> Self {
+        Self::derive(s.applied, s.retry_count, s.last_error.is_some())
+    }
+
+    /// M1e — the i18n string id for this pill's label (zh/en mirrored at
+    /// 158/159/160). Keeps the label-selection logic in the lib so render.rs
+    /// stays a thin painter.
+    pub const fn label_id(self) -> bento_nano_style::StringId {
+        match self {
+            Self::Applied => bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_APPLIED,
+            Self::Pending => bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_PENDING,
+            Self::Failed => bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_FAILED,
         }
     }
 }
@@ -161,5 +185,56 @@ mod tests {
         // Edge case from 1.x deriveLevel — `last_error && applied` means
         // a transient error already recovered; the pill stays green.
         assert_eq!(StatusLevel::derive(true, 0, true), StatusLevel::Applied);
+    }
+
+    // ── M1e — from_status maps the live backend struct (3 combos) ───────
+
+    use bento_nano_backend::stealth::StealthStatus;
+
+    fn status(applied: bool, retry_count: u32, last_error: Option<&str>) -> StealthStatus {
+        StealthStatus {
+            applied,
+            last_error: last_error.map(|s| s.to_string()),
+            retry_count,
+            schema_version: smol_str::SmolStr::new_static("2"),
+            mirror_healthy: true,
+        }
+    }
+
+    #[test]
+    fn from_status_applied_when_clean() {
+        let s = status(true, 0, None);
+        assert_eq!(StatusLevel::from_status(&s), StatusLevel::Applied);
+        assert_eq!(
+            StatusLevel::from_status(&s).label_id(),
+            bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_APPLIED
+        );
+    }
+
+    #[test]
+    fn from_status_pending_when_retry_pressure() {
+        let s = status(true, 2, None);
+        assert_eq!(StatusLevel::from_status(&s), StatusLevel::Pending);
+        assert_eq!(
+            StatusLevel::from_status(&s).label_id(),
+            bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_PENDING
+        );
+    }
+
+    #[test]
+    fn from_status_failed_when_error_and_unapplied() {
+        let s = status(false, 0, Some("GetLastError=5"));
+        assert_eq!(StatusLevel::from_status(&s), StatusLevel::Failed);
+        assert_eq!(
+            StatusLevel::from_status(&s).label_id(),
+            bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_FAILED
+        );
+    }
+
+    #[test]
+    fn from_status_never_panics_on_some_error_with_applied() {
+        // last_error.is_some() but applied=true → still Applied (no unwrap).
+        let s = status(true, 0, Some("transient"));
+        assert_eq!(StatusLevel::from_status(&s), StatusLevel::Applied);
     }
 }

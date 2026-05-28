@@ -999,15 +999,18 @@ pub fn settings_zone_display_mode_radio_label_rect(
     }
 }
 
-/// Round-2 M1/M2 + M1d — total content height inside the body. Grows with
-/// each milestone as sections light up. M1d's Startup section has
-/// conditional rows, so the two gating bools (`crash_restart_enabled`,
-/// `safe_start_after_hibernation`) are parameters — geometry never reads
-/// global state, the shell passes the live Cells.
+/// Round-2 M1/M2 + M1d + M1e — total content height inside the body. Grows
+/// with each milestone as sections light up. M1d's Startup section and M1e's
+/// Stealth card both have conditional rows, so the gating bools
+/// (`crash_restart_enabled`, `safe_start_after_hibernation`,
+/// `stealth_has_retry`, `stealth_has_error`) are parameters — geometry never
+/// reads global state, the shell passes the live values.
 pub fn settings_body_content_height(
     viewport: Size,
     crash_restart_enabled: bool,
     safe_start_after_hibernation: bool,
+    stealth_has_retry: bool,
+    stealth_has_error: bool,
 ) -> f32 {
     settings_m2_content_height(viewport)
         + settings_perf_startup_content_height(
@@ -1015,6 +1018,7 @@ pub fn settings_body_content_height(
             crash_restart_enabled,
             safe_start_after_hibernation,
         )
+        + settings_stealth_content_height(stealth_has_retry, stealth_has_error)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -1025,22 +1029,27 @@ pub fn settings_body_max_scroll(content_total_h: f32, viewport: Size) -> f32 {
     (content_total_h - body.height).max(0.0)
 }
 
-/// Round-2 M1 + M1d — apply a wheel-delta `delta_y` (positive = scroll down)
-/// to `current_offset` and clamp. Pure helper so the wheel handler stays
-/// allocation-free. The two gating bools feed the dynamic content height so
-/// the max-scroll matches whatever conditional rows are currently visible.
+/// Round-2 M1 + M1d + M1e — apply a wheel-delta `delta_y` (positive = scroll
+/// down) to `current_offset` and clamp. Pure helper so the wheel handler stays
+/// allocation-free. The four gating bools feed the dynamic content height so
+/// the max-scroll matches whatever conditional rows are currently visible
+/// (Startup crash steppers + hibernate slider; Stealth retry/error rows).
 pub fn settings_clamp_scroll(
     current_offset: f32,
     delta_y: f32,
     viewport: Size,
     crash_restart_enabled: bool,
     safe_start_after_hibernation: bool,
+    stealth_has_retry: bool,
+    stealth_has_error: bool,
 ) -> f32 {
     let next = (current_offset + delta_y).max(0.0);
     let content_h = settings_body_content_height(
         viewport,
         crash_restart_enabled,
         safe_start_after_hibernation,
+        stealth_has_retry,
+        stealth_has_error,
     );
     let max = settings_body_max_scroll(content_h, viewport);
     next.min(max)
@@ -1467,6 +1476,329 @@ fn settings_perf_startup_content_height(
     perf + startup
 }
 
+// ── M1e 2026-05-29 — Stealth §7 card (`StealthModeCard.tsx`) ────────────
+//
+// Sits AFTER Startup in the Tauri body order
+// (General→Paths→Appearance→Zone→Performance→Startup→Stealth→…). Rows:
+//   title                            (always) — 桌面隐形模式
+//   status row  [label | pill]       (always)
+//   schema-version row [label|value] (always)
+//   mirror-health row  [label|value] (always)
+//   retry-count row    [label|value] (only when retry_count > 0)
+//   last-error block   [label]/[err] (only when last_error.is_some())
+//   buttons row  [Refresh][Reapply]  (always)
+//   OneDrive warning block           (only when retry_count > 0)
+//
+// The two conditional flags (`has_retry`, `has_error`) flow as parameters so
+// geometry stays pure — the shell passes the live `stealth::status()`
+// snapshot. The retry row and OneDrive block are both gated on `has_retry`
+// (the backend notes OneDrive typically holds the lock when retries pend).
+
+/// M1e — compact `.settings-row` height for the Stealth label/value rows
+/// (shorter than the 44-DIP toggle rows; matches Tauri's `.settings-row`
+/// status-line rhythm).
+pub const SETTINGS_STEALTH_ROW_H: f32 = 28.0;
+
+/// M1e — Stealth status pill capsule size (reuses the source-card pill tone;
+/// generalized colour bucket is `StatusLevel::derive`).
+pub const SETTINGS_STEALTH_PILL_W: f32 = 76.0;
+pub const SETTINGS_STEALTH_PILL_H: f32 = 22.0;
+
+/// M1e — last-error block: a label line + a wrapped error-code line.
+pub const SETTINGS_STEALTH_ERROR_BLOCK_H: f32 = 46.0;
+
+/// M1e — buttons-row height (Refresh + Reapply share the footer button size).
+pub const SETTINGS_STEALTH_BTN_ROW_H: f32 = SETTINGS_FOOTER_BTN_H;
+
+/// M1e — OneDrive warning block height (multi-line informational text).
+pub const SETTINGS_STEALTH_ONEDRIVE_H: f32 = 52.0;
+
+/// M1e — scroll-space bottom Y of the last laid-out Startup element, the
+/// anchor the Stealth title hangs from. Mirrors the branch logic in
+/// `settings_perf_startup_content_height` so layout has a single source of
+/// truth.
+fn settings_startup_section_bottom(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> f32 {
+    if safe_start_after_hibernation {
+        settings_hibernate_slider_row_rect(viewport, scroll_offset_y, crash_restart_enabled)
+            .bottom()
+    } else {
+        settings_safe_start_row_rect(viewport, scroll_offset_y, crash_restart_enabled).bottom()
+            + SETTINGS_DESC_H
+    }
+}
+
+/// M1e — `桌面隐形模式 / Desktop Stealth Mode` group title rect. Sits below
+/// the Startup section + a section gap. Takes the Startup gating bools so its
+/// Y follows whatever Startup rows are currently visible.
+pub fn settings_stealth_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    let bottom = settings_startup_section_bottom(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M1e — status row rect (label left + pill right). Row 0, always shown.
+pub fn settings_stealth_status_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> Rect {
+    let label = settings_stealth_label_rect(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    Rect {
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
+        height: SETTINGS_STEALTH_ROW_H,
+    }
+}
+
+/// M1e — right-anchored status-pill rect inside the status row.
+pub fn settings_stealth_pill_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.right() - SETTINGS_STEALTH_PILL_W,
+        y: row.y + (row.height - SETTINGS_STEALTH_PILL_H) * 0.5,
+        width: SETTINGS_STEALTH_PILL_W,
+        height: SETTINGS_STEALTH_PILL_H,
+    }
+}
+
+/// M1e — schema-version row rect (label + value). Row 1, always shown.
+pub fn settings_stealth_schema_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> Rect {
+    let prev = settings_stealth_status_row_rect(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    Rect {
+        x: prev.x,
+        y: prev.bottom(),
+        width: prev.width,
+        height: SETTINGS_STEALTH_ROW_H,
+    }
+}
+
+/// M1e — mirror-health row rect (label + value). Row 2, always shown.
+pub fn settings_stealth_mirror_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> Rect {
+    let prev = settings_stealth_schema_row_rect(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    Rect {
+        x: prev.x,
+        y: prev.bottom(),
+        width: prev.width,
+        height: SETTINGS_STEALTH_ROW_H,
+    }
+}
+
+/// M1e — retry-count row rect (label + value). Row 3, ONLY when
+/// `retry_count > 0`. Sits directly below the mirror-health row.
+pub fn settings_stealth_retry_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> Rect {
+    let prev = settings_stealth_mirror_row_rect(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    Rect {
+        x: prev.x,
+        y: prev.bottom(),
+        width: prev.width,
+        height: SETTINGS_STEALTH_ROW_H,
+    }
+}
+
+/// M1e — last-error block rect (label line + wrapped code line). Row 4, ONLY
+/// when `last_error.is_some()`. Its Y depends on whether the retry row is
+/// present, so the `has_retry` flag chains through.
+pub fn settings_stealth_error_block_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+    has_retry: bool,
+) -> Rect {
+    let anchor = if has_retry {
+        settings_stealth_retry_row_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+        )
+    } else {
+        settings_stealth_mirror_row_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+        )
+    };
+    Rect {
+        x: anchor.x,
+        y: anchor.bottom(),
+        width: anchor.width,
+        height: SETTINGS_STEALTH_ERROR_BLOCK_H,
+    }
+}
+
+/// M1e — buttons row rect ([Refresh][Reapply]). Always shown; its Y depends
+/// on the two conditional rows above (`has_retry`, `has_error`).
+pub fn settings_stealth_buttons_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+    has_retry: bool,
+    has_error: bool,
+) -> Rect {
+    let bottom = if has_error {
+        settings_stealth_error_block_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+            has_retry,
+        )
+        .bottom()
+    } else if has_retry {
+        settings_stealth_retry_row_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+        )
+        .bottom()
+    } else {
+        settings_stealth_mirror_row_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+        )
+        .bottom()
+    };
+    let body = settings_body_rect(viewport);
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: bottom + 6.0,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_STEALTH_BTN_ROW_H,
+    }
+}
+
+/// M1e — Refresh button rect (left), inside the Stealth buttons row.
+pub fn settings_stealth_refresh_button_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.x,
+        y: row.y + (row.height - SETTINGS_FOOTER_BTN_H) * 0.5,
+        width: SETTINGS_FOOTER_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1e — Reapply button rect (right of Refresh), inside the buttons row.
+pub fn settings_stealth_reapply_button_rect(row: Rect) -> Rect {
+    let refresh = settings_stealth_refresh_button_rect(row);
+    Rect {
+        x: refresh.right() + SETTINGS_FOOTER_BTN_GAP,
+        y: refresh.y,
+        width: SETTINGS_FOOTER_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1e — OneDrive warning block rect. ONLY when `retry_count > 0`. Sits below
+/// the buttons row. Informational text only (no button — there is no
+/// OneDrive-exclusion probe / guide URL in the nano backend, so per §17 this
+/// stays text-only rather than painting a dead button).
+pub fn settings_stealth_onedrive_block_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+    has_retry: bool,
+    has_error: bool,
+) -> Rect {
+    let buttons = settings_stealth_buttons_row_rect(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+        has_retry,
+        has_error,
+    );
+    Rect {
+        x: buttons.x,
+        y: buttons.bottom() + 8.0,
+        width: buttons.width,
+        height: SETTINGS_STEALTH_ONEDRIVE_H,
+    }
+}
+
+/// M1e — height the Stealth §7 card contributes to
+/// `settings_body_content_height`. Conditional rows make it dynamic, so the
+/// two flags are parameters (geometry never reads global state). The base
+/// rows (title + status + schema + mirror) are always present; retry adds one
+/// row, error adds the error block, and retry additionally adds the OneDrive
+/// block. A trailing section gap keeps the body bottom padded.
+pub fn settings_stealth_content_height(has_retry: bool, has_error: bool) -> f32 {
+    let mut h = SETTINGS_SECTION_LABEL_H + SETTINGS_STEALTH_ROW_H * 3.0;
+    if has_retry {
+        h += SETTINGS_STEALTH_ROW_H;
+    }
+    if has_error {
+        h += SETTINGS_STEALTH_ERROR_BLOCK_H;
+    }
+    h += 6.0 + SETTINGS_STEALTH_BTN_ROW_H;
+    if has_retry {
+        h += 8.0 + SETTINGS_STEALTH_ONEDRIVE_H;
+    }
+    h + SETTINGS_SECTION_GAP
+}
+
 #[cfg(test)]
 mod m1_tests {
     use super::*;
@@ -1686,16 +2018,19 @@ mod m1_tests {
     #[test]
     fn m1_clamp_scroll_never_goes_negative() {
         let v = vp();
-        assert_eq!(settings_clamp_scroll(0.0, -100.0, v, true, true), 0.0);
-        assert_eq!(settings_clamp_scroll(20.0, -100.0, v, true, true), 0.0);
+        assert_eq!(settings_clamp_scroll(0.0, -100.0, v, true, true, false, false), 0.0);
+        assert_eq!(settings_clamp_scroll(20.0, -100.0, v, true, true, false, false), 0.0);
     }
 
     #[test]
     fn m1_clamp_scroll_caps_at_max() {
         let v = vp();
-        let content = settings_body_content_height(v, true, true);
+        let content = settings_body_content_height(v, true, true, false, false);
         let max = settings_body_max_scroll(content, v);
-        assert_eq!(settings_clamp_scroll(0.0, max + 999.0, v, true, true), max);
+        assert_eq!(
+            settings_clamp_scroll(0.0, max + 999.0, v, true, true, false, false),
+            max
+        );
     }
 
     #[test]
@@ -1929,10 +2264,10 @@ mod m1d_tests {
         let v = vp();
         // Both gates off → shortest. Crash on → +2 stepper rows. Hibernate on
         // → + slider row + desc. All on → tallest.
-        let none = settings_body_content_height(v, false, false);
-        let crash = settings_body_content_height(v, true, false);
-        let hib = settings_body_content_height(v, false, true);
-        let both = settings_body_content_height(v, true, true);
+        let none = settings_body_content_height(v, false, false, false, false);
+        let crash = settings_body_content_height(v, true, false, false, false);
+        let hib = settings_body_content_height(v, false, true, false, false);
+        let both = settings_body_content_height(v, true, true, false, false);
         assert!(crash > none, "crash steppers must add height");
         assert!(hib > none, "hibernate slider must add height");
         assert!(both > crash);
@@ -1946,7 +2281,7 @@ mod m1d_tests {
     fn content_height_exceeds_m2_total() {
         let v = vp();
         let m2 = settings_m2_content_height(v);
-        let total = settings_body_content_height(v, true, true);
+        let total = settings_body_content_height(v, true, true, false, false);
         assert!(total > m2);
     }
 
@@ -1956,6 +2291,138 @@ mod m1d_tests {
         let r_at_0 = settings_performance_label_rect(v, 0.0);
         let r_at_50 = settings_performance_label_rect(v, 50.0);
         assert!((r_at_50.y + 50.0 - r_at_0.y).abs() < 0.01);
+    }
+
+    // ── M1e — Stealth §7 geometry ──────────────────────────────────────
+
+    #[test]
+    fn m1e_stealth_title_sits_below_startup_section() {
+        let v = vp();
+        // With both Startup gates on, the Stealth title must clear the
+        // hibernate slider row (the lowest Startup element).
+        let startup_bottom =
+            settings_hibernate_slider_row_rect(v, 0.0, true).bottom();
+        let title = settings_stealth_label_rect(v, 0.0, true, true);
+        assert!(
+            (title.y - (startup_bottom + SETTINGS_SECTION_GAP)).abs() < 0.01,
+            "stealth title must start a section gap below the last Startup row \
+             (startup_bottom={}, title.y={})",
+            startup_bottom,
+            title.y,
+        );
+        assert_eq!(title.height, SETTINGS_SECTION_LABEL_H);
+    }
+
+    #[test]
+    fn m1e_stealth_base_rows_stack_in_order() {
+        let v = vp();
+        let title = settings_stealth_label_rect(v, 0.0, true, true);
+        let status = settings_stealth_status_row_rect(v, 0.0, true, true);
+        let schema = settings_stealth_schema_row_rect(v, 0.0, true, true);
+        let mirror = settings_stealth_mirror_row_rect(v, 0.0, true, true);
+        assert!((status.y - title.bottom()).abs() < 0.01);
+        assert!((schema.y - status.bottom()).abs() < 0.01);
+        assert!((mirror.y - schema.bottom()).abs() < 0.01);
+        // The status pill right-anchors inside the status row.
+        let pill = settings_stealth_pill_rect(status);
+        assert!(pill.right() <= status.right() + 0.01);
+        assert!(pill.x >= status.x + status.width * 0.5);
+        assert_eq!(pill.width, SETTINGS_STEALTH_PILL_W);
+    }
+
+    #[test]
+    fn m1e_error_block_reflows_when_retry_row_present() {
+        let v = vp();
+        // Without a retry row, the error block hangs off the mirror row.
+        let mirror = settings_stealth_mirror_row_rect(v, 0.0, true, true);
+        let err_no_retry =
+            settings_stealth_error_block_rect(v, 0.0, true, true, false);
+        assert!((err_no_retry.y - mirror.bottom()).abs() < 0.01);
+        // With a retry row, the error block sits a full retry row lower.
+        let retry = settings_stealth_retry_row_rect(v, 0.0, true, true);
+        let err_with_retry =
+            settings_stealth_error_block_rect(v, 0.0, true, true, true);
+        assert!((err_with_retry.y - retry.bottom()).abs() < 0.01);
+        assert!(err_with_retry.y > err_no_retry.y);
+    }
+
+    #[test]
+    fn m1e_buttons_paired_refresh_left_reapply_right() {
+        let v = vp();
+        let row = settings_stealth_buttons_row_rect(v, 0.0, true, true, false, false);
+        let refresh = settings_stealth_refresh_button_rect(row);
+        let reapply = settings_stealth_reapply_button_rect(row);
+        assert_eq!(refresh.y, reapply.y);
+        assert_eq!(refresh.width, reapply.width);
+        assert!(refresh.right() < reapply.x);
+        assert!(reapply.right() <= row.right() + 0.01);
+    }
+
+    #[test]
+    fn m1e_onedrive_block_only_below_buttons() {
+        let v = vp();
+        let buttons = settings_stealth_buttons_row_rect(v, 0.0, true, true, true, false);
+        let onedrive =
+            settings_stealth_onedrive_block_rect(v, 0.0, true, true, true, false);
+        assert!(onedrive.y > buttons.bottom());
+        assert_eq!(onedrive.height, SETTINGS_STEALTH_ONEDRIVE_H);
+    }
+
+    #[test]
+    fn m1e_stealth_content_height_grows_with_retry_and_error() {
+        // Pure additive helper — base < +retry, base < +error, both tallest.
+        let base = settings_stealth_content_height(false, false);
+        let retry = settings_stealth_content_height(true, false);
+        let error = settings_stealth_content_height(false, true);
+        let both = settings_stealth_content_height(true, true);
+        assert!(retry > base, "retry row + OneDrive block must add height");
+        assert!(error > base, "last-error block must add height");
+        assert!(both > retry);
+        assert!(both > error);
+        // The error branch adds exactly the error block height.
+        assert!(
+            (error - base - SETTINGS_STEALTH_ERROR_BLOCK_H).abs() < 0.01,
+            "error-only delta must equal the error block height",
+        );
+        // The retry branch adds a retry row + the OneDrive block (+ its gap).
+        assert!(
+            (retry - base
+                - SETTINGS_STEALTH_ROW_H
+                - 8.0
+                - SETTINGS_STEALTH_ONEDRIVE_H)
+                .abs()
+                < 0.01,
+            "retry-only delta must equal retry row + OneDrive block + gap",
+        );
+    }
+
+    #[test]
+    fn m1e_body_content_height_includes_stealth() {
+        let v = vp();
+        // The full body height with stealth conditionals on must exceed the
+        // height with them off (the Stealth card grows).
+        let off = settings_body_content_height(v, true, true, false, false);
+        let on = settings_body_content_height(v, true, true, true, true);
+        assert!(on > off, "stealth retry+error rows must grow the body");
+    }
+
+    #[test]
+    fn m1e_clamp_scroll_honours_stealth_flags() {
+        let v = vp();
+        // Taller content (stealth rows on) ⇒ a larger max-scroll clamp.
+        let max_off = settings_body_max_scroll(
+            settings_body_content_height(v, true, true, false, false),
+            v,
+        );
+        let max_on = settings_body_max_scroll(
+            settings_body_content_height(v, true, true, true, true),
+            v,
+        );
+        let clamped_off = settings_clamp_scroll(0.0, 99999.0, v, true, true, false, false);
+        let clamped_on = settings_clamp_scroll(0.0, 99999.0, v, true, true, true, true);
+        assert!((clamped_off - max_off).abs() < 0.01);
+        assert!((clamped_on - max_on).abs() < 0.01);
+        assert!(clamped_on >= clamped_off);
     }
 }
 

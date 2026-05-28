@@ -627,6 +627,20 @@ pub enum SettingsHit {
     /// M1d — Startup §6 hibernate slider drag (恢复延迟 ms). Carries the
     /// quantized client `x` for the dispatcher's track-x→value map.
     DragHibernateDelay(i32),
+
+    // ------------------------------------------------------------------
+    // M1e 2026-05-29 — Stealth §7 card (`StealthModeCard.tsx`). Both
+    // variants dispatch to a REAL `bento_nano_backend::stealth` call (no
+    // no-op arms): Refresh re-reads `stealth::status()`; Reapply builds a
+    // `StealthConfig` + calls `reapply_hidden_on_startup`.
+    // ------------------------------------------------------------------
+    /// M1e — Stealth §7 Refresh button: re-read `stealth::status()` into the
+    /// cached `app.stealth_status` snapshot and redraw.
+    RefreshStealth,
+    /// M1e — Stealth §7 Reapply button (重新应用): build the live
+    /// `StealthConfig` and call `stealth::reapply_hidden_on_startup`, then
+    /// refresh the cached status.
+    ReapplyStealth,
 }
 
 /// Resolve a click point against the settings overlay layout.
@@ -899,6 +913,37 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
             return SettingsHit::DragHibernateDelay(x.round() as i32);
         }
     }
+
+    // M1e — Stealth §7 buttons ([Refresh][Reapply]). The buttons-row Y depends
+    // on the conditional retry/error rows above it, so read the same cached
+    // `stealth_status` snapshot the renderer paints from (so paint geometry
+    // and hit geometry agree). Only the two buttons are interactive — the
+    // status/value rows and the OneDrive text block are non-interactive.
+    let (stealth_has_retry, stealth_has_error) = match &*app.stealth_status.borrow() {
+        Some(s) => (s.retry_count > 0, s.last_error.is_some()),
+        None => (false, false),
+    };
+    let stealth_btn_row = bento_nano_app::settings_panel::settings_stealth_buttons_row_rect(
+        vp,
+        scroll_y,
+        crash_restart_on,
+        safe_start_on,
+        stealth_has_retry,
+        stealth_has_error,
+    );
+    let refresh_btn =
+        bento_nano_app::settings_panel::settings_stealth_refresh_button_rect(stealth_btn_row);
+    if x >= refresh_btn.x && x < refresh_btn.right() && y >= refresh_btn.y && y < refresh_btn.bottom()
+    {
+        return SettingsHit::RefreshStealth;
+    }
+    let reapply_btn =
+        bento_nano_app::settings_panel::settings_stealth_reapply_button_rect(stealth_btn_row);
+    if x >= reapply_btn.x && x < reapply_btn.right() && y >= reapply_btn.y && y < reapply_btn.bottom()
+    {
+        return SettingsHit::ReapplyStealth;
+    }
+
     SettingsHit::Body
 }
 

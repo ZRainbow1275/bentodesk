@@ -11969,6 +11969,10 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         ui::SettingsHit::DragHibernateDelay(_) => {
             Some(SmolStr::new_static("Adjust hibernate resume delay"))
         }
+        ui::SettingsHit::RefreshStealth => Some(SmolStr::new_static("Refresh stealth status")),
+        ui::SettingsHit::ReapplyStealth => {
+            Some(SmolStr::new_static("Re-apply stealth attributes to .bentodesk/"))
+        }
         ui::SettingsHit::Body | ui::SettingsHit::Outside => None,
     }
 }
@@ -13446,15 +13450,23 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 use bento_nano_app::settings_panel::settings_clamp_scroll;
                 let app = root.app.borrow();
                 let vp = app.viewport;
-                // M1d — the body content height now depends on the two Startup
-                // gating bools (conditional crash steppers + hibernate slider),
-                // so the max-scroll clamp must read them too.
+                // M1d + M1e — the body content height depends on the Startup
+                // gating bools (conditional crash steppers + hibernate slider)
+                // AND the Stealth conditional rows (retry/error/OneDrive), so
+                // the max-scroll clamp must read all four.
+                let (stealth_has_retry, stealth_has_error) =
+                    match &*app.stealth_status.borrow() {
+                        Some(s) => (s.retry_count > 0, s.last_error.is_some()),
+                        None => (false, false),
+                    };
                 let next = settings_clamp_scroll(
                     app.scroll_offset_y.get(),
                     delta as f32,
                     vp,
                     app.crash_restart_enabled.get(),
                     app.safe_start_after_hibernation.get(),
+                    stealth_has_retry,
+                    stealth_has_error,
                 );
                 app.scroll_offset_y.set(next);
                 drop(app);
@@ -13608,6 +13620,49 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 app.hibernate_resume_delay_ms.set(next);
                 app.settings_dirty.set(true);
                 drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::RefreshStealth => {
+                // M1e — re-read the synchronous stealth status probe into the
+                // cached snapshot the card paints from. Real backend call, no
+                // no-op: `stealth::status()` reflects the live AttrGuard state.
+                refresh_stealth_status(root);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::ReapplyStealth => {
+                // M1e — 重新应用: build the live StealthConfig and re-write the
+                // HIDDEN+SYSTEM attributes via `reapply_hidden_on_startup`,
+                // then refresh the cached status so the pill/rows update.
+                // Graceful on a missing config (no panic): log + skip the
+                // reapply, but still refresh the snapshot.
+                match stealth_config_now(root) {
+                    Some(config) => {
+                        match bento_nano_backend::stealth::sync::reapply_hidden_on_startup(&config)
+                        {
+                            Ok(count) => {
+                                tracing::info!(
+                                    target: "bentodesk::stealth",
+                                    files = count,
+                                    "Settings Reapply: re-applied stealth attributes"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "bentodesk::stealth",
+                                    error = %e,
+                                    "Settings Reapply: reapply_hidden_on_startup failed"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            target: "bentodesk::stealth",
+                            "Settings Reapply: no desktop dir / stealth config; refreshing status only"
+                        );
+                    }
+                }
+                refresh_stealth_status(root);
                 request_redraw(hwnd);
             }
             ui::SettingsHit::Body => {}
@@ -16052,6 +16107,9 @@ fn show_settings_surface(root: &AppRoot) -> bool {
         *app.settings_snapshot.borrow_mut() = Some(app.snapshot_settings());
         app.settings_dirty.set(false);
     }
+    // M1e — refresh the cached Stealth §7 status snapshot on open so the card
+    // (and its conditional retry/error/OneDrive rows) reflect the live probe.
+    refresh_stealth_status(root);
     // Round-2 RC-2 — DO NOT mount the K1 `business::settings::panel` widget
     // subtree. The new dark shell is hand-painted by `draw_settings_panel`
     // against pure-function rects from `crate::settings_panel`. Mounting the
@@ -19265,6 +19323,43 @@ fn stealth_config_for_source(
         desktop_path: smol_str::SmolStr::new(desktop_path),
         app_data_dir: smol_str::SmolStr::new(app_data_dir),
     })
+}
+
+/// M1e — build a `StealthConfig` for the current desktop, for the Settings
+/// Stealth §7 Reapply action. Reuses `stealth_config_for_source` (which derives
+/// `desktop_path` from `source_path.parent()`) by handing it a sentinel child
+/// of the configured/primary Desktop directory, so the parent it strips back
+/// to is exactly that Desktop dir. Returns `None` when no Desktop dir can be
+/// resolved or `zones_path` has no parent — callers must handle it without
+/// panicking.
+fn stealth_config_now(root: &AppRoot) -> Option<bento_nano_backend::stealth::StealthConfig> {
+    // Prefer the user-configured desktop path; fall back to the first
+    // discovered real Desktop directory.
+    let configured = {
+        let app = root.app.borrow();
+        let draft = app.desktop_path_draft.borrow();
+        let trimmed = draft.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    };
+    let desktop_dir = configured
+        .or_else(|| bento_nano_backend::desktop_sources::all_desktop_dirs(None).into_iter().next())?;
+    // Hand the helper a child path so its `.parent()` yields `desktop_dir`.
+    let sentinel = desktop_dir.join(".bentodesk-reapply");
+    stealth_config_for_source(root, &sentinel.to_string_lossy())
+}
+
+/// M1e — re-read `bento_nano_backend::stealth::status()` (synchronous probe)
+/// into the cached `app.stealth_status` snapshot. Called when Settings opens
+/// and after Refresh/Reapply so the immediate-mode paint + hit-test read a
+/// consistent snapshot.
+fn refresh_stealth_status(root: &AppRoot) {
+    let status = bento_nano_backend::stealth::status();
+    let app = root.app.borrow();
+    *app.stealth_status.borrow_mut() = Some(status);
 }
 
 fn stealth_file_type(path: &Path) -> &'static str {

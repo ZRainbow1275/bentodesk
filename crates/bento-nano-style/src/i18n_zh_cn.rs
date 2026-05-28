@@ -212,6 +212,26 @@ pub mod ids {
     pub const SETTING_SAFE_START_HIBERNATION: StringId = StringId(153);
     pub const SETTING_SAFE_START_HIBERNATION_DESC: StringId = StringId(154);
     pub const SETTING_HIBERNATE_DELAY: StringId = StringId(155);
+
+    // 156..170 M1e (2026-05-29) — Stealth §7 card (`StealthModeCard.tsx`).
+    // Appended in lockstep with `i18n_en_us` (same index, same order) per the
+    // positional-array contract. Mirrors the Tauri `stealth*` keys
+    // (`src/i18n/locales/zh-CN.ts:223-239`). The status pill reuses the same
+    // applied/pending/failed derivation as Tauri `deriveLevel`.
+    pub const STEALTH_GROUP_TITLE: StringId = StringId(156);
+    pub const STEALTH_STATUS_LABEL: StringId = StringId(157);
+    pub const STEALTH_STATUS_APPLIED: StringId = StringId(158);
+    pub const STEALTH_STATUS_PENDING: StringId = StringId(159);
+    pub const STEALTH_STATUS_FAILED: StringId = StringId(160);
+    pub const STEALTH_SCHEMA_VERSION: StringId = StringId(161);
+    pub const STEALTH_MIRROR_HEALTHY: StringId = StringId(162);
+    pub const STEALTH_MIRROR_HEALTHY_YES: StringId = StringId(163);
+    pub const STEALTH_MIRROR_HEALTHY_NO: StringId = StringId(164);
+    pub const STEALTH_RETRY_COUNT: StringId = StringId(165);
+    pub const STEALTH_LAST_ERROR: StringId = StringId(166);
+    pub const STEALTH_REFRESH_BTN: StringId = StringId(167);
+    pub const STEALTH_REAPPLY_BTN: StringId = StringId(168);
+    pub const STEALTH_ONEDRIVE_WARNING: StringId = StringId(169);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -411,5 +431,20 @@ pub static ZH_CN: LookupTable = LookupTable {
         "休眠安全恢复",          // SETTING_SAFE_START_HIBERNATION (153)
         "从休眠恢复后安全启动",   // SETTING_SAFE_START_HIBERNATION_DESC (154)
         "恢复延迟",              // SETTING_HIBERNATE_DELAY (155)
+        // 156..170 M1e — Stealth §7 (`StealthModeCard.tsx`, zh-CN.ts:223-239).
+        "桌面隐形模式",          // STEALTH_GROUP_TITLE (156)
+        "状态",                  // STEALTH_STATUS_LABEL (157)
+        "已应用",                // STEALTH_STATUS_APPLIED (158)
+        "待重试",                // STEALTH_STATUS_PENDING (159)
+        "失败",                  // STEALTH_STATUS_FAILED (160)
+        "架构版本",              // STEALTH_SCHEMA_VERSION (161)
+        "镜像备份",              // STEALTH_MIRROR_HEALTHY (162)
+        "同步",                  // STEALTH_MIRROR_HEALTHY_YES (163)
+        "待修复",                // STEALTH_MIRROR_HEALTHY_NO (164)
+        "待重试项",              // STEALTH_RETRY_COUNT (165)
+        "最近错误",              // STEALTH_LAST_ERROR (166)
+        "刷新状态",              // STEALTH_REFRESH_BTN (167)
+        "重新应用",              // STEALTH_REAPPLY_BTN (168)
+        "检测到您的桌面在 OneDrive 内。建议在 OneDrive 设置中排除 .bentodesk/，否则隐藏文件会被上传到云端。", // STEALTH_ONEDRIVE_WARNING (169)
     ],
 };

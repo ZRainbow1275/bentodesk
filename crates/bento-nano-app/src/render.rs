@@ -2211,7 +2211,12 @@ impl Renderer {
             settings_save_button_rect, settings_source_row_rect, settings_source_toggle_hit_rect,
             settings_sources_label_rect, settings_startup_high_priority_row_rect,
             settings_startup_label_rect, settings_startup_toggle_hit_rect,
-            settings_stepper_minus_rect, settings_stepper_plus_rect,
+            settings_stealth_buttons_row_rect, settings_stealth_error_block_rect,
+            settings_stealth_label_rect, settings_stealth_mirror_row_rect,
+            settings_stealth_onedrive_block_rect, settings_stealth_pill_rect,
+            settings_stealth_reapply_button_rect, settings_stealth_refresh_button_rect,
+            settings_stealth_retry_row_rect, settings_stealth_schema_row_rect,
+            settings_stealth_status_row_rect, settings_stepper_minus_rect, settings_stepper_plus_rect,
             settings_stepper_value_rect, settings_top_toggle_hit_rect, settings_top_toggle_row_rect,
             settings_watch_label_rect, settings_watch_textarea_rect,
             settings_zone_display_mode_picker_row_rect,
@@ -3115,6 +3120,292 @@ impl Renderer {
                     height: thumb_d,
                 };
                 self.fill_rounded_rect(thumb, knob_color, slider_thumb_radius)?;
+            }
+        }
+
+        // ── M1e — Stealth §7 card (`StealthModeCard.tsx`) ───────────────
+        //
+        // Sits after Startup in the Tauri body order. Reads the cached
+        // `app.stealth_status` snapshot (refreshed by the shell on open +
+        // Refresh/Reapply). Status pill kind/label derive via
+        // `StatusLevel::from_status` (1:1 with Tauri `deriveLevel`). The
+        // retry/error/OneDrive rows are conditional; the geometry helpers take
+        // the same `has_retry`/`has_error` flags so paint matches hit-test.
+        use crate::business::settings::stealth_mode_card::StatusLevel;
+        let stealth_label = settings_stealth_label_rect(
+            viewport,
+            scroll,
+            crash_restart_on,
+            safe_start_on,
+        );
+        if row_visible(stealth_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_GROUP_TITLE),
+                stealth_label,
+                label_color,
+            )?;
+        }
+        // Snapshot the conditional flags + cloned fields out of the RefCell so
+        // the borrow does not span the fallible paint calls below.
+        let stealth_snapshot = app.stealth_status.borrow().clone();
+        let (has_retry, has_error) = match &stealth_snapshot {
+            Some(s) => (s.retry_count > 0, s.last_error.is_some()),
+            None => (false, false),
+        };
+        // Helper to paint a `label | value` row (label left, value right).
+        // Inlined per-row below to keep `self` borrows simple.
+        let stealth_value_x_frac = 0.5_f32;
+        // Row 0 — status (label + colored pill), always shown.
+        let status_row = settings_stealth_status_row_rect(
+            viewport,
+            scroll,
+            crash_restart_on,
+            safe_start_on,
+        );
+        if row_visible(status_row, body) {
+            let label_rect = bento_nano_style::Rect {
+                x: status_row.x,
+                y: status_row.y + (status_row.height - 16.0) * 0.5,
+                width: status_row.width * stealth_value_x_frac,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_LABEL),
+                label_rect,
+                label_color,
+            )?;
+            let pill = settings_stealth_pill_rect(status_row);
+            let pill_radius = bento_nano_style::BorderRadius::all(pill.height * 0.5);
+            // Pill kind → colour. Applied = green (#36C86B, matching the
+            // source-card pill tone), Pending = amber (#F59E0B per the Tauri
+            // `--accent-amber`), Failed = red (accent_red token).
+            let (pill_bg, pill_label_id) = match stealth_snapshot.as_ref() {
+                Some(s) => {
+                    let level = StatusLevel::from_status(s);
+                    let bg = match level {
+                        StatusLevel::Applied => with_alpha(
+                            bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+                            0.90,
+                        ),
+                        StatusLevel::Pending => with_alpha(
+                            bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
+                            0.90,
+                        ),
+                        StatusLevel::Failed => with_alpha(palette.accent_red, 0.90),
+                    };
+                    (bg, level.label_id())
+                }
+                None => (
+                    with_alpha(palette.surface_subtle, 0.85),
+                    bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_PENDING,
+                ),
+            };
+            self.fill_rounded_rect(pill, pill_bg, pill_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(pill_label_id),
+                pill,
+                bento_nano_style::Color::WHITE,
+            )?;
+        }
+        // Row 1 — schema version (label + value), always shown.
+        let schema_row = settings_stealth_schema_row_rect(
+            viewport,
+            scroll,
+            crash_restart_on,
+            safe_start_on,
+        );
+        if row_visible(schema_row, body) {
+            let label_rect = bento_nano_style::Rect {
+                x: schema_row.x,
+                y: schema_row.y + (schema_row.height - 16.0) * 0.5,
+                width: schema_row.width * stealth_value_x_frac,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_SCHEMA_VERSION),
+                label_rect,
+                label_color,
+            )?;
+            let value_rect = bento_nano_style::Rect {
+                x: schema_row.x + schema_row.width * stealth_value_x_frac,
+                y: label_rect.y,
+                width: schema_row.width * (1.0 - stealth_value_x_frac),
+                height: 16.0,
+            };
+            let schema_text = match stealth_snapshot.as_ref() {
+                Some(s) => smol_str::SmolStr::new(s.schema_version.as_str()),
+                None => smol_str::SmolStr::new_static("—"),
+            };
+            self.draw_text_no_wrap(schema_text.as_str(), value_rect, title_color)?;
+        }
+        // Row 2 — mirror health (label + 健康/异常), always shown.
+        let mirror_row = settings_stealth_mirror_row_rect(
+            viewport,
+            scroll,
+            crash_restart_on,
+            safe_start_on,
+        );
+        if row_visible(mirror_row, body) {
+            let label_rect = bento_nano_style::Rect {
+                x: mirror_row.x,
+                y: mirror_row.y + (mirror_row.height - 16.0) * 0.5,
+                width: mirror_row.width * stealth_value_x_frac,
+                height: 16.0,
+            };
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY),
+                label_rect,
+                label_color,
+            )?;
+            let value_rect = bento_nano_style::Rect {
+                x: mirror_row.x + mirror_row.width * stealth_value_x_frac,
+                y: label_rect.y,
+                width: mirror_row.width * (1.0 - stealth_value_x_frac),
+                height: 16.0,
+            };
+            let healthy = stealth_snapshot
+                .as_ref()
+                .map(|s| s.mirror_healthy)
+                .unwrap_or(true);
+            let mirror_id = if healthy {
+                bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_YES
+            } else {
+                bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_NO
+            };
+            self.draw_text_no_wrap(
+                bento_nano_style::t(mirror_id),
+                value_rect,
+                title_color,
+            )?;
+        }
+        // Row 3 — retry count (label + value), ONLY when retry_count > 0.
+        if has_retry {
+            let retry_row = settings_stealth_retry_row_rect(
+                viewport,
+                scroll,
+                crash_restart_on,
+                safe_start_on,
+            );
+            if row_visible(retry_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: retry_row.x,
+                    y: retry_row.y + (retry_row.height - 16.0) * 0.5,
+                    width: retry_row.width * stealth_value_x_frac,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_RETRY_COUNT),
+                    label_rect,
+                    label_color,
+                )?;
+                let value_rect = bento_nano_style::Rect {
+                    x: retry_row.x + retry_row.width * stealth_value_x_frac,
+                    y: label_rect.y,
+                    width: retry_row.width * (1.0 - stealth_value_x_frac),
+                    height: 16.0,
+                };
+                let retry_text = smol_str::SmolStr::new(
+                    stealth_snapshot
+                        .as_ref()
+                        .map(|s| s.retry_count)
+                        .unwrap_or(0)
+                        .to_string(),
+                );
+                self.draw_text_no_wrap(retry_text.as_str(), value_rect, title_color)?;
+            }
+        }
+        // Row 4 — last-error block (label line + wrapped code), ONLY when set.
+        if has_error {
+            let err_block = settings_stealth_error_block_rect(
+                viewport,
+                scroll,
+                crash_restart_on,
+                safe_start_on,
+                has_retry,
+            );
+            if row_visible(err_block, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: err_block.x,
+                    y: err_block.y,
+                    width: err_block.width,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_LAST_ERROR),
+                    label_rect,
+                    label_color,
+                )?;
+                let err_rect = bento_nano_style::Rect {
+                    x: err_block.x,
+                    y: err_block.y + 18.0,
+                    width: err_block.width,
+                    height: err_block.height - 18.0,
+                };
+                if let Some(s) = stealth_snapshot.as_ref() {
+                    if let Some(err) = s.last_error.as_deref() {
+                        self.draw_text(err, err_rect, with_alpha(palette.accent_red, 0.9))?;
+                    }
+                }
+            }
+        }
+        // Buttons row — [Refresh][Reapply], always shown.
+        let stealth_btn_row = settings_stealth_buttons_row_rect(
+            viewport,
+            scroll,
+            crash_restart_on,
+            safe_start_on,
+            has_retry,
+            has_error,
+        );
+        if row_visible(stealth_btn_row, body) {
+            let refresh_btn = settings_stealth_refresh_button_rect(stealth_btn_row);
+            self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REFRESH_BTN),
+                refresh_btn,
+                title_color,
+            )?;
+            let reapply_btn = settings_stealth_reapply_button_rect(stealth_btn_row);
+            self.fill_rounded_rect(reapply_btn, accent_on, btn_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REAPPLY_BTN),
+                reapply_btn,
+                bento_nano_style::Color::WHITE,
+            )?;
+        }
+        // OneDrive warning block — informational text only, ONLY when
+        // retry_count > 0 (the backend notes OneDrive typically holds the
+        // lock). No button: there is no OneDrive-exclusion probe / guide URL
+        // in the nano backend, so per §17 this stays text-only rather than a
+        // dead button.
+        if has_retry {
+            let od_block = settings_stealth_onedrive_block_rect(
+                viewport,
+                scroll,
+                crash_restart_on,
+                safe_start_on,
+                has_retry,
+                has_error,
+            );
+            if row_visible(od_block, body) {
+                let od_bg = with_alpha(
+                    bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
+                    0.12,
+                );
+                self.fill_rounded_rect(od_block, od_bg, chip_radius)?;
+                let text_rect = bento_nano_style::Rect {
+                    x: od_block.x + 10.0,
+                    y: od_block.y + 8.0,
+                    width: (od_block.width - 20.0).max(0.0),
+                    height: (od_block.height - 16.0).max(0.0),
+                };
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::STEALTH_ONEDRIVE_WARNING,
+                    ),
+                    text_rect,
+                    with_alpha(title_color, 0.92),
+                )?;
             }
         }
             Ok(())

@@ -489,6 +489,13 @@ pub struct AppState {
     /// off, item import keeps the original desktop path instead of moving it
     /// into the hidden mirror.
     pub stealth_enabled: Cell<bool>,
+    /// M1e (2026-05-29) — Stealth §7 card snapshot. Cached from the
+    /// synchronous `bento_nano_backend::stealth::status()` probe when Settings
+    /// opens and after Refresh/Reapply, so the immediate-mode paint and the
+    /// shell hit-tester read one consistent snapshot (the conditional
+    /// retry/error/OneDrive rows must agree between paint and click). `None`
+    /// until the first refresh; the renderer falls back to a placeholder row.
+    pub stealth_status: RefCell<Option<bento_nano_backend::stealth::StealthStatus>>,
     /// Config vault encryption mode restored from `encryption.mode`.
     pub encryption_mode: Cell<SettingsEncryptionMode>,
     /// `true` when the opened vault is passphrase-encrypted and still
@@ -771,6 +778,7 @@ impl AppState {
             update_auto_download: Cell::new(true),
             settings_updater_status: RefCell::new(SettingsUpdaterStatus::Idle),
             stealth_enabled: Cell::new(true),
+            stealth_status: RefCell::new(None),
             encryption_mode: Cell::new(SettingsEncryptionMode::None),
             passphrase_unlock_required: Cell::new(false),
             settings_encryption_status: RefCell::new(None),

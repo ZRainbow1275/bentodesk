@@ -154,6 +154,23 @@ pub mod ids {
     pub const SETTING_SAFE_START_HIBERNATION: StringId = StringId(153);
     pub const SETTING_SAFE_START_HIBERNATION_DESC: StringId = StringId(154);
     pub const SETTING_HIBERNATE_DELAY: StringId = StringId(155);
+
+    // 156..170 M1e (2026-05-29) — Stealth §7 card. Mirrors zh-CN ids
+    // 156..=169 slot-for-slot (`src/i18n/locales/en.ts:225-241`).
+    pub const STEALTH_GROUP_TITLE: StringId = StringId(156);
+    pub const STEALTH_STATUS_LABEL: StringId = StringId(157);
+    pub const STEALTH_STATUS_APPLIED: StringId = StringId(158);
+    pub const STEALTH_STATUS_PENDING: StringId = StringId(159);
+    pub const STEALTH_STATUS_FAILED: StringId = StringId(160);
+    pub const STEALTH_SCHEMA_VERSION: StringId = StringId(161);
+    pub const STEALTH_MIRROR_HEALTHY: StringId = StringId(162);
+    pub const STEALTH_MIRROR_HEALTHY_YES: StringId = StringId(163);
+    pub const STEALTH_MIRROR_HEALTHY_NO: StringId = StringId(164);
+    pub const STEALTH_RETRY_COUNT: StringId = StringId(165);
+    pub const STEALTH_LAST_ERROR: StringId = StringId(166);
+    pub const STEALTH_REFRESH_BTN: StringId = StringId(167);
+    pub const STEALTH_REAPPLY_BTN: StringId = StringId(168);
+    pub const STEALTH_ONEDRIVE_WARNING: StringId = StringId(169);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -347,5 +364,20 @@ pub static EN_US: LookupTable = LookupTable {
         "Safe Start After Hibernation", // SETTING_SAFE_START_HIBERNATION (153)
         "Start safely after resuming from hibernation", // SETTING_SAFE_START_HIBERNATION_DESC (154)
         "Resume Delay",               // SETTING_HIBERNATE_DELAY (155)
+        // 156..170 M1e — Stealth §7 (`StealthModeCard.tsx`, en.ts:225-241).
+        "Desktop Stealth Mode",       // STEALTH_GROUP_TITLE (156)
+        "Status",                     // STEALTH_STATUS_LABEL (157)
+        "Applied",                    // STEALTH_STATUS_APPLIED (158)
+        "Pending retry",              // STEALTH_STATUS_PENDING (159)
+        "Failed",                     // STEALTH_STATUS_FAILED (160)
+        "Schema version",             // STEALTH_SCHEMA_VERSION (161)
+        "Manifest mirror",            // STEALTH_MIRROR_HEALTHY (162)
+        "In sync",                    // STEALTH_MIRROR_HEALTHY_YES (163)
+        "Out of sync",                // STEALTH_MIRROR_HEALTHY_NO (164)
+        "Pending retries",            // STEALTH_RETRY_COUNT (165)
+        "Last error",                 // STEALTH_LAST_ERROR (166)
+        "Refresh status",             // STEALTH_REFRESH_BTN (167)
+        "Re-apply",                   // STEALTH_REAPPLY_BTN (168)
+        "Your Desktop is inside OneDrive. Consider excluding .bentodesk/ from OneDrive sync — otherwise hidden files will be uploaded to the cloud.", // STEALTH_ONEDRIVE_WARNING (169)
     ],
 };
