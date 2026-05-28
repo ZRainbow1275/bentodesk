@@ -999,10 +999,22 @@ pub fn settings_zone_display_mode_radio_label_rect(
     }
 }
 
-/// Round-2 M1/M2/M3 — total content height inside the body. Grows with each
-/// milestone as new sections light up. M3 adds advanced + overlay sections.
-pub fn settings_body_content_height(viewport: Size) -> f32 {
-    settings_m3_content_height(viewport)
+/// Round-2 M1/M2 + M1d — total content height inside the body. Grows with
+/// each milestone as sections light up. M1d's Startup section has
+/// conditional rows, so the two gating bools (`crash_restart_enabled`,
+/// `safe_start_after_hibernation`) are parameters — geometry never reads
+/// global state, the shell passes the live Cells.
+pub fn settings_body_content_height(
+    viewport: Size,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> f32 {
+    settings_m2_content_height(viewport)
+        + settings_perf_startup_content_height(
+            viewport,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+        )
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -1013,12 +1025,24 @@ pub fn settings_body_max_scroll(content_total_h: f32, viewport: Size) -> f32 {
     (content_total_h - body.height).max(0.0)
 }
 
-/// Round-2 M1 — apply a wheel-delta `delta_y` (positive = scroll down) to
-/// `current_offset` and clamp. Pure helper so the wheel handler stays
-/// allocation-free.
-pub fn settings_clamp_scroll(current_offset: f32, delta_y: f32, viewport: Size) -> f32 {
+/// Round-2 M1 + M1d — apply a wheel-delta `delta_y` (positive = scroll down)
+/// to `current_offset` and clamp. Pure helper so the wheel handler stays
+/// allocation-free. The two gating bools feed the dynamic content height so
+/// the max-scroll matches whatever conditional rows are currently visible.
+pub fn settings_clamp_scroll(
+    current_offset: f32,
+    delta_y: f32,
+    viewport: Size,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> f32 {
     let next = (current_offset + delta_y).max(0.0);
-    let max = settings_body_max_scroll(settings_body_content_height(viewport), viewport);
+    let content_h = settings_body_content_height(
+        viewport,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+    );
+    let max = settings_body_max_scroll(content_h, viewport);
     next.min(max)
 }
 
@@ -1134,34 +1158,48 @@ pub fn settings_m2_content_height(_viewport: Size) -> f32 {
         + SETTINGS_SECTION_GAP
 }
 
-// ── Round-2 M3 — 中段 advanced section + 重叠版本 section ──────────────
+// ── M1d 2026-05-29 — Performance §5 + Startup management §6 ────────────
+//
+// Replaces the deleted bespoke 高级 / 未来集成验证 sections (nano-only, not
+// in Tauri) with the two genuine Tauri sections from
+// `SettingsPanel.tsx:601-698`. Performance has 3 SliderRows (no
+// conditionals); Startup has 2 toggles + 2 conditional steppers + 1 toggle
+// + 1 conditional slider, so its height is dynamic (gated by
+// `crash_restart_enabled` and `safe_start_after_hibernation`).
+//
+// The number-stepper rects (− value +) and slider track rect below are the
+// generalized descendants of the old `settings_advanced_num_*` /
+// `settings_advanced_slider_rect` templates.
 
-/// Round-2 M3 — number of rows inside the advanced (高级) section.
-/// 6 rows: 高级洗脑启动 toggle, 磁吸切换提示 toggle, 最大磁吸次数 number,
-/// 磁吸时间 number, 快捷区分布段 toggle, 致敬时长 slider.
-pub const SETTINGS_ADV_ROW_COUNT: u8 = 6;
+/// M1d — number of SliderRows in the Performance section (展开/收起/缓存).
+pub const SETTINGS_PERF_ROW_COUNT: u8 = 3;
 
-/// Round-2 M3 — number of rows inside the overlay (未来集成验证) section.
-/// 3 rows: 架构版本 input, 装备状态 toggle, 磁吸状态 toggle.
-pub const SETTINGS_OVERLAY_ROW_COUNT: u8 = 3;
-
-/// Round-2 M3 — width of a small number-input mini button (− / +).
+/// M1d — number-stepper mini button (− / +) size.
 pub const SETTINGS_NUM_BTN_W: f32 = 24.0;
 pub const SETTINGS_NUM_BTN_H: f32 = 24.0;
 
-/// Round-2 M3 — width of the number-input value label between the buttons.
+/// M1d — number-stepper value label width (between − and +).
 pub const SETTINGS_NUM_VALUE_W: f32 = 40.0;
 
-/// Round-2 M3 — slider total width (track + thumb travel).
-pub const SETTINGS_SLIDER_W: f32 = 130.0;
+/// M1d — slider track geometry shared by Performance + hibernate sliders.
+pub const SETTINGS_SLIDER_W: f32 = 200.0;
 pub const SETTINGS_SLIDER_TRACK_H: f32 = 4.0;
-pub const SETTINGS_SLIDER_THUMB_D: f32 = 12.0;
+pub const SETTINGS_SLIDER_THUMB_D: f32 = 14.0;
 
-/// Round-2 M3 — state pill width (the green "已启用" badge).
-pub const SETTINGS_STATE_PILL_W: f32 = 56.0;
-pub const SETTINGS_STATE_PILL_H: f32 = 22.0;
+/// M1d — SliderRow total height. Tauri `.slider-row` is a column: a
+/// `label + tabular value` line on top, the `<input type=range>` below
+/// (`SettingsPanel.tsx:848-871`). 24 (label line) + 20 (track band) = 44.
+pub const SETTINGS_SLIDER_ROW_H: f32 = 44.0;
 
-fn settings_m3_origin_y_offset() -> f32 {
+/// M1d — height of a one-line `.settings-row__desc` caption under a toggle.
+pub const SETTINGS_DESC_H: f32 = 18.0;
+
+// ── Performance §5 geometry (3 SliderRows, no conditionals) ────────────
+
+/// M1d — scroll-space Y at which the Performance group title starts. Sits
+/// below the full M2 block + a section gap (the M3 advanced/overlay block
+/// it replaces used the same origin).
+fn settings_perf_origin_y_offset() -> f32 {
     settings_m2_origin_y_offset()
         + SETTINGS_SECTION_LABEL_H
         + SETTINGS_SOURCE_ROW_H * SETTINGS_SOURCE_COUNT as f32
@@ -1175,36 +1213,194 @@ fn settings_m3_origin_y_offset() -> f32 {
         + SETTINGS_SECTION_GAP
 }
 
-/// Round-2 M3 — `高级` section label rect.
-pub fn settings_advanced_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+/// M1d — `性能 / Performance` group title rect.
+pub fn settings_performance_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
     let body = settings_body_rect(viewport);
     let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
-        y: origin_y + settings_m3_origin_y_offset(),
+        y: origin_y + settings_perf_origin_y_offset(),
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
         height: SETTINGS_SECTION_LABEL_H,
     }
 }
 
-/// Round-2 M3 — advanced section row at `index` (0..SETTINGS_ADV_ROW_COUNT).
-pub fn settings_advanced_row_rect(viewport: Size, scroll_offset_y: f32, index: u8) -> Rect {
-    let label = settings_advanced_label_rect(viewport, scroll_offset_y);
+/// M1d — full SliderRow rect for Performance slider `index` (0..3).
+pub fn settings_performance_slider_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let label = settings_performance_label_rect(viewport, scroll_offset_y);
     Rect {
         x: label.x,
-        y: label.bottom() + SETTINGS_ROW_H_M1 * index as f32,
+        y: label.bottom() + SETTINGS_SLIDER_ROW_H * index as f32,
+        width: label.width,
+        height: SETTINGS_SLIDER_ROW_H,
+    }
+}
+
+/// M1d — slider track/hit rect inside a Performance SliderRow (full-width
+/// band on the lower line of the row).
+pub fn settings_performance_slider_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let row = settings_performance_slider_row_rect(viewport, scroll_offset_y, index);
+    Rect {
+        x: row.x,
+        y: row.bottom() - SETTINGS_SLIDER_THUMB_D - 4.0,
+        width: row.width,
+        height: SETTINGS_SLIDER_THUMB_D,
+    }
+}
+
+// ── Startup management §6 geometry (dynamic height) ────────────────────
+//
+// Row order (visible subset depends on the two gating bools):
+//   0  高优先级启动 toggle              (always)
+//   0d desc
+//   1  崩溃自动重启 toggle              (always) — gates 2/3
+//   1d desc
+//   2  最大重试次数 stepper             (crash_restart only)
+//   3  崩溃窗口（秒）stepper            (crash_restart only)
+//   4  休眠安全恢复 toggle              (always) — gates the slider
+//   4d desc
+//   5  恢复延迟 SliderRow               (hibernation only)
+
+/// M1d — `启动管理 / Startup Management` group title rect. Sits below the
+/// Performance section (3 SliderRows + a section gap).
+pub fn settings_startup_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let last_perf = settings_performance_slider_row_rect(
+        viewport,
+        scroll_offset_y,
+        SETTINGS_PERF_ROW_COUNT - 1,
+    );
+    let body = settings_body_rect(viewport);
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: last_perf.bottom() + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M1d — `高优先级启动` toggle row rect (row 0, always shown).
+pub fn settings_startup_high_priority_row_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let label = settings_startup_label_rect(viewport, scroll_offset_y);
+    Rect {
+        x: label.x,
+        y: label.bottom(),
         width: label.width,
         height: SETTINGS_ROW_H_M1,
     }
 }
 
-/// Round-2 M3 — right-anchored toggle hit-box (rows 0, 1, 4).
-pub fn settings_advanced_toggle_hit_rect(
+/// M1d — `崩溃自动重启` toggle row rect (row 1, always shown). Sits below the
+/// high-priority row + its description caption.
+pub fn settings_crash_restart_row_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let prev = settings_startup_high_priority_row_rect(viewport, scroll_offset_y);
+    Rect {
+        x: prev.x,
+        y: prev.bottom() + SETTINGS_DESC_H,
+        width: prev.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1d — `最大重试次数` stepper row rect (row 2). Only laid out / painted /
+/// hit-tested when `crash_restart_enabled`. Sits below the crash-restart row
+/// + its description caption.
+pub fn settings_crash_max_retries_row_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let prev = settings_crash_restart_row_rect(viewport, scroll_offset_y);
+    Rect {
+        x: prev.x,
+        y: prev.bottom() + SETTINGS_DESC_H,
+        width: prev.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1d — `崩溃窗口（秒）` stepper row rect (row 3). Conditional on
+/// `crash_restart_enabled`; sits directly below the retries stepper row.
+pub fn settings_crash_window_row_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let prev = settings_crash_max_retries_row_rect(viewport, scroll_offset_y);
+    Rect {
+        x: prev.x,
+        y: prev.bottom(),
+        width: prev.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1d — `休眠安全恢复` toggle row rect (row 4, always shown). Its Y depends
+/// on whether the two crash steppers are present, so it takes the gating
+/// bool as a parameter (geometry stays pure — never reads global state).
+///
+/// When the steppers are hidden, the row sits below the crash-restart
+/// toggle's always-shown description caption (so `+ SETTINGS_DESC_H` clears
+/// it). When the steppers are shown, the last stepper (崩溃窗口) has NO
+/// description caption, so the row sits directly below it (no extra gap).
+pub fn settings_safe_start_row_rect(
     viewport: Size,
     scroll_offset_y: f32,
-    index: u8,
+    crash_restart_enabled: bool,
 ) -> Rect {
-    let row = settings_advanced_row_rect(viewport, scroll_offset_y, index);
+    let (anchor, desc_gap) = if crash_restart_enabled {
+        (settings_crash_window_row_rect(viewport, scroll_offset_y), 0.0)
+    } else {
+        (
+            settings_crash_restart_row_rect(viewport, scroll_offset_y),
+            SETTINGS_DESC_H,
+        )
+    };
+    Rect {
+        x: anchor.x,
+        y: anchor.bottom() + desc_gap,
+        width: anchor.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1d — `恢复延迟` SliderRow rect (row 5). Conditional on
+/// `safe_start_after_hibernation`; positioned below the safe-start toggle +
+/// its description caption. Takes `crash_restart_enabled` to chain through
+/// the dynamic safe-start anchor.
+pub fn settings_hibernate_slider_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+) -> Rect {
+    let prev = settings_safe_start_row_rect(viewport, scroll_offset_y, crash_restart_enabled);
+    Rect {
+        x: prev.x,
+        y: prev.bottom() + SETTINGS_DESC_H,
+        width: prev.width,
+        height: SETTINGS_SLIDER_ROW_H,
+    }
+}
+
+/// M1d — slider track/hit rect inside the hibernate SliderRow.
+pub fn settings_hibernate_slider_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+) -> Rect {
+    let row = settings_hibernate_slider_row_rect(viewport, scroll_offset_y, crash_restart_enabled);
+    Rect {
+        x: row.x,
+        y: row.bottom() - SETTINGS_SLIDER_THUMB_D - 4.0,
+        width: row.width,
+        height: SETTINGS_SLIDER_THUMB_D,
+    }
+}
+
+/// M1d — right-anchored toggle hit-box inside a Startup-section toggle row.
+/// Shared by the renderer (paints the rocker centred in this box) and the
+/// hit-tester. Mirrors `SETTINGS_TOP_TOGGLE_HIT_*` so click ergonomics match
+/// the General-section toggles.
+pub fn settings_startup_toggle_hit_rect(row: Rect) -> Rect {
     Rect {
         x: row.right() - SETTINGS_TOP_TOGGLE_HIT_W,
         y: row.y + (row.height - SETTINGS_TOP_TOGGLE_HIT_H) * 0.5,
@@ -1213,13 +1409,8 @@ pub fn settings_advanced_toggle_hit_rect(
     }
 }
 
-/// Round-2 M3 — number input "+" button rect (rows 2, 3).
-pub fn settings_advanced_num_plus_rect(
-    viewport: Size,
-    scroll_offset_y: f32,
-    index: u8,
-) -> Rect {
-    let row = settings_advanced_row_rect(viewport, scroll_offset_y, index);
+/// M1d — number-stepper "+" button rect, right-anchored inside `row`.
+pub fn settings_stepper_plus_rect(row: Rect) -> Rect {
     Rect {
         x: row.right() - SETTINGS_NUM_BTN_W,
         y: row.y + (row.height - SETTINGS_NUM_BTN_H) * 0.5,
@@ -1228,13 +1419,9 @@ pub fn settings_advanced_num_plus_rect(
     }
 }
 
-/// Round-2 M3 — number input value label rect (between − and +).
-pub fn settings_advanced_num_value_rect(
-    viewport: Size,
-    scroll_offset_y: f32,
-    index: u8,
-) -> Rect {
-    let plus = settings_advanced_num_plus_rect(viewport, scroll_offset_y, index);
+/// M1d — number-stepper value label rect (between − and +).
+pub fn settings_stepper_value_rect(row: Rect) -> Rect {
+    let plus = settings_stepper_plus_rect(row);
     Rect {
         x: plus.x - SETTINGS_NUM_VALUE_W,
         y: plus.y,
@@ -1243,13 +1430,9 @@ pub fn settings_advanced_num_value_rect(
     }
 }
 
-/// Round-2 M3 — number input "−" button rect.
-pub fn settings_advanced_num_minus_rect(
-    viewport: Size,
-    scroll_offset_y: f32,
-    index: u8,
-) -> Rect {
-    let value = settings_advanced_num_value_rect(viewport, scroll_offset_y, index);
+/// M1d — number-stepper "−" button rect (left of the value label).
+pub fn settings_stepper_minus_rect(row: Rect) -> Rect {
+    let value = settings_stepper_value_rect(row);
     Rect {
         x: value.x - SETTINGS_NUM_BTN_W,
         y: value.y,
@@ -1258,80 +1441,30 @@ pub fn settings_advanced_num_minus_rect(
     }
 }
 
-/// Round-2 M3 — slider hit/track rect for row 5 (致敬时长).
-pub fn settings_advanced_slider_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let row = settings_advanced_row_rect(viewport, scroll_offset_y, 5);
-    Rect {
-        x: row.right() - SETTINGS_SLIDER_W,
-        y: row.y + (row.height - SETTINGS_SLIDER_THUMB_D) * 0.5,
-        width: SETTINGS_SLIDER_W,
-        height: SETTINGS_SLIDER_THUMB_D,
-    }
-}
-
-/// Round-2 M3 — `未来集成验证` section label rect.
-pub fn settings_overlay_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let last_row = settings_advanced_row_rect(
-        viewport,
-        scroll_offset_y,
-        SETTINGS_ADV_ROW_COUNT - 1,
-    );
-    let body = settings_body_rect(viewport);
-    Rect {
-        x: body.x + SETTINGS_ROW_PAD_X,
-        y: last_row.bottom() + SETTINGS_SECTION_GAP,
-        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
-        height: SETTINGS_SECTION_LABEL_H,
-    }
-}
-
-/// Round-2 M3 — overlay section row at `index` (0..SETTINGS_OVERLAY_ROW_COUNT).
-pub fn settings_overlay_row_rect(viewport: Size, scroll_offset_y: f32, index: u8) -> Rect {
-    let label = settings_overlay_label_rect(viewport, scroll_offset_y);
-    Rect {
-        x: label.x,
-        y: label.bottom() + SETTINGS_ROW_H_M1 * index as f32,
-        width: label.width,
-        height: SETTINGS_ROW_H_M1,
-    }
-}
-
-/// Round-2 M3 — overlay version input rect (row 0 of overlay section).
-pub fn settings_overlay_version_input_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let row = settings_overlay_row_rect(viewport, scroll_offset_y, 0);
-    let input_w: f32 = 60.0;
-    Rect {
-        x: row.right() - input_w,
-        y: row.y + (row.height - 26.0) * 0.5,
-        width: input_w,
-        height: 26.0,
-    }
-}
-
-/// Round-2 M3 — state pill rect (rows 1, 2 of overlay section).
-pub fn settings_overlay_state_pill_rect(
+/// M1d — combined height of the Performance + Startup sections, fed into
+/// `settings_body_content_height`. Conditional rows make this dynamic, so
+/// the two gating bools are parameters (geometry never reads global state).
+fn settings_perf_startup_content_height(
     viewport: Size,
-    scroll_offset_y: f32,
-    index: u8,
-) -> Rect {
-    let row = settings_overlay_row_rect(viewport, scroll_offset_y, index);
-    Rect {
-        x: row.right() - SETTINGS_STATE_PILL_W,
-        y: row.y + (row.height - SETTINGS_STATE_PILL_H) * 0.5,
-        width: SETTINGS_STATE_PILL_W,
-        height: SETTINGS_STATE_PILL_H,
-    }
-}
-
-/// Round-2 M3 — total content height including M3 sections.
-pub fn settings_m3_content_height(viewport: Size) -> f32 {
-    settings_m2_content_height(viewport)
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_ROW_H_M1 * SETTINGS_ADV_ROW_COUNT as f32
-        + SETTINGS_SECTION_GAP
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_ROW_H_M1 * SETTINGS_OVERLAY_ROW_COUNT as f32
-        + SETTINGS_SECTION_GAP
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+) -> f32 {
+    // Performance: title + 3 SliderRows + section gap.
+    let perf = SETTINGS_SECTION_LABEL_H
+        + SETTINGS_SLIDER_ROW_H * SETTINGS_PERF_ROW_COUNT as f32
+        + SETTINGS_SECTION_GAP;
+    // Startup: title + the visible-row stack measured off the last laid-out
+    // element so the helpers below are the single source of layout truth.
+    let title_top = settings_startup_label_rect(viewport, 0.0).y;
+    let last_bottom = if safe_start_after_hibernation {
+        settings_hibernate_slider_row_rect(viewport, 0.0, crash_restart_enabled).bottom()
+    } else {
+        // safe-start toggle + its description caption.
+        settings_safe_start_row_rect(viewport, 0.0, crash_restart_enabled).bottom()
+            + SETTINGS_DESC_H
+    };
+    let startup = (last_bottom - title_top) + SETTINGS_SECTION_GAP;
+    perf + startup
 }
 
 #[cfg(test)]
@@ -1553,15 +1686,16 @@ mod m1_tests {
     #[test]
     fn m1_clamp_scroll_never_goes_negative() {
         let v = vp();
-        assert_eq!(settings_clamp_scroll(0.0, -100.0, v), 0.0);
-        assert_eq!(settings_clamp_scroll(20.0, -100.0, v), 0.0);
+        assert_eq!(settings_clamp_scroll(0.0, -100.0, v, true, true), 0.0);
+        assert_eq!(settings_clamp_scroll(20.0, -100.0, v, true, true), 0.0);
     }
 
     #[test]
     fn m1_clamp_scroll_caps_at_max() {
         let v = vp();
-        let max = settings_body_max_scroll(settings_body_content_height(v), v);
-        assert_eq!(settings_clamp_scroll(0.0, max + 999.0, v), max);
+        let content = settings_body_content_height(v, true, true);
+        let max = settings_body_max_scroll(content, v);
+        assert_eq!(settings_clamp_scroll(0.0, max + 999.0, v, true, true), max);
     }
 
     #[test]
@@ -1678,7 +1812,9 @@ mod m2_tests {
 }
 
 #[cfg(test)]
-mod m3_tests {
+mod m1d_tests {
+    //! M1d 2026-05-29 — Performance §5 + Startup management §6 geometry.
+    //! Replaces the deleted m3 advanced/overlay tests.
     use super::*;
 
     fn vp() -> Size {
@@ -1689,112 +1825,136 @@ mod m3_tests {
     }
 
     #[test]
-    fn m3_advanced_label_sits_below_m2_textarea() {
+    fn perf_label_sits_below_m2_textarea() {
         let v = vp();
         let textarea = settings_watch_textarea_rect(v, 0.0);
-        let label = settings_advanced_label_rect(v, 0.0);
+        let label = settings_performance_label_rect(v, 0.0);
         assert!(label.y >= textarea.bottom());
     }
 
     #[test]
-    fn m3_advanced_rows_stack_vertically() {
+    fn perf_slider_rows_stack_vertically() {
         let v = vp();
-        let r0 = settings_advanced_row_rect(v, 0.0, 0);
-        let r1 = settings_advanced_row_rect(v, 0.0, 1);
-        let r5 = settings_advanced_row_rect(v, 0.0, 5);
+        let r0 = settings_performance_slider_row_rect(v, 0.0, 0);
+        let r1 = settings_performance_slider_row_rect(v, 0.0, 1);
+        let r2 = settings_performance_slider_row_rect(v, 0.0, 2);
         assert!((r1.y - r0.bottom()).abs() < 0.01);
-        assert!(r5.y > r0.y);
-        assert_eq!(r0.height, SETTINGS_ROW_H_M1);
+        assert!((r2.y - r1.bottom()).abs() < 0.01);
+        assert_eq!(r0.height, SETTINGS_SLIDER_ROW_H);
     }
 
     #[test]
-    fn m3_advanced_toggle_hit_right_anchored_inside_row() {
+    fn perf_slider_track_sits_on_lower_line_full_width() {
         let v = vp();
-        let row = settings_advanced_row_rect(v, 0.0, 0);
-        let hit = settings_advanced_toggle_hit_rect(v, 0.0, 0);
-        assert!(hit.right() <= row.right() + 0.01);
-        assert!(hit.x > row.x + row.width * 0.5);
+        for index in 0..SETTINGS_PERF_ROW_COUNT {
+            let row = settings_performance_slider_row_rect(v, 0.0, index);
+            let track = settings_performance_slider_rect(v, 0.0, index);
+            // Track on the lower line (below the label/value line).
+            assert!(track.y > row.y + row.height * 0.4);
+            assert!(track.bottom() <= row.bottom() + 0.01);
+            assert!((track.x - row.x).abs() < 0.01);
+            assert!((track.width - row.width).abs() < 0.01);
+        }
     }
 
     #[test]
-    fn m3_number_input_buttons_left_of_value_left_of_plus() {
+    fn perf_row_count_pinned() {
+        assert_eq!(SETTINGS_PERF_ROW_COUNT, 3);
+    }
+
+    #[test]
+    fn startup_label_sits_below_performance_section() {
         let v = vp();
-        let plus = settings_advanced_num_plus_rect(v, 0.0, 2);
-        let value = settings_advanced_num_value_rect(v, 0.0, 2);
-        let minus = settings_advanced_num_minus_rect(v, 0.0, 2);
+        let last_perf =
+            settings_performance_slider_row_rect(v, 0.0, SETTINGS_PERF_ROW_COUNT - 1);
+        let startup = settings_startup_label_rect(v, 0.0);
+        assert!(startup.y >= last_perf.bottom() + SETTINGS_SECTION_GAP - 0.01);
+    }
+
+    #[test]
+    fn startup_always_rows_stack_with_desc_gaps() {
+        let v = vp();
+        let label = settings_startup_label_rect(v, 0.0);
+        let high = settings_startup_high_priority_row_rect(v, 0.0);
+        let crash = settings_crash_restart_row_rect(v, 0.0);
+        assert!((high.y - label.bottom()).abs() < 0.01);
+        // crash row sits a full row + a desc-line below high priority.
+        assert!((crash.y - (high.bottom() + SETTINGS_DESC_H)).abs() < 0.01);
+    }
+
+    #[test]
+    fn startup_crash_steppers_only_chain_when_enabled() {
+        let v = vp();
+        let retries = settings_crash_max_retries_row_rect(v, 0.0);
+        let window = settings_crash_window_row_rect(v, 0.0);
+        // window stepper sits directly below the retries stepper.
+        assert!((window.y - retries.bottom()).abs() < 0.01);
+        // Steppers' − value + pack right-to-left.
+        let plus = settings_stepper_plus_rect(retries);
+        let value = settings_stepper_value_rect(retries);
+        let minus = settings_stepper_minus_rect(retries);
         assert!(minus.right() <= value.x + 0.01);
         assert!(value.right() <= plus.x + 0.01);
-        assert_eq!(minus.y, value.y);
-        assert_eq!(value.y, plus.y);
+        assert!(plus.right() <= retries.right() + 0.01);
         assert_eq!(plus.width, SETTINGS_NUM_BTN_W);
         assert_eq!(value.width, SETTINGS_NUM_VALUE_W);
     }
 
     #[test]
-    fn m3_slider_right_anchored_at_row_5() {
+    fn safe_start_row_reflows_with_crash_restart_flag() {
         let v = vp();
-        let row = settings_advanced_row_rect(v, 0.0, 5);
-        let slider = settings_advanced_slider_rect(v, 0.0);
-        assert!(slider.right() <= row.right() + 0.01);
-        assert_eq!(slider.width, SETTINGS_SLIDER_W);
+        let off = settings_safe_start_row_rect(v, 0.0, false);
+        let on = settings_safe_start_row_rect(v, 0.0, true);
+        // Net effect of showing the two crash steppers is +2 stepper rows: the
+        // crash-restart desc-clearing gap (SETTINGS_DESC_H) is present in BOTH
+        // branches (OFF adds it directly; ON spends it on the retries-row gap),
+        // so it cancels and the delta is exactly two row heights.
+        assert!(on.y > off.y);
+        assert!((on.y - off.y - SETTINGS_ROW_H_M1 * 2.0).abs() < 0.01);
     }
 
     #[test]
-    fn m3_overlay_label_sits_below_advanced_section() {
+    fn hibernate_slider_sits_below_safe_start_when_shown() {
         let v = vp();
-        let last = settings_advanced_row_rect(v, 0.0, SETTINGS_ADV_ROW_COUNT - 1);
-        let overlay = settings_overlay_label_rect(v, 0.0);
-        assert!(overlay.y >= last.bottom());
+        let safe = settings_safe_start_row_rect(v, 0.0, true);
+        let slider_row = settings_hibernate_slider_row_rect(v, 0.0, true);
+        assert!((slider_row.y - (safe.bottom() + SETTINGS_DESC_H)).abs() < 0.01);
+        assert_eq!(slider_row.height, SETTINGS_SLIDER_ROW_H);
+        let track = settings_hibernate_slider_rect(v, 0.0, true);
+        assert!(track.bottom() <= slider_row.bottom() + 0.01);
     }
 
     #[test]
-    fn m3_overlay_version_input_right_anchored_in_row_0() {
+    fn content_height_grows_with_conditional_rows() {
         let v = vp();
-        let row = settings_overlay_row_rect(v, 0.0, 0);
-        let input = settings_overlay_version_input_rect(v, 0.0);
-        assert!(input.right() <= row.right() + 0.01);
-        assert!(input.x > row.x + row.width * 0.5);
+        // Both gates off → shortest. Crash on → +2 stepper rows. Hibernate on
+        // → + slider row + desc. All on → tallest.
+        let none = settings_body_content_height(v, false, false);
+        let crash = settings_body_content_height(v, true, false);
+        let hib = settings_body_content_height(v, false, true);
+        let both = settings_body_content_height(v, true, true);
+        assert!(crash > none, "crash steppers must add height");
+        assert!(hib > none, "hibernate slider must add height");
+        assert!(both > crash);
+        assert!(both > hib);
+        // Crash adds a net 2 stepper rows (the desc-clearing gap cancels
+        // between the two branches — see safe_start_row_reflows test).
+        assert!((crash - none - SETTINGS_ROW_H_M1 * 2.0).abs() < 0.01);
     }
 
     #[test]
-    fn m3_overlay_state_pills_right_anchored_in_rows_1_and_2() {
-        let v = vp();
-        for index in 1..SETTINGS_OVERLAY_ROW_COUNT {
-            let row = settings_overlay_row_rect(v, 0.0, index);
-            let pill = settings_overlay_state_pill_rect(v, 0.0, index);
-            assert!(pill.right() <= row.right() + 0.01);
-            assert_eq!(pill.width, SETTINGS_STATE_PILL_W);
-            assert_eq!(pill.height, SETTINGS_STATE_PILL_H);
-        }
-    }
-
-    #[test]
-    fn m3_content_height_greater_than_m2_total() {
+    fn content_height_exceeds_m2_total() {
         let v = vp();
         let m2 = settings_m2_content_height(v);
-        let m3 = settings_m3_content_height(v);
-        assert!(m3 > m2);
+        let total = settings_body_content_height(v, true, true);
+        assert!(total > m2);
     }
 
     #[test]
-    fn m3_body_content_height_now_returns_m3_total() {
+    fn scroll_offset_shifts_performance_label_up() {
         let v = vp();
-        let body_total = settings_body_content_height(v);
-        let m3 = settings_m3_content_height(v);
-        assert!((body_total - m3).abs() < 0.01);
-    }
-
-    #[test]
-    fn m3_advanced_row_count_pinned() {
-        assert_eq!(SETTINGS_ADV_ROW_COUNT, 6);
-        assert_eq!(SETTINGS_OVERLAY_ROW_COUNT, 3);
-    }
-
-    #[test]
-    fn m3_scroll_offset_shifts_advanced_label_up() {
-        let v = vp();
-        let r_at_0 = settings_advanced_label_rect(v, 0.0);
-        let r_at_50 = settings_advanced_label_rect(v, 50.0);
+        let r_at_0 = settings_performance_label_rect(v, 0.0);
+        let r_at_50 = settings_performance_label_rect(v, 50.0);
         assert!((r_at_50.y + 50.0 - r_at_0.y).abs() < 0.01);
     }
 }

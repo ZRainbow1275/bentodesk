@@ -4742,6 +4742,18 @@ const SETTING_GENERAL_LAUNCH_AT_STARTUP: &str = "general.launch_at_startup";
 const SETTING_GENERAL_SHOW_IN_TASKBAR: &str = "general.show_in_taskbar";
 const SETTING_GENERAL_AUTO_GROUP_ENABLED: &str = "general.auto_group_enabled";
 const SETTING_GENERAL_PORTABLE_MODE: &str = "general.portable_mode";
+// M1d 2026-05-29 — Performance §5 + Startup management §6 persistence keys.
+// Dotted names mirror Tauri's `AppSettings` (`performance.*` / `startup.*`)
+// so a vault file stays portable between the two builds.
+const SETTING_PERF_EXPAND_DELAY_MS: &str = "performance.expand_delay_ms";
+const SETTING_PERF_COLLAPSE_DELAY_MS: &str = "performance.collapse_delay_ms";
+const SETTING_PERF_ICON_CACHE_SIZE: &str = "performance.icon_cache_size";
+const SETTING_STARTUP_HIGH_PRIORITY: &str = "startup.high_priority";
+const SETTING_STARTUP_CRASH_RESTART_ENABLED: &str = "startup.crash_restart_enabled";
+const SETTING_STARTUP_CRASH_MAX_RETRIES: &str = "startup.crash_max_retries";
+const SETTING_STARTUP_CRASH_WINDOW_SECS: &str = "startup.crash_window_secs";
+const SETTING_STARTUP_SAFE_AFTER_HIBERNATION: &str = "startup.safe_start_after_hibernation";
+const SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS: &str = "startup.hibernate_resume_delay_ms";
 
 /// M1a 2026-05-29 — restore each General-section AppState Cell from the
 /// persisted vault values written by `save_settings_general`. Absent keys
@@ -4770,6 +4782,16 @@ fn apply_general_settings_from_vault(app: &AppState) {
     let taskbar = vault.get_setting(SETTING_GENERAL_SHOW_IN_TASKBAR);
     let auto_group = vault.get_setting(SETTING_GENERAL_AUTO_GROUP_ENABLED);
     let portable = vault.get_setting(SETTING_GENERAL_PORTABLE_MODE);
+    // M1d — Performance §5 + Startup management §6 reads.
+    let expand_delay = vault.get_setting(SETTING_PERF_EXPAND_DELAY_MS);
+    let collapse_delay = vault.get_setting(SETTING_PERF_COLLAPSE_DELAY_MS);
+    let icon_cache = vault.get_setting(SETTING_PERF_ICON_CACHE_SIZE);
+    let high_priority = vault.get_setting(SETTING_STARTUP_HIGH_PRIORITY);
+    let crash_restart = vault.get_setting(SETTING_STARTUP_CRASH_RESTART_ENABLED);
+    let crash_retries = vault.get_setting(SETTING_STARTUP_CRASH_MAX_RETRIES);
+    let crash_window = vault.get_setting(SETTING_STARTUP_CRASH_WINDOW_SECS);
+    let safe_start = vault.get_setting(SETTING_STARTUP_SAFE_AFTER_HIBERNATION);
+    let hibernate_delay = vault.get_setting(SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS);
     drop(vault);
 
     restore_general_bool_cell(&app.setting_desktop_embed, ghost, "ghost_layer_enabled");
@@ -4777,6 +4799,93 @@ fn apply_general_settings_from_vault(app: &AppState) {
     restore_general_bool_cell(&app.setting_show_in_taskbar, taskbar, "show_in_taskbar");
     restore_general_bool_cell(&app.setting_smart_layout, auto_group, "auto_group_enabled");
     restore_general_bool_cell(&app.setting_portable_mode, portable, "portable_mode");
+    // M1d — clamp persisted ints back to their Tauri bounds on restore so a
+    // hand-edited / ported vault can never push a slider out of range.
+    use bento_nano_app::state::{
+        COLLAPSE_DELAY_MAX_MS, COLLAPSE_DELAY_MIN_MS, CRASH_MAX_RETRIES_MAX, CRASH_MAX_RETRIES_MIN,
+        CRASH_WINDOW_SECS_MAX, CRASH_WINDOW_SECS_MIN, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_MIN_MS,
+        HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_MIN_MS, ICON_CACHE_MAX, ICON_CACHE_MIN,
+    };
+    restore_general_int_cell(
+        &app.expand_delay_ms,
+        expand_delay,
+        EXPAND_DELAY_MIN_MS,
+        EXPAND_DELAY_MAX_MS,
+        "expand_delay_ms",
+    );
+    restore_general_int_cell(
+        &app.collapse_delay_ms,
+        collapse_delay,
+        COLLAPSE_DELAY_MIN_MS,
+        COLLAPSE_DELAY_MAX_MS,
+        "collapse_delay_ms",
+    );
+    restore_general_int_cell(
+        &app.icon_cache_size,
+        icon_cache,
+        ICON_CACHE_MIN,
+        ICON_CACHE_MAX,
+        "icon_cache_size",
+    );
+    restore_general_bool_cell(&app.startup_high_priority, high_priority, "startup_high_priority");
+    restore_general_bool_cell(
+        &app.crash_restart_enabled,
+        crash_restart,
+        "crash_restart_enabled",
+    );
+    restore_general_int_cell(
+        &app.crash_max_retries,
+        crash_retries,
+        CRASH_MAX_RETRIES_MIN,
+        CRASH_MAX_RETRIES_MAX,
+        "crash_max_retries",
+    );
+    restore_general_int_cell(
+        &app.crash_window_secs,
+        crash_window,
+        CRASH_WINDOW_SECS_MIN,
+        CRASH_WINDOW_SECS_MAX,
+        "crash_window_secs",
+    );
+    restore_general_bool_cell(
+        &app.safe_start_after_hibernation,
+        safe_start,
+        "safe_start_after_hibernation",
+    );
+    restore_general_int_cell(
+        &app.hibernate_resume_delay_ms,
+        hibernate_delay,
+        HIBERNATE_DELAY_MIN_MS,
+        HIBERNATE_DELAY_MAX_MS,
+        "hibernate_resume_delay_ms",
+    );
+}
+
+/// M1d 2026-05-29 — apply a `SettingValue::Int` to one `Cell<i32>`, clamped to
+/// `[min, max]`, logging if the persisted value has the wrong tag. `None`
+/// keeps the AppState default (silent — first-launch path). The clamp guards
+/// a hand-edited / ported vault from pushing a slider out of its Tauri range.
+fn restore_general_int_cell(
+    cell: &std::cell::Cell<i32>,
+    value: Option<bento_nano_backend::config_vault::SettingValue>,
+    min: i32,
+    max: i32,
+    label: &'static str,
+) {
+    match value {
+        Some(bento_nano_backend::config_vault::SettingValue::Int(i)) => {
+            let clamped = (i as i32).clamp(min, max);
+            cell.set(clamped);
+        }
+        Some(_) => {
+            tracing::warn!(
+                target: "bentodesk::vault",
+                key = %label,
+                "general settings restore skipped: non-int value"
+            );
+        }
+        None => {}
+    }
 }
 
 /// M1a 2026-05-29 — apply a `SettingValue::Bool` to one General-section
@@ -4806,7 +4915,7 @@ fn restore_general_bool_cell(
 /// the write completes the dirty flag clears, leaving the panel in a
 /// "just-saved" state until the next toggle.
 fn save_settings_general(root: &AppRoot) {
-    let (dirty, values) = {
+    let (dirty, values, perf_startup) = {
         let app = root.app.borrow();
         let dirty = app.settings_dirty.get();
         let values = (
@@ -4816,7 +4925,21 @@ fn save_settings_general(root: &AppRoot) {
             app.setting_smart_layout.get(),
             app.setting_portable_mode.get(),
         );
-        (dirty, values)
+        // M1d — Performance §5 + Startup management §6 values, captured under
+        // the same borrow so Save persists General + Performance + Startup in
+        // one batched flush.
+        let perf_startup = (
+            app.expand_delay_ms.get(),
+            app.collapse_delay_ms.get(),
+            app.icon_cache_size.get(),
+            app.startup_high_priority.get(),
+            app.crash_restart_enabled.get(),
+            app.crash_max_retries.get(),
+            app.crash_window_secs.get(),
+            app.safe_start_after_hibernation.get(),
+            app.hibernate_resume_delay_ms.get(),
+        );
+        (dirty, values, perf_startup)
     };
     if !dirty {
         return;
@@ -4866,6 +4989,54 @@ fn save_settings_general(root: &AppRoot) {
     vault.set_setting(
         SETTING_GENERAL_PORTABLE_MODE,
         bento_nano_backend::config_vault::SettingValue::Bool(portable),
+    );
+    // M1d — Performance §5 + Startup management §6.
+    let (
+        expand_delay,
+        collapse_delay,
+        icon_cache,
+        high_priority,
+        crash_restart,
+        crash_retries,
+        crash_window,
+        safe_start,
+        hibernate_delay,
+    ) = perf_startup;
+    vault.set_setting(
+        SETTING_PERF_EXPAND_DELAY_MS,
+        bento_nano_backend::config_vault::SettingValue::Int(expand_delay as i64),
+    );
+    vault.set_setting(
+        SETTING_PERF_COLLAPSE_DELAY_MS,
+        bento_nano_backend::config_vault::SettingValue::Int(collapse_delay as i64),
+    );
+    vault.set_setting(
+        SETTING_PERF_ICON_CACHE_SIZE,
+        bento_nano_backend::config_vault::SettingValue::Int(icon_cache as i64),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_HIGH_PRIORITY,
+        bento_nano_backend::config_vault::SettingValue::Bool(high_priority),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_CRASH_RESTART_ENABLED,
+        bento_nano_backend::config_vault::SettingValue::Bool(crash_restart),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_CRASH_MAX_RETRIES,
+        bento_nano_backend::config_vault::SettingValue::Int(crash_retries as i64),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_CRASH_WINDOW_SECS,
+        bento_nano_backend::config_vault::SettingValue::Int(crash_window as i64),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_SAFE_AFTER_HIBERNATION,
+        bento_nano_backend::config_vault::SettingValue::Bool(safe_start),
+    );
+    vault.set_setting(
+        SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS,
+        bento_nano_backend::config_vault::SettingValue::Int(hibernate_delay as i64),
     );
     if let Err(error) = vault.flush() {
         tracing::warn!(
@@ -11757,44 +11928,46 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         }
         ui::SettingsHit::EditDesktopPath => Some(SmolStr::new_static("Edit desktop path")),
         ui::SettingsHit::EditWatchValues => Some(SmolStr::new_static("Edit watch values")),
-        ui::SettingsHit::ToggleAdvancedStartup => {
-            Some(SmolStr::new_static("Toggle launch-at-startup"))
-        }
-        ui::SettingsHit::ToggleMagnetSwitchHint => {
-            Some(SmolStr::new_static("Toggle magnet switch hint"))
-        }
-        ui::SettingsHit::IncMaxMagnetCount => {
-            Some(SmolStr::new_static("Increase max magnet count"))
-        }
-        ui::SettingsHit::DecMaxMagnetCount => {
-            Some(SmolStr::new_static("Decrease max magnet count"))
-        }
-        ui::SettingsHit::IncMagnetDuration => {
-            Some(SmolStr::new_static("Increase magnet duration"))
-        }
-        ui::SettingsHit::DecMagnetDuration => {
-            Some(SmolStr::new_static("Decrease magnet duration"))
-        }
-        ui::SettingsHit::ToggleZoneLayoutSection => {
-            Some(SmolStr::new_static("Toggle zone layout section"))
-        }
-        ui::SettingsHit::DragBarCountDisplay(_) => {
-            Some(SmolStr::new_static("Adjust bar count display"))
-        }
-        ui::SettingsHit::EditOverlayVersion => Some(SmolStr::new_static("Edit overlay version")),
-        ui::SettingsHit::ToggleEquipmentState => {
-            if app.equipment_state_enabled.get() {
-                Some(SmolStr::new_static("Disable equipment state"))
+        ui::SettingsHit::DragPerformanceSlider { index, .. } => match index {
+            0 => Some(SmolStr::new_static("Adjust expand delay")),
+            1 => Some(SmolStr::new_static("Adjust collapse delay")),
+            _ => Some(SmolStr::new_static("Adjust icon cache size")),
+        },
+        ui::SettingsHit::ToggleStartupHighPriority => {
+            if app.startup_high_priority.get() {
+                Some(SmolStr::new_static("Disable high priority startup"))
             } else {
-                Some(SmolStr::new_static("Enable equipment state"))
+                Some(SmolStr::new_static("Enable high priority startup"))
             }
         }
-        ui::SettingsHit::ToggleMagnetState => {
-            if app.magnet_state_enabled.get() {
-                Some(SmolStr::new_static("Disable magnet state"))
+        ui::SettingsHit::ToggleCrashRestart => {
+            if app.crash_restart_enabled.get() {
+                Some(SmolStr::new_static("Disable crash auto restart"))
             } else {
-                Some(SmolStr::new_static("Enable magnet state"))
+                Some(SmolStr::new_static("Enable crash auto restart"))
             }
+        }
+        ui::SettingsHit::IncCrashMaxRetries => {
+            Some(SmolStr::new_static("Increase max retries"))
+        }
+        ui::SettingsHit::DecCrashMaxRetries => {
+            Some(SmolStr::new_static("Decrease max retries"))
+        }
+        ui::SettingsHit::IncCrashWindowSecs => {
+            Some(SmolStr::new_static("Increase crash window"))
+        }
+        ui::SettingsHit::DecCrashWindowSecs => {
+            Some(SmolStr::new_static("Decrease crash window"))
+        }
+        ui::SettingsHit::ToggleSafeStartHibernation => {
+            if app.safe_start_after_hibernation.get() {
+                Some(SmolStr::new_static("Disable safe start after hibernation"))
+            } else {
+                Some(SmolStr::new_static("Enable safe start after hibernation"))
+            }
+        }
+        ui::SettingsHit::DragHibernateDelay(_) => {
+            Some(SmolStr::new_static("Adjust hibernate resume delay"))
         }
         ui::SettingsHit::Body | ui::SettingsHit::Outside => None,
     }
@@ -13273,10 +13446,15 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 use bento_nano_app::settings_panel::settings_clamp_scroll;
                 let app = root.app.borrow();
                 let vp = app.viewport;
+                // M1d — the body content height now depends on the two Startup
+                // gating bools (conditional crash steppers + hibernate slider),
+                // so the max-scroll clamp must read them too.
                 let next = settings_clamp_scroll(
                     app.scroll_offset_y.get(),
                     delta as f32,
                     vp,
+                    app.crash_restart_enabled.get(),
+                    app.safe_start_after_hibernation.get(),
                 );
                 app.scroll_offset_y.set(next);
                 drop(app);
@@ -13306,83 +13484,129 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             ui::SettingsHit::EditWatchValues => {
                 log_static("settings: M2 EditWatchValues click (no-op stub)\n");
             }
-            ui::SettingsHit::ToggleAdvancedStartup => {
-                let app = root.app.borrow();
-                app.setting_advanced_startup
-                    .set(!app.setting_advanced_startup.get());
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::ToggleMagnetSwitchHint => {
-                let app = root.app.borrow();
-                app.setting_magnet_switch_hint
-                    .set(!app.setting_magnet_switch_hint.get());
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::IncMaxMagnetCount => {
-                let app = root.app.borrow();
-                let next = (app.setting_max_magnet_count.get() + 1).min(9);
-                app.setting_max_magnet_count.set(next);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::DecMaxMagnetCount => {
-                let app = root.app.borrow();
-                let next = (app.setting_max_magnet_count.get() - 1).max(1);
-                app.setting_max_magnet_count.set(next);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::IncMagnetDuration => {
-                let app = root.app.borrow();
-                let next = (app.setting_magnet_duration_s.get() + 1).min(60);
-                app.setting_magnet_duration_s.set(next);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::DecMagnetDuration => {
-                let app = root.app.borrow();
-                let next = (app.setting_magnet_duration_s.get() - 1).max(1);
-                app.setting_magnet_duration_s.set(next);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::ToggleZoneLayoutSection => {
-                let app = root.app.borrow();
-                app.setting_zone_layout_section
-                    .set(!app.setting_zone_layout_section.get());
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::DragBarCountDisplay(x_q) => {
-                use bento_nano_app::settings_panel::settings_advanced_slider_rect;
+            ui::SettingsHit::DragPerformanceSlider { index, x_q } => {
+                use bento_nano_app::settings_panel::settings_performance_slider_rect;
+                use bento_nano_app::state::{
+                    COLLAPSE_DELAY_MAX_MS, COLLAPSE_DELAY_MIN_MS, COLLAPSE_DELAY_STEP_MS,
+                    EXPAND_DELAY_MAX_MS, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_STEP_MS, ICON_CACHE_MAX,
+                    ICON_CACHE_MIN, ICON_CACHE_STEP, slider_fraction_to_value,
+                };
                 let app = root.app.borrow();
                 let vp = app.viewport;
                 let scroll_y = app.scroll_offset_y.get();
-                let track = settings_advanced_slider_rect(vp, scroll_y);
+                let track = settings_performance_slider_rect(vp, scroll_y, index);
                 let span = track.width.max(1.0);
-                let frac = ((x_q as f32 - track.x) / span).clamp(0.0, 1.0);
-                // Map fraction → [500, 5000] ms.
-                let next = (500.0 + frac * (5000.0 - 500.0)).round() as i32;
-                app.setting_bar_count_display_ms.set(next);
+                let frac = (x_q as f32 - track.x) / span;
+                let next = match index {
+                    0 => slider_fraction_to_value(
+                        frac,
+                        EXPAND_DELAY_MIN_MS,
+                        EXPAND_DELAY_MAX_MS,
+                        EXPAND_DELAY_STEP_MS,
+                    ),
+                    1 => slider_fraction_to_value(
+                        frac,
+                        COLLAPSE_DELAY_MIN_MS,
+                        COLLAPSE_DELAY_MAX_MS,
+                        COLLAPSE_DELAY_STEP_MS,
+                    ),
+                    _ => slider_fraction_to_value(
+                        frac,
+                        ICON_CACHE_MIN,
+                        ICON_CACHE_MAX,
+                        ICON_CACHE_STEP,
+                    ),
+                };
+                match index {
+                    0 => app.expand_delay_ms.set(next),
+                    1 => app.collapse_delay_ms.set(next),
+                    _ => app.icon_cache_size.set(next),
+                }
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::EditOverlayVersion => {
-                log_static("settings: M3 EditOverlayVersion click (no-op stub)\n");
-            }
-            ui::SettingsHit::ToggleEquipmentState => {
+            ui::SettingsHit::ToggleStartupHighPriority => {
                 let app = root.app.borrow();
-                app.equipment_state_enabled
-                    .set(!app.equipment_state_enabled.get());
+                app.startup_high_priority
+                    .set(!app.startup_high_priority.get());
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::ToggleMagnetState => {
+            ui::SettingsHit::ToggleCrashRestart => {
                 let app = root.app.borrow();
-                app.magnet_state_enabled
-                    .set(!app.magnet_state_enabled.get());
+                app.crash_restart_enabled
+                    .set(!app.crash_restart_enabled.get());
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::IncCrashMaxRetries => {
+                use bento_nano_app::state::CRASH_MAX_RETRIES_MAX;
+                let app = root.app.borrow();
+                let next = (app.crash_max_retries.get() + 1).min(CRASH_MAX_RETRIES_MAX);
+                app.crash_max_retries.set(next);
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::DecCrashMaxRetries => {
+                use bento_nano_app::state::CRASH_MAX_RETRIES_MIN;
+                let app = root.app.borrow();
+                let next = (app.crash_max_retries.get() - 1).max(CRASH_MAX_RETRIES_MIN);
+                app.crash_max_retries.set(next);
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::IncCrashWindowSecs => {
+                use bento_nano_app::state::CRASH_WINDOW_SECS_MAX;
+                let app = root.app.borrow();
+                let next = (app.crash_window_secs.get() + 1).min(CRASH_WINDOW_SECS_MAX);
+                app.crash_window_secs.set(next);
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::DecCrashWindowSecs => {
+                use bento_nano_app::state::CRASH_WINDOW_SECS_MIN;
+                let app = root.app.borrow();
+                let next = (app.crash_window_secs.get() - 1).max(CRASH_WINDOW_SECS_MIN);
+                app.crash_window_secs.set(next);
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::ToggleSafeStartHibernation => {
+                let app = root.app.borrow();
+                app.safe_start_after_hibernation
+                    .set(!app.safe_start_after_hibernation.get());
+                app.settings_dirty.set(true);
+                drop(app);
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::DragHibernateDelay(x_q) => {
+                use bento_nano_app::settings_panel::settings_hibernate_slider_rect;
+                use bento_nano_app::state::{
+                    HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_MIN_MS, HIBERNATE_DELAY_STEP_MS,
+                    slider_fraction_to_value,
+                };
+                let app = root.app.borrow();
+                let vp = app.viewport;
+                let scroll_y = app.scroll_offset_y.get();
+                let crash_restart_on = app.crash_restart_enabled.get();
+                let track = settings_hibernate_slider_rect(vp, scroll_y, crash_restart_on);
+                let span = track.width.max(1.0);
+                let frac = (x_q as f32 - track.x) / span;
+                let next = slider_fraction_to_value(
+                    frac,
+                    HIBERNATE_DELAY_MIN_MS,
+                    HIBERNATE_DELAY_MAX_MS,
+                    HIBERNATE_DELAY_STEP_MS,
+                );
+                app.hibernate_resume_delay_ms.set(next);
+                app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
             }

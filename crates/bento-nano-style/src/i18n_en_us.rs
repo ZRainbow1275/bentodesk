@@ -125,18 +125,9 @@ pub mod ids {
     pub const SOURCE_PUBLIC_LABEL: StringId = StringId(125);
     pub const WATCH_HINT_LINE_EACH: StringId = StringId(126);
 
-    // 127..139 Round-2 M3 — Advanced section + overlay version + equipment.
-    pub const SECTION_ADVANCED: StringId = StringId(127);
-    pub const ROW_ADVANCED_STARTUP: StringId = StringId(128);
-    pub const ROW_MAGNET_SWITCH_HINT: StringId = StringId(129);
-    pub const ROW_MAX_MAGNET_COUNT: StringId = StringId(130);
-    pub const ROW_MAGNET_DURATION: StringId = StringId(131);
-    pub const ROW_ZONE_LAYOUT_SECTION: StringId = StringId(132);
-    pub const ROW_BAR_COUNT_DISPLAY: StringId = StringId(133);
-    pub const SECTION_OVERLAY_VERSION: StringId = StringId(134);
-    pub const ROW_OVERLAY_VERSION: StringId = StringId(135);
-    pub const ROW_EQUIPMENT_STATE: StringId = StringId(136);
-    pub const ROW_MAGNET_STATE: StringId = StringId(137);
+    // 127..138 M1d (2026-05-29) — orphan slots. Bespoke Advanced + overlay
+    // sections deleted; ids 127..=137 blanked in lockstep with zh-CN. Const
+    // names removed (no live reference).
     pub const STATE_ENABLED_PILL: StringId = StringId(138);
     pub const STATE_DISABLED_PILL: StringId = StringId(139);
     // 140 Wave I-α / R14 (2026-05-25) — picker row caption matching zh-CN.
@@ -146,6 +137,23 @@ pub mod ids {
     // Mirrors zh-CN id 141. Lockstep with `SETTING_SPEED_MODE` (117), which
     // is now orphan in both tables.
     pub const SETTING_PORTABLE_MODE: StringId = StringId(141);
+
+    // 142..156 M1d (2026-05-29) — Performance §5 + Startup management §6.
+    // Mirrors zh-CN ids 142..=155 slot-for-slot.
+    pub const SETTINGS_GROUP_PERFORMANCE: StringId = StringId(142);
+    pub const SETTING_EXPAND_DELAY: StringId = StringId(143);
+    pub const SETTING_COLLAPSE_DELAY: StringId = StringId(144);
+    pub const SETTING_ICON_CACHE_SIZE: StringId = StringId(145);
+    pub const SETTINGS_GROUP_STARTUP: StringId = StringId(146);
+    pub const SETTING_STARTUP_HIGH_PRIORITY: StringId = StringId(147);
+    pub const SETTING_STARTUP_HIGH_PRIORITY_DESC: StringId = StringId(148);
+    pub const SETTING_CRASH_RESTART: StringId = StringId(149);
+    pub const SETTING_CRASH_RESTART_DESC: StringId = StringId(150);
+    pub const SETTING_CRASH_MAX_RETRIES: StringId = StringId(151);
+    pub const SETTING_CRASH_WINDOW_SECS: StringId = StringId(152);
+    pub const SETTING_SAFE_START_HIBERNATION: StringId = StringId(153);
+    pub const SETTING_SAFE_START_HIBERNATION_DESC: StringId = StringId(154);
+    pub const SETTING_HIBERNATE_DELAY: StringId = StringId(155);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -304,23 +312,40 @@ pub static EN_US: LookupTable = LookupTable {
         "Personal desktop",  // SOURCE_PRIMARY_LABEL (124)
         "Public desktop",    // SOURCE_PUBLIC_LABEL (125)
         "One per line",      // WATCH_HINT_LINE_EACH (126)
-        // 127..139 Round-2 M3 — Advanced + overlay version + equipment.
-        "Advanced",                   // SECTION_ADVANCED (127)
-        "Advanced startup",           // ROW_ADVANCED_STARTUP (128)
-        "Magnet switch hint",         // ROW_MAGNET_SWITCH_HINT (129)
-        "Max magnet count",           // ROW_MAX_MAGNET_COUNT (130)
-        "Magnet duration (s)",        // ROW_MAGNET_DURATION (131)
-        "Quick zone layout",          // ROW_ZONE_LAYOUT_SECTION (132)
-        "Salute duration",            // ROW_BAR_COUNT_DISPLAY (133)
-        "Future integration check",   // SECTION_OVERLAY_VERSION (134)
-        "Architecture version",       // ROW_OVERLAY_VERSION (135)
-        "Equipment status",           // ROW_EQUIPMENT_STATE (136)
-        "Magnet status",              // ROW_MAGNET_STATE (137)
+        // 127..138 M1d (2026-05-29) — orphan slots. Bespoke Advanced +
+        // overlay sections deleted; blanked in lockstep with zh-CN.
+        "", // (127) — orphan (was SECTION_ADVANCED)
+        "", // (128) — orphan
+        "", // (129) — orphan
+        "", // (130) — orphan
+        "", // (131) — orphan
+        "", // (132) — orphan
+        "", // (133) — orphan
+        "", // (134) — orphan
+        "", // (135) — orphan
+        "", // (136) — orphan
+        "", // (137) — orphan
         "Enabled",                    // STATE_ENABLED_PILL (138)
         "Disabled",                   // STATE_DISABLED_PILL (139)
         // 140 Wave I-α / R14 — picker row caption.
         "Default display mode",       // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
         // 141 M1a (2026-05-29) — General section row 5 (Tauri parity).
         "Portable Mode (restart required)", // SETTING_PORTABLE_MODE (141)
+        // 142..146 M1d — Performance §5 (`SettingsPanel.tsx:601-631`).
+        "Performance",                // SETTINGS_GROUP_PERFORMANCE (142)
+        "Expand Delay",               // SETTING_EXPAND_DELAY (143)
+        "Collapse Delay",             // SETTING_COLLAPSE_DELAY (144)
+        "Icon Cache Size",            // SETTING_ICON_CACHE_SIZE (145)
+        // 146..156 M1d — Startup management §6 (`SettingsPanel.tsx:634-698`).
+        "Startup Management",         // SETTINGS_GROUP_STARTUP (146)
+        "High Priority Startup",      // SETTING_STARTUP_HIGH_PRIORITY (147)
+        "Start with high priority for faster response", // SETTING_STARTUP_HIGH_PRIORITY_DESC (148)
+        "Crash Auto Restart",         // SETTING_CRASH_RESTART (149)
+        "Automatically restart the app after a crash", // SETTING_CRASH_RESTART_DESC (150)
+        "Max Retries",                // SETTING_CRASH_MAX_RETRIES (151)
+        "Crash Window (s)",           // SETTING_CRASH_WINDOW_SECS (152)
+        "Safe Start After Hibernation", // SETTING_SAFE_START_HIBERNATION (153)
+        "Start safely after resuming from hibernation", // SETTING_SAFE_START_HIBERNATION_DESC (154)
+        "Resume Delay",               // SETTING_HIBERNATE_DELAY (155)
     ],
 };

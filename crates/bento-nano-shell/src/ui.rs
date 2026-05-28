@@ -598,30 +598,35 @@ pub enum SettingsHit {
     /// `EditDesktopPath`; keyboard binding wires in a later wave.
     EditWatchValues,
 
-    /// Round-2 M3 — advanced row 0 toggle: `高级 / 启动` (boot-with-system hint).
-    ToggleAdvancedStartup,
-    /// Round-2 M3 — advanced row 1 toggle: `开启时显示磁条切换提示`.
-    ToggleMagnetSwitchHint,
-    /// Round-2 M3 — advanced row 2 number stepper `+` (最大磁吸数量).
-    IncMaxMagnetCount,
-    /// Round-2 M3 — advanced row 2 number stepper `−` (最大磁吸数量).
-    DecMaxMagnetCount,
-    /// Round-2 M3 — advanced row 3 number stepper `+` (磁吸持续时间).
-    IncMagnetDuration,
-    /// Round-2 M3 — advanced row 3 number stepper `−` (磁吸持续时间).
-    DecMagnetDuration,
-    /// Round-2 M3 — advanced row 4 toggle: `区域布局段落`.
-    ToggleZoneLayoutSection,
-    /// Round-2 M3 — advanced row 5 slider drag (致敬时长 ms). Carries the
-    /// raw client `x` (px-quantized to i32) so the dispatcher can map
-    /// track-x→value. Quantizing keeps `SettingsHit` `Eq` derivable.
-    DragBarCountDisplay(i32),
-    /// Round-2 M3 — overlay row 0 — version input focus / edit start.
-    EditOverlayVersion,
-    /// Round-2 M3 — overlay row 1 state pill (装备状态 toggle).
-    ToggleEquipmentState,
-    /// Round-2 M3 — overlay row 2 state pill (磁条状态 toggle).
-    ToggleMagnetState,
+    // ------------------------------------------------------------------
+    // M1d 2026-05-29 — Performance §5 + Startup management §6. These
+    // replace the deleted bespoke 高级 / 未来集成验证 hits. Every variant
+    // mutates real AppState, is Save-gated, and is reverted by Cancel.
+    // ------------------------------------------------------------------
+    /// M1d — Performance slider drag. `index` selects the slider
+    /// (0=expand_delay, 1=collapse_delay, 2=icon_cache) and the quantized
+    /// client `x` lets the dispatcher map track-x→stepped value. Quantizing
+    /// to i32 keeps `SettingsHit` `Eq` derivable.
+    DragPerformanceSlider { index: u8, x_q: i32 },
+    /// M1d — Startup §6 toggle: 高优先级启动 (`startup_high_priority`).
+    ToggleStartupHighPriority,
+    /// M1d — Startup §6 toggle: 崩溃自动重启 (`crash_restart_enabled`).
+    /// Gates the two crash steppers below.
+    ToggleCrashRestart,
+    /// M1d — Startup §6 stepper `+`: 最大重试次数 (`crash_max_retries`).
+    IncCrashMaxRetries,
+    /// M1d — Startup §6 stepper `−`: 最大重试次数 (`crash_max_retries`).
+    DecCrashMaxRetries,
+    /// M1d — Startup §6 stepper `+`: 崩溃窗口（秒）(`crash_window_secs`).
+    IncCrashWindowSecs,
+    /// M1d — Startup §6 stepper `−`: 崩溃窗口（秒）(`crash_window_secs`).
+    DecCrashWindowSecs,
+    /// M1d — Startup §6 toggle: 休眠安全恢复
+    /// (`safe_start_after_hibernation`). Gates the hibernate slider below.
+    ToggleSafeStartHibernation,
+    /// M1d — Startup §6 hibernate slider drag (恢复延迟 ms). Carries the
+    /// quantized client `x` for the dispatcher's track-x→value map.
+    DragHibernateDelay(i32),
 }
 
 /// Resolve a click point against the settings overlay layout.
@@ -815,69 +820,83 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     if x >= watch_box.x && x < watch_box.right() && y >= watch_box.y && y < watch_box.bottom() {
         return SettingsHit::EditWatchValues;
     }
-    // Round-2 M3 — advanced section. Rows 0/1/4 carry right-anchored toggle
-    // rockers; rows 2/3 carry number-input steppers (− value +); row 5 carries
-    // a horizontal slider. Hit-test ordering: toggle hits first (smallest
-    // rects), then steppers, then slider track.
-    for index in [0u8, 1, 4] {
-        let hit = bento_nano_app::settings_panel::settings_advanced_toggle_hit_rect(
+    // M1d — Performance §5: 3 SliderRows (no conditionals). The slider track
+    // band sits on the lower line of each row; a click anywhere on it starts
+    // a drag carrying the quantized client x for the dispatcher's
+    // track-x→value map.
+    for index in 0..bento_nano_app::settings_panel::SETTINGS_PERF_ROW_COUNT {
+        let track = bento_nano_app::settings_panel::settings_performance_slider_rect(
             vp, scroll_y, index,
         );
-        if x >= hit.x && x < hit.right() && y >= hit.y && y < hit.bottom() {
-            return match index {
-                0 => SettingsHit::ToggleAdvancedStartup,
-                1 => SettingsHit::ToggleMagnetSwitchHint,
-                4 => SettingsHit::ToggleZoneLayoutSection,
-                _ => SettingsHit::Body,
+        if x >= track.x && x < track.right() && y >= track.y && y < track.bottom() {
+            return SettingsHit::DragPerformanceSlider {
+                index,
+                x_q: x.round() as i32,
             };
         }
     }
-    for index in [2u8, 3] {
-        let plus = bento_nano_app::settings_panel::settings_advanced_num_plus_rect(
-            vp, scroll_y, index,
-        );
-        if x >= plus.x && x < plus.right() && y >= plus.y && y < plus.bottom() {
-            return match index {
-                2 => SettingsHit::IncMaxMagnetCount,
-                3 => SettingsHit::IncMagnetDuration,
-                _ => SettingsHit::Body,
-            };
+    // M1d — Startup §6. Two always-on toggles, two conditional steppers
+    // (crash_restart), one always-on toggle, one conditional slider
+    // (hibernation). The two gating bools are read from AppState so the
+    // hit-test geometry matches whatever rows are currently painted.
+    let crash_restart_on = app.crash_restart_enabled.get();
+    let safe_start_on = app.safe_start_after_hibernation.get();
+    // 高优先级启动 toggle (row 0).
+    let high_row =
+        bento_nano_app::settings_panel::settings_startup_high_priority_row_rect(vp, scroll_y);
+    let high_hit = bento_nano_app::settings_panel::settings_startup_toggle_hit_rect(high_row);
+    if x >= high_hit.x && x < high_hit.right() && y >= high_hit.y && y < high_hit.bottom() {
+        return SettingsHit::ToggleStartupHighPriority;
+    }
+    // 崩溃自动重启 toggle (row 1).
+    let crash_row =
+        bento_nano_app::settings_panel::settings_crash_restart_row_rect(vp, scroll_y);
+    let crash_hit = bento_nano_app::settings_panel::settings_startup_toggle_hit_rect(crash_row);
+    if x >= crash_hit.x && x < crash_hit.right() && y >= crash_hit.y && y < crash_hit.bottom() {
+        return SettingsHit::ToggleCrashRestart;
+    }
+    // Crash steppers (rows 2/3) — only when crash_restart_on.
+    if crash_restart_on {
+        let retries_row =
+            bento_nano_app::settings_panel::settings_crash_max_retries_row_rect(vp, scroll_y);
+        let r_plus = bento_nano_app::settings_panel::settings_stepper_plus_rect(retries_row);
+        if x >= r_plus.x && x < r_plus.right() && y >= r_plus.y && y < r_plus.bottom() {
+            return SettingsHit::IncCrashMaxRetries;
         }
-        let minus = bento_nano_app::settings_panel::settings_advanced_num_minus_rect(
-            vp, scroll_y, index,
-        );
-        if x >= minus.x && x < minus.right() && y >= minus.y && y < minus.bottom() {
-            return match index {
-                2 => SettingsHit::DecMaxMagnetCount,
-                3 => SettingsHit::DecMagnetDuration,
-                _ => SettingsHit::Body,
-            };
+        let r_minus = bento_nano_app::settings_panel::settings_stepper_minus_rect(retries_row);
+        if x >= r_minus.x && x < r_minus.right() && y >= r_minus.y && y < r_minus.bottom() {
+            return SettingsHit::DecCrashMaxRetries;
+        }
+        let window_row =
+            bento_nano_app::settings_panel::settings_crash_window_row_rect(vp, scroll_y);
+        let w_plus = bento_nano_app::settings_panel::settings_stepper_plus_rect(window_row);
+        if x >= w_plus.x && x < w_plus.right() && y >= w_plus.y && y < w_plus.bottom() {
+            return SettingsHit::IncCrashWindowSecs;
+        }
+        let w_minus = bento_nano_app::settings_panel::settings_stepper_minus_rect(window_row);
+        if x >= w_minus.x && x < w_minus.right() && y >= w_minus.y && y < w_minus.bottom() {
+            return SettingsHit::DecCrashWindowSecs;
         }
     }
-    let slider = bento_nano_app::settings_panel::settings_advanced_slider_rect(vp, scroll_y);
-    if x >= slider.x && x < slider.right() && y >= slider.y && y < slider.bottom() {
-        return SettingsHit::DragBarCountDisplay(x.round() as i32);
+    // 休眠安全恢复 toggle (row 4) — Y depends on crash_restart_on.
+    let safe_row = bento_nano_app::settings_panel::settings_safe_start_row_rect(
+        vp,
+        scroll_y,
+        crash_restart_on,
+    );
+    let safe_hit = bento_nano_app::settings_panel::settings_startup_toggle_hit_rect(safe_row);
+    if x >= safe_hit.x && x < safe_hit.right() && y >= safe_hit.y && y < safe_hit.bottom() {
+        return SettingsHit::ToggleSafeStartHibernation;
     }
-    // Round-2 M3 — overlay section (重叠版本 + 装备状态 + 磁条状态).
-    let version_box =
-        bento_nano_app::settings_panel::settings_overlay_version_input_rect(vp, scroll_y);
-    if x >= version_box.x
-        && x < version_box.right()
-        && y >= version_box.y
-        && y < version_box.bottom()
-    {
-        return SettingsHit::EditOverlayVersion;
-    }
-    for index in 1..bento_nano_app::settings_panel::SETTINGS_OVERLAY_ROW_COUNT {
-        let pill = bento_nano_app::settings_panel::settings_overlay_state_pill_rect(
-            vp, scroll_y, index,
+    // 恢复延迟 hibernate slider (row 5) — only when safe_start_on.
+    if safe_start_on {
+        let track = bento_nano_app::settings_panel::settings_hibernate_slider_rect(
+            vp,
+            scroll_y,
+            crash_restart_on,
         );
-        if x >= pill.x && x < pill.right() && y >= pill.y && y < pill.bottom() {
-            return match index {
-                1 => SettingsHit::ToggleEquipmentState,
-                2 => SettingsHit::ToggleMagnetState,
-                _ => SettingsHit::Body,
-            };
+        if x >= track.x && x < track.right() && y >= track.y && y < track.bottom() {
+            return SettingsHit::DragHibernateDelay(x.round() as i32);
         }
     }
     SettingsHit::Body

@@ -41,6 +41,50 @@ use crate::{
     dispatcher::PaletteTarget,
 };
 
+// ── M1d 2026-05-29 — Performance §5 + Startup management §6 bounds ──────
+// Min/max/step lifted 1:1 from Tauri `SettingsPanel.tsx:601-698`. Stored as
+// `pub const` so geometry (`settings_panel.rs`), the shell dispatch
+// (`main.rs`), and unit tests share one source of truth and never drift.
+
+/// 展开延迟 / Expand Delay — `SettingsPanel.tsx:607-609`.
+pub const EXPAND_DELAY_MIN_MS: i32 = 50;
+pub const EXPAND_DELAY_MAX_MS: i32 = 500;
+pub const EXPAND_DELAY_STEP_MS: i32 = 10;
+/// 收起延迟 / Collapse Delay — `SettingsPanel.tsx:616-618`.
+pub const COLLAPSE_DELAY_MIN_MS: i32 = 100;
+pub const COLLAPSE_DELAY_MAX_MS: i32 = 1000;
+pub const COLLAPSE_DELAY_STEP_MS: i32 = 50;
+/// 图标缓存大小 / Icon Cache Size — `SettingsPanel.tsx:625-627`.
+pub const ICON_CACHE_MIN: i32 = 100;
+pub const ICON_CACHE_MAX: i32 = 2000;
+pub const ICON_CACHE_STEP: i32 = 100;
+/// 最大重试次数 / Max Retries — `SettingsPanel.tsx:657-658`.
+pub const CRASH_MAX_RETRIES_MIN: i32 = 1;
+pub const CRASH_MAX_RETRIES_MAX: i32 = 10;
+/// 崩溃窗口（秒）/ Crash Window (s) — `SettingsPanel.tsx:670-671`.
+pub const CRASH_WINDOW_SECS_MIN: i32 = 5;
+pub const CRASH_WINDOW_SECS_MAX: i32 = 60;
+/// 恢复延迟 / Resume Delay — `SettingsPanel.tsx:691-693`.
+pub const HIBERNATE_DELAY_MIN_MS: i32 = 500;
+pub const HIBERNATE_DELAY_MAX_MS: i32 = 5000;
+pub const HIBERNATE_DELAY_STEP_MS: i32 = 100;
+
+/// M1d — map a slider track fraction `[0,1]` to a stepped value in
+/// `[min, max]`, snapped to `step` and clamped. Pure helper shared by the
+/// drag-dispatch arms; keeps the quantization unit-testable away from the
+/// shell. `step` must be > 0 (all call sites pass a positive const); a
+/// non-positive step degrades to a plain clamp so the function stays
+/// panic-free.
+pub fn slider_fraction_to_value(frac: f32, min: i32, max: i32, step: i32) -> i32 {
+    let frac = frac.clamp(0.0, 1.0);
+    let raw = min as f32 + frac * (max - min) as f32;
+    if step <= 0 {
+        return (raw.round() as i32).clamp(min, max);
+    }
+    let steps = ((raw - min as f32) / step as f32).round() as i32;
+    (min + steps * step).clamp(min, max)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsEncryptionMode {
     None,
@@ -68,10 +112,11 @@ pub enum PassphraseEntryPurpose {
 /// when the panel opens. Cancel/Escape/Close × replay this back onto the
 /// `AppState` Cells so a mid-edit dismissal never leaks into the vault.
 ///
-/// Today this only covers the 5 General toggles (Tauri parity scope). Later
-/// milestones (Performance sliders, Startup management, etc.) extend this
-/// struct with additional fields; `snapshot_settings`/`restore_settings`
-/// stay the single round-trip surface.
+/// M1d 2026-05-29 — extended past the 5 General toggles to cover the
+/// Performance (3 sliders) + Startup-management (2 toggles + 2 steppers +
+/// 1 toggle + 1 slider) sections. All these fields are Save-gated (NOT
+/// immediate), so Cancel must revert them; `snapshot_settings`/
+/// `restore_settings` stay the single round-trip surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsSnapshot {
     pub ghost_layer_enabled: bool,
@@ -79,6 +124,17 @@ pub struct SettingsSnapshot {
     pub show_in_taskbar: bool,
     pub auto_group_enabled: bool,
     pub portable_mode: bool,
+    // M1d — Performance section (§5).
+    pub expand_delay_ms: i32,
+    pub collapse_delay_ms: i32,
+    pub icon_cache_size: i32,
+    // M1d — Startup management section (§6).
+    pub startup_high_priority: bool,
+    pub crash_restart_enabled: bool,
+    pub crash_max_retries: i32,
+    pub crash_window_secs: i32,
+    pub safe_start_after_hibernation: bool,
+    pub hibernate_resume_delay_ms: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,24 +438,43 @@ pub struct AppState {
     /// Round-2 M2 — 监控值 draft multi-line buffer for the watch-paths
     /// textarea. One path per line. Persists on Save (M4).
     pub watch_paths_draft: RefCell<SmolStr>,
-    /// Round-2 M3 — 高级洗脑启动 toggle. Default off.
-    pub setting_advanced_startup: Cell<bool>,
-    /// Round-2 M3 — 磁吸切换提示 toggle. Default on.
-    pub setting_magnet_switch_hint: Cell<bool>,
-    /// Round-2 M3 — 最大磁吸次数 (number, clamped 1..=10). Default 3.
-    pub setting_max_magnet_count: Cell<i32>,
-    /// Round-2 M3 — 磁吸时间 in seconds (number, clamped 1..=30). Default 10.
-    pub setting_magnet_duration_s: Cell<i32>,
-    /// Round-2 M3 — 快捷区分布段 toggle. Default on.
-    pub setting_zone_layout_section: Cell<bool>,
-    /// Round-2 M3 — 致敬时长 in ms, driven by a slider (500..=5000). Default 2000.
-    pub setting_bar_count_display_ms: Cell<i32>,
-    /// Round-2 M3 — 重叠版本 (architecture version label / draft).
-    pub overlay_version_draft: RefCell<SmolStr>,
-    /// Round-2 M3 — 装备状态 toggle. Default true (already-on indicator).
-    pub equipment_state_enabled: Cell<bool>,
-    /// Round-2 M3 — 磁吸状态 toggle. Default true.
-    pub magnet_state_enabled: Cell<bool>,
+    /// M1d 2026-05-29 — Performance §5 slider: 展开延迟 / Expand Delay in ms
+    /// (50..=500, step 10). Save-gated; reverted by Cancel. Deliberately
+    /// produced here to unblock the M3 animation milestone — named exactly
+    /// per `SettingsPanel.tsx:606`. Tauri default 150.
+    pub expand_delay_ms: Cell<i32>,
+    /// M1d — Performance §5 slider: 收起延迟 / Collapse Delay in ms
+    /// (100..=1000, step 50). Tauri default 300 (`SettingsPanel.tsx:615`).
+    /// Also unblocks the M3 animation milestone.
+    pub collapse_delay_ms: Cell<i32>,
+    /// M1d — Performance §5 slider: 图标缓存大小 / Icon Cache Size
+    /// (100..=2000, step 100, no unit). Tauri default 500
+    /// (`SettingsPanel.tsx:624`).
+    pub icon_cache_size: Cell<i32>,
+    /// M1d — Startup management §6 toggle: 高优先级启动 / High Priority
+    /// Startup (always shown). Tauri default off (`SettingsPanel.tsx:639`).
+    pub startup_high_priority: Cell<bool>,
+    /// M1d — Startup management §6 toggle: 崩溃自动重启 / Crash Auto Restart
+    /// (always shown). Gates the two crash steppers below. Tauri default on
+    /// (`SettingsPanel.tsx:646`).
+    pub crash_restart_enabled: Cell<bool>,
+    /// M1d — Startup management §6 stepper: 最大重试次数 / Max Retries
+    /// (1..=10), shown only when `crash_restart_enabled`. Tauri default 3
+    /// (`SettingsPanel.tsx:659`).
+    pub crash_max_retries: Cell<i32>,
+    /// M1d — Startup management §6 stepper: 崩溃窗口（秒）/ Crash Window (s)
+    /// (5..=60), shown only when `crash_restart_enabled`. Tauri default 60
+    /// (`SettingsPanel.tsx:672`).
+    pub crash_window_secs: Cell<i32>,
+    /// M1d — Startup management §6 toggle: 休眠安全恢复 / Safe Start After
+    /// Hibernation (always shown). Gates the hibernate slider below. Tauri
+    /// default on (`SettingsPanel.tsx:682`).
+    pub safe_start_after_hibernation: Cell<bool>,
+    /// M1d — Startup management §6 slider: 恢复延迟 / Resume Delay in ms
+    /// (500..=5000, step 100), shown only when
+    /// `safe_start_after_hibernation`. Tauri default 2000
+    /// (`SettingsPanel.tsx:690`).
+    pub hibernate_resume_delay_ms: Cell<i32>,
     /// Updater check cadence restored from `updates.check_frequency`.
     /// Mutated only by selected-stack Settings controls that first persist
     /// through `Command::SetSetting`.
@@ -683,15 +758,15 @@ impl AppState {
             source_public_enabled: Cell::new(false),
             desktop_path_draft: RefCell::new(SmolStr::new_static("D:\\Desktop")),
             watch_paths_draft: RefCell::new(SmolStr::default()),
-            setting_advanced_startup: Cell::new(false),
-            setting_magnet_switch_hint: Cell::new(true),
-            setting_max_magnet_count: Cell::new(3),
-            setting_magnet_duration_s: Cell::new(10),
-            setting_zone_layout_section: Cell::new(true),
-            setting_bar_count_display_ms: Cell::new(2000),
-            overlay_version_draft: RefCell::new(SmolStr::new_static("1.1")),
-            equipment_state_enabled: Cell::new(true),
-            magnet_state_enabled: Cell::new(true),
+            expand_delay_ms: Cell::new(150),
+            collapse_delay_ms: Cell::new(300),
+            icon_cache_size: Cell::new(500),
+            startup_high_priority: Cell::new(false),
+            crash_restart_enabled: Cell::new(true),
+            crash_max_retries: Cell::new(3),
+            crash_window_secs: Cell::new(60),
+            safe_start_after_hibernation: Cell::new(true),
+            hibernate_resume_delay_ms: Cell::new(2000),
             update_check_frequency: Cell::new(UpdateCheckFrequency::Weekly),
             update_auto_download: Cell::new(true),
             settings_updater_status: RefCell::new(SettingsUpdaterStatus::Idle),
@@ -781,6 +856,15 @@ impl AppState {
             show_in_taskbar: self.setting_show_in_taskbar.get(),
             auto_group_enabled: self.setting_smart_layout.get(),
             portable_mode: self.setting_portable_mode.get(),
+            expand_delay_ms: self.expand_delay_ms.get(),
+            collapse_delay_ms: self.collapse_delay_ms.get(),
+            icon_cache_size: self.icon_cache_size.get(),
+            startup_high_priority: self.startup_high_priority.get(),
+            crash_restart_enabled: self.crash_restart_enabled.get(),
+            crash_max_retries: self.crash_max_retries.get(),
+            crash_window_secs: self.crash_window_secs.get(),
+            safe_start_after_hibernation: self.safe_start_after_hibernation.get(),
+            hibernate_resume_delay_ms: self.hibernate_resume_delay_ms.get(),
         }
     }
 
@@ -794,6 +878,17 @@ impl AppState {
         self.setting_show_in_taskbar.set(snap.show_in_taskbar);
         self.setting_smart_layout.set(snap.auto_group_enabled);
         self.setting_portable_mode.set(snap.portable_mode);
+        self.expand_delay_ms.set(snap.expand_delay_ms);
+        self.collapse_delay_ms.set(snap.collapse_delay_ms);
+        self.icon_cache_size.set(snap.icon_cache_size);
+        self.startup_high_priority.set(snap.startup_high_priority);
+        self.crash_restart_enabled.set(snap.crash_restart_enabled);
+        self.crash_max_retries.set(snap.crash_max_retries);
+        self.crash_window_secs.set(snap.crash_window_secs);
+        self.safe_start_after_hibernation
+            .set(snap.safe_start_after_hibernation);
+        self.hibernate_resume_delay_ms
+            .set(snap.hibernate_resume_delay_ms);
     }
 
     pub fn active_theme_palette(&self) -> PaletteTokens {
@@ -1198,6 +1293,16 @@ mod tests {
         app.setting_show_in_taskbar.set(false);
         app.setting_smart_layout.set(false);
         app.setting_portable_mode.set(true);
+        // M1d — set the 9 Performance/Startup fields to non-default values too.
+        app.expand_delay_ms.set(200);
+        app.collapse_delay_ms.set(400);
+        app.icon_cache_size.set(900);
+        app.startup_high_priority.set(true);
+        app.crash_restart_enabled.set(false);
+        app.crash_max_retries.set(7);
+        app.crash_window_secs.set(45);
+        app.safe_start_after_hibernation.set(false);
+        app.hibernate_resume_delay_ms.set(3500);
 
         let snap = app.snapshot_settings();
         assert_eq!(
@@ -1208,6 +1313,15 @@ mod tests {
                 show_in_taskbar: false,
                 auto_group_enabled: false,
                 portable_mode: true,
+                expand_delay_ms: 200,
+                collapse_delay_ms: 400,
+                icon_cache_size: 900,
+                startup_high_priority: true,
+                crash_restart_enabled: false,
+                crash_max_retries: 7,
+                crash_window_secs: 45,
+                safe_start_after_hibernation: false,
+                hibernate_resume_delay_ms: 3500,
             }
         );
 
@@ -1217,6 +1331,15 @@ mod tests {
         app.setting_show_in_taskbar.set(true);
         app.setting_smart_layout.set(true);
         app.setting_portable_mode.set(false);
+        app.expand_delay_ms.set(50);
+        app.collapse_delay_ms.set(100);
+        app.icon_cache_size.set(100);
+        app.startup_high_priority.set(false);
+        app.crash_restart_enabled.set(true);
+        app.crash_max_retries.set(1);
+        app.crash_window_secs.set(5);
+        app.safe_start_after_hibernation.set(true);
+        app.hibernate_resume_delay_ms.set(500);
 
         app.restore_settings(&snap);
 
@@ -1225,6 +1348,16 @@ mod tests {
         assert!(!app.setting_show_in_taskbar.get());
         assert!(!app.setting_smart_layout.get());
         assert!(app.setting_portable_mode.get());
+        // M1d — the 9 new fields round-trip through snapshot → restore.
+        assert_eq!(app.expand_delay_ms.get(), 200);
+        assert_eq!(app.collapse_delay_ms.get(), 400);
+        assert_eq!(app.icon_cache_size.get(), 900);
+        assert!(app.startup_high_priority.get());
+        assert!(!app.crash_restart_enabled.get());
+        assert_eq!(app.crash_max_retries.get(), 7);
+        assert_eq!(app.crash_window_secs.get(), 45);
+        assert!(!app.safe_start_after_hibernation.get());
+        assert_eq!(app.hibernate_resume_delay_ms.get(), 3500);
     }
 
     /// M1a 2026-05-29 — the Cancel/Escape/Close × path stashes the snapshot in
@@ -1243,6 +1376,15 @@ mod tests {
             show_in_taskbar: false,
             auto_group_enabled: true,
             portable_mode: true,
+            expand_delay_ms: 150,
+            collapse_delay_ms: 300,
+            icon_cache_size: 500,
+            startup_high_priority: false,
+            crash_restart_enabled: true,
+            crash_max_retries: 3,
+            crash_window_secs: 60,
+            safe_start_after_hibernation: true,
+            hibernate_resume_delay_ms: 2000,
         };
         app.settings_snapshot.borrow_mut().replace(snap);
         assert_eq!(app.settings_snapshot.borrow().as_ref(), Some(&snap));
@@ -1253,6 +1395,111 @@ mod tests {
             app.settings_snapshot.borrow().is_none(),
             "after take() the slot must be empty so cancel can't replay a stale snapshot"
         );
+    }
+
+    /// M1d 2026-05-29 — `slider_fraction_to_value` maps a track fraction to a
+    /// stepped, clamped value. Pin the endpoints + snapping for each of the 4
+    /// slider ranges so a drag can never produce an off-grid / out-of-range
+    /// value. (Tauri min/max/step from `SettingsPanel.tsx:601-698`.)
+    #[test]
+    fn m1d_slider_fraction_clamps_and_snaps_to_step() {
+        // Expand delay 50..500 step 10.
+        assert_eq!(
+            slider_fraction_to_value(0.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            50
+        );
+        assert_eq!(
+            slider_fraction_to_value(1.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            500
+        );
+        // Below 0 / above 1 saturate at the endpoints (never out of range).
+        assert_eq!(
+            slider_fraction_to_value(-5.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            50
+        );
+        assert_eq!(
+            slider_fraction_to_value(9.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            500
+        );
+        // Midpoint snaps to the nearest 10-step. (50 + 0.5*450 = 275 → 280).
+        let mid = slider_fraction_to_value(
+            0.5,
+            EXPAND_DELAY_MIN_MS,
+            EXPAND_DELAY_MAX_MS,
+            EXPAND_DELAY_STEP_MS,
+        );
+        assert_eq!(mid % EXPAND_DELAY_STEP_MS, 0, "value must snap to step");
+        assert!((EXPAND_DELAY_MIN_MS..=EXPAND_DELAY_MAX_MS).contains(&mid));
+
+        // Collapse delay 100..1000 step 50 — every output is a 50-multiple.
+        for n in 0..=10 {
+            let f = n as f32 / 10.0;
+            let v = slider_fraction_to_value(
+                f,
+                COLLAPSE_DELAY_MIN_MS,
+                COLLAPSE_DELAY_MAX_MS,
+                COLLAPSE_DELAY_STEP_MS,
+            );
+            assert_eq!((v - COLLAPSE_DELAY_MIN_MS) % COLLAPSE_DELAY_STEP_MS, 0);
+            assert!((COLLAPSE_DELAY_MIN_MS..=COLLAPSE_DELAY_MAX_MS).contains(&v));
+        }
+
+        // Icon cache 100..2000 step 100.
+        assert_eq!(
+            slider_fraction_to_value(0.0, ICON_CACHE_MIN, ICON_CACHE_MAX, ICON_CACHE_STEP),
+            100
+        );
+        assert_eq!(
+            slider_fraction_to_value(1.0, ICON_CACHE_MIN, ICON_CACHE_MAX, ICON_CACHE_STEP),
+            2000
+        );
+
+        // Hibernate delay 500..5000 step 100.
+        assert_eq!(
+            slider_fraction_to_value(0.0, HIBERNATE_DELAY_MIN_MS, HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_STEP_MS),
+            500
+        );
+        assert_eq!(
+            slider_fraction_to_value(1.0, HIBERNATE_DELAY_MIN_MS, HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_STEP_MS),
+            5000
+        );
+
+        // step <= 0 degrades to a plain clamp (panic-free), never out of range.
+        assert_eq!(slider_fraction_to_value(0.5, 1, 10, 0), 6);
+        assert_eq!(slider_fraction_to_value(-1.0, 1, 10, 0), 1);
+        assert_eq!(slider_fraction_to_value(2.0, 1, 10, 0), 10);
+    }
+
+    /// M1d 2026-05-29 — the crash steppers + sliders default to in-range Tauri
+    /// values and the bounds are the exact Tauri min/max. Pin the defaults so a
+    /// future edit cannot silently seed an out-of-range Cell (which the panel
+    /// would then clamp on first paint, hiding the drift).
+    #[test]
+    fn m1d_perf_startup_defaults_in_range() {
+        let app = AppState::new();
+        assert!(
+            (EXPAND_DELAY_MIN_MS..=EXPAND_DELAY_MAX_MS).contains(&app.expand_delay_ms.get())
+        );
+        assert!(
+            (COLLAPSE_DELAY_MIN_MS..=COLLAPSE_DELAY_MAX_MS)
+                .contains(&app.collapse_delay_ms.get())
+        );
+        assert!((ICON_CACHE_MIN..=ICON_CACHE_MAX).contains(&app.icon_cache_size.get()));
+        assert!(
+            (CRASH_MAX_RETRIES_MIN..=CRASH_MAX_RETRIES_MAX)
+                .contains(&app.crash_max_retries.get())
+        );
+        assert!(
+            (CRASH_WINDOW_SECS_MIN..=CRASH_WINDOW_SECS_MAX)
+                .contains(&app.crash_window_secs.get())
+        );
+        assert!(
+            (HIBERNATE_DELAY_MIN_MS..=HIBERNATE_DELAY_MAX_MS)
+                .contains(&app.hibernate_resume_delay_ms.get())
+        );
+        // Bounds match Tauri exactly.
+        assert_eq!((CRASH_MAX_RETRIES_MIN, CRASH_MAX_RETRIES_MAX), (1, 10));
+        assert_eq!((CRASH_WINDOW_SECS_MIN, CRASH_WINDOW_SECS_MAX), (5, 60));
     }
 
     #[test]

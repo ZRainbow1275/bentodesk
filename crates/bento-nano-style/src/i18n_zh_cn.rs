@@ -171,18 +171,11 @@ pub mod ids {
     pub const SOURCE_PUBLIC_LABEL: StringId = StringId(125);
     pub const WATCH_HINT_LINE_EACH: StringId = StringId(126);
 
-    // 127..139 Round-2 M3 — 中段 advanced section + 重叠版本 + 装备状态.
-    pub const SECTION_ADVANCED: StringId = StringId(127);
-    pub const ROW_ADVANCED_STARTUP: StringId = StringId(128);
-    pub const ROW_MAGNET_SWITCH_HINT: StringId = StringId(129);
-    pub const ROW_MAX_MAGNET_COUNT: StringId = StringId(130);
-    pub const ROW_MAGNET_DURATION: StringId = StringId(131);
-    pub const ROW_ZONE_LAYOUT_SECTION: StringId = StringId(132);
-    pub const ROW_BAR_COUNT_DISPLAY: StringId = StringId(133);
-    pub const SECTION_OVERLAY_VERSION: StringId = StringId(134);
-    pub const ROW_OVERLAY_VERSION: StringId = StringId(135);
-    pub const ROW_EQUIPMENT_STATE: StringId = StringId(136);
-    pub const ROW_MAGNET_STATE: StringId = StringId(137);
+    // 127..138 M1d (2026-05-29) — orphan slots. The bespoke 高级 +
+    // 未来集成验证 sections (nano-only, absent from Tauri) were deleted in
+    // M1d; their 11 ids 127..=137 are blanked to "" in BOTH tables (slots
+    // kept so `lookup_tables_have_matching_length` + every id 0..N reference
+    // stays stable) and their `pub const` names removed (no live reference).
     pub const STATE_ENABLED_PILL: StringId = StringId(138);
     pub const STATE_DISABLED_PILL: StringId = StringId(139);
     // 140 Wave I-α / R14 (2026-05-25) — row caption for the 3-radio
@@ -198,6 +191,27 @@ pub mod ids {
     // to preserve numbering lockstep with `i18n_en_us`; readers must
     // reference 141 going forward.
     pub const SETTING_PORTABLE_MODE: StringId = StringId(141);
+
+    // 142..156 M1d (2026-05-29) — Performance §5 + Startup management §6.
+    // Appended in lockstep with `i18n_en_us` (same index, same order) per the
+    // positional-array contract. These replace the deleted 高级/未来集成验证
+    // strings with the genuine Tauri sections (`SettingsPanel.tsx:601-698`).
+    // Performance group (142..146).
+    pub const SETTINGS_GROUP_PERFORMANCE: StringId = StringId(142);
+    pub const SETTING_EXPAND_DELAY: StringId = StringId(143);
+    pub const SETTING_COLLAPSE_DELAY: StringId = StringId(144);
+    pub const SETTING_ICON_CACHE_SIZE: StringId = StringId(145);
+    // Startup management group (146..156).
+    pub const SETTINGS_GROUP_STARTUP: StringId = StringId(146);
+    pub const SETTING_STARTUP_HIGH_PRIORITY: StringId = StringId(147);
+    pub const SETTING_STARTUP_HIGH_PRIORITY_DESC: StringId = StringId(148);
+    pub const SETTING_CRASH_RESTART: StringId = StringId(149);
+    pub const SETTING_CRASH_RESTART_DESC: StringId = StringId(150);
+    pub const SETTING_CRASH_MAX_RETRIES: StringId = StringId(151);
+    pub const SETTING_CRASH_WINDOW_SECS: StringId = StringId(152);
+    pub const SETTING_SAFE_START_HIBERNATION: StringId = StringId(153);
+    pub const SETTING_SAFE_START_HIBERNATION_DESC: StringId = StringId(154);
+    pub const SETTING_HIBERNATE_DELAY: StringId = StringId(155);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -360,23 +374,42 @@ pub static ZH_CN: LookupTable = LookupTable {
         "海桌面",                // SOURCE_PRIMARY_LABEL (124)
         "公共桌面",              // SOURCE_PUBLIC_LABEL (125)
         "每行一个",              // WATCH_HINT_LINE_EACH (126)
-        // 127..139 Round-2 M3 — 中段 advanced section + 重叠版本 + 装备状态.
-        "高级",                  // SECTION_ADVANCED (127)
-        "高级洗脑启动",          // ROW_ADVANCED_STARTUP (128)
-        "磁吸切换提示",          // ROW_MAGNET_SWITCH_HINT (129)
-        "最大磁吸次数",          // ROW_MAX_MAGNET_COUNT (130)
-        "磁吸时间 (秒)",         // ROW_MAGNET_DURATION (131)
-        "快捷区分布段",          // ROW_ZONE_LAYOUT_SECTION (132)
-        "致敬时长",              // ROW_BAR_COUNT_DISPLAY (133)
-        "未来集成验证",          // SECTION_OVERLAY_VERSION (134)
-        "架构版本",              // ROW_OVERLAY_VERSION (135)
-        "装备状态",              // ROW_EQUIPMENT_STATE (136)
-        "磁吸状态",              // ROW_MAGNET_STATE (137)
+        // 127..138 M1d (2026-05-29) — orphan slots. The bespoke 高级 +
+        // 未来集成验证 sections were deleted; their 11 strings are blanked to
+        // "" to keep zh-CN/en-US index lockstep. No live code references
+        // ids 127..=137.
+        "", // (127) — orphan (was SECTION_ADVANCED)
+        "", // (128) — orphan
+        "", // (129) — orphan
+        "", // (130) — orphan
+        "", // (131) — orphan
+        "", // (132) — orphan
+        "", // (133) — orphan
+        "", // (134) — orphan
+        "", // (135) — orphan
+        "", // (136) — orphan
+        "", // (137) — orphan
         "已启用",                // STATE_ENABLED_PILL (138)
         "未启用",                // STATE_DISABLED_PILL (139)
         // 140 Wave I-α / R14 — picker row caption.
         "默认显示模式",          // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
         // 141 M1a (2026-05-29) — General section row 5 (Tauri parity).
         "便携模式 (需要重启)",   // SETTING_PORTABLE_MODE (141)
+        // 142..146 M1d — Performance §5 (`SettingsPanel.tsx:601-631`).
+        "性能",                  // SETTINGS_GROUP_PERFORMANCE (142)
+        "展开延迟",              // SETTING_EXPAND_DELAY (143)
+        "收起延迟",              // SETTING_COLLAPSE_DELAY (144)
+        "图标缓存大小",          // SETTING_ICON_CACHE_SIZE (145)
+        // 146..156 M1d — Startup management §6 (`SettingsPanel.tsx:634-698`).
+        "启动管理",              // SETTINGS_GROUP_STARTUP (146)
+        "高优先级启动",          // SETTING_STARTUP_HIGH_PRIORITY (147)
+        "以高优先级启动以获得更快的响应", // SETTING_STARTUP_HIGH_PRIORITY_DESC (148)
+        "崩溃自动重启",          // SETTING_CRASH_RESTART (149)
+        "崩溃后自动重新启动应用", // SETTING_CRASH_RESTART_DESC (150)
+        "最大重试次数",          // SETTING_CRASH_MAX_RETRIES (151)
+        "崩溃窗口（秒）",        // SETTING_CRASH_WINDOW_SECS (152)
+        "休眠安全恢复",          // SETTING_SAFE_START_HIBERNATION (153)
+        "从休眠恢复后安全启动",   // SETTING_SAFE_START_HIBERNATION_DESC (154)
+        "恢复延迟",              // SETTING_HIBERNATE_DELAY (155)
     ],
 };
