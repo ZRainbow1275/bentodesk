@@ -197,6 +197,18 @@ pub mod ids {
     pub const UPDATER_FREQ_WEEKLY: StringId = StringId(188);
     pub const UPDATER_FREQ_MANUAL: StringId = StringId(189);
     pub const UPDATER_AUTO_DOWNLOAD: StringId = StringId(190);
+
+    // 191..197 M1g (2026-05-29) — Backup §9 card (`BackupCard.tsx`).
+    // Mirror of the zh-CN ids at the SAME index (positional-array contract;
+    // `lookup_tables_have_matching_length` enforces parity). Tauri keys at
+    // `src/i18n/locales/en.ts:338-346`. `BACKUP_REFRESH` has no Tauri key (see
+    // the zh-CN note) — it's the nano explicit Refresh affordance.
+    pub const BACKUP_CARD_TITLE: StringId = StringId(191);
+    pub const BACKUP_CARD_DESCRIPTION: StringId = StringId(192);
+    pub const BACKUP_CREATE_NOW: StringId = StringId(193);
+    pub const BACKUP_REFRESH: StringId = StringId(194);
+    pub const BACKUP_RESTORE: StringId = StringId(195);
+    pub const BACKUP_EMPTY: StringId = StringId(196);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -427,5 +439,12 @@ pub static EN_US: LookupTable = LookupTable {
         "Weekly",                     // UPDATER_FREQ_WEEKLY (188)
         "Manual only",                // UPDATER_FREQ_MANUAL (189)
         "Silent background download", // UPDATER_AUTO_DOWNLOAD (190)
+        // 191..197 M1g — Backup §9 (`BackupCard.tsx`, en.ts:338-346).
+        "Settings Backup",            // BACKUP_CARD_TITLE (191)
+        "Keeps the last three settings.json snapshots so a bad migration can always be rolled back.", // BACKUP_CARD_DESCRIPTION (192)
+        "Backup now",                 // BACKUP_CREATE_NOW (193)
+        "Refresh",                    // BACKUP_REFRESH (194)
+        "Restore",                    // BACKUP_RESTORE (195)
+        "No backups yet",             // BACKUP_EMPTY (196)
     ],
 };

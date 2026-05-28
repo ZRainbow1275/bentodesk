@@ -1037,11 +1037,18 @@ pub struct SettingsBodyFlags {
     /// Updater §8 — which status family is live (drives version/progress/error
     /// block visibility, hence the card height).
     pub updater_kind: UpdaterHeightKind,
+    /// Backup §9 — number of backup rows the list paints (already capped at
+    /// [`SETTINGS_BACKUP_ROW_VISIBLE_MAX`] by the caller via
+    /// `backup_card::backup_visible_row_count`). The list is variable-length,
+    /// so its height grows one [`SETTINGS_BACKUP_ROW_H`] per visible row; an
+    /// empty list shows the single `backupEmpty` placeholder row instead.
+    pub backup_row_count: usize,
 }
 
 impl SettingsBodyFlags {
     /// Convenience constructor used by tests + call sites that only vary the
-    /// Startup/Stealth bools (updater idle). Keeps the common case terse.
+    /// Startup/Stealth bools (updater idle, no backups). Keeps the common case
+    /// terse; `with_backup_rows` layers the variable backup-list count on top.
     pub const fn new(
         crash_restart_enabled: bool,
         safe_start_after_hibernation: bool,
@@ -1055,7 +1062,17 @@ impl SettingsBodyFlags {
             stealth_has_retry,
             stealth_has_error,
             updater_kind,
+            backup_row_count: 0,
         }
+    }
+
+    /// M1g — return a copy with the Backup §9 visible-row count set. Builder
+    /// style keeps `new()`'s arity fixed (no clippy `too_many_arguments`
+    /// regression) while letting the shell + renderer feed the live capped
+    /// count into the dynamic body height + scroll clamp.
+    pub const fn with_backup_rows(mut self, backup_row_count: usize) -> Self {
+        self.backup_row_count = backup_row_count;
+        self
     }
 }
 
@@ -1073,6 +1090,7 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
         )
         + settings_stealth_content_height(flags.stealth_has_retry, flags.stealth_has_error)
         + settings_updater_content_height(flags.updater_kind)
+        + settings_backup_content_height(flags.backup_row_count)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -2137,6 +2155,204 @@ pub fn settings_updater_content_height(kind: UpdaterHeightKind) -> f32 {
         + SETTINGS_SECTION_GAP
 }
 
+// ── M1g 2026-05-29 — Backup §9 card (`BackupCard.tsx`) ──────────────────
+//
+// Sits AFTER Updater in the Tauri body order
+// (…→Stealth→Updater→Backup→Encryption→Plugins). Rows:
+//   title                              (always) — 设置备份
+//   description line                   (always)
+//   立即备份 button + Refresh button     (always)
+//   info/error line                    (only when settings_backup_status set)
+//   backup-list:
+//     N entry rows [file·size | 恢复]  (one per visible entry, capped)
+//     OR a single backupEmpty row       (when the list is empty)
+//
+// The list is variable-length: its height grows one `SETTINGS_BACKUP_ROW_H`
+// per visible row (capped at `SETTINGS_BACKUP_ROW_VISIBLE_MAX`), or a single
+// placeholder row when empty. The capped row count + the status-present flag
+// flow through `SettingsBodyFlags::backup_row_count` (built from
+// `backup_card::backup_visible_row_count`) so the dynamic height + scroll
+// clamp match what's painted. Geometry stays PURE — the count is passed in,
+// nothing reads global state. Encryption §10 + Plugins §11 follow in a later
+// chunk; this card leaves a trailing section gap for them.
+
+/// M1g — max backup rows the list paints / hit-tests. Reuses the plugins
+/// visible-cap rhythm (`SETTINGS_PLUGINS_ROW_VISIBLE_MAX`) so the compact
+/// overlay never runs the list off the body. Matches the (now superseded) K1
+/// `SETTINGS_BACKUP_ENTRY_VISIBLE_MAX` so the cap is unchanged from the K1
+/// shell the runtime replaced.
+pub const SETTINGS_BACKUP_ROW_VISIBLE_MAX: usize = 3;
+
+/// M1g — compact backup label/value/description row height (matches the
+/// Stealth/Updater 28-DIP status-line rhythm).
+pub const SETTINGS_BACKUP_ROW_H: f32 = 28.0;
+
+/// M1g — backup-list entry row height (file·size on the left, 恢复 button on
+/// the right).
+pub const SETTINGS_BACKUP_ENTRY_ROW_H: f32 = 30.0;
+
+/// M1g — gap between adjacent backup-list entry rows.
+pub const SETTINGS_BACKUP_ENTRY_ROW_GAP: f32 = 6.0;
+
+/// M1g — `立即备份 / Create now` button width (wider than a stepper so the
+/// bilingual label fits) and the smaller per-row 恢复 / Refresh button width.
+pub const SETTINGS_BACKUP_CREATE_BTN_W: f32 = 104.0;
+pub const SETTINGS_BACKUP_REFRESH_BTN_W: f32 = 84.0;
+pub const SETTINGS_BACKUP_RESTORE_BTN_W: f32 = 64.0;
+pub const SETTINGS_BACKUP_BTN_GAP_M1: f32 = 8.0;
+
+/// M1g — `设置备份 / Settings Backup` group title rect. Sits below the Updater
+/// section + a section gap. Takes the full flag set so its Y follows whatever
+/// Updater rows (status/version/progress/error + prefs) are currently visible.
+pub fn settings_backup_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    // The Updater section's last laid-out element is always the auto-download
+    // prefs row (always shown), so anchor off its bottom + a section gap.
+    let updater_bottom =
+        settings_updater_auto_download_row_rect(viewport, scroll_offset_y, flags).bottom();
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: updater_bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M1g — description line rect (一段说明文字). Row 0, always shown, below the
+/// title.
+pub fn settings_backup_description_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let label = settings_backup_label_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
+        height: SETTINGS_BACKUP_ROW_H,
+    }
+}
+
+/// M1g — actions row rect ([立即备份][刷新]). Always shown; below the
+/// description line.
+pub fn settings_backup_actions_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let desc = settings_backup_description_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: desc.x,
+        y: desc.bottom(),
+        width: desc.width,
+        height: SETTINGS_BACKUP_BTN_ROW_H,
+    }
+}
+
+/// M1g — actions row height (shares the footer button height, like the other
+/// card button rows).
+pub const SETTINGS_BACKUP_BTN_ROW_H: f32 = SETTINGS_FOOTER_BTN_H;
+
+/// M1g — `立即备份 / Create now` button rect (left), inside the actions row.
+pub fn settings_backup_create_button_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.x,
+        y: row.y + (row.height - SETTINGS_FOOTER_BTN_H) * 0.5,
+        width: SETTINGS_BACKUP_CREATE_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1g — `刷新 / Refresh` button rect (right of 立即备份), inside the actions
+/// row. Re-lists the backup files (`ListSettingsBackups`).
+pub fn settings_backup_refresh_button_rect(row: Rect) -> Rect {
+    let create = settings_backup_create_button_rect(row);
+    Rect {
+        x: create.right() + SETTINGS_BACKUP_BTN_GAP_M1,
+        y: create.y,
+        width: SETTINGS_BACKUP_REFRESH_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1g — info/error line rect. Only painted when `settings_backup_status` is
+/// set; below the actions row. Its presence does NOT change the list Y (the
+/// list anchors off this rect's reserved slot regardless) so the geometry
+/// stays a single linear chain — when no status is set the renderer simply
+/// skips painting here and the list still lines up because both branches
+/// anchor off `actions_row.bottom()`.
+pub fn settings_backup_status_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let actions = settings_backup_actions_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: actions.x,
+        y: actions.bottom() + 4.0,
+        width: actions.width,
+        height: SETTINGS_BACKUP_ROW_H,
+    }
+}
+
+/// M1g — backup-list entry row rect for visible `entry_index` (0-based,
+/// newest-first). Sits below the status line. When the list is empty the
+/// renderer paints a single `backupEmpty` placeholder at `entry_index = 0`.
+pub fn settings_backup_entry_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+    entry_index: usize,
+) -> Rect {
+    let status = settings_backup_status_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: status.x,
+        y: status.bottom()
+            + (SETTINGS_BACKUP_ENTRY_ROW_H + SETTINGS_BACKUP_ENTRY_ROW_GAP) * entry_index as f32,
+        width: status.width,
+        height: SETTINGS_BACKUP_ENTRY_ROW_H,
+    }
+}
+
+/// M1g — right-anchored `恢复 / Restore` button rect inside an entry row.
+pub fn settings_backup_restore_button_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.right() - SETTINGS_BACKUP_RESTORE_BTN_W,
+        y: row.y + (row.height - SETTINGS_FOOTER_BTN_H) * 0.5,
+        width: SETTINGS_BACKUP_RESTORE_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1g — height the Backup §9 card contributes to
+/// `settings_body_content_height`. The variable-length list makes it dynamic,
+/// so the (already-capped) `backup_row_count` is the parameter (geometry never
+/// reads global state). Always-present: title + description + actions +
+/// reserved status line. The list adds either `n` entry rows (+ inter-row
+/// gaps) or a single empty-placeholder row. A trailing section gap pads the
+/// body bottom (and reserves room for the §10/§11 chunk to come).
+pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
+    let base = SETTINGS_SECTION_LABEL_H
+        + SETTINGS_BACKUP_ROW_H            // description
+        + SETTINGS_BACKUP_BTN_ROW_H        // actions
+        + 4.0
+        + SETTINGS_BACKUP_ROW_H; // reserved status line
+    let rows = backup_row_count.min(SETTINGS_BACKUP_ROW_VISIBLE_MAX);
+    let list = if rows == 0 {
+        // Empty placeholder occupies one entry-row slot.
+        SETTINGS_BACKUP_ENTRY_ROW_H
+    } else {
+        SETTINGS_BACKUP_ENTRY_ROW_H * rows as f32
+            + SETTINGS_BACKUP_ENTRY_ROW_GAP * (rows as f32 - 1.0)
+    };
+    base + list + SETTINGS_SECTION_GAP
+}
+
 #[cfg(test)]
 mod m1_tests {
     use super::*;
@@ -2914,6 +3130,106 @@ mod m1d_tests {
         let c = a;
         assert_eq!(a, c);
         assert_ne!(a, b);
+    }
+
+    // ── M1g — Backup §9 geometry ───────────────────────────────────────
+
+    /// Backup flag baseline: both startup gates on (stable Updater Y) + the
+    /// updater idle (StatusOnly) so only the backup row count varies.
+    fn backup_flags(backup_rows: usize) -> SettingsBodyFlags {
+        SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly)
+            .with_backup_rows(backup_rows)
+    }
+
+    #[test]
+    fn m1g_backup_title_sits_below_updater_section() {
+        let v = vp();
+        let f = backup_flags(0);
+        let updater_bottom = settings_updater_auto_download_row_rect(v, 0.0, &f).bottom();
+        let title = settings_backup_label_rect(v, 0.0, &f);
+        // Title clears the Updater section by exactly the section gap.
+        assert!((title.y - updater_bottom - SETTINGS_SECTION_GAP).abs() < 0.01);
+        assert_eq!(title.height, SETTINGS_SECTION_LABEL_H);
+    }
+
+    #[test]
+    fn m1g_rows_stack_in_order_title_desc_actions_status_list() {
+        let v = vp();
+        let f = backup_flags(2);
+        let title = settings_backup_label_rect(v, 0.0, &f);
+        let desc = settings_backup_description_rect(v, 0.0, &f);
+        let actions = settings_backup_actions_row_rect(v, 0.0, &f);
+        let status = settings_backup_status_rect(v, 0.0, &f);
+        let entry0 = settings_backup_entry_row_rect(v, 0.0, &f, 0);
+        assert!((desc.y - title.bottom()).abs() < 0.01);
+        assert!((actions.y - desc.bottom()).abs() < 0.01);
+        assert!(status.y >= actions.bottom());
+        assert!(entry0.y >= status.bottom());
+    }
+
+    #[test]
+    fn m1g_create_and_refresh_buttons_pack_left_inside_actions_row() {
+        let v = vp();
+        let row = settings_backup_actions_row_rect(v, 0.0, &backup_flags(0));
+        let create = settings_backup_create_button_rect(row);
+        let refresh = settings_backup_refresh_button_rect(row);
+        assert!((create.x - row.x).abs() < 0.01);
+        assert!(create.right() <= refresh.x);
+        assert_eq!(create.width, SETTINGS_BACKUP_CREATE_BTN_W);
+        assert_eq!(refresh.width, SETTINGS_BACKUP_REFRESH_BTN_W);
+        assert!(refresh.right() <= row.right());
+    }
+
+    #[test]
+    fn m1g_entry_rows_stack_with_gap_and_restore_button_right_anchors() {
+        let v = vp();
+        let f = backup_flags(3);
+        let r0 = settings_backup_entry_row_rect(v, 0.0, &f, 0);
+        let r1 = settings_backup_entry_row_rect(v, 0.0, &f, 1);
+        let r2 = settings_backup_entry_row_rect(v, 0.0, &f, 2);
+        assert!(r0.y < r1.y);
+        assert!(r1.y < r2.y);
+        // Adjacent rows are one row-height + gap apart.
+        assert!(
+            (r1.y - r0.y - SETTINGS_BACKUP_ENTRY_ROW_H - SETTINGS_BACKUP_ENTRY_ROW_GAP).abs() < 0.01
+        );
+        let restore = settings_backup_restore_button_rect(r0);
+        assert!(restore.right() <= r0.right());
+        assert!(restore.x >= r0.x);
+        assert_eq!(restore.width, SETTINGS_BACKUP_RESTORE_BTN_W);
+    }
+
+    #[test]
+    fn m1g_content_height_grows_with_visible_row_count() {
+        // 0 (empty placeholder) / 1 / cap rows — height is monotone up to cap.
+        let h0 = settings_backup_content_height(0);
+        let h1 = settings_backup_content_height(1);
+        let h_cap = settings_backup_content_height(SETTINGS_BACKUP_ROW_VISIBLE_MAX);
+        assert!(h1 >= h0, "one entry row ≥ the empty placeholder slot");
+        assert!(h_cap > h1, "more rows must grow the section");
+        // Over-cap saturates at the cap height (the cap is applied inside).
+        let h_over = settings_backup_content_height(SETTINGS_BACKUP_ROW_VISIBLE_MAX + 10);
+        assert!((h_over - h_cap).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1g_body_content_height_includes_backup_rows() {
+        let v = vp();
+        // Body height with 3 backup rows must exceed the empty-list body — the
+        // variable list feeds the body via SettingsBodyFlags::backup_row_count.
+        let empty = settings_body_content_height(v, &backup_flags(0));
+        let full = settings_body_content_height(v, &backup_flags(SETTINGS_BACKUP_ROW_VISIBLE_MAX));
+        assert!(full > empty, "backup list rows must grow the body");
+    }
+
+    #[test]
+    fn m1g_with_backup_rows_only_changes_backup_field() {
+        let base = SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly);
+        let with = base.with_backup_rows(2);
+        assert_eq!(base.backup_row_count, 0);
+        assert_eq!(with.backup_row_count, 2);
+        assert_eq!(with.crash_restart_enabled, base.crash_restart_enabled);
+        assert_eq!(with.updater_kind, base.updater_kind);
     }
 }
 

@@ -205,18 +205,56 @@ pub fn backup_status_text(status: &SettingsBackupStatus) -> &str {
     }
 }
 
-/// Format `bytes` using the 1.x convention — `<1024 → "<n> B"`, otherwise
-/// `"<x.x> KB"` with one decimal. Pulled into the port today so the snap.md
-/// "size column" text matches the React baseline at composition time.
+/// Format `bytes` using the 1.x convention — `<1024 → "<n> B"`,
+/// `<1 MiB → "<x.x> KB"` (one decimal), otherwise `"<x.xx> MB"` (two
+/// decimals). Mirrors `updater_card::format_bytes` so the backup-list size
+/// column reads identically to the updater download size. Pulled into the
+/// port today so the snap.md "size column" text matches the React baseline at
+/// composition time.
 pub fn format_size(bytes: u64) -> smol_str::SmolStr {
-    if bytes < 1024 {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes < KIB {
         // SmolStr::new handles short strings inline (≤ 22 bytes) — the
         // longest "<n> B" output ("1023 B") is 6 bytes, well within inline.
         smol_str::SmolStr::new(format!("{bytes} B"))
-    } else {
-        let kb = (bytes as f32) / 1024.0;
+    } else if bytes < MIB {
+        let kb = (bytes as f64) / KIB as f64;
         smol_str::SmolStr::new(format!("{kb:.1} KB"))
+    } else {
+        let mb = (bytes as f64) / MIB as f64;
+        smol_str::SmolStr::new(format!("{mb:.2} MB"))
     }
+}
+
+/// M1g — true when the backup list has no entries (drives the `backupEmpty`
+/// placeholder vs the per-row restore list). 1:1 with Tauri
+/// `<Show when={backups().length === 0}>` in `BackupCard.tsx`.
+pub fn backup_list_is_empty(entries: &[SettingsBackupEntry]) -> bool {
+    entries.is_empty()
+}
+
+/// M1g — number of backup rows the card actually paints / hit-tests: the live
+/// entry count capped at [`crate::settings_panel::SETTINGS_BACKUP_ROW_VISIBLE_MAX`].
+/// Both the renderer's `for` loop and the shell hit-tester feed this into the
+/// row geometry so paint and hit agree, and the dynamic body height matches
+/// whatever rows are on screen.
+pub fn backup_visible_row_count(entries: &[SettingsBackupEntry]) -> usize {
+    entries
+        .len()
+        .min(crate::settings_panel::SETTINGS_BACKUP_ROW_VISIBLE_MAX)
+}
+
+/// M1g — map a visible-row index back to its backup id, mirroring the shell
+/// dispatch arm (`SettingsHit::RestoreSettingsBackup(index)` →
+/// `entries.get(index).id`). Returns `None` for an out-of-range index so a
+/// stale click after the list shrank can never panic. Borrows the
+/// already-allocated id so the lookup stays alloc-free.
+pub fn backup_entry_id_at(
+    entries: &[SettingsBackupEntry],
+    index: usize,
+) -> Option<&smol_str::SmolStr> {
+    entries.get(index).map(|entry| &entry.id)
 }
 
 /// Convert a 1.x backup ISO basic-format timestamp ("20260418T150000.000Z")
@@ -259,9 +297,81 @@ mod tests {
     }
 
     #[test]
-    fn format_size_above_1k_emits_one_decimal_kb() {
-        // 1536 bytes = 1.5 KB exactly — pinning the 1.x decimal precision.
+    fn format_size_kib_range_emits_one_decimal_kb() {
+        // 1024 bytes = exactly the KB floor; 1536 = 1.5 KB; just under 1 MiB
+        // still reads in KB (pinning the 1.x decimal precision + boundary).
+        assert_eq!(format_size(1024).as_str(), "1.0 KB");
         assert_eq!(format_size(1536).as_str(), "1.5 KB");
+        assert_eq!(format_size(1024 * 1024 - 1).as_str(), "1024.0 KB");
+    }
+
+    #[test]
+    fn format_size_mib_range_emits_two_decimal_mb() {
+        // 1 MiB is the MB floor; 2.5 MiB pins the two-decimal precision.
+        assert_eq!(format_size(1024 * 1024).as_str(), "1.00 MB");
+        assert_eq!(format_size(2 * 1024 * 1024 + 512 * 1024).as_str(), "2.50 MB");
+    }
+
+    #[test]
+    fn backup_list_empty_predicate_tracks_entry_count() {
+        assert!(backup_list_is_empty(&[]));
+        let one = vec![SettingsBackupEntry {
+            id: smol_str::SmolStr::new_static("a"),
+            file_name: smol_str::SmolStr::new_static("vault-a.bin"),
+            size_bytes: 10,
+        }];
+        assert!(!backup_list_is_empty(&one));
+    }
+
+    #[test]
+    fn backup_visible_row_count_caps_at_max() {
+        use crate::settings_panel::SETTINGS_BACKUP_ROW_VISIBLE_MAX;
+        let mk = |n: usize| -> Vec<SettingsBackupEntry> {
+            (0..n)
+                .map(|i| SettingsBackupEntry {
+                    id: smol_str::SmolStr::new(format!("id-{i}")),
+                    file_name: smol_str::SmolStr::new(format!("vault-{i}.bin")),
+                    size_bytes: i as u64,
+                })
+                .collect()
+        };
+        // 0 / few (under cap) / exactly cap / over cap.
+        assert_eq!(backup_visible_row_count(&mk(0)), 0);
+        assert_eq!(backup_visible_row_count(&mk(2)), 2);
+        assert_eq!(
+            backup_visible_row_count(&mk(SETTINGS_BACKUP_ROW_VISIBLE_MAX)),
+            SETTINGS_BACKUP_ROW_VISIBLE_MAX
+        );
+        assert_eq!(
+            backup_visible_row_count(&mk(SETTINGS_BACKUP_ROW_VISIBLE_MAX + 5)),
+            SETTINGS_BACKUP_ROW_VISIBLE_MAX
+        );
+    }
+
+    #[test]
+    fn backup_entry_id_at_maps_index_to_id_and_guards_out_of_range() {
+        let entries = vec![
+            SettingsBackupEntry {
+                id: smol_str::SmolStr::new_static("newest"),
+                file_name: smol_str::SmolStr::new_static("vault-newest.bin"),
+                size_bytes: 1,
+            },
+            SettingsBackupEntry {
+                id: smol_str::SmolStr::new_static("older"),
+                file_name: smol_str::SmolStr::new_static("vault-older.bin"),
+                size_bytes: 2,
+            },
+        ];
+        assert_eq!(
+            backup_entry_id_at(&entries, 0).map(|s| s.as_str()),
+            Some("newest")
+        );
+        assert_eq!(
+            backup_entry_id_at(&entries, 1).map(|s| s.as_str()),
+            Some("older")
+        );
+        // Stale click past the end → None, never a panic.
+        assert_eq!(backup_entry_id_at(&entries, 2), None);
     }
 
     #[test]

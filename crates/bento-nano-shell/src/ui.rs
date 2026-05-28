@@ -1015,6 +1015,56 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         return SettingsHit::ToggleUpdateAutoDownload;
     }
 
+    // M1g — Backup §9 buttons. The card's row Ys depend on the same
+    // Startup+Stealth+Updater flags as the renderer PLUS the variable backup
+    // row count (capped), so build the same `SettingsBodyFlags` the renderer
+    // paints from via `with_backup_rows` (so paint geometry and hit geometry
+    // agree). Interactive: 立即备份 (always) + 刷新 (always) + per-row 恢复
+    // (one per visible entry). The title/description/status/empty rows are
+    // non-interactive. The per-row 恢复 carries the newest-first list index;
+    // the dispatch arm maps index → entry → backup_id.
+    let backup_entries = app.settings_backup_entries.borrow();
+    let backup_visible = bento_nano_app::business::settings::backup_card::backup_visible_row_count(
+        &backup_entries,
+    );
+    let backup_flags = updater_flags.with_backup_rows(backup_visible);
+    let backup_actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
+        vp,
+        scroll_y,
+        &backup_flags,
+    );
+    let create_btn =
+        bento_nano_app::settings_panel::settings_backup_create_button_rect(backup_actions);
+    if x >= create_btn.x && x < create_btn.right() && y >= create_btn.y && y < create_btn.bottom() {
+        return SettingsHit::CreateSettingsBackup;
+    }
+    let refresh_btn =
+        bento_nano_app::settings_panel::settings_backup_refresh_button_rect(backup_actions);
+    if x >= refresh_btn.x && x < refresh_btn.right() && y >= refresh_btn.y && y < refresh_btn.bottom()
+    {
+        return SettingsHit::ListSettingsBackups;
+    }
+    // Per-row 恢复 buttons — only the visible (non-empty, capped) entries.
+    if !bento_nano_app::business::settings::backup_card::backup_list_is_empty(&backup_entries) {
+        for entry_index in 0..backup_visible {
+            let entry_row = bento_nano_app::settings_panel::settings_backup_entry_row_rect(
+                vp,
+                scroll_y,
+                &backup_flags,
+                entry_index,
+            );
+            let restore_btn =
+                bento_nano_app::settings_panel::settings_backup_restore_button_rect(entry_row);
+            if x >= restore_btn.x
+                && x < restore_btn.right()
+                && y >= restore_btn.y
+                && y < restore_btn.bottom()
+            {
+                return SettingsHit::RestoreSettingsBackup(entry_index);
+            }
+        }
+    }
+
     SettingsHit::Body
 }
 
@@ -1509,6 +1559,162 @@ mod phase21_tests {
     // 设置备份 section re-introduces the hit path.
     #[test]
     fn _retired_settings_hit_resolves_visible_backup_entry_restore_in_round_2_m1() {}
+
+    /// M1g — reachability: with backup entries seeded, clicking 立即备份 /
+    /// 刷新 / per-row 恢复 resolves to the (previously orphan) backup
+    /// `SettingsHit` variants. Proves the paint→hit chain is wired — after
+    /// this chunk no backup button is painted-but-unwired. Builds the SAME
+    /// `SettingsBodyFlags` (idle updater + capped backup count) the hit-tester
+    /// derives so the sampled button centres line up with production geometry.
+    #[test]
+    fn m1g_settings_hit_resolves_backup_create_refresh_and_per_row_restore() {
+        use bento_nano_app::SettingsBackupEntry;
+        use smol_str::SmolStr;
+
+        let app = app_with_zones(vec![]);
+        // Seed two real-shaped entries so the per-row restore path is live.
+        app.settings_backup_entries.replace(vec![
+            SettingsBackupEntry {
+                id: SmolStr::new_static("1748467200-100"),
+                file_name: SmolStr::new_static("vault-1748467200-100.bin"),
+                size_bytes: 4096,
+            },
+            SettingsBackupEntry {
+                id: SmolStr::new_static("1748460000-100"),
+                file_name: SmolStr::new_static("vault-1748460000-100.bin"),
+                size_bytes: 8192,
+            },
+        ]);
+
+        // Rebuild the EXACT flags the hit-tester derives: the live Startup
+        // gating bools (both default true in AppState::new) + idle updater
+        // (StatusOnly) + the capped visible backup row count. Reading them off
+        // `app` (rather than hardcoding) is what makes the test's button rects
+        // line up with production geometry.
+        let entries = app.settings_backup_entries.borrow();
+        let visible =
+            bento_nano_app::business::settings::backup_card::backup_visible_row_count(&entries);
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_backup_rows(visible);
+        drop(entries);
+
+        // The Backup card sits at the bottom of the scrollable content; scroll
+        // to the clamped max so its rows fall inside the visible body (the
+        // hit-tester early-returns `Body`/`Outside` for any y outside the body
+        // rect). Assert the whole backup section is in view so the geometry —
+        // not scroll bookkeeping — is what's under test.
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        app.scroll_offset_y.set(max_scroll);
+        let scroll_y = max_scroll;
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let label = bento_nano_app::settings_panel::settings_backup_label_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        assert!(
+            label.y >= body.y && label.y < body.bottom(),
+            "backup section must scroll into the visible body (label.y={}, body=[{}, {}])",
+            label.y,
+            body.y,
+            body.bottom(),
+        );
+
+        let actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        let create = bento_nano_app::settings_panel::settings_backup_create_button_rect(actions);
+        assert_eq!(
+            settings_hit(&app, create.x + create.width * 0.5, create.y + create.height * 0.5),
+            SettingsHit::CreateSettingsBackup,
+        );
+        let refresh = bento_nano_app::settings_panel::settings_backup_refresh_button_rect(actions);
+        assert_eq!(
+            settings_hit(&app, refresh.x + refresh.width * 0.5, refresh.y + refresh.height * 0.5),
+            SettingsHit::ListSettingsBackups,
+        );
+        // Per-row 恢复 — index 0 and index 1 each route to their own index.
+        for entry_index in 0..visible {
+            let row = bento_nano_app::settings_panel::settings_backup_entry_row_rect(
+                app.viewport,
+                scroll_y,
+                &flags,
+                entry_index,
+            );
+            let restore =
+                bento_nano_app::settings_panel::settings_backup_restore_button_rect(row);
+            assert_eq!(
+                settings_hit(
+                    &app,
+                    restore.x + restore.width * 0.5,
+                    restore.y + restore.height * 0.5,
+                ),
+                SettingsHit::RestoreSettingsBackup(entry_index),
+                "per-row restore must carry the newest-first list index",
+            );
+        }
+    }
+
+    /// M1g — empty list: with no backup entries there is no per-row restore
+    /// hit (the empty-placeholder row is non-interactive), but 立即备份 /
+    /// 刷新 stay reachable.
+    #[test]
+    fn m1g_settings_hit_empty_backup_list_has_no_restore_but_keeps_create_refresh() {
+        let app = app_with_zones(vec![]);
+        assert!(app.settings_backup_entries.borrow().is_empty());
+
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_backup_rows(0);
+        // Scroll the bottom Backup card into the visible body (see the sibling
+        // reachability test for why).
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        app.scroll_offset_y.set(max_scroll);
+        let scroll_y = max_scroll;
+        let actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        let create = bento_nano_app::settings_panel::settings_backup_create_button_rect(actions);
+        assert_eq!(
+            settings_hit(&app, create.x + create.width * 0.5, create.y + create.height * 0.5),
+            SettingsHit::CreateSettingsBackup,
+        );
+        // The empty-placeholder row's centre must NOT produce a restore hit —
+        // it eats as Body (non-interactive).
+        let empty_row = bento_nano_app::settings_panel::settings_backup_entry_row_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+            0,
+        );
+        let hit = settings_hit(
+            &app,
+            empty_row.x + empty_row.width * 0.5,
+            empty_row.y + empty_row.height * 0.5,
+        );
+        assert_ne!(hit, SettingsHit::RestoreSettingsBackup(0));
+    }
 
     /// α4 (Wave I-α, 2026-05-25) — clicking each of the three zone-display
     /// radio hit-boxes routes to the matching `SetZoneDisplayMode(mode)`

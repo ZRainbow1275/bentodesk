@@ -16116,6 +16116,11 @@ fn show_settings_surface(root: &AppRoot) -> bool {
     // M1e — refresh the cached Stealth §7 status snapshot on open so the card
     // (and its conditional retry/error/OneDrive rows) reflect the live probe.
     refresh_stealth_status(root);
+    // M1g — populate the Backup §9 list on open (mirrors Tauri `BackupCard`'s
+    // `onMount → refresh`) so the backup-list isn't empty on first paint. Reads
+    // the real rotated vault files via the existing list command/fn; sets
+    // `settings_backup_status` to a success/error line the card renders.
+    run_settings_backup_list(root);
     // Round-2 RC-2 — DO NOT mount the K1 `business::settings::panel` widget
     // subtree. The new dark shell is hand-painted by `draw_settings_panel`
     // against pure-function rects from `crate::settings_panel`. Mounting the

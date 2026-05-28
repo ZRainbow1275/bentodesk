@@ -261,6 +261,21 @@ pub mod ids {
     pub const UPDATER_FREQ_WEEKLY: StringId = StringId(188);
     pub const UPDATER_FREQ_MANUAL: StringId = StringId(189);
     pub const UPDATER_AUTO_DOWNLOAD: StringId = StringId(190);
+
+    // 191..197 M1g (2026-05-29) — Backup §9 card (`BackupCard.tsx`).
+    // Appended in lockstep with `i18n_en_us` (same index, same order) per the
+    // positional-array contract. Mirrors the Tauri `backup*` keys
+    // (`src/i18n/locales/zh-CN.ts:336-344`). `BACKUP_REFRESH` has no Tauri
+    // string key (Tauri refreshes on mount + on the `backupCreated` event); the
+    // nano shell has no event listener, so it exposes an explicit Refresh
+    // button that fires `ListSettingsBackups` — the nano equivalent of Tauri's
+    // auto-refresh.
+    pub const BACKUP_CARD_TITLE: StringId = StringId(191);
+    pub const BACKUP_CARD_DESCRIPTION: StringId = StringId(192);
+    pub const BACKUP_CREATE_NOW: StringId = StringId(193);
+    pub const BACKUP_REFRESH: StringId = StringId(194);
+    pub const BACKUP_RESTORE: StringId = StringId(195);
+    pub const BACKUP_EMPTY: StringId = StringId(196);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -497,5 +512,12 @@ pub static ZH_CN: LookupTable = LookupTable {
         "每周",                  // UPDATER_FREQ_WEEKLY (188)
         "仅手动",                // UPDATER_FREQ_MANUAL (189)
         "后台静默下载",          // UPDATER_AUTO_DOWNLOAD (190)
+        // 191..197 M1g — Backup §9 (`BackupCard.tsx`, zh-CN.ts:336-344).
+        "设置备份",              // BACKUP_CARD_TITLE (191)
+        "每次启动前自动保留最近 3 份 settings.json 备份，迁移失败可随时回滚。", // BACKUP_CARD_DESCRIPTION (192)
+        "立即备份",              // BACKUP_CREATE_NOW (193)
+        "刷新",                  // BACKUP_REFRESH (194)
+        "恢复",                  // BACKUP_RESTORE (195)
+        "暂无备份",              // BACKUP_EMPTY (196)
     ],
 };

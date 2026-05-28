@@ -2224,7 +2224,11 @@ impl Renderer {
             settings_updater_label_rect, settings_updater_middle_block_rect,
             settings_updater_pill_rect, settings_updater_progress_track_rect,
             settings_updater_status_row_rect, settings_watch_label_rect, settings_watch_textarea_rect,
-            SettingsBodyFlags, UpdaterHeightKind,
+            settings_backup_actions_row_rect, settings_backup_create_button_rect,
+            settings_backup_description_rect, settings_backup_entry_row_rect,
+            settings_backup_label_rect, settings_backup_refresh_button_rect,
+            settings_backup_restore_button_rect, settings_backup_status_rect,
+            SETTINGS_BACKUP_ROW_VISIBLE_MAX, SettingsBodyFlags, UpdaterHeightKind,
             settings_zone_display_mode_picker_row_rect,
             settings_zone_display_mode_radio_inner_rect,
             settings_zone_display_mode_radio_label_rect,
@@ -3653,6 +3657,122 @@ impl Renderer {
             )?;
         }
         drop(updater_status);
+
+        // ── M1g — Backup §9 card (`BackupCard.tsx`) ─────────────────────
+        //
+        // Sits after Updater in the Tauri body order. Reads the live
+        // `app.settings_backup_entries` snapshot (populated on Settings open +
+        // after every create/restore by the shell). The list is
+        // variable-length, capped at SETTINGS_BACKUP_ROW_VISIBLE_MAX; the
+        // capped count threads through the same `SettingsBodyFlags` the
+        // hit-tester + scroll-clamp use (via `with_backup_rows`) so paint and
+        // hit geometry agree. Size + empty-state + the capped count come from
+        // the lib helpers in `business::settings::backup_card`.
+        use crate::business::settings::backup_card as bkp;
+        // Snapshot the entries + status text out of the RefCells BEFORE the
+        // fallible paint calls so no borrow spans them (mirrors the Stealth
+        // snapshot pattern above).
+        let backup_entries = app.settings_backup_entries.borrow().clone();
+        let backup_status_snapshot = app.settings_backup_status.borrow().clone();
+        let backup_visible = bkp::backup_visible_row_count(&backup_entries);
+        let backup_flags = updater_flags.with_backup_rows(backup_visible);
+        let backup_label = settings_backup_label_rect(viewport, scroll, &backup_flags);
+        if row_visible(backup_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_TITLE),
+                backup_label,
+                label_color,
+            )?;
+        }
+        // Description line — always shown.
+        let backup_desc = settings_backup_description_rect(viewport, scroll, &backup_flags);
+        if row_visible(backup_desc, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_DESCRIPTION),
+                backup_desc,
+                label_color,
+            )?;
+        }
+        // Actions row — [立即备份 (accent)] [刷新 (neutral)].
+        let backup_actions = settings_backup_actions_row_rect(viewport, scroll, &backup_flags);
+        if row_visible(backup_actions, body) {
+            let create_btn = settings_backup_create_button_rect(backup_actions);
+            self.fill_rounded_rect(create_btn, accent_on, btn_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CREATE_NOW),
+                create_btn,
+                bento_nano_style::Color::WHITE,
+            )?;
+            let refresh_btn = settings_backup_refresh_button_rect(backup_actions);
+            self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_REFRESH),
+                refresh_btn,
+                title_color,
+            )?;
+        }
+        // Info/error line — only when a status is set. Success → green, error
+        // → red (mirrors the widget-tree card's status colours).
+        if let Some(status) = backup_status_snapshot.as_ref() {
+            let backup_status_row = settings_backup_status_rect(viewport, scroll, &backup_flags);
+            if row_visible(backup_status_row, body) {
+                let is_error = matches!(status, crate::state::SettingsBackupStatus::Error(_));
+                let status_color = if is_error {
+                    with_alpha(palette.accent_red, 0.9)
+                } else {
+                    with_alpha(bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF), 0.9)
+                };
+                self.draw_text(bkp::backup_status_text(status), backup_status_row, status_color)?;
+            }
+        }
+        // Backup list — N entry rows (file·size + 恢复) or one backupEmpty
+        // placeholder. Both branches anchor off the reserved status slot so the
+        // list lines up whether or not a status line painted.
+        if bkp::backup_list_is_empty(&backup_entries) {
+            let empty_row = settings_backup_entry_row_rect(viewport, scroll, &backup_flags, 0);
+            if row_visible(empty_row, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_EMPTY),
+                    empty_row,
+                    label_color,
+                )?;
+            }
+        } else {
+            for (entry_index, entry) in backup_entries
+                .iter()
+                .take(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
+                .enumerate()
+            {
+                let entry_row =
+                    settings_backup_entry_row_rect(viewport, scroll, &backup_flags, entry_index);
+                if !row_visible(entry_row, body) {
+                    continue;
+                }
+                // Left — "id · size" (the backend chose the stable id over a
+                // parsed timestamp; reuse the same label the widget card uses).
+                // Format the size once per visible row (§10 — no redundant
+                // per-frame formatting beyond the visible rows).
+                let restore_btn = settings_backup_restore_button_rect(entry_row);
+                let info_rect = bento_nano_style::Rect {
+                    x: entry_row.x,
+                    y: entry_row.y + (entry_row.height - 16.0) * 0.5,
+                    width: (restore_btn.x - entry_row.x - 8.0).max(0.0),
+                    height: 16.0,
+                };
+                self.draw_text_no_wrap(
+                    bkp::format_entry_label(entry).as_str(),
+                    info_rect,
+                    title_color,
+                )?;
+                // Right — 恢复 button (neutral chip).
+                self.fill_rounded_rect(restore_btn, chip_bg, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_RESTORE),
+                    restore_btn,
+                    title_color,
+                )?;
+            }
+        }
             Ok(())
         })();
         // Balance the body clip BEFORE propagating any body-paint error so the
