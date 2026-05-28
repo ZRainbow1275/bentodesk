@@ -999,26 +999,80 @@ pub fn settings_zone_display_mode_radio_label_rect(
     }
 }
 
-/// Round-2 M1/M2 + M1d + M1e — total content height inside the body. Grows
-/// with each milestone as sections light up. M1d's Startup section and M1e's
-/// Stealth card both have conditional rows, so the gating bools
-/// (`crash_restart_enabled`, `safe_start_after_hibernation`,
-/// `stealth_has_retry`, `stealth_has_error`) are parameters — geometry never
-/// reads global state, the shell passes the live values.
-pub fn settings_body_content_height(
-    viewport: Size,
-    crash_restart_enabled: bool,
-    safe_start_after_hibernation: bool,
-    stealth_has_retry: bool,
-    stealth_has_error: bool,
-) -> f32 {
+/// M1f — which Updater §8 status family is live, for height purposes only.
+/// The updater card height depends on whether the version block, the progress
+/// bar, and/or the error line are shown — and those three are mutually
+/// determined by the status family. Collapsing the status to this 4-way
+/// discriminant keeps [`SettingsBodyFlags`] `Copy` + tiny (no SmolStr) while
+/// still driving an exact dynamic height. Pure data — geometry reads it, never
+/// global state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UpdaterHeightKind {
+    /// Idle / Checking / UpToDate — status row only, no extra blocks.
+    StatusOnly,
+    /// Available / Ready / Installing / Skipped — adds the version block.
+    Versioned,
+    /// Downloading — adds the progress bar (no version block).
+    Downloading,
+    /// Error — adds the wrapped error line (no version block).
+    Error,
+}
+
+/// M1d + M1e + M1f — the conditional-row gating flags fed into the dynamic
+/// body-height + scroll-clamp geometry. Bundling them in one `Copy` struct
+/// keeps `settings_body_content_height` / `settings_clamp_scroll` (and the
+/// shell call sites) under clippy's `too_many_arguments` threshold as more
+/// sections light up. Geometry stays PURE: every flag is passed in, nothing
+/// inside reads global state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SettingsBodyFlags {
+    /// Startup §6 — crash-auto-restart toggle on (shows the 2 stepper rows).
+    pub crash_restart_enabled: bool,
+    /// Startup §6 — safe-start-after-hibernation on (shows the resume slider).
+    pub safe_start_after_hibernation: bool,
+    /// Stealth §7 — `retry_count > 0` (shows the retry row + OneDrive block).
+    pub stealth_has_retry: bool,
+    /// Stealth §7 — `last_error.is_some()` (shows the error block).
+    pub stealth_has_error: bool,
+    /// Updater §8 — which status family is live (drives version/progress/error
+    /// block visibility, hence the card height).
+    pub updater_kind: UpdaterHeightKind,
+}
+
+impl SettingsBodyFlags {
+    /// Convenience constructor used by tests + call sites that only vary the
+    /// Startup/Stealth bools (updater idle). Keeps the common case terse.
+    pub const fn new(
+        crash_restart_enabled: bool,
+        safe_start_after_hibernation: bool,
+        stealth_has_retry: bool,
+        stealth_has_error: bool,
+        updater_kind: UpdaterHeightKind,
+    ) -> Self {
+        Self {
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+            stealth_has_retry,
+            stealth_has_error,
+            updater_kind,
+        }
+    }
+}
+
+/// Round-2 M1/M2 + M1d + M1e + M1f — total content height inside the body.
+/// Grows with each milestone as sections light up. The Startup §6, Stealth §7
+/// and Updater §8 sections all have conditional rows, so their gating lives in
+/// [`SettingsBodyFlags`] (passed by ref) — geometry never reads global state,
+/// the shell passes the live values.
+pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -> f32 {
     settings_m2_content_height(viewport)
         + settings_perf_startup_content_height(
             viewport,
-            crash_restart_enabled,
-            safe_start_after_hibernation,
+            flags.crash_restart_enabled,
+            flags.safe_start_after_hibernation,
         )
-        + settings_stealth_content_height(stealth_has_retry, stealth_has_error)
+        + settings_stealth_content_height(flags.stealth_has_retry, flags.stealth_has_error)
+        + settings_updater_content_height(flags.updater_kind)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -1029,28 +1083,20 @@ pub fn settings_body_max_scroll(content_total_h: f32, viewport: Size) -> f32 {
     (content_total_h - body.height).max(0.0)
 }
 
-/// Round-2 M1 + M1d + M1e — apply a wheel-delta `delta_y` (positive = scroll
-/// down) to `current_offset` and clamp. Pure helper so the wheel handler stays
-/// allocation-free. The four gating bools feed the dynamic content height so
-/// the max-scroll matches whatever conditional rows are currently visible
-/// (Startup crash steppers + hibernate slider; Stealth retry/error rows).
+/// Round-2 M1 + M1d + M1e + M1f — apply a wheel-delta `delta_y` (positive =
+/// scroll down) to `current_offset` and clamp. Pure helper so the wheel
+/// handler stays allocation-free. The [`SettingsBodyFlags`] feed the dynamic
+/// content height so the max-scroll matches whatever conditional rows are
+/// currently visible (Startup crash steppers + hibernate slider; Stealth
+/// retry/error rows; Updater version/progress/error block).
 pub fn settings_clamp_scroll(
     current_offset: f32,
     delta_y: f32,
     viewport: Size,
-    crash_restart_enabled: bool,
-    safe_start_after_hibernation: bool,
-    stealth_has_retry: bool,
-    stealth_has_error: bool,
+    flags: &SettingsBodyFlags,
 ) -> f32 {
     let next = (current_offset + delta_y).max(0.0);
-    let content_h = settings_body_content_height(
-        viewport,
-        crash_restart_enabled,
-        safe_start_after_hibernation,
-        stealth_has_retry,
-        stealth_has_error,
-    );
+    let content_h = settings_body_content_height(viewport, flags);
     let max = settings_body_max_scroll(content_h, viewport);
     next.min(max)
 }
@@ -1799,6 +1845,298 @@ pub fn settings_stealth_content_height(has_retry: bool, has_error: bool) -> f32 
     h + SETTINGS_SECTION_GAP
 }
 
+// ── M1f 2026-05-29 — Updater §8 card (`UpdaterCard.tsx`) ────────────────
+//
+// Sits AFTER Stealth in the Tauri body order
+// (…→Performance→Startup→Stealth→Updater→Backup→Encryption→Plugins). Rows:
+//   title                              (always) — 应用更新
+//   status row  [label | pill]         (always)
+//   version block [label : version]    (only Available/Ready/Installing/Skipped)
+//   progress bar                       (only Downloading)
+//   error line                         (only Error)
+//   action buttons [Check][Dl/Install][Skip]  (Check always; others state-gated)
+//   freq prefs row  [label | chip]     (always)
+//   auto-download row [label | toggle] (always)
+//
+// The version/progress/error blocks are mutually exclusive by status family,
+// captured as `UpdaterHeightKind`. Geometry takes that discriminant + the
+// Startup/Stealth gating flags (so the title follows whatever Stealth rows are
+// visible) — all passed in, never read from global state.
+
+/// M1f — compact label/value/version row height (matches the Stealth row
+/// rhythm).
+pub const SETTINGS_UPDATER_ROW_H: f32 = 28.0;
+
+/// M1f — status pill capsule size (reuses the Stealth pill footprint; the
+/// "有可用更新"/"准备安装" labels are the widest so the pill is a touch wider).
+pub const SETTINGS_UPDATER_PILL_W: f32 = 92.0;
+pub const SETTINGS_UPDATER_PILL_H: f32 = 22.0;
+
+/// M1f — progress-bar band height (the track sits vertically centred in it).
+pub const SETTINGS_UPDATER_PROGRESS_H: f32 = 20.0;
+/// M1f — progress-track thickness.
+pub const SETTINGS_UPDATER_PROGRESS_TRACK_H: f32 = 6.0;
+
+/// M1f — error line band height (single wrapped line).
+pub const SETTINGS_UPDATER_ERROR_H: f32 = 32.0;
+
+/// M1f — action buttons row height (shares the footer button height).
+pub const SETTINGS_UPDATER_BTN_ROW_H: f32 = SETTINGS_FOOTER_BTN_H;
+
+/// M1f — wider action button for the bilingual labels (检查更新 / 安装并重启
+/// / Install and restart) which overflow the 84-DIP footer button width.
+pub const SETTINGS_UPDATER_BTN_W: f32 = 104.0;
+/// M1f — gap between adjacent action buttons.
+pub const SETTINGS_UPDATER_BTN_GAP: f32 = 8.0;
+
+/// M1f — frequency chip size (cycles Daily/Weekly/Manual). Mirrors the
+/// language chip footprint so the prefs rows read as the same control band.
+pub const SETTINGS_UPDATER_FREQ_CHIP_W: f32 = 96.0;
+pub const SETTINGS_UPDATER_FREQ_CHIP_H: f32 = 28.0;
+
+/// M1f — scroll-space bottom Y of the last laid-out Stealth element, the
+/// anchor the Updater title hangs from. Mirrors the branch logic in
+/// `settings_stealth_content_height` (buttons row always; OneDrive block only
+/// when `has_retry`) so layout has a single source of truth.
+fn settings_stealth_section_bottom(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+    has_retry: bool,
+    has_error: bool,
+) -> f32 {
+    if has_retry {
+        settings_stealth_onedrive_block_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+            has_retry,
+            has_error,
+        )
+        .bottom()
+    } else {
+        settings_stealth_buttons_row_rect(
+            viewport,
+            scroll_offset_y,
+            crash_restart_enabled,
+            safe_start_after_hibernation,
+            has_retry,
+            has_error,
+        )
+        .bottom()
+    }
+}
+
+/// M1f — `应用更新 / App Updates` group title rect. Sits below the Stealth
+/// section + a section gap. Takes all the Startup+Stealth gating flags so its
+/// Y follows whatever rows are currently visible above it.
+pub fn settings_updater_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    crash_restart_enabled: bool,
+    safe_start_after_hibernation: bool,
+    stealth_has_retry: bool,
+    stealth_has_error: bool,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    let bottom = settings_stealth_section_bottom(
+        viewport,
+        scroll_offset_y,
+        crash_restart_enabled,
+        safe_start_after_hibernation,
+        stealth_has_retry,
+        stealth_has_error,
+    );
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M1f — status row rect (label left + pill right). Row 0, always shown. Takes
+/// the full flag set to chain off the dynamic title Y.
+pub fn settings_updater_status_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let label = settings_updater_label_rect(
+        viewport,
+        scroll_offset_y,
+        flags.crash_restart_enabled,
+        flags.safe_start_after_hibernation,
+        flags.stealth_has_retry,
+        flags.stealth_has_error,
+    );
+    Rect {
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
+        height: SETTINGS_UPDATER_ROW_H,
+    }
+}
+
+/// M1f — right-anchored status-pill rect inside the status row.
+pub fn settings_updater_pill_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.right() - SETTINGS_UPDATER_PILL_W,
+        y: row.y + (row.height - SETTINGS_UPDATER_PILL_H) * 0.5,
+        width: SETTINGS_UPDATER_PILL_W,
+        height: SETTINGS_UPDATER_PILL_H,
+    }
+}
+
+/// M1f — the conditional middle block (version / progress / error) rect. Its
+/// height depends on `flags.updater_kind`; `StatusOnly` yields a zero-height
+/// rect anchored at the status-row bottom (so the buttons row chains cleanly
+/// with no gap). Sits directly below the status row.
+pub fn settings_updater_middle_block_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let status = settings_updater_status_row_rect(viewport, scroll_offset_y, flags);
+    let height = match flags.updater_kind {
+        UpdaterHeightKind::StatusOnly => 0.0,
+        UpdaterHeightKind::Versioned => SETTINGS_UPDATER_ROW_H,
+        UpdaterHeightKind::Downloading => SETTINGS_UPDATER_PROGRESS_H,
+        UpdaterHeightKind::Error => SETTINGS_UPDATER_ERROR_H,
+    };
+    Rect {
+        x: status.x,
+        y: status.bottom(),
+        width: status.width,
+        height,
+    }
+}
+
+/// M1f — progress-track rect inside the middle block (only meaningful when
+/// `flags.updater_kind == Downloading`; the renderer paints the filled portion
+/// itself from the fraction). Vertically centred, full row width.
+pub fn settings_updater_progress_track_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let block = settings_updater_middle_block_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: block.x,
+        y: block.y + (block.height - SETTINGS_UPDATER_PROGRESS_TRACK_H) * 0.5,
+        width: block.width,
+        height: SETTINGS_UPDATER_PROGRESS_TRACK_H,
+    }
+}
+
+/// M1f — action buttons row rect ([检查更新][下载/安装并重启][跳过此版本]).
+/// Always shown (检查更新 is always visible); sits below the middle block.
+pub fn settings_updater_buttons_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let block = settings_updater_middle_block_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: block.x,
+        y: block.bottom() + 6.0,
+        width: block.width,
+        height: SETTINGS_UPDATER_BTN_ROW_H,
+    }
+}
+
+/// M1f — action button rect for column `index` (0-based, left to right) inside
+/// the buttons row. Buttons left-pack; visibility is decided by the caller
+/// (`updater_show_*`), so callers must assign a stable column index to the
+/// buttons they actually paint. The hit-tester reuses the same index→rect
+/// mapping so paint and hit agree.
+pub fn settings_updater_button_rect(row: Rect, index: u8) -> Rect {
+    let x = row.x + (SETTINGS_UPDATER_BTN_W + SETTINGS_UPDATER_BTN_GAP) * index as f32;
+    Rect {
+        x,
+        y: row.y + (row.height - SETTINGS_FOOTER_BTN_H) * 0.5,
+        width: SETTINGS_UPDATER_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1f — `检查频率 / Check frequency` prefs row rect (label + cycling chip).
+/// Always shown; sits below the action buttons row.
+pub fn settings_updater_frequency_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let buttons = settings_updater_buttons_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: buttons.x,
+        y: buttons.bottom() + 8.0,
+        width: buttons.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1f — right-anchored frequency chip rect inside the frequency row.
+pub fn settings_updater_frequency_chip_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.right() - SETTINGS_UPDATER_FREQ_CHIP_W,
+        y: row.y + (row.height - SETTINGS_UPDATER_FREQ_CHIP_H) * 0.5,
+        width: SETTINGS_UPDATER_FREQ_CHIP_W,
+        height: SETTINGS_UPDATER_FREQ_CHIP_H,
+    }
+}
+
+/// M1f — `后台静默下载 / Silent background download` toggle row rect. Always
+/// shown; sits directly below the frequency row.
+pub fn settings_updater_auto_download_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let freq = settings_updater_frequency_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: freq.x,
+        y: freq.bottom(),
+        width: freq.width,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// M1f — right-anchored toggle hit-box inside the auto-download row (mirrors
+/// `SETTINGS_TOP_TOGGLE_HIT_*` so click ergonomics match the General toggles).
+pub fn settings_updater_auto_download_hit_rect(row: Rect) -> Rect {
+    Rect {
+        x: row.right() - SETTINGS_TOP_TOGGLE_HIT_W,
+        y: row.y + (row.height - SETTINGS_TOP_TOGGLE_HIT_H) * 0.5,
+        width: SETTINGS_TOP_TOGGLE_HIT_W,
+        height: SETTINGS_TOP_TOGGLE_HIT_H,
+    }
+}
+
+/// M1f — height the Updater §8 card contributes to
+/// `settings_body_content_height`. Conditional middle block makes it dynamic,
+/// so the status family drives it (pure — no global reads). Always-present
+/// rows: title + status + buttons + 2 prefs rows. The middle block adds its
+/// kind-specific height. A trailing section gap keeps the body bottom padded.
+pub fn settings_updater_content_height(kind: UpdaterHeightKind) -> f32 {
+    let middle = match kind {
+        UpdaterHeightKind::StatusOnly => 0.0,
+        UpdaterHeightKind::Versioned => SETTINGS_UPDATER_ROW_H,
+        UpdaterHeightKind::Downloading => SETTINGS_UPDATER_PROGRESS_H,
+        UpdaterHeightKind::Error => SETTINGS_UPDATER_ERROR_H,
+    };
+    SETTINGS_SECTION_LABEL_H
+        + SETTINGS_UPDATER_ROW_H
+        + middle
+        + 6.0
+        + SETTINGS_UPDATER_BTN_ROW_H
+        + 8.0
+        + SETTINGS_ROW_H_M1 * 2.0
+        + SETTINGS_SECTION_GAP
+}
+
 #[cfg(test)]
 mod m1_tests {
     use super::*;
@@ -2018,19 +2356,18 @@ mod m1_tests {
     #[test]
     fn m1_clamp_scroll_never_goes_negative() {
         let v = vp();
-        assert_eq!(settings_clamp_scroll(0.0, -100.0, v, true, true, false, false), 0.0);
-        assert_eq!(settings_clamp_scroll(20.0, -100.0, v, true, true, false, false), 0.0);
+        let f = SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly);
+        assert_eq!(settings_clamp_scroll(0.0, -100.0, v, &f), 0.0);
+        assert_eq!(settings_clamp_scroll(20.0, -100.0, v, &f), 0.0);
     }
 
     #[test]
     fn m1_clamp_scroll_caps_at_max() {
         let v = vp();
-        let content = settings_body_content_height(v, true, true, false, false);
+        let f = SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly);
+        let content = settings_body_content_height(v, &f);
         let max = settings_body_max_scroll(content, v);
-        assert_eq!(
-            settings_clamp_scroll(0.0, max + 999.0, v, true, true, false, false),
-            max
-        );
+        assert_eq!(settings_clamp_scroll(0.0, max + 999.0, v, &f), max);
     }
 
     #[test]
@@ -2264,10 +2601,11 @@ mod m1d_tests {
         let v = vp();
         // Both gates off → shortest. Crash on → +2 stepper rows. Hibernate on
         // → + slider row + desc. All on → tallest.
-        let none = settings_body_content_height(v, false, false, false, false);
-        let crash = settings_body_content_height(v, true, false, false, false);
-        let hib = settings_body_content_height(v, false, true, false, false);
-        let both = settings_body_content_height(v, true, true, false, false);
+        let k = UpdaterHeightKind::StatusOnly;
+        let none = settings_body_content_height(v, &SettingsBodyFlags::new(false, false, false, false, k));
+        let crash = settings_body_content_height(v, &SettingsBodyFlags::new(true, false, false, false, k));
+        let hib = settings_body_content_height(v, &SettingsBodyFlags::new(false, true, false, false, k));
+        let both = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
         assert!(crash > none, "crash steppers must add height");
         assert!(hib > none, "hibernate slider must add height");
         assert!(both > crash);
@@ -2281,7 +2619,10 @@ mod m1d_tests {
     fn content_height_exceeds_m2_total() {
         let v = vp();
         let m2 = settings_m2_content_height(v);
-        let total = settings_body_content_height(v, true, true, false, false);
+        let total = settings_body_content_height(
+            v,
+            &SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly),
+        );
         assert!(total > m2);
     }
 
@@ -2401,28 +2742,178 @@ mod m1d_tests {
         let v = vp();
         // The full body height with stealth conditionals on must exceed the
         // height with them off (the Stealth card grows).
-        let off = settings_body_content_height(v, true, true, false, false);
-        let on = settings_body_content_height(v, true, true, true, true);
+        let k = UpdaterHeightKind::StatusOnly;
+        let off = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
+        let on = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, true, true, k));
         assert!(on > off, "stealth retry+error rows must grow the body");
     }
 
     #[test]
     fn m1e_clamp_scroll_honours_stealth_flags() {
         let v = vp();
+        let k = UpdaterHeightKind::StatusOnly;
+        let f_off = SettingsBodyFlags::new(true, true, false, false, k);
+        let f_on = SettingsBodyFlags::new(true, true, true, true, k);
         // Taller content (stealth rows on) ⇒ a larger max-scroll clamp.
-        let max_off = settings_body_max_scroll(
-            settings_body_content_height(v, true, true, false, false),
-            v,
-        );
-        let max_on = settings_body_max_scroll(
-            settings_body_content_height(v, true, true, true, true),
-            v,
-        );
-        let clamped_off = settings_clamp_scroll(0.0, 99999.0, v, true, true, false, false);
-        let clamped_on = settings_clamp_scroll(0.0, 99999.0, v, true, true, true, true);
+        let max_off = settings_body_max_scroll(settings_body_content_height(v, &f_off), v);
+        let max_on = settings_body_max_scroll(settings_body_content_height(v, &f_on), v);
+        let clamped_off = settings_clamp_scroll(0.0, 99999.0, v, &f_off);
+        let clamped_on = settings_clamp_scroll(0.0, 99999.0, v, &f_on);
         assert!((clamped_off - max_off).abs() < 0.01);
         assert!((clamped_on - max_on).abs() < 0.01);
         assert!(clamped_on >= clamped_off);
+    }
+
+    // ── M1f — Updater §8 geometry ──────────────────────────────────────
+
+    /// All five flag combos used by M1f tests share the both-startup-gates-on
+    /// baseline (matches the M1e tests) so the Updater section sits at a stable
+    /// Y; only `updater_kind` varies.
+    fn flags(kind: UpdaterHeightKind) -> SettingsBodyFlags {
+        SettingsBodyFlags::new(true, true, false, false, kind)
+    }
+
+    #[test]
+    fn m1f_updater_title_sits_below_stealth_section() {
+        let v = vp();
+        // With no stealth retry, the Stealth section ends at its buttons row.
+        let stealth_bottom =
+            settings_stealth_buttons_row_rect(v, 0.0, true, true, false, false).bottom();
+        let title = settings_updater_label_rect(v, 0.0, true, true, false, false);
+        assert!(
+            (title.y - (stealth_bottom + SETTINGS_SECTION_GAP)).abs() < 0.01,
+            "updater title must start a section gap below the last Stealth row \
+             (stealth_bottom={}, title.y={})",
+            stealth_bottom,
+            title.y,
+        );
+        assert_eq!(title.height, SETTINGS_SECTION_LABEL_H);
+    }
+
+    #[test]
+    fn m1f_updater_title_reflows_when_stealth_retry_present() {
+        let v = vp();
+        // A stealth retry adds the OneDrive block, pushing the updater title
+        // lower. Updater kind is irrelevant to the title Y.
+        let no_retry = settings_updater_label_rect(v, 0.0, true, true, false, false);
+        let with_retry = settings_updater_label_rect(v, 0.0, true, true, true, false);
+        assert!(with_retry.y > no_retry.y);
+    }
+
+    #[test]
+    fn m1f_status_row_and_pill_anchor() {
+        let v = vp();
+        let f = flags(UpdaterHeightKind::StatusOnly);
+        let title = settings_updater_label_rect(v, 0.0, true, true, false, false);
+        let status = settings_updater_status_row_rect(v, 0.0, &f);
+        assert!((status.y - title.bottom()).abs() < 0.01);
+        let pill = settings_updater_pill_rect(status);
+        assert!(pill.right() <= status.right() + 0.01);
+        assert!(pill.x >= status.x + status.width * 0.5);
+        assert_eq!(pill.width, SETTINGS_UPDATER_PILL_W);
+    }
+
+    #[test]
+    fn m1f_middle_block_height_tracks_status_family() {
+        let v = vp();
+        let status_only = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
+        let versioned = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Versioned));
+        let downloading = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        let error = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Error));
+        assert_eq!(status_only.height, 0.0);
+        assert_eq!(versioned.height, SETTINGS_UPDATER_ROW_H);
+        assert_eq!(downloading.height, SETTINGS_UPDATER_PROGRESS_H);
+        assert_eq!(error.height, SETTINGS_UPDATER_ERROR_H);
+        // The progress track sits inside the downloading block, full width.
+        let track = settings_updater_progress_track_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        assert!(track.y >= downloading.y);
+        assert!(track.bottom() <= downloading.bottom() + 0.01);
+        assert!((track.width - downloading.width).abs() < 0.01);
+        assert_eq!(track.height, SETTINGS_UPDATER_PROGRESS_TRACK_H);
+    }
+
+    #[test]
+    fn m1f_buttons_left_pack_in_column_order() {
+        let v = vp();
+        let row = settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::Versioned));
+        let b0 = settings_updater_button_rect(row, 0);
+        let b1 = settings_updater_button_rect(row, 1);
+        let b2 = settings_updater_button_rect(row, 2);
+        assert_eq!(b0.y, b1.y);
+        assert!(b0.right() <= b1.x + 0.01);
+        assert!(b1.right() <= b2.x + 0.01);
+        assert!((b0.x - row.x).abs() < 0.01);
+        assert_eq!(b0.width, SETTINGS_UPDATER_BTN_W);
+    }
+
+    #[test]
+    fn m1f_buttons_row_reflows_with_middle_block() {
+        let v = vp();
+        // The buttons row sits lower when a middle block is present.
+        let no_block = settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
+        let with_progress = settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        assert!(with_progress.y > no_block.y);
+        assert!((with_progress.y - no_block.y - SETTINGS_UPDATER_PROGRESS_H).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1f_prefs_rows_stack_below_buttons() {
+        let v = vp();
+        let f = flags(UpdaterHeightKind::StatusOnly);
+        let buttons = settings_updater_buttons_row_rect(v, 0.0, &f);
+        let freq = settings_updater_frequency_row_rect(v, 0.0, &f);
+        let auto = settings_updater_auto_download_row_rect(v, 0.0, &f);
+        assert!(freq.y >= buttons.bottom());
+        assert!((auto.y - freq.bottom()).abs() < 0.01);
+        // Chip right-anchors in the frequency row; toggle hit right-anchors in
+        // the auto-download row.
+        let chip = settings_updater_frequency_chip_rect(freq);
+        assert!((chip.right() - freq.right()).abs() < 0.01);
+        let hit = settings_updater_auto_download_hit_rect(auto);
+        assert!((hit.right() - auto.right()).abs() < 0.01);
+        assert_eq!(hit.width, SETTINGS_TOP_TOGGLE_HIT_W);
+    }
+
+    #[test]
+    fn m1f_content_height_tracks_status_family() {
+        let status_only = settings_updater_content_height(UpdaterHeightKind::StatusOnly);
+        let versioned = settings_updater_content_height(UpdaterHeightKind::Versioned);
+        let downloading = settings_updater_content_height(UpdaterHeightKind::Downloading);
+        let error = settings_updater_content_height(UpdaterHeightKind::Error);
+        assert!(versioned > status_only);
+        assert!(downloading > status_only);
+        assert!(error > status_only);
+        // Each family adds exactly its middle-block height over StatusOnly.
+        assert!((versioned - status_only - SETTINGS_UPDATER_ROW_H).abs() < 0.01);
+        assert!((downloading - status_only - SETTINGS_UPDATER_PROGRESS_H).abs() < 0.01);
+        assert!((error - status_only - SETTINGS_UPDATER_ERROR_H).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1f_body_content_height_includes_updater() {
+        let v = vp();
+        // Body height with the updater downloading (progress block) must exceed
+        // the idle (status-only) height — proving the updater feeds the body.
+        let idle = settings_body_content_height(v, &flags(UpdaterHeightKind::StatusOnly));
+        let dl = settings_body_content_height(v, &flags(UpdaterHeightKind::Downloading));
+        assert!(dl > idle, "updater progress block must grow the body");
+    }
+
+    #[test]
+    fn m1f_flags_round_trip_through_height_fn() {
+        let v = vp();
+        // The Copy struct's fields drive the same height as the equivalent
+        // legacy-style bools would: build two flag sets that differ only in
+        // updater_kind and confirm the delta equals the middle-block delta.
+        let a = SettingsBodyFlags::new(true, false, true, false, UpdaterHeightKind::StatusOnly);
+        let b = SettingsBodyFlags::new(true, false, true, false, UpdaterHeightKind::Error);
+        let ha = settings_body_content_height(v, &a);
+        let hb = settings_body_content_height(v, &b);
+        assert!((hb - ha - SETTINGS_UPDATER_ERROR_H).abs() < 0.01);
+        // Round-trip the struct itself (Copy + Eq).
+        let c = a;
+        assert_eq!(a, c);
+        assert_ne!(a, b);
     }
 }
 

@@ -13447,27 +13447,33 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 queue_locale_setting_toggle(root);
             }
             ui::SettingsHit::ScrollBodyDelta(delta) => {
-                use bento_nano_app::settings_panel::settings_clamp_scroll;
+                use bento_nano_app::settings_panel::{
+                    SettingsBodyFlags, settings_clamp_scroll,
+                };
                 let app = root.app.borrow();
                 let vp = app.viewport;
-                // M1d + M1e — the body content height depends on the Startup
-                // gating bools (conditional crash steppers + hibernate slider)
-                // AND the Stealth conditional rows (retry/error/OneDrive), so
-                // the max-scroll clamp must read all four.
+                // M1d + M1e + M1f — the body content height depends on the
+                // Startup gating bools (conditional crash steppers + hibernate
+                // slider), the Stealth conditional rows (retry/error/OneDrive),
+                // AND the Updater status family (version/progress/error block),
+                // so the max-scroll clamp reads all of them via SettingsBodyFlags.
                 let (stealth_has_retry, stealth_has_error) =
                     match &*app.stealth_status.borrow() {
                         Some(s) => (s.retry_count > 0, s.last_error.is_some()),
                         None => (false, false),
                     };
-                let next = settings_clamp_scroll(
-                    app.scroll_offset_y.get(),
-                    delta as f32,
-                    vp,
+                let updater_kind = bento_nano_app::business::settings::updater_card::updater_height_kind(
+                    &app.settings_updater_status.borrow(),
+                );
+                let flags = SettingsBodyFlags::new(
                     app.crash_restart_enabled.get(),
                     app.safe_start_after_hibernation.get(),
                     stealth_has_retry,
                     stealth_has_error,
+                    updater_kind,
                 );
+                let next =
+                    settings_clamp_scroll(app.scroll_offset_y.get(), delta as f32, vp, &flags);
                 app.scroll_offset_y.set(next);
                 drop(app);
                 request_redraw(hwnd);

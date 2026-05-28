@@ -171,6 +171,32 @@ pub mod ids {
     pub const STEALTH_REFRESH_BTN: StringId = StringId(167);
     pub const STEALTH_REAPPLY_BTN: StringId = StringId(168);
     pub const STEALTH_ONEDRIVE_WARNING: StringId = StringId(169);
+
+    // 170..187 M1f (2026-05-29) — Updater §8 card (`UpdaterCard.tsx`).
+    // Mirror of the zh-CN ids at the SAME index (positional-array contract;
+    // `lookup_tables_have_matching_length` enforces parity). Tauri keys at
+    // `src/i18n/locales/en.ts:315-335`.
+    pub const UPDATER_CARD_TITLE: StringId = StringId(170);
+    pub const UPDATER_STATUS_LABEL: StringId = StringId(171);
+    pub const UPDATER_STATUS_IDLE: StringId = StringId(172);
+    pub const UPDATER_STATUS_CHECKING: StringId = StringId(173);
+    pub const UPDATER_STATUS_UP_TO_DATE: StringId = StringId(174);
+    pub const UPDATER_STATUS_AVAILABLE: StringId = StringId(175);
+    pub const UPDATER_STATUS_DOWNLOADING: StringId = StringId(176);
+    pub const UPDATER_STATUS_READY: StringId = StringId(177);
+    pub const UPDATER_STATUS_INSTALLING: StringId = StringId(178);
+    pub const UPDATER_STATUS_SKIPPED: StringId = StringId(179);
+    pub const UPDATER_STATUS_ERROR: StringId = StringId(180);
+    pub const UPDATER_AVAILABLE_VERSION: StringId = StringId(181);
+    pub const UPDATER_CHECK_NOW: StringId = StringId(182);
+    pub const UPDATER_DOWNLOAD: StringId = StringId(183);
+    pub const UPDATER_SKIP_VERSION: StringId = StringId(184);
+    pub const UPDATER_INSTALL_RESTART: StringId = StringId(185);
+    pub const UPDATER_FREQUENCY: StringId = StringId(186);
+    pub const UPDATER_FREQ_DAILY: StringId = StringId(187);
+    pub const UPDATER_FREQ_WEEKLY: StringId = StringId(188);
+    pub const UPDATER_FREQ_MANUAL: StringId = StringId(189);
+    pub const UPDATER_AUTO_DOWNLOAD: StringId = StringId(190);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -379,5 +405,27 @@ pub static EN_US: LookupTable = LookupTable {
         "Refresh status",             // STEALTH_REFRESH_BTN (167)
         "Re-apply",                   // STEALTH_REAPPLY_BTN (168)
         "Your Desktop is inside OneDrive. Consider excluding .bentodesk/ from OneDrive sync — otherwise hidden files will be uploaded to the cloud.", // STEALTH_ONEDRIVE_WARNING (169)
+        // 170..187 M1f — Updater §8 (`UpdaterCard.tsx`, en.ts:315-335).
+        "App Updates",                // UPDATER_CARD_TITLE (170)
+        "Status",                     // UPDATER_STATUS_LABEL (171)
+        "Up to date",                 // UPDATER_STATUS_IDLE (172)
+        "Checking",                   // UPDATER_STATUS_CHECKING (173)
+        "Up to date",                 // UPDATER_STATUS_UP_TO_DATE (174)
+        "Update available",           // UPDATER_STATUS_AVAILABLE (175)
+        "Downloading",                // UPDATER_STATUS_DOWNLOADING (176)
+        "Ready to install",           // UPDATER_STATUS_READY (177)
+        "Installing",                 // UPDATER_STATUS_INSTALLING (178)
+        "Skipped",                    // UPDATER_STATUS_SKIPPED (179)
+        "Error",                      // UPDATER_STATUS_ERROR (180)
+        "Available",                  // UPDATER_AVAILABLE_VERSION (181)
+        "Check now",                  // UPDATER_CHECK_NOW (182)
+        "Download",                   // UPDATER_DOWNLOAD (183)
+        "Skip this version",          // UPDATER_SKIP_VERSION (184)
+        "Install and restart",        // UPDATER_INSTALL_RESTART (185)
+        "Check frequency",            // UPDATER_FREQUENCY (186)
+        "Daily",                      // UPDATER_FREQ_DAILY (187)
+        "Weekly",                     // UPDATER_FREQ_WEEKLY (188)
+        "Manual only",                // UPDATER_FREQ_MANUAL (189)
+        "Silent background download", // UPDATER_AUTO_DOWNLOAD (190)
     ],
 };

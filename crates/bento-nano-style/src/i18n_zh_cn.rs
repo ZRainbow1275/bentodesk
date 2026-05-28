@@ -232,6 +232,35 @@ pub mod ids {
     pub const STEALTH_REFRESH_BTN: StringId = StringId(167);
     pub const STEALTH_REAPPLY_BTN: StringId = StringId(168);
     pub const STEALTH_ONEDRIVE_WARNING: StringId = StringId(169);
+
+    // 170..187 M1f (2026-05-29) — Updater §8 card (`UpdaterCard.tsx`).
+    // Appended in lockstep with `i18n_en_us` (same index, same order) per the
+    // positional-array contract. Mirrors the Tauri `updater*` keys
+    // (`src/i18n/locales/zh-CN.ts:313-333`). The status pill maps each of the
+    // nano `SettingsUpdaterStatus` variants to one of these labels; the action
+    // buttons reuse the `can_run_update_action` / `can_skip_update` helpers for
+    // visibility.
+    pub const UPDATER_CARD_TITLE: StringId = StringId(170);
+    pub const UPDATER_STATUS_LABEL: StringId = StringId(171);
+    pub const UPDATER_STATUS_IDLE: StringId = StringId(172);
+    pub const UPDATER_STATUS_CHECKING: StringId = StringId(173);
+    pub const UPDATER_STATUS_UP_TO_DATE: StringId = StringId(174);
+    pub const UPDATER_STATUS_AVAILABLE: StringId = StringId(175);
+    pub const UPDATER_STATUS_DOWNLOADING: StringId = StringId(176);
+    pub const UPDATER_STATUS_READY: StringId = StringId(177);
+    pub const UPDATER_STATUS_INSTALLING: StringId = StringId(178);
+    pub const UPDATER_STATUS_SKIPPED: StringId = StringId(179);
+    pub const UPDATER_STATUS_ERROR: StringId = StringId(180);
+    pub const UPDATER_AVAILABLE_VERSION: StringId = StringId(181);
+    pub const UPDATER_CHECK_NOW: StringId = StringId(182);
+    pub const UPDATER_DOWNLOAD: StringId = StringId(183);
+    pub const UPDATER_SKIP_VERSION: StringId = StringId(184);
+    pub const UPDATER_INSTALL_RESTART: StringId = StringId(185);
+    pub const UPDATER_FREQUENCY: StringId = StringId(186);
+    pub const UPDATER_FREQ_DAILY: StringId = StringId(187);
+    pub const UPDATER_FREQ_WEEKLY: StringId = StringId(188);
+    pub const UPDATER_FREQ_MANUAL: StringId = StringId(189);
+    pub const UPDATER_AUTO_DOWNLOAD: StringId = StringId(190);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -446,5 +475,27 @@ pub static ZH_CN: LookupTable = LookupTable {
         "刷新状态",              // STEALTH_REFRESH_BTN (167)
         "重新应用",              // STEALTH_REAPPLY_BTN (168)
         "检测到您的桌面在 OneDrive 内。建议在 OneDrive 设置中排除 .bentodesk/，否则隐藏文件会被上传到云端。", // STEALTH_ONEDRIVE_WARNING (169)
+        // 170..187 M1f — Updater §8 (`UpdaterCard.tsx`, zh-CN.ts:313-333).
+        "应用更新",              // UPDATER_CARD_TITLE (170)
+        "状态",                  // UPDATER_STATUS_LABEL (171)
+        "已是最新",              // UPDATER_STATUS_IDLE (172)
+        "检查中",                // UPDATER_STATUS_CHECKING (173)
+        "已是最新",              // UPDATER_STATUS_UP_TO_DATE (174)
+        "有可用更新",            // UPDATER_STATUS_AVAILABLE (175)
+        "下载中",                // UPDATER_STATUS_DOWNLOADING (176)
+        "准备安装",              // UPDATER_STATUS_READY (177)
+        "安装中",                // UPDATER_STATUS_INSTALLING (178)
+        "已跳过",                // UPDATER_STATUS_SKIPPED (179)
+        "错误",                  // UPDATER_STATUS_ERROR (180)
+        "可用版本",              // UPDATER_AVAILABLE_VERSION (181)
+        "检查更新",              // UPDATER_CHECK_NOW (182)
+        "下载",                  // UPDATER_DOWNLOAD (183)
+        "跳过此版本",            // UPDATER_SKIP_VERSION (184)
+        "安装并重启",            // UPDATER_INSTALL_RESTART (185)
+        "检查频率",              // UPDATER_FREQUENCY (186)
+        "每天",                  // UPDATER_FREQ_DAILY (187)
+        "每周",                  // UPDATER_FREQ_WEEKLY (188)
+        "仅手动",                // UPDATER_FREQ_MANUAL (189)
+        "后台静默下载",          // UPDATER_AUTO_DOWNLOAD (190)
     ],
 };

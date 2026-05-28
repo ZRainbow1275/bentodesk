@@ -158,6 +158,157 @@ pub fn format_bytes(bytes: u64) -> smol_str::SmolStr {
     }
 }
 
+// ── M1f 2026-05-29 — inline Updater §8 paint/hit logic ──────────────────
+//
+// The visible Updater card is painted by `Renderer::draw_settings_panel`
+// from the live `AppState::settings_updater_status` snapshot (9 variants),
+// NOT from the widget-tree `mount` above. The pure status→pill / button-
+// visibility / progress-fraction helpers below keep that drawing logic in
+// the lib crate (testable, panic-free) so render.rs + the shell hit-tester
+// stay thin painters. 1:1 with Tauri `UpdaterCard.tsx` (`statusPillLabel`
+// + the three `<Show when=…>` action gates).
+
+use crate::state::SettingsUpdaterStatus;
+
+/// M1f — pill colour bucket for the Updater status row. Mirrors the Tauri
+/// `.updater-status-{state}` CSS tints: idle/up-to-date → green, checking →
+/// muted/grey, available/downloading/installing → blue, ready → green,
+/// skipped → grey, error → red.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UpdaterPillKind {
+    /// No update activity / already on the latest build. Green.
+    UpToDate,
+    /// A check or background work is in flight. Muted grey.
+    Busy,
+    /// An update is available, downloading, or installing. Blue.
+    Active,
+    /// A staged update is ready to install + restart. Green.
+    Ready,
+    /// The current version was skipped by the user. Grey.
+    Skipped,
+    /// The last check / download / install errored. Red.
+    Error,
+}
+
+impl UpdaterPillKind {
+    /// M1f — map a live [`SettingsUpdaterStatus`] to its pill colour bucket.
+    /// Panic-free total match over all 9 variants.
+    pub const fn from_status(status: &SettingsUpdaterStatus) -> Self {
+        match status {
+            SettingsUpdaterStatus::Idle | SettingsUpdaterStatus::UpToDate { .. } => Self::UpToDate,
+            SettingsUpdaterStatus::Checking => Self::Busy,
+            SettingsUpdaterStatus::Available { .. }
+            | SettingsUpdaterStatus::Downloading { .. }
+            | SettingsUpdaterStatus::Installing { .. } => Self::Active,
+            SettingsUpdaterStatus::Ready { .. } => Self::Ready,
+            SettingsUpdaterStatus::Skipped { .. } => Self::Skipped,
+            SettingsUpdaterStatus::Error(_) => Self::Error,
+        }
+    }
+}
+
+/// M1f — i18n string id for the status pill label of a given updater status.
+/// Each of the 9 variants maps to one of the appended ids 172..181. Returns
+/// the id (the renderer calls `bento_nano_style::t(..)`).
+pub const fn updater_status_label_id(
+    status: &SettingsUpdaterStatus,
+) -> bento_nano_style::StringId {
+    use bento_nano_style::i18n_zh_cn::ids;
+    match status {
+        SettingsUpdaterStatus::Idle => ids::UPDATER_STATUS_IDLE,
+        SettingsUpdaterStatus::Checking => ids::UPDATER_STATUS_CHECKING,
+        SettingsUpdaterStatus::UpToDate { .. } => ids::UPDATER_STATUS_UP_TO_DATE,
+        SettingsUpdaterStatus::Available { .. } => ids::UPDATER_STATUS_AVAILABLE,
+        SettingsUpdaterStatus::Downloading { .. } => ids::UPDATER_STATUS_DOWNLOADING,
+        SettingsUpdaterStatus::Ready { .. } => ids::UPDATER_STATUS_READY,
+        SettingsUpdaterStatus::Installing { .. } => ids::UPDATER_STATUS_INSTALLING,
+        SettingsUpdaterStatus::Skipped { .. } => ids::UPDATER_STATUS_SKIPPED,
+        SettingsUpdaterStatus::Error(_) => ids::UPDATER_STATUS_ERROR,
+    }
+}
+
+/// M1f — which conditional version SmolStr (if any) the card shows below the
+/// status row. Available/Ready/Installing/Skipped carry a version; the other
+/// states show no version block. Borrows the already-allocated SmolStr so
+/// paint stays alloc-free (§10).
+pub fn updater_visible_version(status: &SettingsUpdaterStatus) -> Option<&smol_str::SmolStr> {
+    match status {
+        SettingsUpdaterStatus::Available { version }
+        | SettingsUpdaterStatus::Ready { version }
+        | SettingsUpdaterStatus::Installing { version }
+        | SettingsUpdaterStatus::Skipped { version } => Some(version),
+        _ => None,
+    }
+}
+
+/// M1f — download progress fraction in `0.0..=1.0`, or `None` when the total
+/// size is unknown (indeterminate bar). Only meaningful while
+/// `Downloading`; every other state returns `None` (no bar painted).
+///
+/// Panic-free: guards `total_bytes == 0` (→ `None`, never a divide-by-zero)
+/// and clamps the ratio to `1.0` so a late chunk that overshoots the
+/// advertised total can't paint a fill wider than the track.
+pub fn updater_progress_fraction(status: &SettingsUpdaterStatus) -> Option<f32> {
+    match status {
+        SettingsUpdaterStatus::Downloading {
+            chunk_len,
+            total_bytes,
+        } => match total_bytes {
+            Some(total) if *total > 0 => {
+                let frac = (*chunk_len as f64 / *total as f64) as f32;
+                Some(frac.clamp(0.0, 1.0))
+            }
+            // total unknown (or zero) → indeterminate bar.
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// M1f — true when the `下载 / Download` action button should be visible
+/// (status `Available`). 1:1 with Tauri `<Show when={status()==="available"}>`.
+pub const fn updater_show_download(status: &SettingsUpdaterStatus) -> bool {
+    matches!(status, SettingsUpdaterStatus::Available { .. })
+}
+
+/// M1f — true when the `安装并重启 / Install and restart` action button should
+/// be visible (status `Ready`). 1:1 with Tauri `<Show when={status()==="ready"}>`.
+pub const fn updater_show_install(status: &SettingsUpdaterStatus) -> bool {
+    matches!(status, SettingsUpdaterStatus::Ready { .. })
+}
+
+/// M1f — true when the `跳过此版本 / Skip this version` action button should be
+/// visible. Tauri shows it for `available`; nano additionally allows it for
+/// `Ready` (a staged-but-not-installed update can still be skipped — the
+/// shell's `version_for_skip` already supports both). Reuses the existing
+/// [`SettingsUpdaterStatus::can_skip_update`] gate so paint + dispatch agree.
+pub const fn updater_show_skip(status: &SettingsUpdaterStatus) -> bool {
+    status.can_skip_update()
+}
+
+/// M1f — collapse a live [`SettingsUpdaterStatus`] to the
+/// [`crate::settings_panel::UpdaterHeightKind`] discriminant that drives the
+/// card's dynamic body height. The middle block (version / progress / error)
+/// is mutually exclusive by status family, so the height only needs this 4-way
+/// classification (keeping `SettingsBodyFlags` `Copy` + SmolStr-free). The
+/// renderer + the shell scroll-clamp both call this so paint and clamp agree.
+pub const fn updater_height_kind(
+    status: &SettingsUpdaterStatus,
+) -> crate::settings_panel::UpdaterHeightKind {
+    use crate::settings_panel::UpdaterHeightKind as K;
+    match status {
+        SettingsUpdaterStatus::Available { .. }
+        | SettingsUpdaterStatus::Ready { .. }
+        | SettingsUpdaterStatus::Installing { .. }
+        | SettingsUpdaterStatus::Skipped { .. } => K::Versioned,
+        SettingsUpdaterStatus::Downloading { .. } => K::Downloading,
+        SettingsUpdaterStatus::Error(_) => K::Error,
+        SettingsUpdaterStatus::Idle
+        | SettingsUpdaterStatus::Checking
+        | SettingsUpdaterStatus::UpToDate { .. } => K::StatusOnly,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +341,196 @@ mod tests {
             format_bytes(2 * 1024 * 1024 + 512 * 1024).as_str(),
             "2.50 MB"
         );
+    }
+
+    // ── M1f — inline Updater §8 paint/hit logic ─────────────────────────
+
+    use crate::state::SettingsUpdaterStatus as S;
+    use smol_str::SmolStr;
+
+    fn ver() -> SmolStr {
+        SmolStr::new_static("1.4.0")
+    }
+
+    #[test]
+    fn pill_kind_covers_every_status_variant() {
+        assert_eq!(UpdaterPillKind::from_status(&S::Idle), UpdaterPillKind::UpToDate);
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::UpToDate { current_version: ver() }),
+            UpdaterPillKind::UpToDate
+        );
+        assert_eq!(UpdaterPillKind::from_status(&S::Checking), UpdaterPillKind::Busy);
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Available { version: ver() }),
+            UpdaterPillKind::Active
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Downloading { chunk_len: 1, total_bytes: Some(2) }),
+            UpdaterPillKind::Active
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Installing { version: ver() }),
+            UpdaterPillKind::Active
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Ready { version: ver() }),
+            UpdaterPillKind::Ready
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Skipped { version: ver() }),
+            UpdaterPillKind::Skipped
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Error(SmolStr::new_static("boom"))),
+            UpdaterPillKind::Error
+        );
+    }
+
+    #[test]
+    fn status_label_id_maps_each_variant_to_a_distinct_appended_id() {
+        use bento_nano_style::i18n_zh_cn::ids;
+        assert_eq!(updater_status_label_id(&S::Idle), ids::UPDATER_STATUS_IDLE);
+        assert_eq!(updater_status_label_id(&S::Checking), ids::UPDATER_STATUS_CHECKING);
+        assert_eq!(
+            updater_status_label_id(&S::UpToDate { current_version: ver() }),
+            ids::UPDATER_STATUS_UP_TO_DATE
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Available { version: ver() }),
+            ids::UPDATER_STATUS_AVAILABLE
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Downloading { chunk_len: 0, total_bytes: None }),
+            ids::UPDATER_STATUS_DOWNLOADING
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Ready { version: ver() }),
+            ids::UPDATER_STATUS_READY
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Installing { version: ver() }),
+            ids::UPDATER_STATUS_INSTALLING
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Skipped { version: ver() }),
+            ids::UPDATER_STATUS_SKIPPED
+        );
+        assert_eq!(
+            updater_status_label_id(&S::Error(SmolStr::new_static("e"))),
+            ids::UPDATER_STATUS_ERROR
+        );
+        // Every appended status label id is non-empty in BOTH locales (a blank
+        // would paint an empty pill). Spot-check the two endpoints.
+        assert!(!bento_nano_style::i18n_zh_cn::ZH_CN
+            .get(ids::UPDATER_STATUS_IDLE)
+            .is_empty());
+        assert!(!bento_nano_style::i18n_en_us::EN_US
+            .get(ids::UPDATER_STATUS_ERROR)
+            .is_empty());
+    }
+
+    #[test]
+    fn visible_version_only_for_versioned_states() {
+        assert_eq!(
+            updater_visible_version(&S::Available { version: ver() }).map(|v| v.as_str()),
+            Some("1.4.0")
+        );
+        assert!(updater_visible_version(&S::Ready { version: ver() }).is_some());
+        assert!(updater_visible_version(&S::Installing { version: ver() }).is_some());
+        assert!(updater_visible_version(&S::Skipped { version: ver() }).is_some());
+        assert!(updater_visible_version(&S::Idle).is_none());
+        assert!(updater_visible_version(&S::Checking).is_none());
+        assert!(updater_visible_version(&S::Downloading { chunk_len: 1, total_bytes: Some(2) }).is_none());
+        assert!(updater_visible_version(&S::Error(SmolStr::new_static("e"))).is_none());
+    }
+
+    #[test]
+    fn progress_fraction_is_chunk_over_total_clamped() {
+        // Half-way.
+        let f = updater_progress_fraction(&S::Downloading { chunk_len: 50, total_bytes: Some(100) });
+        assert!((f.expect("some") - 0.5).abs() < 1e-6);
+        // Floor + ceiling.
+        assert_eq!(
+            updater_progress_fraction(&S::Downloading { chunk_len: 0, total_bytes: Some(100) }),
+            Some(0.0)
+        );
+        // Overshoot clamps to 1.0 (never wider than the track).
+        assert_eq!(
+            updater_progress_fraction(&S::Downloading { chunk_len: 250, total_bytes: Some(100) }),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn progress_fraction_none_when_total_unknown_or_zero() {
+        // total_bytes == None → indeterminate (None), never a panic.
+        assert_eq!(
+            updater_progress_fraction(&S::Downloading { chunk_len: 999, total_bytes: None }),
+            None
+        );
+        // total_bytes == Some(0) → guarded, no divide-by-zero, indeterminate.
+        assert_eq!(
+            updater_progress_fraction(&S::Downloading { chunk_len: 10, total_bytes: Some(0) }),
+            None
+        );
+        // Non-downloading states paint no bar.
+        assert_eq!(updater_progress_fraction(&S::Idle), None);
+        assert_eq!(
+            updater_progress_fraction(&S::Available { version: ver() }),
+            None
+        );
+    }
+
+    #[test]
+    fn height_kind_classifies_every_status_family() {
+        use crate::settings_panel::UpdaterHeightKind as K;
+        assert_eq!(updater_height_kind(&S::Idle), K::StatusOnly);
+        assert_eq!(updater_height_kind(&S::Checking), K::StatusOnly);
+        assert_eq!(
+            updater_height_kind(&S::UpToDate { current_version: ver() }),
+            K::StatusOnly
+        );
+        assert_eq!(
+            updater_height_kind(&S::Available { version: ver() }),
+            K::Versioned
+        );
+        assert_eq!(
+            updater_height_kind(&S::Ready { version: ver() }),
+            K::Versioned
+        );
+        assert_eq!(
+            updater_height_kind(&S::Installing { version: ver() }),
+            K::Versioned
+        );
+        assert_eq!(
+            updater_height_kind(&S::Skipped { version: ver() }),
+            K::Versioned
+        );
+        assert_eq!(
+            updater_height_kind(&S::Downloading { chunk_len: 0, total_bytes: None }),
+            K::Downloading
+        );
+        assert_eq!(
+            updater_height_kind(&S::Error(SmolStr::new_static("e"))),
+            K::Error
+        );
+    }
+
+    #[test]
+    fn button_visibility_matches_tauri_show_gates() {
+        // Download: only Available.
+        assert!(updater_show_download(&S::Available { version: ver() }));
+        assert!(!updater_show_download(&S::Ready { version: ver() }));
+        assert!(!updater_show_download(&S::Idle));
+        // Install: only Ready.
+        assert!(updater_show_install(&S::Ready { version: ver() }));
+        assert!(!updater_show_install(&S::Available { version: ver() }));
+        assert!(!updater_show_install(&S::Idle));
+        // Skip: Available OR Ready (reuses can_skip_update).
+        assert!(updater_show_skip(&S::Available { version: ver() }));
+        assert!(updater_show_skip(&S::Ready { version: ver() }));
+        assert!(!updater_show_skip(&S::Idle));
+        assert!(!updater_show_skip(&S::Checking));
+        assert!(!updater_show_skip(&S::Downloading { chunk_len: 0, total_bytes: None }));
     }
 }

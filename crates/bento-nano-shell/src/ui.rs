@@ -944,6 +944,77 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         return SettingsHit::ReapplyStealth;
     }
 
+    // M1f — Updater §8 actions/prefs. The card's row Ys depend on the
+    // Startup+Stealth gating flags AND the live updater status family (which
+    // drives the version/progress/error middle-block height), so build the
+    // same `SettingsBodyFlags` the renderer paints from (so paint geometry and
+    // hit geometry agree). Interactive: 3 action buttons + frequency chip +
+    // auto-download toggle. The status/version/progress/error blocks are
+    // non-interactive. Action-button column indices match the renderer: col 0
+    // = 检查更新 (always), col 1 = 下载/安装并重启 (gated), col 2 = 跳过此版本 (gated).
+    let updater_status = app.settings_updater_status.borrow();
+    let updater_kind = bento_nano_app::business::settings::updater_card::updater_height_kind(
+        &updater_status,
+    );
+    let updater_flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+        crash_restart_on,
+        safe_start_on,
+        stealth_has_retry,
+        stealth_has_error,
+        updater_kind,
+    );
+    let upd_btn_row = bento_nano_app::settings_panel::settings_updater_buttons_row_rect(
+        vp,
+        scroll_y,
+        &updater_flags,
+    );
+    // Col 0 — 检查更新 (always).
+    let check_btn = bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 0);
+    if x >= check_btn.x && x < check_btn.right() && y >= check_btn.y && y < check_btn.bottom() {
+        return SettingsHit::CheckForUpdates;
+    }
+    // Col 1 — 下载 (Available) or 安装并重启 (Ready) → RunUpdateAction.
+    if bento_nano_app::business::settings::updater_card::updater_show_download(&updater_status)
+        || bento_nano_app::business::settings::updater_card::updater_show_install(&updater_status)
+    {
+        let action_btn =
+            bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 1);
+        if x >= action_btn.x && x < action_btn.right() && y >= action_btn.y && y < action_btn.bottom()
+        {
+            return SettingsHit::RunUpdateAction;
+        }
+    }
+    // Col 2 — 跳过此版本 (Available/Ready) → SkipCurrentUpdate.
+    if bento_nano_app::business::settings::updater_card::updater_show_skip(&updater_status) {
+        let skip_btn =
+            bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 2);
+        if x >= skip_btn.x && x < skip_btn.right() && y >= skip_btn.y && y < skip_btn.bottom() {
+            return SettingsHit::SkipCurrentUpdate;
+        }
+    }
+    // 检查频率 cycling chip → CycleUpdateFrequency.
+    let upd_freq_row = bento_nano_app::settings_panel::settings_updater_frequency_row_rect(
+        vp,
+        scroll_y,
+        &updater_flags,
+    );
+    let freq_chip =
+        bento_nano_app::settings_panel::settings_updater_frequency_chip_rect(upd_freq_row);
+    if x >= freq_chip.x && x < freq_chip.right() && y >= freq_chip.y && y < freq_chip.bottom() {
+        return SettingsHit::CycleUpdateFrequency;
+    }
+    // 后台静默下载 toggle → ToggleUpdateAutoDownload.
+    let upd_auto_row = bento_nano_app::settings_panel::settings_updater_auto_download_row_rect(
+        vp,
+        scroll_y,
+        &updater_flags,
+    );
+    let auto_hit =
+        bento_nano_app::settings_panel::settings_updater_auto_download_hit_rect(upd_auto_row);
+    if x >= auto_hit.x && x < auto_hit.right() && y >= auto_hit.y && y < auto_hit.bottom() {
+        return SettingsHit::ToggleUpdateAutoDownload;
+    }
+
     SettingsHit::Body
 }
 
