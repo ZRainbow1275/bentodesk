@@ -1056,6 +1056,29 @@ mod tests {
         assert_eq!(app.active_theme_typography().sizes.md, 15.0);
     }
 
+    /// α5 (S2, 2026-05-24) — pin AppState invariant that `theme_base_accent`
+    /// defaults to `None`. Combined with the call-site removal in
+    /// `render.rs::render_frame` (the unconditional `draw_theme_base_accent`
+    /// at line 470 was deleted), a fresh launch no longer paints the 4-DIP
+    /// accent strip over the desktop. If a future regression resurrects that
+    /// paint call AND leaves `theme_base_accent = None`, the strip falls
+    /// back to `palette.accent × 0.92` — exactly the blue strip the user
+    /// reported. This test is the canary for the state half of the contract;
+    /// the call-site half is pinned by the comment + git history at
+    /// render.rs:470.
+    #[test]
+    fn theme_base_accent_defaults_to_none_alpha_s2_regression_pin() {
+        let app = AppState::new();
+        assert!(
+            app.theme_base_accent.borrow().is_none(),
+            "α5 S2 regression: theme_base_accent must default to None so a \
+             future re-introduced top strip paint at least falls through the \
+             swatch picker rather than the palette fallback. Setting a \
+             default here would re-paint the leaked top strip the moment the \
+             call site comes back."
+        );
+    }
+
     #[test]
     fn zone_pill_anim_defaults_are_settled() {
         // Wave G2 — fresh AppState must report no pill morph in flight so

@@ -467,7 +467,15 @@ impl Renderer {
             };
             self.draw_node(node, *rect)?;
         }
-        self.draw_theme_base_accent(app)?;
+        // α5 (S2, 2026-05-24): the prior unconditional `draw_theme_base_accent`
+        // call painted a 4-DIP accent strip across the full top edge of the
+        // Main HWND on every frame. The Tauri 1.2.4 baseline paints no such
+        // strip (grep on bentodesk@6a3b283 returns zero `theme-base` /
+        // `base-accent` consumers). On the desktop overlay the strip read as
+        // an ugly blue border riding above all foreground apps. The state
+        // field + helper stay alive for zone-accent fallback (consumed at
+        // :1235/1283/1303/1391 below) and for the picker pop-up that lets
+        // users pick the base accent; only the Main-HWND leak is removed.
 
         // Phase 2 — zones live outside the widget tree (they're a domain
         // collection, not a tree-mounted card). Render after the tree so
@@ -1161,6 +1169,12 @@ impl Renderer {
         Ok(())
     }
 
+    // α5 (S2, 2026-05-24): no longer called from the Main HWND paint loop
+    // (the unconditional call at :470 leaked a 4 DIP blue strip across the
+    // top of the desktop overlay). Kept as `dead_code`-tolerant in case a
+    // future Settings header or accent-callout reuses it; `cargo test` still
+    // pins the math at :1235/1283/1303/1391 via the consumer accessors.
+    #[allow(dead_code)]
     fn draw_theme_base_accent(&mut self, app: &AppState) -> Result<(), RenderError> {
         let accent = app
             .theme_base_accent
@@ -2182,8 +2196,9 @@ impl Renderer {
     fn draw_settings_panel(&mut self, app: &AppState) -> Result<(), RenderError> {
         use crate::settings_panel::{
             SETTINGS_ADV_ROW_COUNT, SETTINGS_OVERLAY_ROW_COUNT, SETTINGS_PANEL_RADIUS,
-            SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_ROW_PAD_X, SETTINGS_SOURCE_COUNT,
-            SETTINGS_TOP_TOGGLE_COUNT,
+            SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_RADIO_INNER_D, SETTINGS_RADIO_OUTER_D,
+            SETTINGS_ROW_PAD_X, SETTINGS_SOURCE_COUNT, SETTINGS_TOP_TOGGLE_COUNT,
+            SETTINGS_ZONE_DISPLAY_MODE_COUNT,
             settings_active_theme_rect, settings_advanced_label_rect,
             settings_advanced_num_value_rect, settings_advanced_row_rect,
             settings_advanced_slider_rect, settings_advanced_toggle_hit_rect, settings_body_rect,
@@ -2197,7 +2212,12 @@ impl Renderer {
             settings_source_toggle_hit_rect, settings_sources_label_rect,
             settings_top_toggle_hit_rect, settings_top_toggle_row_rect,
             settings_watch_label_rect, settings_watch_textarea_rect,
+            settings_zone_display_mode_picker_row_rect,
+            settings_zone_display_mode_radio_inner_rect,
+            settings_zone_display_mode_radio_label_rect,
+            settings_zone_display_mode_radio_outer_rect,
         };
+        use crate::state::ZoneDisplayMode;
         use crate::widgets::toggle_switch::toggle_switch_in_rect;
         // Round-2 M1 — Tauri 1.2.4 frame_060/065/070/075 dark redesign.
         //
@@ -2417,6 +2437,103 @@ impl Renderer {
                 settings_language_chevron_rect(viewport, scroll),
                 label_color,
             )?;
+        }
+
+        // α4 (Wave I-α, 2026-05-25) — zone-display-mode 3-radio picker.
+        //
+        // Tauri 1.2.4 baseline (`SettingsPanel.tsx:555-595`) paints a 3-radio
+        // horizontal group (Hover / Always / Click) for the default zone
+        // display mode. Wave H shipped the data path (enum + get/set +
+        // SettingsHit::CycleZoneDisplayMode dispatch) but no UI — the row
+        // index lived as orphan `#[allow(dead_code)]` per evidence row R2.
+        // This block paints the row + 3 radios; the hit-tester in
+        // `bento-nano-shell/src/ui.rs::settings_hit` and the dispatch arm in
+        // `bento-nano-shell/src/main.rs` route clicks back into the same
+        // `Command::SetSetting` path the cycle button used.
+        let picker_row = settings_zone_display_mode_picker_row_rect(viewport, scroll);
+        if row_visible(picker_row, body) {
+            // Row label on the left half — matches the language row layout.
+            let label_rect = bento_nano_style::Rect {
+                x: picker_row.x,
+                y: picker_row.y + (picker_row.height - 16.0) * 0.5,
+                width: picker_row.width * 0.4,
+                height: 16.0,
+            };
+            // R14 fix (2026-05-25) — caption uses dedicated picker-row label
+            // StringId 140 ("默认显示模式" / "Default display mode"), bilingual
+            // and unrelated to the per-radio mode names (77/78/79).
+            self.draw_text(
+                bento_nano_style::t(
+                    bento_nano_style::i18n_zh_cn::ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
+                ),
+                label_rect,
+                label_color,
+            )?;
+            let modes = [
+                ZoneDisplayMode::Hover,
+                ZoneDisplayMode::Always,
+                ZoneDisplayMode::Click,
+            ];
+            let current = app.zone_display_mode.get();
+            let radius_outer = BorderRadius::all(SETTINGS_RADIO_OUTER_D * 0.5);
+            let radius_inner = BorderRadius::all(SETTINGS_RADIO_INNER_D * 0.5);
+            for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+                let mode = modes[index as usize];
+                let outer = settings_zone_display_mode_radio_outer_rect(
+                    viewport, scroll, index,
+                );
+                // Selected radios use the accent hue; unselected keep the
+                // chip_border tone. v1.3.0 SettingsPanel.tsx ring pattern:
+                // fill the outer disc with ring_color, then carve out the
+                // interior with the panel surface — leaves a 1-DIP ring on
+                // ALL four edges (top/bottom/left/right) at once, no
+                // per-edge band stitching (R14 fix — prior 2-band version
+                // read as `(== ==)` not `○`).
+                let ring_color = if mode == current {
+                    accent_on
+                } else {
+                    chip_border
+                };
+                self.fill_rounded_rect(outer, ring_color, radius_outer)?;
+                let ring_hairline: f32 = 1.0;
+                let interior = bento_nano_style::Rect {
+                    x: outer.x + ring_hairline,
+                    y: outer.y + ring_hairline,
+                    width: (outer.width - 2.0 * ring_hairline).max(0.0),
+                    height: (outer.height - 2.0 * ring_hairline).max(0.0),
+                };
+                let radius_interior = BorderRadius::all(
+                    (SETTINGS_RADIO_OUTER_D * 0.5 - ring_hairline).max(0.0),
+                );
+                self.fill_rounded_rect(interior, chip_bg, radius_interior)?;
+                if mode == current {
+                    let inner = settings_zone_display_mode_radio_inner_rect(
+                        viewport, scroll, index,
+                    );
+                    self.fill_rounded_rect(inner, accent_on, radius_inner)?;
+                }
+                // Radio label — bilingual via StringId 77/78/79 (R14 fix —
+                // prior `mode.label()` returned English-only literals).
+                let label_id = match mode {
+                    ZoneDisplayMode::Hover => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_HOVER
+                    }
+                    ZoneDisplayMode::Always => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_ALWAYS
+                    }
+                    ZoneDisplayMode::Click => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_CLICK
+                    }
+                };
+                let label = settings_zone_display_mode_radio_label_rect(
+                    viewport, scroll, index,
+                );
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(label_id),
+                    label,
+                    title_color,
+                )?;
+            }
         }
 
         // ── Round-2 M2 sections ──────────────────────────────────────────
@@ -5979,6 +6096,13 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 /// G3 — locale-aware mapping for `SettingsEncryptionMode::as_wire()`. The wire
 /// variant returns the SmolStr/SerDe token; this returns the user-visible
 /// translation while preserving the same set of distinct states.
+//
+// β carry-over (Wave I-α / R14 2026-05-25): function landed in the Wave H baseline
+// (commit 1562751, 2026-05-20) ahead of the encryption settings UI integration
+// and has no current call site. Annotated `#[allow(dead_code)]` so clippy
+// `dead_code` lint passes; deletion deferred to β1 when the encryption status
+// row is wired up.
+#[allow(dead_code)]
 fn localized_encryption_mode(mode: crate::state::SettingsEncryptionMode) -> &'static str {
     use crate::state::SettingsEncryptionMode;
     match mode {
@@ -5999,6 +6123,11 @@ fn localized_encryption_mode(mode: crate::state::SettingsEncryptionMode) -> &'st
 /// keep the existing `format!` shape (with a localized prefix) so the
 /// "Available 2.1.0" / "Downloading 4096/8192 B" inline-test expectations in
 /// `bento-nano-shell` still hold for the en-US locale.
+//
+// β carry-over (Wave I-α / R14 2026-05-25): Wave H baseline leftover (see
+// `localized_encryption_mode` note above). Updater summary row not yet wired
+// into the Settings panel; β1 owner of updater UI will either delete or call.
+#[allow(dead_code)]
 fn localized_updater_summary(status: &crate::state::SettingsUpdaterStatus) -> smol_str::SmolStr {
     use crate::state::SettingsUpdaterStatus;
     match status {
@@ -6016,6 +6145,10 @@ fn localized_updater_summary(status: &crate::state::SettingsUpdaterStatus) -> sm
 }
 
 /// G3 — locale-aware version of `SettingsUpdaterStatus::action_label()`.
+//
+// β carry-over (Wave I-α / R14 2026-05-25): pairs with `localized_updater_summary`
+// above; activated by β1 updater UI wave or removed alongside.
+#[allow(dead_code)]
 fn localized_updater_action_label(status: &crate::state::SettingsUpdaterStatus) -> &'static str {
     use crate::state::SettingsUpdaterStatus;
     match status {

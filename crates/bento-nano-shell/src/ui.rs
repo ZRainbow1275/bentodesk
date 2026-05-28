@@ -520,6 +520,12 @@ pub enum SettingsHit {
     CycleActiveTheme,
     /// Process default zone display-mode cycle button.
     CycleZoneDisplayMode,
+    /// α4 (Wave I-α, 2026-05-25) — pick a specific zone-display mode
+    /// (Hover / Always / Click) from the 3-radio picker that replaces the
+    /// orphan cycle button. Dispatches `Command::SetSetting` like the
+    /// cycle button used to, but with the explicit chosen mode wire string
+    /// instead of `zone_display_mode.next()`.
+    SetZoneDisplayMode(bento_nano_app::ZoneDisplayMode),
     /// Create a config-vault backup now.
     CreateSettingsBackup,
     /// List real config-vault backup files.
@@ -765,6 +771,24 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     let lang_chip = bento_nano_app::settings_panel::settings_language_chip_rect(vp, scroll_y);
     if x >= lang_chip.x && x < lang_chip.right() && y >= lang_chip.y && y < lang_chip.bottom() {
         return SettingsHit::OpenLocaleMenu;
+    }
+    // α4 (Wave I-α, 2026-05-25) — zone-display-mode picker radios. Three
+    // right-anchored radio hit-boxes sit on the row directly below the
+    // language chip; each radio dispatches `SetZoneDisplayMode(mode)`.
+    // Index → mode mapping mirrors the renderer's `modes` array.
+    for index in 0..bento_nano_app::settings_panel::SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+        let hit = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
+            vp, scroll_y, index,
+        );
+        if x >= hit.x && x < hit.right() && y >= hit.y && y < hit.bottom() {
+            let mode = match index {
+                0 => bento_nano_app::ZoneDisplayMode::Hover,
+                1 => bento_nano_app::ZoneDisplayMode::Always,
+                2 => bento_nano_app::ZoneDisplayMode::Click,
+                _ => return SettingsHit::Body,
+            };
+            return SettingsHit::SetZoneDisplayMode(mode);
+        }
     }
     // Round-2 M2 — 桌面源 card toggles (right-anchored on each row).
     for index in 0..bento_nano_app::settings_panel::SETTINGS_SOURCE_COUNT {
@@ -1348,6 +1372,59 @@ mod phase21_tests {
     // 设置备份 section re-introduces the hit path.
     #[test]
     fn _retired_settings_hit_resolves_visible_backup_entry_restore_in_round_2_m1() {}
+
+    /// α4 (Wave I-α, 2026-05-25) — clicking each of the three zone-display
+    /// radio hit-boxes routes to the matching `SetZoneDisplayMode(mode)`
+    /// variant. Each hit-box centre is sampled so the test exercises the
+    /// hit-tester (not the geometry, which has its own settings_panel.rs
+    /// tests).
+    #[test]
+    fn alpha4_three_radio_hit_boxes_route_to_set_zone_display_mode() {
+        let app = app_with_zones(vec![]);
+        let scroll_y = 0.0;
+
+        let r_hover = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
+            app.viewport,
+            scroll_y,
+            0,
+        );
+        assert_eq!(
+            settings_hit(
+                &app,
+                r_hover.x + r_hover.width * 0.5,
+                r_hover.y + r_hover.height * 0.5,
+            ),
+            SettingsHit::SetZoneDisplayMode(bento_nano_app::ZoneDisplayMode::Hover)
+        );
+
+        let r_always = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
+            app.viewport,
+            scroll_y,
+            1,
+        );
+        assert_eq!(
+            settings_hit(
+                &app,
+                r_always.x + r_always.width * 0.5,
+                r_always.y + r_always.height * 0.5,
+            ),
+            SettingsHit::SetZoneDisplayMode(bento_nano_app::ZoneDisplayMode::Always)
+        );
+
+        let r_click = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
+            app.viewport,
+            scroll_y,
+            2,
+        );
+        assert_eq!(
+            settings_hit(
+                &app,
+                r_click.x + r_click.width * 0.5,
+                r_click.y + r_click.height * 0.5,
+            ),
+            SettingsHit::SetZoneDisplayMode(bento_nano_app::ZoneDisplayMode::Click)
+        );
+    }
 
     #[test]
     fn settings_hit_routes_keybindings_modal_buttons_first() {

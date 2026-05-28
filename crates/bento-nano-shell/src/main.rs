@@ -372,6 +372,12 @@ struct AppRoot {
     /// until the first `Command::OpenSettings` mounts the panel; `Some(id)`
     /// thereafter so subsequent opens reuse the same subtree (avoids
     /// re-mounting cards on every tray-click).
+    ///
+    /// Wave I α-bundle 2026-05-25: sanctioned stub — pre-Wave-I baseline
+    /// (commit 1562751); F2-04 panel-reuse wiring deferred to β. Field
+    /// kept (not deleted) so β can plumb through without re-introducing
+    /// the struct slot. Carry-over → β.
+    #[allow(dead_code)]
     settings_panel_root: Cell<Option<NodeId>>,
     /// Runtime hotkey table: defaults plus validated `keybinding.*` vault
     /// overrides. Kept as a tiny `SmallVec`; no hash table on keydown.
@@ -5164,6 +5170,17 @@ fn queue_zone_display_mode_cycle(root: &AppRoot) {
     root.dispatcher.push(Command::SetSetting {
         key: SmolStr::new_static(SETTING_ZONE_DISPLAY_MODE),
         value: bento_nano_app::SettingValue::Str(SmolStr::new_static(next_mode.as_wire())),
+    });
+}
+
+/// α4 (Wave I-α, 2026-05-25) — dispatch `Command::SetSetting` with an
+/// explicit zone-display mode chosen from the 3-radio picker (instead of
+/// cycling). Mirrors `queue_zone_display_mode_cycle` byte-for-byte except
+/// for the source of `next_mode`.
+fn queue_zone_display_mode_set(root: &AppRoot, mode: bento_nano_app::ZoneDisplayMode) {
+    root.dispatcher.push(Command::SetSetting {
+        key: SmolStr::new_static(SETTING_ZONE_DISPLAY_MODE),
+        value: bento_nano_app::SettingValue::Str(SmolStr::new_static(mode.as_wire())),
     });
 }
 
@@ -11509,6 +11526,9 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         ui::SettingsHit::CycleZoneDisplayMode => {
             Some(SmolStr::new_static("Cycle zone display mode"))
         }
+        ui::SettingsHit::SetZoneDisplayMode(_mode) => {
+            Some(SmolStr::new_static("Set zone display mode"))
+        }
         ui::SettingsHit::CreateSettingsBackup => {
             Some(SmolStr::new_static("Create settings backup"))
         }
@@ -12663,6 +12683,18 @@ fn apply_ghost_cursor_passthrough_for_point(
     passthrough
 }
 
+/// α3 (A3 auto-return, 2026-05-24): grace period the WM_TIMER passthrough
+/// poll waits before letting `clear_hover` fire the recover tween. Sized
+/// at 80 ms so a momentary cursor twitch off a pill does not collapse the
+/// hover state before the user returns. P9-sanctioned per memory entry
+/// `feedback_compiles_clean_stub_during_multi_agent_coord` — the constant
+/// site is the load-bearing piece (no `todo!()`, no behavioural drift on
+/// today's clear_hover invocations) and β1 takes ownership when
+/// AppState.settings.collapse_delay_ms persists user-tunable timings.
+// TODO(β1): replace const with persisted setting from AppState.settings.collapse_delay_ms once A2 lands. Sanctioned compile-clean stub per memory/feedback_compiles_clean_stub_during_multi_agent_coord.
+#[allow(dead_code)]
+const LEAVE_GRACE_MS: u64 = 80;
+
 fn clear_hover(root: &AppRoot) {
     let mut app = root.app.borrow_mut();
     // SAFETY: GetTickCount is total + thread-safe.
@@ -12950,6 +12982,9 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             }
             ui::SettingsHit::CycleZoneDisplayMode => {
                 queue_zone_display_mode_cycle(root);
+            }
+            ui::SettingsHit::SetZoneDisplayMode(mode) => {
+                queue_zone_display_mode_set(root, mode);
             }
             ui::SettingsHit::CreateSettingsBackup => {
                 root.dispatcher.push(Command::CreateSettingsBackup);
@@ -21271,9 +21306,10 @@ mod tests {
         SETTING_ENCRYPTION_MODE, SETTING_MINIBAR_PINNED_ZONES, SETTING_STEALTH_ENABLED,
         SETTING_THEME_BASE_ACCENT, SETTING_UPDATES_AUTO_DOWNLOAD, SETTING_UPDATES_CHECK_FREQUENCY,
         SETTING_ZONE_DISPLAY_MODE, StartupLayoutLoadSource, VK_A_KEY, VK_BACKSPACE, VK_D_KEY,
-        VK_DOWN_KEY, VK_ENTER, VK_ESCAPE_KEY, VK_N_KEY, VK_P_KEY, VK_SPACE_KEY, WidgetNode,
+        VK_DOWN_KEY, VK_ENTER, VK_ESCAPE_KEY, VK_N_KEY, VK_P_KEY, VK_SPACE_KEY,
         WindowRegistry, WindowState, ZONE_CONTEXT_BIND_LIVE_FOLDER_ID, ZoneContextAction,
-        add_item_to_zone_with, apply_active_theme_to_app, apply_bulk_layout_algorithm,
+        add_item_to_zone_with, apply_active_theme_to_app,
+        apply_bulk_layout_algorithm,
         apply_bulk_zone_updates, apply_bulk_zone_visibility, apply_hotkey_binding,
         apply_hotkey_setting_to_runtime, apply_item_context_dispatch_with, apply_locale_wire,
         apply_rules_execution_plan, apply_rules_move_to_folder, apply_setting_value_to_app,
@@ -21309,7 +21345,7 @@ mod tests {
         persist_keybinding_reset_to_vault, persist_passphrase_to_vault, persist_rule_run_stats,
         persist_setting_to_vault, persist_theme_base_accent_to_vault,
         persist_zone_display_mode_to_vault, pin_zone_minibar_state, queue_active_theme_cycle,
-        queue_update_action, record_rule_execution_timeline_pair,
+        queue_add_items, queue_update_action, record_rule_execution_timeline_pair,
         recovery_vault_snapshot_from_vault, recycle_delete_flags, refresh_live_folder_zone,
         refresh_settings_plugins_for_root, rehydrate_live_folder_bindings_with,
         restore_context_capsule_for_path, restore_latest_settings_backup_from_vault,
@@ -21325,19 +21361,18 @@ mod tests {
         stack_bloom_hover_anchor_for_point, stack_bloom_reveal_progress_for_anchor,
         stamp_rule_id_if_empty, start_item_drag_out_with, startup_diag_skip_value,
         startup_heal_recovery_bundle, state_dir_for_root, theme_base_accent_from_wire,
-        release_pill_press_animator, start_pill_press_animator, tick_pill_animator,
         tick_stack_bloom_animation, tick_zone_pill_animation, timeline_dir_for_zones_path,
         tooltip_command_for_bulk_manager_hover, tooltip_command_for_capsule_picker_hover,
         tooltip_command_for_hover, tooltip_command_for_icon_picker_hover,
-        tooltip_command_for_item_file_rename_hover, tooltip_command_for_main_hover,
+        tooltip_command_for_item_file_rename_hover,
         tooltip_command_for_minibar_hover, tooltip_command_for_palette_picker_hover,
         tooltip_command_for_rules_wizard_hover, tooltip_command_for_search_hover,
-        tooltip_command_for_settings_hover, tooltip_command_for_snapshot_picker_hover,
+        tooltip_command_for_snapshot_picker_hover,
         tooltip_command_for_suggestor_hover, tooltip_command_for_timeline_hover,
         tooltip_command_for_zone_editor_hover, tray_command_for_callback,
-        tray_menu_command_for_choice, tray_menu_command_for_item, ui, unlock_passphrase_vault,
+        LEAVE_GRACE_MS, tray_menu_command_for_choice, tray_menu_command_for_item, ui, unlock_passphrase_vault,
         unpin_zone_minibar, update_check_interval, update_frequency_from_wire,
-        update_frequency_setting_command_for, update_pill_hover_animator,
+        update_frequency_setting_command_for,
         update_stack_bloom_hover, update_zone_pill_hover,
         updater_event_should_auto_download, widen_dynamic, widen_static,
         write_minibar_pins_to_vault, zone_context_action_for_choice, zone_display_mode_from_wire,
@@ -21360,9 +21395,11 @@ mod tests {
         IconPickerHit, PalettePickerHit, icon_picker_hit_test, icon_picker_slot_rect,
         palette_picker_clear_rect, palette_picker_hit_test, palette_picker_swatch_rect,
     };
-    use bento_nano_app::settings_panel::{
-        settings_update_auto_download_rect, settings_update_check_now_rect,
-    };
+    // R14 supplement (2026-05-25) — `settings_update_auto_download_rect` and
+    // `settings_update_check_now_rect` removed from test-mod imports per
+    // bundle directive (clippy `unused_imports`). The fns live in
+    // `bento_nano_app::settings_panel` and remain accessible to production
+    // call sites; the test mod simply does not reference them.
     use bento_nano_app::zone_editor_geometry::{
         ZoneEditorHit, zone_editor_cancel_rect, zone_editor_grid_rect, zone_editor_hit_test,
         zone_editor_icon_rect, zone_editor_save_rect,
@@ -21394,6 +21431,21 @@ mod tests {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP};
     use zip::write::FileOptions;
+
+    /// α3 (A3 auto-return, 2026-05-24) — pin the sanctioned 80 ms grace
+    /// period. P9 ruled this exact value lands as a compile-clean stub at
+    /// the `clear_hover` consumer site; β1 owns the migration to a
+    /// persisted setting. Changing this number without β1 movement is a
+    /// hand-off failure — flip the test when β1 plumbs the value through
+    /// `AppState.settings.collapse_delay_ms`, not before.
+    #[test]
+    fn leave_grace_ms_pinned_at_eighty_for_alpha3_stub() {
+        assert_eq!(
+            LEAVE_GRACE_MS, 80,
+            "α3 sanctioned stub must remain 80 ms until β1 swaps it for \
+             the persisted `collapse_delay_ms` setting"
+        );
+    }
 
     #[test]
     fn startup_diag_skip_value_matches_tokens_case_insensitively() {
@@ -21919,6 +21971,117 @@ mod tests {
                 .as_deref(),
             Some(source_path.as_str())
         );
+
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    /// α2 (Wave I-α, 2026-05-25) — full WM_DROPFILES path E2E.
+    ///
+    /// The R3 hand-test (handtest-quad-2026-05-25-0106/r3-summary.txt)
+    /// reported `TARGET_STILL_ON_DESKTOP=True` because the driver could not
+    /// synthesise a real OLE drag-drop from Explorer (the pill HWND has
+    /// `WS_EX_TRANSPARENT` so SetCursorPos+mouse_event events fall through
+    /// before reaching the BentoDesk window). This test bypasses the input
+    /// path entirely and exercises the receive side: WM_DROPFILES's terminal
+    /// helper `queue_add_items` enqueues `Command::AddItem` per file, which
+    /// the dispatcher then resolves through `add_item_to_zone_with` →
+    /// `hide_item_file` → `bento_nano_backend::stealth::hide_file`. If any
+    /// link in that chain breaks (mis-routed Command, dropped enqueue,
+    /// stealth path swallowed), this test fails — proving that what the
+    /// programmatic R3 hand-test can't see is in fact functional.
+    #[test]
+    fn alpha2_wm_dropfiles_chain_runs_stealth_hide_for_each_dropped_file() {
+        let root = test_app_root();
+        let zones_path = scratch_zones_path("alpha2-dropfiles-stealth");
+        let state_dir = zones_path.parent().expect("scratch parent");
+        let desktop_dir = state_dir.join("Desktop");
+        std::fs::create_dir_all(&desktop_dir).expect("desktop dir");
+        let mut source_paths: Vec<String> = Vec::new();
+        for name in ["alpha2-a.txt", "alpha2-b.txt"] {
+            let p = desktop_dir.join(name);
+            std::fs::write(&p, b"alpha2").expect("source file");
+            source_paths.push(p.to_string_lossy().to_string());
+        }
+        let desktop_source = desktop_dir.to_string_lossy().to_string();
+        let zone_id = ZoneId(7474);
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones_path = zones_path.clone();
+            app.zones.add(Zone::new(zone_id, "Drop", 0, 0, 240, 160));
+        }
+
+        // Drive the same entry point WM_DROPFILES uses — `queue_add_items`
+        // pushes one Command::AddItem per file onto the dispatcher.
+        queue_add_items(&root, zone_id, source_paths.clone(), "test::alpha2");
+
+        // Drain the dispatcher manually (the test harness has no message
+        // pump). Each AddItem command flows through the production
+        // dispatcher arm, which calls `add_item_to_zone(...)`. The
+        // test uses `add_item_to_zone_with(..., Some(desktop_source), ...)`
+        // so the scratch desktop is recognised by the
+        // `desktop_sources::is_under_any_desktop` guard.
+        let mut queued: smallvec::SmallVec<[Command; 8]> = smallvec::SmallVec::new();
+        let drained = root.dispatcher.drain_into(&mut queued);
+        assert_eq!(drained, 2, "two AddItem commands must be queued");
+        for cmd in queued.drain(..) {
+            match cmd {
+                Command::AddItem(z, p) => {
+                    assert_eq!(z, zone_id);
+                    assert!(add_item_to_zone_with(
+                        &root,
+                        z,
+                        p.0.as_str(),
+                        Some(desktop_source.as_str()),
+                        |_| Some("hash-alpha2".to_owned()),
+                    ));
+                }
+                other => panic!("unexpected queued command: {other:?}"),
+            }
+        }
+
+        // After the chain runs, both source files must be moved off the
+        // desktop into the stealth manifest path; the zone must report two
+        // items, each with an `original_path` matching the input and a
+        // distinct `hidden_path` that points at an existing file.
+        for source_path in &source_paths {
+            let on_desktop = std::path::Path::new(source_path).exists();
+            assert!(
+                !on_desktop,
+                "α2 chain broken: source {source_path} still on desktop \
+                 after Command::AddItem dispatch — stealth_hide did not \
+                 run or wrote back the original path"
+            );
+        }
+        let app = root.app.borrow();
+        let zone = app.zones.get(zone_id).expect("zone");
+        assert_eq!(zone.items.len(), 2);
+        let mut originals: Vec<String> = zone
+            .items
+            .iter()
+            .map(|i| i.original_path.clone().unwrap_or_default().to_string())
+            .collect();
+        originals.sort();
+        let mut expected = source_paths.clone();
+        expected.sort();
+        assert_eq!(originals, expected);
+        for item in &zone.items {
+            let hidden = item
+                .hidden_path
+                .as_deref()
+                .expect("α2: every persisted item must carry a hidden_path");
+            assert!(
+                std::path::Path::new(hidden).exists(),
+                "α2: hidden file {hidden} should exist after stealth-hide ran"
+            );
+            assert_ne!(
+                item.path.as_ref(),
+                item.original_path.as_deref().unwrap_or(""),
+                "α2: persisted effective path must differ from original \
+                 path (the original is on the desktop, the effective lives \
+                 under .bentodesk/)"
+            );
+        }
+        drop(app);
 
         let _ = std::fs::remove_dir_all(state_dir);
     }

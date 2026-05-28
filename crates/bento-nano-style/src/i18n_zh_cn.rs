@@ -94,7 +94,10 @@ pub mod ids {
     pub const UPDATE_FREQ_DAILY: StringId = StringId(74);
     pub const UPDATE_FREQ_WEEKLY: StringId = StringId(75);
     pub const UPDATE_FREQ_MANUAL: StringId = StringId(76);
-    // 77..80 zone display mode (cycle button text)
+    // 77..80 zone display mode — short radio-button labels (Wave I-α / R14).
+    // Previously held "模式: 悬停" prefixed strings used by the cycle button;
+    // R14 reshape (2026-05-25): prefix moved to id 140 so radios can compose
+    // `默认显示模式  ○ 悬停  ○ 常显  ● 点击` without doubling up "模式:".
     pub const ZONE_MODE_HOVER: StringId = StringId(77);
     pub const ZONE_MODE_ALWAYS: StringId = StringId(78);
     pub const ZONE_MODE_CLICK: StringId = StringId(79);
@@ -182,6 +185,11 @@ pub mod ids {
     pub const ROW_MAGNET_STATE: StringId = StringId(137);
     pub const STATE_ENABLED_PILL: StringId = StringId(138);
     pub const STATE_DISABLED_PILL: StringId = StringId(139);
+    // 140 Wave I-α / R14 (2026-05-25) — row caption for the 3-radio
+    // zone-display-mode picker. Separate from `ZONE_MODE_*` (77..79) so the
+    // picker can render `默认显示模式  ○ 悬停  ○ 常显  ● 点击` without
+    // duplicating the "模式:" prefix on every radio.
+    pub const SETTINGS_ZONE_DISPLAY_MODE_LABEL: StringId = StringId(140);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -277,9 +285,9 @@ pub static ZH_CN: LookupTable = LookupTable {
         "每周",   // UPDATE_FREQ_WEEKLY (75)
         "手动",   // UPDATE_FREQ_MANUAL (76)
         // 77..80 zone display mode
-        "模式: 悬停", // ZONE_MODE_HOVER (77)
-        "模式: 常显", // ZONE_MODE_ALWAYS (78)
-        "模式: 点击", // ZONE_MODE_CLICK (79)
+        "悬停",       // ZONE_MODE_HOVER (77)
+        "常显",       // ZONE_MODE_ALWAYS (78)
+        "点击",       // ZONE_MODE_CLICK (79)
         // 80..87 encryption states / modes
         "输入密码",   // ENCRYPTION_TYPE_PASS (80)
         "回车解锁",   // ENCRYPTION_ENTER_UNLOCK (81)
@@ -351,5 +359,7 @@ pub static ZH_CN: LookupTable = LookupTable {
         "磁吸状态",              // ROW_MAGNET_STATE (137)
         "已启用",                // STATE_ENABLED_PILL (138)
         "未启用",                // STATE_DISABLED_PILL (139)
+        // 140 Wave I-α / R14 — picker row caption.
+        "默认显示模式",          // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
     ],
 };

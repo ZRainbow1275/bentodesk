@@ -124,6 +124,12 @@ fn g3_settings_panel_labels_differ_across_zh_and_en() {
         ids::ZONE_MODE_HOVER,
         ids::ZONE_MODE_ALWAYS,
         ids::ZONE_MODE_CLICK,
+        // Wave I-α / R14 (2026-05-25) — picker row caption added so the
+        // 3-radio Zone Display Mode picker can render `默认显示模式` / `Default
+        // display mode` as the row label without doubling up "模式:" on each
+        // radio. Pin guards id 140 against table-padding regressions in both
+        // locales.
+        ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
         // Updater + encryption state machine.
         ids::UPDATER_IDLE,
         ids::UPDATER_CHECKING,

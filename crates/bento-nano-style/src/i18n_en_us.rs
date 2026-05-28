@@ -139,6 +139,8 @@ pub mod ids {
     pub const ROW_MAGNET_STATE: StringId = StringId(137);
     pub const STATE_ENABLED_PILL: StringId = StringId(138);
     pub const STATE_DISABLED_PILL: StringId = StringId(139);
+    // 140 Wave I-α / R14 (2026-05-25) — picker row caption matching zh-CN.
+    pub const SETTINGS_ZONE_DISPLAY_MODE_LABEL: StringId = StringId(140);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -234,9 +236,9 @@ pub static EN_US: LookupTable = LookupTable {
         "Weekly",   // UPDATE_FREQ_WEEKLY (75)
         "Manual",   // UPDATE_FREQ_MANUAL (76)
         // 77..80 zone display mode
-        "Mode: Hover",  // ZONE_MODE_HOVER (77)
-        "Mode: Always", // ZONE_MODE_ALWAYS (78)
-        "Mode: Click",  // ZONE_MODE_CLICK (79)
+        "Hover",        // ZONE_MODE_HOVER (77)
+        "Always",       // ZONE_MODE_ALWAYS (78)
+        "Click",        // ZONE_MODE_CLICK (79)
         // 80..87 encryption
         "Type pass",    // ENCRYPTION_TYPE_PASS (80)
         "Enter unlock", // ENCRYPTION_ENTER_UNLOCK (81)
@@ -308,5 +310,7 @@ pub static EN_US: LookupTable = LookupTable {
         "Magnet status",              // ROW_MAGNET_STATE (137)
         "Enabled",                    // STATE_ENABLED_PILL (138)
         "Disabled",                   // STATE_DISABLED_PILL (139)
+        // 140 Wave I-α / R14 — picker row caption.
+        "Default display mode",       // SETTINGS_ZONE_DISPLAY_MODE_LABEL (140)
     ],
 };

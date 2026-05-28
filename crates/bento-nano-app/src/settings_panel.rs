@@ -686,6 +686,30 @@ pub const SETTINGS_FOOTER_BTN_GAP: f32 = 8.0;
 /// row living inside the same logical section). Pinned by a test below.
 pub const SETTINGS_TOP_TOGGLE_COUNT: u8 = 5;
 
+/// α4 (Wave I-α, 2026-05-25) — zone-display-mode picker row geometry.
+/// Tauri 1.2.4 baseline (`SettingsPanel.tsx:555-595`) renders a 3-radio
+/// horizontal group (Hover / Always / Click) immediately below the language
+/// row. Each radio is a 12-DIP outer circle + 6-DIP inner dot when selected
+/// + an inline label. Three radios + 2 inter-radio gaps + leading/trailing
+/// padding pack into the right-anchored ~260-DIP cluster, matching the
+/// language-chip horizontal anchor for vertical alignment.
+///
+/// Picker row sits between the language row (M1) and the M2 sources
+/// section; `settings_m2_origin_y_offset` is bumped by one row to clear it.
+/// Number of choices in the zone-display-mode picker.
+pub const SETTINGS_ZONE_DISPLAY_MODE_COUNT: u8 = 3;
+/// Outer circle diameter (DIP) of one radio.
+pub const SETTINGS_RADIO_OUTER_D: f32 = 14.0;
+/// Inner dot diameter (DIP) when a radio is selected.
+pub const SETTINGS_RADIO_INNER_D: f32 = 6.0;
+/// Per-radio hit-box width (outer circle + 4-DIP gap + label).
+pub const SETTINGS_RADIO_W: f32 = 78.0;
+/// Per-radio hit-box height (matches the language-chip height so the row
+/// reads as a single horizontal control band).
+pub const SETTINGS_RADIO_H: f32 = 28.0;
+/// Horizontal gap between adjacent radios.
+pub const SETTINGS_RADIO_GAP: f32 = 4.0;
+
 /// Round-2 M2 — height of a section label band (the dim header text above
 /// 桌面源 / 桌面路径 / 监控值).
 pub const SETTINGS_SECTION_LABEL_H: f32 = 24.0;
@@ -885,6 +909,95 @@ pub fn settings_language_chip_label_rect(viewport: Size, scroll_offset_y: f32) -
     }
 }
 
+/// α4 (Wave I-α, 2026-05-25) — full row rect for the zone-display-mode
+/// picker. Sits directly below the language row (M1 toggle band + 1
+/// language row) and above the M2 桌面源 section. Honours scroll offset
+/// the same way every other body row does.
+pub fn settings_zone_display_mode_picker_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: origin_y + SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 1.0),
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_ROW_H_M1,
+    }
+}
+
+/// α4 — sub-rect for radio `index` (0 = Hover, 1 = Always, 2 = Click).
+/// Three radios right-anchor as a single 78×3 + 4×2 = 242-DIP cluster
+/// aligned with the language-chip column above. The hit-box height matches
+/// the row breathing room (28 DIP) so a tall click still lands cleanly.
+pub fn settings_zone_display_mode_radio_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let row = settings_zone_display_mode_picker_row_rect(viewport, scroll_offset_y);
+    let cluster_w = SETTINGS_RADIO_W * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
+        + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32;
+    let cluster_x = row.right() - cluster_w;
+    Rect {
+        x: cluster_x + (SETTINGS_RADIO_W + SETTINGS_RADIO_GAP) * index as f32,
+        y: row.y + (row.height - SETTINGS_RADIO_H) * 0.5,
+        width: SETTINGS_RADIO_W,
+        height: SETTINGS_RADIO_H,
+    }
+}
+
+/// α4 — outer-circle paint rect for radio `index`. Sits inside the
+/// hit-box, left-anchored, vertically centred.
+pub fn settings_zone_display_mode_radio_outer_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let hit = settings_zone_display_mode_radio_rect(viewport, scroll_offset_y, index);
+    Rect {
+        x: hit.x,
+        y: hit.y + (hit.height - SETTINGS_RADIO_OUTER_D) * 0.5,
+        width: SETTINGS_RADIO_OUTER_D,
+        height: SETTINGS_RADIO_OUTER_D,
+    }
+}
+
+/// α4 — inner-dot paint rect for radio `index` (only painted when this
+/// mode is the current `zone_display_mode`).
+pub fn settings_zone_display_mode_radio_inner_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let outer = settings_zone_display_mode_radio_outer_rect(viewport, scroll_offset_y, index);
+    Rect {
+        x: outer.x + (SETTINGS_RADIO_OUTER_D - SETTINGS_RADIO_INNER_D) * 0.5,
+        y: outer.y + (SETTINGS_RADIO_OUTER_D - SETTINGS_RADIO_INNER_D) * 0.5,
+        width: SETTINGS_RADIO_INNER_D,
+        height: SETTINGS_RADIO_INNER_D,
+    }
+}
+
+/// α4 — label rect for radio `index`. Sits to the right of the outer
+/// circle with a 4-DIP gap; vertically centred inside the hit-box.
+pub fn settings_zone_display_mode_radio_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    index: u8,
+) -> Rect {
+    let hit = settings_zone_display_mode_radio_rect(viewport, scroll_offset_y, index);
+    let outer = settings_zone_display_mode_radio_outer_rect(viewport, scroll_offset_y, index);
+    let label_x = outer.right() + 4.0;
+    Rect {
+        x: label_x,
+        y: hit.y + (hit.height - 16.0) * 0.5,
+        width: (hit.right() - label_x).max(0.0),
+        height: 16.0,
+    }
+}
+
 /// Round-2 M1/M2/M3 — total content height inside the body. Grows with each
 /// milestone as new sections light up. M3 adds advanced + overlay sections.
 pub fn settings_body_content_height(viewport: Size) -> f32 {
@@ -909,9 +1022,10 @@ pub fn settings_clamp_scroll(current_offset: f32, delta_y: f32, viewport: Size) 
 }
 
 /// Round-2 M2 — Y offset (scroll-space) at which the M2 sections start.
-/// Sits below the M1 toggle band + the language row + a section gap.
+/// Sits below the M1 toggle band + the language row + α4 zone-display
+/// picker row + a section gap.
 fn settings_m2_origin_y_offset() -> f32 {
-    SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 1.0) + SETTINGS_SECTION_GAP
+    SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 2.0) + SETTINGS_SECTION_GAP
 }
 
 /// Round-2 M2 — `桌面源` section label rect (the dim caption above the two
@@ -1337,6 +1451,87 @@ mod m1_tests {
         let row0_at_0 = settings_top_toggle_row_rect(v, 0.0, 0);
         let row0_at_50 = settings_top_toggle_row_rect(v, 50.0, 0);
         assert!((row0_at_50.y + 50.0 - row0_at_0.y).abs() < 0.01);
+    }
+
+    /// α4 (Wave I-α, 2026-05-25) — zone-display-mode picker sits between
+    /// the language row and the M2 sources section, and its three radios
+    /// pack right-to-left in cluster order.
+    #[test]
+    fn alpha4_zone_display_picker_row_sits_below_language_row() {
+        let v = vp();
+        let lang = settings_language_row_rect(v, 0.0);
+        let picker = settings_zone_display_mode_picker_row_rect(v, 0.0);
+        assert!(
+            (picker.y - lang.bottom()).abs() < 0.01,
+            "picker row must start exactly where the language row ends \
+             (lang.bottom={}, picker.y={})",
+            lang.bottom(),
+            picker.y,
+        );
+        assert_eq!(picker.height, SETTINGS_ROW_H_M1);
+    }
+
+    #[test]
+    fn alpha4_three_radios_pack_left_to_right_inside_picker_row() {
+        let v = vp();
+        let row = settings_zone_display_mode_picker_row_rect(v, 0.0);
+        let r0 = settings_zone_display_mode_radio_rect(v, 0.0, 0);
+        let r1 = settings_zone_display_mode_radio_rect(v, 0.0, 1);
+        let r2 = settings_zone_display_mode_radio_rect(v, 0.0, 2);
+        assert_eq!(r0.y, r1.y);
+        assert_eq!(r1.y, r2.y);
+        assert!(r0.right() <= r1.x);
+        assert!(r1.right() <= r2.x);
+        // The whole cluster right-anchors at row.right() and never pokes
+        // outside the row. Cluster width (78×3 + 4×2 = 242 DIP) leaves the
+        // first radio at ~row.width × 0.36; allow a 0.3 floor so the
+        // assertion stays meaningful across SETTINGS_PANEL_WIDTH_M1 tweaks.
+        assert!(r0.x >= row.x + row.width * 0.3);
+        assert!(r2.right() <= row.right());
+        // Per-radio dimensions pinned.
+        assert_eq!(r0.width, SETTINGS_RADIO_W);
+        assert_eq!(r0.height, SETTINGS_RADIO_H);
+    }
+
+    #[test]
+    fn alpha4_radio_inner_dot_sits_inside_outer_circle() {
+        let v = vp();
+        for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+            let outer = settings_zone_display_mode_radio_outer_rect(v, 0.0, index);
+            let inner = settings_zone_display_mode_radio_inner_rect(v, 0.0, index);
+            assert!(inner.x >= outer.x);
+            assert!(inner.y >= outer.y);
+            assert!(inner.right() <= outer.right());
+            assert!(inner.bottom() <= outer.bottom());
+            assert_eq!(inner.width, SETTINGS_RADIO_INNER_D);
+            assert_eq!(outer.width, SETTINGS_RADIO_OUTER_D);
+        }
+    }
+
+    #[test]
+    fn alpha4_radio_label_sits_right_of_outer_circle() {
+        let v = vp();
+        for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+            let outer = settings_zone_display_mode_radio_outer_rect(v, 0.0, index);
+            let label = settings_zone_display_mode_radio_label_rect(v, 0.0, index);
+            assert!(label.x >= outer.right());
+        }
+    }
+
+    #[test]
+    fn alpha4_m2_sources_section_shifts_below_picker_row() {
+        let v = vp();
+        let picker = settings_zone_display_mode_picker_row_rect(v, 0.0);
+        let sources_label = settings_sources_label_rect(v, 0.0);
+        // Sources label must clear the picker row by at least the section
+        // gap so the picker and the next section never overlap.
+        assert!(
+            sources_label.y >= picker.bottom(),
+            "M2 sources label (y={}) must sit at-or-below picker row \
+             bottom (y={}) so α4 picker has dedicated vertical real estate",
+            sources_label.y,
+            picker.bottom(),
+        );
     }
 
     #[test]
