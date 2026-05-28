@@ -632,14 +632,15 @@ pub fn settings_keybindings_close_rect(viewport: Size) -> Rect {
 /// panel reads ≥420 DIP across all DPI (was 400; with the K1 paint-leak fixed
 /// the visual perception of "tiny" came from leak debris, not real geometry,
 /// but a 20-DIP bump still leaves room for M3 slider track + value chip pairs).
-pub const SETTINGS_PANEL_WIDTH_M1: f32 = 420.0;
+pub const SETTINGS_PANEL_WIDTH_M1: f32 = 480.0;
 /// Round-2 M1 — maximum panel height. TL A-path 2026-05-21: 700→580 so the
 /// modal fits inside the 800×600 Settings aux HWND client area with breathing
 /// room around the 8-DIP drop shadow. Smaller viewports still clamp via the
 /// `min(available_h)` in `settings_panel_rect_m1`.
 pub const SETTINGS_PANEL_HEIGHT_MAX: f32 = 580.0;
-/// Round-2 M1 — panel corner radius (14 DIP per frame_060 measurement).
-pub const SETTINGS_PANEL_RADIUS: f32 = 14.0;
+/// Round-2 M1 — panel corner radius. Tauri `--radius-expanded: 16px`
+/// (`SettingsPanel.css`); M1b parity bump 14→16 (was 14 per frame_060).
+pub const SETTINGS_PANEL_RADIUS: f32 = 16.0;
 /// V-5 (TL re-issue 2026-05-21) — alpha for the 8-DIP outer drop-shadow ring
 /// painted around the panel. The shadow is a hard-edged `fill_rounded_rect`
 /// (no D2D gaussian blur on the hot path per spec §10) so ANY non-zero alpha

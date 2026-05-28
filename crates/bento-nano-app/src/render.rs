@@ -51,8 +51,8 @@ use smol_str::SmolStr;
 use windows::Win32::Foundation::HWND as W_HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1RenderTarget,
-    ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
+    ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat};
 use windows::core::Interface;
@@ -2337,9 +2337,22 @@ impl Renderer {
         };
         self.fill_rounded_rect(header_hairline, divider_color, BorderRadius::ZERO)?;
 
-        // 4) Body — paint rows scrolled by `app.scroll_offset_y`. No clip API
-        // available; rows that would fall outside `body_rect` skip paint.
+        // 4) Body — paint rows scrolled by `app.scroll_offset_y`.
+        //
+        // M1b (S-02): clip the whole body band so partial rows at the top/bottom
+        // edge are masked by the sticky header/footer instead of bleeding past
+        // them (rows fully offscreen still early-skip via `row_visible`, but a
+        // row straddling the edge now clips at the pixel boundary).
+        //
+        // CRITICAL — the body paint propagates with `?`, so a naive
+        // `push; …?; pop` would leak the clip on the first D2D error and
+        // corrupt the device context. We capture the body paint into a closure
+        // result and ALWAYS run `pop_clip()` before propagating, keeping the
+        // push/pop balanced across every early return. (No Drop guard: a
+        // fallible pop in Drop is disallowed; this stays `?`-clean + panic-free.)
         let body = settings_body_rect(viewport);
+        self.push_clip(body)?;
+        let body_paint = (|| -> Result<(), RenderError> {
         let scroll = app.scroll_offset_y.get();
 
         // Helper: skip if row falls fully outside the body band.
@@ -2932,8 +2945,15 @@ impl Renderer {
                 _ => {}
             }
         }
+            Ok(())
+        })();
+        // Balance the body clip BEFORE propagating any body-paint error so the
+        // device context is never left with a dangling PushAxisAlignedClip.
+        self.pop_clip()?;
+        body_paint?;
 
-        // 5) Footer (sticky, 56 DIP) — [取消] [保存(accent)].
+        // 5) Footer (sticky, 56 DIP) — [取消] [保存(accent)]. Painted AFTER the
+        // body clip is popped so the sticky footer is never masked by it.
         let footer = settings_footer_rect(viewport);
         self.fill_rounded_rect(footer, footer_bg, footer_radius)?;
         let footer_hairline = bento_nano_style::Rect {
@@ -5471,6 +5491,47 @@ impl Renderer {
                 ),
             )),
         }
+    }
+
+    /// Push an axis-aligned D2D clip so subsequent paint is masked to `rect`.
+    /// Used by the Settings scrollable body (S-02) so partial rows clip cleanly
+    /// at the sticky header/footer edges instead of bleeding past them.
+    ///
+    /// CRITICAL: every `push_clip` MUST be balanced by exactly one `pop_clip`
+    /// before the next `Present` — an unbalanced clip corrupts the device
+    /// context. Callers using `?` propagation must capture the clipped paint
+    /// into a local and run `pop_clip()` before propagating any error. We use
+    /// `D2D1_ANTIALIAS_MODE_ALIASED` (hard pixel edge) so the row/header/footer
+    /// boundaries stay crisp; the body band is axis-aligned so there is nothing
+    /// to antialias.
+    fn push_clip(&self, rect: bento_nano_style::Rect) -> Result<(), RenderError> {
+        let ctx = self.ctx()?;
+        // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        let clip = D2D_RECT_F {
+            left: rect.x,
+            top: rect.y,
+            right: rect.right(),
+            bottom: rect.bottom(),
+        };
+        // SAFETY: rt valid for the call; `clip` lives until the call returns.
+        unsafe {
+            rt.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+        Ok(())
+    }
+
+    /// Pop the most recent `push_clip`. See `push_clip` for the balancing
+    /// contract — leaving a clip pushed corrupts the device context.
+    fn pop_clip(&self) -> Result<(), RenderError> {
+        let ctx = self.ctx()?;
+        // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        // SAFETY: rt valid; pairs with the matching PushAxisAlignedClip.
+        unsafe {
+            rt.PopAxisAlignedClip();
+        }
+        Ok(())
     }
 
     fn fill_rounded_rect(
