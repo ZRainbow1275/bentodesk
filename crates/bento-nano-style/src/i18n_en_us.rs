@@ -209,6 +209,19 @@ pub mod ids {
     pub const BACKUP_REFRESH: StringId = StringId(194);
     pub const BACKUP_RESTORE: StringId = StringId(195);
     pub const BACKUP_EMPTY: StringId = StringId(196);
+
+    // 197..203 M1h (2026-05-29) — Plugins §11 inline section. Mirror of the
+    // zh-CN ids at the SAME index (positional-array contract;
+    // `lookup_tables_have_matching_length` enforces parity). Tauri keys at
+    // `src/i18n/locales/en.ts:209-218`. Group title reuses `SETTINGS_PLUGINS`
+    // (36, "Plugins"); install button is distinct from `BTN_INSTALL` (72) and
+    // the empty line is distinct from the long `PLUGINS_EMPTY_HINT` (91).
+    pub const PLUGIN_INSTALL: StringId = StringId(197);
+    pub const PLUGIN_EMPTY: StringId = StringId(198);
+    pub const PLUGIN_TYPE_THEME: StringId = StringId(199);
+    pub const PLUGIN_TYPE_WIDGET: StringId = StringId(200);
+    pub const PLUGIN_TYPE_ORGANIZER: StringId = StringId(201);
+    pub const PLUGIN_UNINSTALL: StringId = StringId(202);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -446,5 +459,13 @@ pub static EN_US: LookupTable = LookupTable {
         "Refresh",                    // BACKUP_REFRESH (194)
         "Restore",                    // BACKUP_RESTORE (195)
         "No backups yet",             // BACKUP_EMPTY (196)
+        // 197..203 M1h — Plugins §11 (`SettingsPanel.tsx:709-781`,
+        // en.ts:209-218).
+        "Install plugin...",          // PLUGIN_INSTALL (197)
+        "No plugins installed",       // PLUGIN_EMPTY (198)
+        "Theme",                      // PLUGIN_TYPE_THEME (199)
+        "Widget",                     // PLUGIN_TYPE_WIDGET (200)
+        "Organizer",                  // PLUGIN_TYPE_ORGANIZER (201)
+        "Uninstall",                  // PLUGIN_UNINSTALL (202)
     ],
 };

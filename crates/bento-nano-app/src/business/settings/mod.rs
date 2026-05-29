@@ -30,6 +30,10 @@ pub mod backup_card;
 pub mod encryption_card;
 pub mod keybindings_section;
 pub mod panel;
+// M1h (2026-05-29) — Plugins §11 inline section view-model helpers. Unlike the
+// K1 cards this has no widget-tree `build`/`mount` (the plugins surface was
+// never tree-mounted; it is hand-painted by `Renderer::draw_settings_panel`).
+pub mod plugins_section;
 pub mod stealth_mode_card;
 pub mod updater_card;
 

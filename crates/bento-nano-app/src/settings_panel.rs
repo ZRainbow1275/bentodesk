@@ -121,24 +121,18 @@ pub const SETTINGS_BACKUP_ENTRY_VISIBLE_MAX: usize = 3;
 pub const SETTINGS_BACKUP_ENTRY_H: f32 = 18.0;
 pub const SETTINGS_BACKUP_ENTRY_GAP: f32 = 6.0;
 
-/// Modal opener buttons (keybindings / plugins) — rendered as flat chips in
-/// the bottom-action row instead of the pre-K1 title-bar buttons.
-pub const SETTINGS_PLUGINS_BTN_W: f32 = 72.0;
-pub const SETTINGS_PLUGINS_BTN_H: f32 = SETTINGS_SWITCH_BTN_H;
+// M1h (2026-05-29) — the pre-K1 plugins modal-opener button constants
+// (`SETTINGS_PLUGINS_BTN_W/H`) were removed with `settings_plugins_open_rect`
+// when the Plugins surface moved inline. The keybindings opener uses its own
+// `SETTINGS_KEYBINDINGS_BTN_W/H` below and is unaffected.
 
-/// Plugin lifecycle modal geometry (untouched by K1).
-pub const SETTINGS_PLUGINS_MODAL_W: f32 = 420.0;
-pub const SETTINGS_PLUGINS_MODAL_H: f32 = 260.0;
+/// M1h (2026-05-29) — the plugin lifecycle MODAL geometry constants
+/// (`SETTINGS_PLUGINS_MODAL_W/H`, `_ROW_START_Y/STEP_Y/H`, `_INSTALL/REFRESH/
+/// TOGGLE/REMOVE/CLOSE_BTN_W`, `_BTN_GAP`) were removed: the Plugins surface is
+/// now an inline §11 section (see the M1h block lower in this file). The
+/// visible-row cap survives — it still bounds the inline plugin-card list so
+/// paint / hit / scroll agree.
 pub const SETTINGS_PLUGINS_ROW_VISIBLE_MAX: usize = 5;
-pub const SETTINGS_PLUGINS_ROW_START_Y: f32 = 54.0;
-pub const SETTINGS_PLUGINS_ROW_STEP_Y: f32 = 34.0;
-pub const SETTINGS_PLUGINS_ROW_H: f32 = 30.0;
-pub const SETTINGS_PLUGINS_INSTALL_BTN_W: f32 = 58.0;
-pub const SETTINGS_PLUGINS_REFRESH_BTN_W: f32 = 64.0;
-pub const SETTINGS_PLUGINS_TOGGLE_BTN_W: f32 = 54.0;
-pub const SETTINGS_PLUGINS_REMOVE_BTN_W: f32 = 64.0;
-pub const SETTINGS_PLUGINS_CLOSE_BTN_W: f32 = 32.0;
-pub const SETTINGS_PLUGINS_BTN_GAP: f32 = 6.0;
 
 /// Keybindings modal geometry (untouched by K1).
 pub const SETTINGS_KEYBINDINGS_BTN_W: f32 = 64.0;
@@ -282,16 +276,10 @@ pub fn settings_keybindings_open_rect(viewport: Size) -> Rect {
     }
 }
 
-/// Plugins-modal opener — sits to the right of the keybindings opener.
-pub fn settings_plugins_open_rect(viewport: Size) -> Rect {
-    let keys = settings_keybindings_open_rect(viewport);
-    Rect {
-        x: keys.x + keys.width + SETTINGS_PLUGINS_BTN_GAP,
-        y: keys.y,
-        width: SETTINGS_PLUGINS_BTN_W,
-        height: SETTINGS_PLUGINS_BTN_H,
-    }
-}
+// M1h (2026-05-29) — `settings_plugins_open_rect` (the K1 modal-opener button
+// that sat next to the keybindings opener) was removed: Tauri has no "open
+// plugins" affordance — the Plugins §11 section is always inline in the
+// scrollable body. The keybindings opener is unaffected.
 
 // =============================================================================
 // Boolean toggle rows — return the rocker-switch hit-box.
@@ -503,77 +491,13 @@ pub fn settings_keybindings_modal_rect(viewport: Size) -> Rect {
     }
 }
 
-pub fn settings_plugins_modal_rect(viewport: Size) -> Rect {
-    Rect {
-        x: ((viewport.width - SETTINGS_PLUGINS_MODAL_W) * 0.5).max(0.0),
-        y: ((viewport.height - SETTINGS_PLUGINS_MODAL_H) * 0.5).max(0.0),
-        width: SETTINGS_PLUGINS_MODAL_W,
-        height: SETTINGS_PLUGINS_MODAL_H,
-    }
-}
-
-pub fn settings_plugins_close_rect(viewport: Size) -> Rect {
-    let modal = settings_plugins_modal_rect(viewport);
-    Rect {
-        x: modal.x + modal.width - SETTINGS_PANEL_PADDING - SETTINGS_PLUGINS_CLOSE_BTN_W,
-        y: modal.y + 12.0,
-        width: SETTINGS_PLUGINS_CLOSE_BTN_W,
-        height: SETTINGS_SWITCH_BTN_H,
-    }
-}
-
-pub fn settings_plugins_refresh_rect(viewport: Size) -> Rect {
-    let close = settings_plugins_close_rect(viewport);
-    Rect {
-        x: close.x - SETTINGS_PLUGINS_BTN_GAP - SETTINGS_PLUGINS_REFRESH_BTN_W,
-        y: close.y,
-        width: SETTINGS_PLUGINS_REFRESH_BTN_W,
-        height: SETTINGS_SWITCH_BTN_H,
-    }
-}
-
-pub fn settings_plugins_install_rect(viewport: Size) -> Rect {
-    let refresh = settings_plugins_refresh_rect(viewport);
-    Rect {
-        x: refresh.x - SETTINGS_PLUGINS_BTN_GAP - SETTINGS_PLUGINS_INSTALL_BTN_W,
-        y: refresh.y,
-        width: SETTINGS_PLUGINS_INSTALL_BTN_W,
-        height: SETTINGS_SWITCH_BTN_H,
-    }
-}
-
-pub fn settings_plugin_row_rect(viewport: Size, row_index: usize) -> Rect {
-    let modal = settings_plugins_modal_rect(viewport);
-    Rect {
-        x: modal.x + SETTINGS_PANEL_PADDING,
-        y: modal.y + SETTINGS_PLUGINS_ROW_START_Y + SETTINGS_PLUGINS_ROW_STEP_Y * row_index as f32,
-        width: modal.width - SETTINGS_PANEL_PADDING * 2.0,
-        height: SETTINGS_PLUGINS_ROW_H,
-    }
-}
-
-pub fn settings_plugin_toggle_rect(viewport: Size, row_index: usize) -> Rect {
-    let row = settings_plugin_row_rect(viewport, row_index);
-    Rect {
-        x: row.right()
-            - SETTINGS_PLUGINS_REMOVE_BTN_W
-            - SETTINGS_PLUGINS_BTN_GAP
-            - SETTINGS_PLUGINS_TOGGLE_BTN_W,
-        y: row.y + 3.0,
-        width: SETTINGS_PLUGINS_TOGGLE_BTN_W,
-        height: SETTINGS_SWITCH_BTN_H,
-    }
-}
-
-pub fn settings_plugin_uninstall_rect(viewport: Size, row_index: usize) -> Rect {
-    let row = settings_plugin_row_rect(viewport, row_index);
-    Rect {
-        x: row.right() - SETTINGS_PLUGINS_REMOVE_BTN_W,
-        y: row.y + 3.0,
-        width: SETTINGS_PLUGINS_REMOVE_BTN_W,
-        height: SETTINGS_SWITCH_BTN_H,
-    }
-}
+// M1h (2026-05-29) — the plugin lifecycle MODAL geometry
+// (`settings_plugins_modal_rect` / `_close_rect` / `_refresh_rect` /
+// `_install_rect` / `settings_plugin_row_rect` / `_toggle_rect` /
+// `_uninstall_rect`) was removed: the Plugins surface is now an inline §11
+// section of the scrollable Settings body (Tauri parity — `SettingsPanel.tsx:
+// 709-781`). The inline geometry lives in the M1h block alongside the Backup
+// §9 helpers below (`settings_plugins_label_rect` … `settings_plugins_content_height`).
 
 pub fn settings_keybinding_row_rect(viewport: Size, row_index: usize) -> Rect {
     let modal = settings_keybindings_modal_rect(viewport);
@@ -1043,6 +967,13 @@ pub struct SettingsBodyFlags {
     /// so its height grows one [`SETTINGS_BACKUP_ROW_H`] per visible row; an
     /// empty list shows the single `backupEmpty` placeholder row instead.
     pub backup_row_count: usize,
+    /// Plugins §11 — number of plugin cards the list paints (already capped at
+    /// [`SETTINGS_PLUGINS_ROW_VISIBLE_MAX`] by the caller via
+    /// `plugins_section::plugin_visible_row_count`). Like the backup list this
+    /// is variable-length: each visible plugin card adds one
+    /// [`SETTINGS_PLUGIN_CARD_H`] (+ inter-card gap); an empty list shows the
+    /// single `pluginEmpty` placeholder row instead.
+    pub plugin_row_count: usize,
 }
 
 impl SettingsBodyFlags {
@@ -1063,6 +994,7 @@ impl SettingsBodyFlags {
             stealth_has_error,
             updater_kind,
             backup_row_count: 0,
+            plugin_row_count: 0,
         }
     }
 
@@ -1072,6 +1004,15 @@ impl SettingsBodyFlags {
     /// count into the dynamic body height + scroll clamp.
     pub const fn with_backup_rows(mut self, backup_row_count: usize) -> Self {
         self.backup_row_count = backup_row_count;
+        self
+    }
+
+    /// M1h — return a copy with the Plugins §11 visible-row count set. Same
+    /// builder rationale as [`Self::with_backup_rows`]: keeps `new()`'s arity
+    /// fixed while feeding the live capped plugin-card count into the dynamic
+    /// body height + scroll clamp so paint / hit / scroll all agree.
+    pub const fn with_plugin_rows(mut self, plugin_row_count: usize) -> Self {
+        self.plugin_row_count = plugin_row_count;
         self
     }
 }
@@ -1091,6 +1032,7 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
         + settings_stealth_content_height(flags.stealth_has_retry, flags.stealth_has_error)
         + settings_updater_content_height(flags.updater_kind)
         + settings_backup_content_height(flags.backup_row_count)
+        + settings_plugins_content_height(flags.plugin_row_count)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -2353,6 +2295,234 @@ pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
     base + list + SETTINGS_SECTION_GAP
 }
 
+// ── M1h 2026-05-29 — Plugins §11 inline section (`SettingsPanel.tsx:709-781`) ──
+//
+// Sits LAST in the (currently shipped) Tauri body order
+// (…→Updater→Backup→**Plugins**→footer). Encryption §10 is deferred
+// (crash-entangled) so Plugins anchors directly after the Backup card for now;
+// when Encryption lands it will slot between Backup and Plugins and the offset
+// chain reflows automatically (each section anchors off the previous one).
+// Layout (top-to-bottom, vertical column):
+//   group title                                  (always) — 插件 / Plugins
+//   安装插件... button (full width)              (always)
+//   plugin-list:
+//     N plugin cards [header | author | desc | uninstall]  (one per visible
+//                                                            entry, capped)
+//     OR a single pluginEmpty placeholder row    (when the list is empty)
+//
+// Each plugin card is a fixed-height block; the list is variable-length so its
+// height grows one card (+ inter-card gap) per visible row (capped at
+// [`SETTINGS_PLUGINS_ROW_VISIBLE_MAX`]), or a single placeholder row when
+// empty. The capped row count flows through `SettingsBodyFlags::plugin_row_count`
+// (built from `plugins_section::plugin_visible_row_count`) so the dynamic height
+// + scroll clamp match what's painted. Geometry stays PURE — the count is
+// passed in, nothing reads global state.
+
+/// M1h — `安装插件... / Install plugin...` full-width button height (shares the
+/// footer button height like the Backup card's action buttons).
+pub const SETTINGS_PLUGIN_INSTALL_BTN_H: f32 = SETTINGS_FOOTER_BTN_H;
+
+/// M1h — per-plugin card sub-row heights. Header carries name + v{version} +
+/// type badge + enable toggle; the author + description lines sit below it; the
+/// actions row hosts the 卸载 / Uninstall button.
+pub const SETTINGS_PLUGIN_CARD_HEADER_H: f32 = 24.0;
+pub const SETTINGS_PLUGIN_CARD_AUTHOR_H: f32 = 16.0;
+pub const SETTINGS_PLUGIN_CARD_DESC_H: f32 = 16.0;
+pub const SETTINGS_PLUGIN_CARD_ACTIONS_H: f32 = SETTINGS_FOOTER_BTN_H;
+/// M1h — inner vertical padding inside a plugin card (top + bottom each).
+pub const SETTINGS_PLUGIN_CARD_PAD_Y: f32 = 6.0;
+
+/// M1h — full plugin-card height (the variable list grows by this per row).
+pub const SETTINGS_PLUGIN_CARD_H: f32 = SETTINGS_PLUGIN_CARD_PAD_Y
+    + SETTINGS_PLUGIN_CARD_HEADER_H
+    + SETTINGS_PLUGIN_CARD_AUTHOR_H
+    + SETTINGS_PLUGIN_CARD_DESC_H
+    + SETTINGS_PLUGIN_CARD_ACTIONS_H
+    + SETTINGS_PLUGIN_CARD_PAD_Y;
+
+/// M1h — empty-state placeholder row height (matches the Backup empty row).
+pub const SETTINGS_PLUGIN_EMPTY_ROW_H: f32 = SETTINGS_BACKUP_ENTRY_ROW_H;
+
+/// M1h — gap between adjacent plugin cards.
+pub const SETTINGS_PLUGIN_CARD_GAP: f32 = 8.0;
+
+/// M1h — type-badge chip width + the enable-toggle hit-box (right-anchored in
+/// the card header) + the 卸载 button width.
+pub const SETTINGS_PLUGIN_BADGE_W: f32 = 56.0;
+pub const SETTINGS_PLUGIN_TOGGLE_HIT_W: f32 = 60.0;
+pub const SETTINGS_PLUGIN_TOGGLE_HIT_H: f32 = 24.0;
+pub const SETTINGS_PLUGIN_UNINSTALL_BTN_W: f32 = 72.0;
+
+/// M1h — scroll-space Y at which the Plugins group title starts. Anchors off
+/// the Backup card's last laid-out element (the backup list's last visible
+/// entry row, or the empty placeholder) plus a section gap. Takes the full flag
+/// set so its Y follows whatever Backup/Updater/Stealth/Startup rows are
+/// currently visible.
+pub fn settings_plugins_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    // The Backup section's last laid-out row is its list (entry rows when
+    // non-empty, otherwise the single placeholder at index 0). Both branches
+    // anchor off the reserved status slot, so the bottom of the last visible
+    // row = the start of the trailing section gap.
+    let last_backup_index = flags
+        .backup_row_count
+        .min(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
+        .saturating_sub(1);
+    let backup_bottom =
+        settings_backup_entry_row_rect(viewport, scroll_offset_y, flags, last_backup_index).bottom();
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: backup_bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M1h — full-width `安装插件...` install button rect. Below the group title.
+pub fn settings_plugins_install_button_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let label = settings_plugins_label_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
+        height: SETTINGS_PLUGIN_INSTALL_BTN_H,
+    }
+}
+
+/// M1h — plugin-card row rect for visible `card_index` (0-based). Sits below
+/// the install button. When the list is empty the renderer paints a single
+/// `pluginEmpty` placeholder at `card_index = 0` (its height differs, but the
+/// origin is the same slot).
+pub fn settings_plugin_card_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+    card_index: usize,
+) -> Rect {
+    let install = settings_plugins_install_button_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: install.x,
+        y: install.bottom()
+            + SETTINGS_PLUGIN_CARD_GAP
+            + (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP) * card_index as f32,
+        width: install.width,
+        height: SETTINGS_PLUGIN_CARD_H,
+    }
+}
+
+/// M1h — empty-state placeholder row rect (when no plugins are installed). Same
+/// origin slot as `settings_plugin_card_rect(.., 0)` but the empty-row height.
+pub fn settings_plugin_empty_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let install = settings_plugins_install_button_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: install.x,
+        y: install.bottom() + SETTINGS_PLUGIN_CARD_GAP,
+        width: install.width,
+        height: SETTINGS_PLUGIN_EMPTY_ROW_H,
+    }
+}
+
+/// M1h — right-anchored enable-toggle hit-box inside a plugin card's header
+/// sub-row. Maps to `SettingsHit::TogglePlugin(card_index)`.
+pub fn settings_plugin_toggle_hit_rect(card: Rect) -> Rect {
+    let header_y = card.y + SETTINGS_PLUGIN_CARD_PAD_Y;
+    Rect {
+        x: card.right() - SETTINGS_PLUGIN_TOGGLE_HIT_W,
+        y: header_y + (SETTINGS_PLUGIN_CARD_HEADER_H - SETTINGS_PLUGIN_TOGGLE_HIT_H) * 0.5,
+        width: SETTINGS_PLUGIN_TOGGLE_HIT_W,
+        height: SETTINGS_PLUGIN_TOGGLE_HIT_H,
+    }
+}
+
+/// M1h — type-badge chip rect inside a plugin card's header sub-row (left of
+/// the toggle). Display-only (no hit), shows theme/widget/organizer.
+pub fn settings_plugin_badge_rect(card: Rect) -> Rect {
+    let toggle = settings_plugin_toggle_hit_rect(card);
+    Rect {
+        x: toggle.x - 8.0 - SETTINGS_PLUGIN_BADGE_W,
+        y: toggle.y,
+        width: SETTINGS_PLUGIN_BADGE_W,
+        height: SETTINGS_PLUGIN_TOGGLE_HIT_H,
+    }
+}
+
+/// M1h — name + v{version} text rect inside a plugin card's header sub-row
+/// (left of the type badge). Display-only.
+pub fn settings_plugin_name_rect(card: Rect) -> Rect {
+    let badge = settings_plugin_badge_rect(card);
+    Rect {
+        x: card.x + SETTINGS_PLUGIN_CARD_PAD_Y,
+        y: card.y + SETTINGS_PLUGIN_CARD_PAD_Y,
+        width: (badge.x - card.x - SETTINGS_PLUGIN_CARD_PAD_Y - 8.0).max(0.0),
+        height: SETTINGS_PLUGIN_CARD_HEADER_H,
+    }
+}
+
+/// M1h — author line rect inside a plugin card (below the header sub-row).
+pub fn settings_plugin_author_rect(card: Rect) -> Rect {
+    Rect {
+        x: card.x + SETTINGS_PLUGIN_CARD_PAD_Y,
+        y: card.y + SETTINGS_PLUGIN_CARD_PAD_Y + SETTINGS_PLUGIN_CARD_HEADER_H,
+        width: card.width - SETTINGS_PLUGIN_CARD_PAD_Y * 2.0,
+        height: SETTINGS_PLUGIN_CARD_AUTHOR_H,
+    }
+}
+
+/// M1h — description line rect inside a plugin card (below the author line).
+pub fn settings_plugin_desc_rect(card: Rect) -> Rect {
+    let author = settings_plugin_author_rect(card);
+    Rect {
+        x: author.x,
+        y: author.bottom(),
+        width: author.width,
+        height: SETTINGS_PLUGIN_CARD_DESC_H,
+    }
+}
+
+/// M1h — `卸载 / Uninstall` button rect inside a plugin card's actions sub-row
+/// (right-anchored, below the description line). Maps to
+/// `SettingsHit::UninstallPlugin(card_index)`.
+pub fn settings_plugin_uninstall_button_rect(card: Rect) -> Rect {
+    let desc = settings_plugin_desc_rect(card);
+    Rect {
+        x: card.right() - SETTINGS_PLUGIN_CARD_PAD_Y - SETTINGS_PLUGIN_UNINSTALL_BTN_W,
+        y: desc.bottom() + (SETTINGS_PLUGIN_CARD_ACTIONS_H - SETTINGS_FOOTER_BTN_H) * 0.5,
+        width: SETTINGS_PLUGIN_UNINSTALL_BTN_W,
+        height: SETTINGS_FOOTER_BTN_H,
+    }
+}
+
+/// M1h — height the Plugins §11 section contributes to
+/// `settings_body_content_height`. Always-present: title + install button. The
+/// list adds either `n` plugin cards (+ inter-card gaps, plus the leading gap)
+/// or a single empty-placeholder row. A trailing section gap pads the body
+/// bottom. The (already-capped) `plugin_row_count` is the parameter — geometry
+/// never reads global state.
+pub fn settings_plugins_content_height(plugin_row_count: usize) -> f32 {
+    let base = SETTINGS_SECTION_LABEL_H + SETTINGS_PLUGIN_INSTALL_BTN_H;
+    let rows = plugin_row_count.min(SETTINGS_PLUGINS_ROW_VISIBLE_MAX);
+    let list = if rows == 0 {
+        SETTINGS_PLUGIN_CARD_GAP + SETTINGS_PLUGIN_EMPTY_ROW_H
+    } else {
+        SETTINGS_PLUGIN_CARD_GAP
+            + SETTINGS_PLUGIN_CARD_H * rows as f32
+            + SETTINGS_PLUGIN_CARD_GAP * (rows as f32 - 1.0)
+    };
+    base + list + SETTINGS_SECTION_GAP
+}
+
 #[cfg(test)]
 mod m1_tests {
     use super::*;
@@ -2610,6 +2780,127 @@ mod m1_tests {
             SETTINGS_PANEL_SHADOW_ALPHA,
         );
         assert!((SETTINGS_PANEL_SHADOW_ALPHA - 0.0).abs() < f32::EPSILON);
+    }
+
+    // ── M1h — Plugins §11 inline geometry ──────────────────────────────
+
+    /// Helper: a base flag set with the Plugins section anchored after an empty
+    /// Backup list (the shipped layout while Encryption §10 is deferred).
+    fn plugin_flags(plugin_rows: usize) -> SettingsBodyFlags {
+        SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly)
+            .with_backup_rows(0)
+            .with_plugin_rows(plugin_rows)
+    }
+
+    #[test]
+    fn m1h_plugins_section_sits_below_backup_card() {
+        let v = vp();
+        let f = plugin_flags(2);
+        // The Backup card's last laid-out row (empty placeholder at index 0,
+        // since backup_row_count = 0) must sit ABOVE the Plugins group title.
+        let backup_empty = settings_backup_entry_row_rect(v, 0.0, &f, 0);
+        let plugin_label = settings_plugins_label_rect(v, 0.0, &f);
+        assert!(
+            plugin_label.y >= backup_empty.bottom(),
+            "plugins title (y={}) must sit below the backup card's last row \
+             (bottom={})",
+            plugin_label.y,
+            backup_empty.bottom(),
+        );
+        // A section gap separates them.
+        assert!((plugin_label.y - backup_empty.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1h_install_button_full_width_below_title() {
+        let v = vp();
+        let f = plugin_flags(0);
+        let label = settings_plugins_label_rect(v, 0.0, &f);
+        let install = settings_plugins_install_button_rect(v, 0.0, &f);
+        // Install button sits directly below the title and spans the same
+        // (full body) width.
+        assert!((install.y - label.bottom()).abs() < 0.01);
+        assert_eq!(install.x, label.x);
+        assert_eq!(install.width, label.width);
+        assert_eq!(install.height, SETTINGS_PLUGIN_INSTALL_BTN_H);
+    }
+
+    #[test]
+    fn m1h_plugin_cards_stack_vertically_below_install() {
+        let v = vp();
+        let f = plugin_flags(3);
+        let install = settings_plugins_install_button_rect(v, 0.0, &f);
+        let card0 = settings_plugin_card_rect(v, 0.0, &f, 0);
+        let card1 = settings_plugin_card_rect(v, 0.0, &f, 1);
+        let card2 = settings_plugin_card_rect(v, 0.0, &f, 2);
+        // First card sits below the install button (plus the leading gap).
+        assert!(card0.y >= install.bottom());
+        // Cards stack with a fixed step = card height + inter-card gap.
+        assert!(card0.y < card1.y);
+        assert!(card1.y < card2.y);
+        assert!((card1.y - card0.y - (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP)).abs() < 0.01);
+        assert_eq!(card0.height, SETTINGS_PLUGIN_CARD_H);
+    }
+
+    #[test]
+    fn m1h_card_controls_fit_inside_card_in_order() {
+        let v = vp();
+        let f = plugin_flags(1);
+        let card = settings_plugin_card_rect(v, 0.0, &f, 0);
+        let name = settings_plugin_name_rect(card);
+        let badge = settings_plugin_badge_rect(card);
+        let toggle = settings_plugin_toggle_hit_rect(card);
+        let author = settings_plugin_author_rect(card);
+        let desc = settings_plugin_desc_rect(card);
+        let uninstall = settings_plugin_uninstall_button_rect(card);
+        // Header sub-row: name | badge | toggle, packed left→right inside card.
+        assert!(name.right() <= badge.x);
+        assert!(badge.right() <= toggle.x);
+        assert!(toggle.right() <= card.right() + 0.01);
+        // Vertical stack: header → author → desc → actions (uninstall), all
+        // inside the card.
+        assert!(author.y >= name.y);
+        assert!(desc.y >= author.bottom() - 0.01);
+        assert!(uninstall.y >= desc.bottom() - 0.01);
+        assert!(uninstall.bottom() <= card.bottom() + 0.01);
+        assert!(uninstall.right() <= card.right() + 0.01);
+    }
+
+    #[test]
+    fn m1h_plugins_content_height_grows_with_capped_row_count() {
+        // 0 (empty placeholder) < few < cap == over-cap (capped).
+        let none = settings_plugins_content_height(0);
+        let one = settings_plugins_content_height(1);
+        let few = settings_plugins_content_height(3);
+        let at_cap = settings_plugins_content_height(SETTINGS_PLUGINS_ROW_VISIBLE_MAX);
+        let over_cap = settings_plugins_content_height(SETTINGS_PLUGINS_ROW_VISIBLE_MAX + 4);
+        assert!(none > 0.0);
+        assert!(one > none);
+        assert!(few > one);
+        // Over-cap clamps to the cap height (visible-row cap honoured).
+        assert!((over_cap - at_cap).abs() < f32::EPSILON);
+        // The empty-state height is the title + install + gap + one empty row.
+        let expected_empty = SETTINGS_SECTION_LABEL_H
+            + SETTINGS_PLUGIN_INSTALL_BTN_H
+            + SETTINGS_PLUGIN_CARD_GAP
+            + SETTINGS_PLUGIN_EMPTY_ROW_H
+            + SETTINGS_SECTION_GAP;
+        assert!((none - expected_empty).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1h_plugin_row_count_feeds_body_height_and_scroll() {
+        let v = vp();
+        // Adding plugin rows must strictly grow the total body content height
+        // (so the scroll clamp lets the user reach the new cards).
+        let h0 = settings_body_content_height(v, &plugin_flags(0));
+        let h2 = settings_body_content_height(v, &plugin_flags(2));
+        assert!(h2 > h0);
+        // The growth equals the plugins-section delta exactly (no other section
+        // depends on plugin_row_count).
+        let delta_section =
+            settings_plugins_content_height(2) - settings_plugins_content_height(0);
+        assert!((h2 - h0 - delta_section).abs() < 0.01);
     }
 }
 
@@ -3345,14 +3636,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn modal_openers_paired_with_keybindings_left_plugins_right() {
-        let v = vp();
-        let keys = settings_keybindings_open_rect(v);
-        let plugins = settings_plugins_open_rect(v);
-        assert_eq!(keys.y, plugins.y);
-        assert!(keys.right() <= plugins.x);
-    }
+    // M1h (2026-05-29) — removed `modal_openers_paired_with_keybindings_left_plugins_right`:
+    // the plugins modal-opener button (`settings_plugins_open_rect`) was deleted
+    // when the Plugins surface moved inline (§11). The keybindings opener keeps
+    // its own coverage elsewhere.
 
     #[test]
     fn backup_entries_sit_below_vault_row() {
@@ -3430,27 +3717,10 @@ mod tests {
         assert!(reset.right() <= row_0.right());
     }
 
-    #[test]
-    fn plugins_modal_rows_and_actions_fit_inside_card() {
-        let v = vp();
-        let modal = settings_plugins_modal_rect(v);
-        let close = settings_plugins_close_rect(v);
-        let refresh = settings_plugins_refresh_rect(v);
-        let install = settings_plugins_install_rect(v);
-        let row_0 = settings_plugin_row_rect(v, 0);
-        let row_4 = settings_plugin_row_rect(v, 4);
-        let toggle = settings_plugin_toggle_rect(v, 0);
-        let uninstall = settings_plugin_uninstall_rect(v, 0);
-        assert!(modal.x >= 0.0);
-        assert!(modal.y >= 0.0);
-        assert!(close.right() <= modal.right() - SETTINGS_PANEL_PADDING + 0.01);
-        assert!(refresh.right() < close.x);
-        assert!(install.right() < refresh.x);
-        assert!(row_0.y > close.bottom());
-        assert!(row_4.bottom() <= modal.bottom() - SETTINGS_PANEL_PADDING + 0.01);
-        assert!(toggle.right() < uninstall.x);
-        assert!(uninstall.right() <= row_0.right());
-    }
+    // M1h (2026-05-29) — removed `plugins_modal_rows_and_actions_fit_inside_card`:
+    // the plugin lifecycle modal geometry it covered was deleted when the
+    // Plugins surface moved inline. The inline §11 card geometry is covered by
+    // the `m1h_*` tests in the `m1_tests` dark-shell module above.
 
     #[test]
     fn section_row_count_matches_visible_rows() {

@@ -1633,9 +1633,10 @@ fn handle_keydown(
         if let Some(result) = handle_settings_keybinding_keydown(root, vk, hwnd) {
             return result;
         }
-        if let Some(result) = handle_settings_plugins_keydown(root, vk, hwnd) {
-            return result;
-        }
+        // M1h — `handle_settings_plugins_keydown` removed: the inline Plugins
+        // §11 section has no separate modal, so Esc no longer needs a plugins-
+        // specific close path (panel Esc already closes the whole Settings
+        // surface).
         if let Some(result) = handle_settings_passphrase_keydown(root, vk, hwnd) {
             return result;
         }
@@ -4154,21 +4155,10 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
     Some(0)
 }
 
-fn handle_settings_plugins_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<LRESULT> {
-    let modal_open = {
-        let app = root.app.borrow();
-        app.settings_open.get() && app.settings_plugins_open.get()
-    };
-    if !modal_open {
-        return None;
-    }
-    if vk == VK_ESCAPE_KEY {
-        let app = root.app.borrow();
-        app.settings_plugins_open.set(false);
-        request_redraw(hwnd);
-    }
-    Some(0)
-}
+// M1h (2026-05-29) — `handle_settings_plugins_keydown` removed. It existed only
+// to close the (now-deleted) plugins MODAL on Esc; the inline §11 Plugins
+// section has no modal, and Esc on the Settings panel already closes the whole
+// surface via the auxiliary-escape path.
 
 fn handle_settings_passphrase_char(root: &AppRoot, codepoint: u32) -> bool {
     if matches!(codepoint, VK_BACKSPACE | VK_ENTER | VK_ESCAPE_KEY) {
@@ -5819,6 +5809,11 @@ fn plugin_entries_from_registry(registry: PluginRegistry) -> Vec<SettingsPluginE
             name: SmolStr::new(plugin.name),
             version: SmolStr::new(plugin.version),
             plugin_type: plugin_type_label(&plugin.plugin_type),
+            // M1h — thread the manifest author/description (already loaded by
+            // the registry) through so the inline §11 plugin card shows the
+            // author + description lines (Tauri `plugin-card__author/__desc`).
+            author: SmolStr::new(plugin.author),
+            description: SmolStr::new(plugin.description),
             enabled: plugin.enabled,
         })
         .collect()
@@ -11845,10 +11840,9 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
     match hit {
         ui::SettingsHit::SwitchLocale => Some(SmolStr::new_static("Switch display language")),
         ui::SettingsHit::OpenKeybindings => Some(SmolStr::new_static("Edit keyboard shortcuts")),
-        ui::SettingsHit::OpenPlugins => Some(SmolStr::new_static("Manage installed plugins")),
         ui::SettingsHit::CloseKeybindings => Some(SmolStr::new_static("Close keyboard shortcuts")),
-        ui::SettingsHit::ClosePlugins => Some(SmolStr::new_static("Close plugin manager")),
-        ui::SettingsHit::RefreshPlugins => Some(SmolStr::new_static("Refresh plugin registry")),
+        // M1h — `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` removed: the
+        // Plugins surface is inline (no modal) and refreshes on Settings open.
         ui::SettingsHit::InstallPlugin => Some(SmolStr::new_static("Install plugin archive")),
         ui::SettingsHit::TogglePlugin(_) => Some(SmolStr::new_static("Enable or disable plugin")),
         ui::SettingsHit::UninstallPlugin(_) => Some(SmolStr::new_static("Remove installed plugin")),
@@ -13120,46 +13114,21 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             ui::SettingsHit::OpenKeybindings => {
                 let app = root.app.borrow();
                 app.settings_keybindings_open.set(true);
-                app.settings_plugins_open.set(false);
                 app.settings_keybinding_recording.borrow_mut().take();
                 app.settings_keybinding_feedback.borrow_mut().take();
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::OpenPlugins => {
-                let app = root.app.borrow();
-                app.settings_plugins_open.set(true);
-                app.settings_keybindings_open.set(false);
-                drop(app);
-                match refresh_settings_plugins_for_root(root) {
-                    Ok(_changed) => {
-                        let count = root.app.borrow().settings_plugin_entries.borrow().len();
-                        set_plugin_setting_success(
-                            root,
-                            SmolStr::new(format!("Loaded {count} plugin(s)")),
-                        );
-                    }
-                    Err(error) => {
-                        set_plugin_setting_error(
-                            root,
-                            SmolStr::new(format!("Plugin list failed: {error}")),
-                        );
-                    }
-                }
-                request_redraw(hwnd);
-            }
+            // M1h — `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` arms were
+            // removed: the Plugins surface is an always-inline §11 section (no
+            // modal to open/close), and the list refreshes on Settings open via
+            // `refresh_settings_plugins_for_root` in `show_settings_surface`
+            // (mirroring how Stealth/Backup refresh). Install / Toggle /
+            // Uninstall keep their real dispatch arms below.
             ui::SettingsHit::CloseKeybindings => {
                 let app = root.app.borrow();
                 app.settings_keybindings_open.set(false);
                 app.settings_keybinding_recording.borrow_mut().take();
                 request_redraw(hwnd);
-            }
-            ui::SettingsHit::ClosePlugins => {
-                let app = root.app.borrow();
-                app.settings_plugins_open.set(false);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::RefreshPlugins => {
-                root.dispatcher.push(Command::ListPlugins);
             }
             ui::SettingsHit::InstallPlugin => match unsafe { select_plugin_file_from_dialog(hwnd) }
             {
@@ -16095,7 +16064,7 @@ unsafe extern "system" fn aux_wnd_proc(
 /// finalise their bridge surfaces.
 fn reset_settings_transient_state(app: &AppState) {
     app.settings_keybindings_open.set(false);
-    app.settings_plugins_open.set(false);
+    // M1h — `settings_plugins_open` removed (Plugins is inline, no modal).
     app.settings_keybinding_recording.borrow_mut().take();
 }
 
@@ -16121,6 +16090,20 @@ fn show_settings_surface(root: &AppRoot) -> bool {
     // the real rotated vault files via the existing list command/fn; sets
     // `settings_backup_status` to a success/error line the card renders.
     run_settings_backup_list(root);
+    // M1h — populate the Plugins §11 list on open (mirrors Tauri's
+    // `loadPlugins()` on mount) so the inline plugin cards reflect the real
+    // registry on first paint. Reads installed plugins via the existing
+    // `refresh_settings_plugins_for_root` (→ `list_plugins_for_root`) and sets a
+    // visible success/error status line; replaces the old OpenPlugins modal arm.
+    match refresh_settings_plugins_for_root(root) {
+        Ok(_changed) => {
+            let count = root.app.borrow().settings_plugin_entries.borrow().len();
+            set_plugin_setting_success(root, SmolStr::new(format!("Loaded {count} plugin(s)")));
+        }
+        Err(error) => {
+            set_plugin_setting_error(root, SmolStr::new(format!("Plugin list failed: {error}")));
+        }
+    }
     // Round-2 RC-2 — DO NOT mount the K1 `business::settings::panel` widget
     // subtree. The new dark shell is hand-painted by `draw_settings_panel`
     // against pure-function rects from `crate::settings_panel`. Mounting the

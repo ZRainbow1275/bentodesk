@@ -462,14 +462,18 @@ pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<Zon
 // `bento-nano-app::settings_panel` but no longer referenced from this hit
 // tester; their `pub use` re-exports were dropped here to keep the symbol
 // surface trim.
+// M1h (2026-05-29) — the plugins modal-rect helpers (`settings_plugin_row_rect`
+// / `_toggle_rect` / `_uninstall_rect`, `settings_plugins_close_rect` /
+// `_install_rect` / `_modal_rect` / `_refresh_rect`) were dropped from this
+// re-export when the Plugins surface moved inline; the inline §11 hit-test uses
+// the fully-qualified `bento_nano_app::settings_panel::settings_plugin_*` paths
+// (same convention as the Backup §9 hits).
 pub use bento_nano_app::settings_panel::{
     SETTINGS_BACKUP_ENTRY_VISIBLE_MAX, SETTINGS_CLOSE_BTN_H, SETTINGS_CLOSE_BTN_W,
     SETTINGS_PANEL_HEIGHT, SETTINGS_PANEL_PADDING, SETTINGS_PANEL_WIDTH, SETTINGS_SWITCH_BTN_H,
     SETTINGS_SWITCH_BTN_W, settings_active_theme_rect, settings_keybinding_record_rect,
     settings_keybinding_reset_rect, settings_keybindings_close_rect,
-    settings_keybindings_modal_rect, settings_plugin_row_rect, settings_plugin_toggle_rect,
-    settings_plugin_uninstall_rect, settings_plugins_close_rect, settings_plugins_install_rect,
-    settings_plugins_modal_rect, settings_plugins_refresh_rect,
+    settings_keybindings_modal_rect,
 };
 
 /// What part of the settings overlay was clicked.
@@ -479,14 +483,12 @@ pub enum SettingsHit {
     SwitchLocale,
     /// Open the keybindings recorder/reset modal.
     OpenKeybindings,
-    /// Open the plugin lifecycle modal.
-    OpenPlugins,
     /// Close the keybindings recorder/reset modal.
     CloseKeybindings,
-    /// Close the plugin lifecycle modal.
-    ClosePlugins,
-    /// Refresh plugin rows from the real selected-stack registry.
-    RefreshPlugins,
+    // M1h (2026-05-29) — `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` were
+    // removed: the Plugins surface is inline (no modal to open/close) and Tauri
+    // has no Refresh affordance in the §11 section (the list refreshes on
+    // Settings open). Install / Toggle / Uninstall below stay.
     /// Select a `.bdplugin`/zip archive for install through the selected-stack
     /// safe archive extraction and plugin registry path.
     InstallPlugin,
@@ -673,47 +675,11 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         }
         return SettingsHit::Body;
     }
-    if app.settings_plugins_open.get() {
-        let modal = settings_plugins_modal_rect(vp);
-        if x >= modal.x && x < modal.right() && y >= modal.y && y < modal.bottom() {
-            let close = settings_plugins_close_rect(vp);
-            if x >= close.x && x < close.right() && y >= close.y && y < close.bottom() {
-                return SettingsHit::ClosePlugins;
-            }
-            let refresh = settings_plugins_refresh_rect(vp);
-            if x >= refresh.x && x < refresh.right() && y >= refresh.y && y < refresh.bottom() {
-                return SettingsHit::RefreshPlugins;
-            }
-            let install = settings_plugins_install_rect(vp);
-            if x >= install.x && x < install.right() && y >= install.y && y < install.bottom() {
-                return SettingsHit::InstallPlugin;
-            }
-            let plugins = app.settings_plugin_entries.borrow();
-            for row_index in 0..plugins
-                .len()
-                .min(bento_nano_app::SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
-            {
-                let toggle = settings_plugin_toggle_rect(vp, row_index);
-                if x >= toggle.x && x < toggle.right() && y >= toggle.y && y < toggle.bottom() {
-                    return SettingsHit::TogglePlugin(row_index);
-                }
-                let uninstall = settings_plugin_uninstall_rect(vp, row_index);
-                if x >= uninstall.x
-                    && x < uninstall.right()
-                    && y >= uninstall.y
-                    && y < uninstall.bottom()
-                {
-                    return SettingsHit::UninstallPlugin(row_index);
-                }
-                let row = settings_plugin_row_rect(vp, row_index);
-                if x >= row.x && x < row.right() && y >= row.y && y < row.bottom() {
-                    return SettingsHit::Body;
-                }
-            }
-            return SettingsHit::Body;
-        }
-        return SettingsHit::ClosePlugins;
-    }
+    // M1h (2026-05-29) — the plugins MODAL hit block was removed: the Plugins
+    // surface is now an always-inline §11 section hit-tested at the body level
+    // (Install / per-card Toggle / per-card Uninstall) near the end of this
+    // function, after the Backup §9 hits. `settings_plugins_open` +
+    // `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` were deleted.
     // Wave J1b — theme picker swatch popup. When open the picker layer sits
     // above every Row 5+ chip in the Settings panel, so it must hit-test
     // first; otherwise clicks on the popup would punch through to the
@@ -1061,6 +1027,57 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
                 && y < restore_btn.bottom()
             {
                 return SettingsHit::RestoreSettingsBackup(entry_index);
+            }
+        }
+    }
+
+    // M1h — Plugins §11 inline section. The card Ys depend on the same
+    // Startup+Stealth+Updater+Backup flags as the renderer PLUS the variable
+    // plugin row count (capped), so build the same `SettingsBodyFlags` the
+    // renderer paints from via `with_plugin_rows` (paint geometry == hit
+    // geometry). Interactive: 安装插件... (always) + per-card enable toggle +
+    // per-card 卸载. The title/author/desc/empty rows are non-interactive. The
+    // per-card toggle/uninstall carry the list index; the dispatch arms map
+    // index → entry → plugin id (and toggle flips the current enabled state).
+    let plugin_entries = app.settings_plugin_entries.borrow();
+    let plugin_visible =
+        bento_nano_app::business::settings::plugins_section::plugin_visible_row_count(
+            &plugin_entries,
+        );
+    let plugin_flags = backup_flags.with_plugin_rows(plugin_visible);
+    let plugin_install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
+        vp,
+        scroll_y,
+        &plugin_flags,
+    );
+    if x >= plugin_install.x
+        && x < plugin_install.right()
+        && y >= plugin_install.y
+        && y < plugin_install.bottom()
+    {
+        return SettingsHit::InstallPlugin;
+    }
+    // Per-card enable toggle + 卸载 — only the visible (non-empty, capped) cards.
+    if !bento_nano_app::business::settings::plugins_section::plugin_list_is_empty(&plugin_entries) {
+        for card_index in 0..plugin_visible {
+            let card = bento_nano_app::settings_panel::settings_plugin_card_rect(
+                vp,
+                scroll_y,
+                &plugin_flags,
+                card_index,
+            );
+            let toggle = bento_nano_app::settings_panel::settings_plugin_toggle_hit_rect(card);
+            if x >= toggle.x && x < toggle.right() && y >= toggle.y && y < toggle.bottom() {
+                return SettingsHit::TogglePlugin(card_index);
+            }
+            let uninstall =
+                bento_nano_app::settings_panel::settings_plugin_uninstall_button_rect(card);
+            if x >= uninstall.x
+                && x < uninstall.right()
+                && y >= uninstall.y
+                && y < uninstall.bottom()
+            {
+                return SettingsHit::UninstallPlugin(card_index);
             }
         }
     }
@@ -1811,77 +1828,162 @@ mod phase21_tests {
         );
     }
 
+    /// M1h — reachability: with plugin entries seeded, clicking the full-width
+    /// 安装插件... button / per-card enable toggle / per-card 卸载 resolves to
+    /// `InstallPlugin` / `TogglePlugin(idx)` / `UninstallPlugin(idx)` against
+    /// the INLINE §11 geometry (no modal). Proves the paint→hit chain is wired
+    /// after the modal→inline move — no plugin control is painted-but-unwired.
+    /// Builds the SAME `SettingsBodyFlags` (idle updater + empty backup +
+    /// capped plugin count) the hit-tester derives so the sampled centres line
+    /// up with production geometry, then scrolls the bottom Plugins section
+    /// into the visible body.
     #[test]
-    fn settings_hit_routes_plugins_modal_buttons_first() {
+    fn m1h_settings_hit_resolves_inline_plugin_install_toggle_and_per_card_uninstall() {
         let app = app_with_zones(vec![]);
-        app.settings_plugins_open.set(true);
+        // Seed two real-shaped entries so the per-card toggle/uninstall paths
+        // are live (different kinds + enabled states for good measure).
         app.settings_plugin_entries.replace(vec![
             SettingsPluginEntry {
                 id: smol_str::SmolStr::new_static("com.test.theme"),
                 name: smol_str::SmolStr::new_static("Theme"),
                 version: smol_str::SmolStr::new_static("1.0.0"),
                 plugin_type: smol_str::SmolStr::new_static("theme"),
+                author: smol_str::SmolStr::new_static("Acme"),
+                description: smol_str::SmolStr::new_static("A theme plugin"),
                 enabled: true,
             },
             SettingsPluginEntry {
-                id: smol_str::SmolStr::new_static("com.test.second"),
-                name: smol_str::SmolStr::new_static("Second"),
-                version: smol_str::SmolStr::new_static("1.0.0"),
-                plugin_type: smol_str::SmolStr::new_static("theme"),
+                id: smol_str::SmolStr::new_static("com.test.widget"),
+                name: smol_str::SmolStr::new_static("Widget"),
+                version: smol_str::SmolStr::new_static("2.0.0"),
+                plugin_type: smol_str::SmolStr::new_static("widget"),
+                author: smol_str::SmolStr::new_static("Acme"),
+                description: smol_str::SmolStr::new_static("A widget plugin"),
                 enabled: false,
             },
         ]);
 
-        let install = settings_plugins_install_rect(app.viewport);
-        assert_eq!(
-            settings_hit(
-                &app,
-                install.x + install.width * 0.5,
-                install.y + install.height * 0.5
-            ),
-            SettingsHit::InstallPlugin
+        // Rebuild the EXACT flags the hit-tester derives: live Startup gating
+        // bools + idle updater + empty backup list + capped visible plugin
+        // count. Reading them off `app` keeps the sampled rects production-true.
+        let entries = app.settings_plugin_entries.borrow();
+        let visible =
+            bento_nano_app::business::settings::plugins_section::plugin_visible_row_count(&entries);
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_backup_rows(0)
+        .with_plugin_rows(visible);
+        drop(entries);
+
+        // Plugins sits LAST in the body; scroll to the clamped max so its rows
+        // fall inside the visible body (the hit-tester early-returns for any y
+        // outside the body rect).
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        app.scroll_offset_y.set(max_scroll);
+        let scroll_y = max_scroll;
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let label =
+            bento_nano_app::settings_panel::settings_plugins_label_rect(app.viewport, scroll_y, &flags);
+        assert!(
+            label.y >= body.y && label.y < body.bottom(),
+            "plugins section must scroll into the visible body (label.y={}, body=[{}, {}])",
+            label.y,
+            body.y,
+            body.bottom(),
         );
 
-        let refresh = settings_plugins_refresh_rect(app.viewport);
+        // 安装插件... full-width button → InstallPlugin.
+        let install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
         assert_eq!(
-            settings_hit(
-                &app,
-                refresh.x + refresh.width * 0.5,
-                refresh.y + refresh.height * 0.5
-            ),
-            SettingsHit::RefreshPlugins
+            settings_hit(&app, install.x + install.width * 0.5, install.y + install.height * 0.5),
+            SettingsHit::InstallPlugin,
         );
 
-        let toggle = settings_plugin_toggle_rect(app.viewport, 1);
-        assert_eq!(
-            settings_hit(
-                &app,
-                toggle.x + toggle.width * 0.5,
-                toggle.y + toggle.height * 0.5
-            ),
-            SettingsHit::TogglePlugin(1)
-        );
+        // Per-card enable toggle + 卸载 — each routes to its own card index.
+        for card_index in 0..visible {
+            let card = bento_nano_app::settings_panel::settings_plugin_card_rect(
+                app.viewport,
+                scroll_y,
+                &flags,
+                card_index,
+            );
+            let toggle = bento_nano_app::settings_panel::settings_plugin_toggle_hit_rect(card);
+            assert_eq!(
+                settings_hit(&app, toggle.x + toggle.width * 0.5, toggle.y + toggle.height * 0.5),
+                SettingsHit::TogglePlugin(card_index),
+                "per-card toggle must carry the list index",
+            );
+            let uninstall =
+                bento_nano_app::settings_panel::settings_plugin_uninstall_button_rect(card);
+            assert_eq!(
+                settings_hit(
+                    &app,
+                    uninstall.x + uninstall.width * 0.5,
+                    uninstall.y + uninstall.height * 0.5,
+                ),
+                SettingsHit::UninstallPlugin(card_index),
+                "per-card uninstall must carry the list index",
+            );
+        }
+    }
 
-        let uninstall = settings_plugin_uninstall_rect(app.viewport, 0);
-        assert_eq!(
-            settings_hit(
-                &app,
-                uninstall.x + uninstall.width * 0.5,
-                uninstall.y + uninstall.height * 0.5
-            ),
-            SettingsHit::UninstallPlugin(0)
-        );
+    /// M1h — empty list: with no plugins there is no per-card toggle/uninstall
+    /// hit (the empty-placeholder row is non-interactive), but the full-width
+    /// 安装插件... button stays reachable.
+    #[test]
+    fn m1h_settings_hit_empty_plugin_list_keeps_install_but_has_no_card_hits() {
+        let app = app_with_zones(vec![]);
+        assert!(app.settings_plugin_entries.borrow().is_empty());
 
-        let close = settings_plugins_close_rect(app.viewport);
-        assert_eq!(
-            settings_hit(
-                &app,
-                close.x + close.width * 0.5,
-                close.y + close.height * 0.5
-            ),
-            SettingsHit::ClosePlugins
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_backup_rows(0)
+        .with_plugin_rows(0);
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        app.scroll_offset_y.set(max_scroll);
+        let scroll_y = max_scroll;
+        let install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
         );
-
-        assert_eq!(settings_hit(&app, 0.0, 0.0), SettingsHit::ClosePlugins);
+        assert_eq!(
+            settings_hit(&app, install.x + install.width * 0.5, install.y + install.height * 0.5),
+            SettingsHit::InstallPlugin,
+        );
+        // The empty-placeholder row's centre must NOT produce a plugin hit — it
+        // eats as Body (non-interactive).
+        let empty_row = bento_nano_app::settings_panel::settings_plugin_empty_row_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        let empty_hit = settings_hit(
+            &app,
+            empty_row.x + empty_row.width * 0.5,
+            empty_row.y + empty_row.height * 0.5,
+        );
+        assert_ne!(empty_hit, SettingsHit::TogglePlugin(0));
+        assert_ne!(empty_hit, SettingsHit::UninstallPlugin(0));
     }
 }

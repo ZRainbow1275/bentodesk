@@ -277,6 +277,14 @@ pub struct SettingsPluginEntry {
     pub name: SmolStr,
     pub version: SmolStr,
     pub plugin_type: SmolStr,
+    /// M1h — plugin author from the manifest (`InstalledPlugin::author`). The
+    /// inline Plugins §11 card shows this on its own line, matching Tauri
+    /// `plugin-card__author` (`SettingsPanel.tsx:749`).
+    pub author: SmolStr,
+    /// M1h — plugin description from the manifest (`InstalledPlugin::
+    /// description`). Rendered as the card's description line, matching Tauri
+    /// `plugin-card__desc` (`SettingsPanel.tsx:750`).
+    pub description: SmolStr,
     pub enabled: bool,
 }
 
@@ -550,11 +558,11 @@ pub struct AppState {
     /// create, or restore command so the selected-stack Settings overlay can
     /// display actual backup availability without mock rows.
     pub settings_backup_entries: RefCell<Vec<SettingsBackupEntry>>,
-    /// `true` when the native selected-stack plugin lifecycle modal is open
-    /// above Settings. Rows are loaded from the real plugin registry and
-    /// mutations route through backend plugin toggle/uninstall services.
-    pub settings_plugins_open: Cell<bool>,
-    /// Real installed plugin rows discovered from `<state_dir>/plugins`.
+    /// Real installed plugin rows discovered from `<state_dir>/plugins`. M1h
+    /// (2026-05-29) — the plugins surface is now an inline §11 section of the
+    /// scrollable Settings body (Tauri parity), not a separate modal, so the
+    /// former `settings_plugins_open` modal gate was removed; these rows render
+    /// inline and refresh on Settings open.
     pub settings_plugin_entries: RefCell<Vec<SettingsPluginEntry>>,
     /// Visible status for plugin list/install/toggle/uninstall actions.
     pub settings_plugin_status: RefCell<Option<SettingsBackupStatus>>,
@@ -796,7 +804,6 @@ impl AppState {
             selected_zone: Cell::new(None),
             settings_backup_status: RefCell::new(None),
             settings_backup_entries: RefCell::new(Vec::new()),
-            settings_plugins_open: Cell::new(false),
             settings_plugin_entries: RefCell::new(Vec::new()),
             settings_plugin_status: RefCell::new(None),
             settings_keybindings_open: Cell::new(false),

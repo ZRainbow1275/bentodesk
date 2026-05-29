@@ -276,6 +276,22 @@ pub mod ids {
     pub const BACKUP_REFRESH: StringId = StringId(194);
     pub const BACKUP_RESTORE: StringId = StringId(195);
     pub const BACKUP_EMPTY: StringId = StringId(196);
+
+    // 197..203 M1h (2026-05-29) — Plugins §11 inline section
+    // (`SettingsPanel.tsx:709-781`). Appended in lockstep with `i18n_en_us`
+    // (same index, same order) per the positional-array contract. Mirrors the
+    // Tauri plugin keys (`src/i18n/locales/zh-CN.ts:208-217`). The group title
+    // reuses `SETTINGS_PLUGINS` (36, "插件"); the install button gets its own
+    // string ("安装插件...") distinct from the generic `BTN_INSTALL` (72,
+    // "安装"), and the empty-state gets a short Tauri-matching line ("暂无已安装
+    // 插件") distinct from the long drag-hint `PLUGINS_EMPTY_HINT` (91). The
+    // three type badges + the per-row Uninstall button complete the 1:1 set.
+    pub const PLUGIN_INSTALL: StringId = StringId(197);
+    pub const PLUGIN_EMPTY: StringId = StringId(198);
+    pub const PLUGIN_TYPE_THEME: StringId = StringId(199);
+    pub const PLUGIN_TYPE_WIDGET: StringId = StringId(200);
+    pub const PLUGIN_TYPE_ORGANIZER: StringId = StringId(201);
+    pub const PLUGIN_UNINSTALL: StringId = StringId(202);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -519,5 +535,13 @@ pub static ZH_CN: LookupTable = LookupTable {
         "刷新",                  // BACKUP_REFRESH (194)
         "恢复",                  // BACKUP_RESTORE (195)
         "暂无备份",              // BACKUP_EMPTY (196)
+        // 197..203 M1h — Plugins §11 (`SettingsPanel.tsx:709-781`,
+        // zh-CN.ts:208-217).
+        "安装插件...",           // PLUGIN_INSTALL (197)
+        "暂无已安装插件",        // PLUGIN_EMPTY (198)
+        "主题",                  // PLUGIN_TYPE_THEME (199)
+        "组件",                  // PLUGIN_TYPE_WIDGET (200)
+        "整理器",                // PLUGIN_TYPE_ORGANIZER (201)
+        "卸载",                  // PLUGIN_UNINSTALL (202)
     ],
 };

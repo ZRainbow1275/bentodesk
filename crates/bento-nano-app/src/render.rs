@@ -3773,6 +3773,152 @@ impl Renderer {
                 )?;
             }
         }
+
+        // ── M1h — Plugins §11 section (`SettingsPanel.tsx:709-781`) ──────
+        //
+        // Sits LAST in the (currently shipped) Tauri body order
+        // (…→Backup→**Plugins**→footer); Encryption §10 is deferred so Plugins
+        // anchors directly after the Backup card. Reads the live
+        // `app.settings_plugin_entries` snapshot (populated on Settings open +
+        // after every install/toggle/uninstall by the shell). The list is
+        // variable-length, capped at SETTINGS_PLUGINS_ROW_VISIBLE_MAX; the
+        // capped count threads through the same `SettingsBodyFlags` the
+        // hit-tester + scroll-clamp use (via `with_plugin_rows`) so paint and
+        // hit geometry agree. PURE view-model helpers (badge id, visible cap,
+        // empty predicate, header text) come from
+        // `business::settings::plugins_section`. Dark dialog tokens only — the
+        // old modal's light `active_theme_palette()` was dropped.
+        use crate::business::settings::plugins_section as plg;
+        use crate::settings_panel::{
+            settings_plugin_author_rect, settings_plugin_badge_rect, settings_plugin_card_rect,
+            settings_plugin_desc_rect, settings_plugin_empty_row_rect, settings_plugin_name_rect,
+            settings_plugin_toggle_hit_rect, settings_plugin_uninstall_button_rect,
+            settings_plugins_install_button_rect, settings_plugins_label_rect,
+            SETTINGS_PLUGINS_ROW_VISIBLE_MAX,
+        };
+        // Snapshot the entries out of the RefCell BEFORE the fallible paint
+        // calls so no borrow spans them (mirrors the Backup/Stealth pattern).
+        let plugin_entries = app.settings_plugin_entries.borrow().clone();
+        let plugin_visible = plg::plugin_visible_row_count(&plugin_entries);
+        let plugin_flags = backup_flags.with_plugin_rows(plugin_visible);
+        // Group title — 插件 / Plugins (reuses SETTINGS_PLUGINS id 36).
+        let plugin_label = settings_plugins_label_rect(viewport, scroll, &plugin_flags);
+        if row_visible(plugin_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_PLUGINS),
+                plugin_label,
+                label_color,
+            )?;
+        }
+        // Full-width 安装插件... button (neutral chip) → InstallPlugin.
+        let plugin_install = settings_plugins_install_button_rect(viewport, scroll, &plugin_flags);
+        if row_visible(plugin_install, body) {
+            self.fill_rounded_rect(plugin_install, chip_bg, btn_radius)?;
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_INSTALL),
+                plugin_install,
+                title_color,
+            )?;
+        }
+        // plugin-list — N plugin cards or one pluginEmpty placeholder.
+        if plg::plugin_list_is_empty(&plugin_entries) {
+            let empty_row = settings_plugin_empty_row_rect(viewport, scroll, &plugin_flags);
+            if row_visible(empty_row, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_EMPTY),
+                    empty_row,
+                    label_color,
+                )?;
+            }
+        } else {
+            for (card_index, plugin) in plugin_entries
+                .iter()
+                .take(SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
+                .enumerate()
+            {
+                let card = settings_plugin_card_rect(viewport, scroll, &plugin_flags, card_index);
+                if !row_visible(card, body) {
+                    continue;
+                }
+                // Card surface — raised chip behind the whole card.
+                self.fill_rounded_rect(card, chip_bg, chip_radius)?;
+                // Header — name · v{version} (left), type badge + enable toggle
+                // (right). The header text is formatted once per visible card.
+                let name_rect = settings_plugin_name_rect(card);
+                self.draw_text_no_wrap(
+                    plg::format_plugin_header(plugin).as_str(),
+                    name_rect,
+                    title_color,
+                )?;
+                // Type badge — accent-tinted chip (theme=purple, widget=blue,
+                // organizer=green; `SettingsPanel.css:612-625`).
+                let badge_rect = settings_plugin_badge_rect(card);
+                let badge_accent = match plugin.plugin_type.as_str() {
+                    "widget" => palette.accent_blue,
+                    "organizer" => palette.accent_green,
+                    _ => palette.accent_purple,
+                };
+                self.fill_rounded_rect(
+                    badge_rect,
+                    with_alpha(badge_accent, 0.20),
+                    bento_nano_style::BorderRadius::all(badge_rect.height * 0.5),
+                )?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(plg::plugin_type_label_id(plugin.plugin_type.as_str())),
+                    badge_rect,
+                    with_alpha(badge_accent, 1.0),
+                )?;
+                // Enable toggle — accent when on, neutral track when off →
+                // TogglePlugin(card_index).
+                let toggle_rect = settings_plugin_toggle_hit_rect(card);
+                let toggle_radius = bento_nano_style::BorderRadius::all(toggle_rect.height * 0.5);
+                self.fill_rounded_rect(
+                    toggle_rect,
+                    if plugin.enabled {
+                        accent_on
+                    } else {
+                        track_off
+                    },
+                    toggle_radius,
+                )?;
+                self.draw_text_no_wrap(
+                    if plugin.enabled {
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_ON)
+                    } else {
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_OFF)
+                    },
+                    toggle_rect,
+                    bento_nano_style::Color::WHITE,
+                )?;
+                // Author line (muted).
+                let author_rect = settings_plugin_author_rect(card);
+                self.draw_text_no_wrap(
+                    plugin.author.as_str(),
+                    author_rect,
+                    with_alpha(palette.text_muted, 0.95),
+                )?;
+                // Description line (muted).
+                let desc_rect = settings_plugin_desc_rect(card);
+                self.draw_text_no_wrap(
+                    plugin.description.as_str(),
+                    desc_rect,
+                    with_alpha(palette.text_muted, 0.95),
+                )?;
+                // Actions — 卸载 / Uninstall (danger chip) → UninstallPlugin(idx).
+                let uninstall_btn = settings_plugin_uninstall_button_rect(card);
+                self.fill_rounded_rect(
+                    uninstall_btn,
+                    with_alpha(palette.accent_red, 0.85),
+                    btn_radius,
+                )?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_UNINSTALL),
+                    uninstall_btn,
+                    bento_nano_style::Color::WHITE,
+                )?;
+            }
+        }
+
             Ok(())
         })();
         // Balance the body clip BEFORE propagating any body-paint error so the
@@ -3819,9 +3965,11 @@ impl Renderer {
         if app.settings_keybindings_open.get() {
             self.draw_keybindings_modal(app)?;
         }
-        if app.settings_plugins_open.get() {
-            self.draw_plugins_modal(app)?;
-        }
+        // M1h (2026-05-29) — the plugins MODAL gate (`if app.settings_plugins_open
+        // { self.draw_plugins_modal(app) }`) was removed: the Plugins surface is
+        // now an always-inline §11 section painted inside the scrollable body
+        // (see the M1h block in the body-paint closure above). `draw_plugins_modal`
+        // + `settings_plugins_open` were deleted.
         if app.theme_picker_open.get() {
             let chip = settings_active_theme_rect(viewport);
             let origin = crate::theme_picker::theme_picker_popup_origin(chip);
@@ -3834,180 +3982,14 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw the native selected-stack plugin lifecycle modal. This is the
-    /// Settings replacement for the Tauri plugin management surface: list rows
-    /// are registry-backed and Toggle/Remove emit real backend mutations.
-    fn draw_plugins_modal(&mut self, app: &AppState) -> Result<(), RenderError> {
-        use crate::settings_panel::{
-            SETTINGS_PLUGINS_ROW_VISIBLE_MAX, settings_panel_shadow_rect, settings_plugin_row_rect,
-            settings_plugin_toggle_rect, settings_plugin_uninstall_rect,
-            settings_plugins_close_rect, settings_plugins_install_rect,
-            settings_plugins_modal_rect, settings_plugins_refresh_rect,
-        };
-        let palette = app.active_theme_palette();
-        let radius_tokens = app.active_theme_radius();
-        let spacing_tokens = app.active_theme_spacing();
-        let shadow_tokens = app.active_theme_shadow();
-        let modal_scrim = with_alpha(palette.scrim, 0.45);
-        let modal_bg = with_alpha(palette.surface, 0.98);
-        let row_bg = with_alpha(palette.surface_alt, 0.82);
-        let title_color = with_alpha(palette.text, 0.96);
-        let label_color = with_alpha(palette.text, 0.90);
-        let muted_text = with_alpha(palette.text_muted, 0.95);
-        let success_text = with_alpha(palette.success, 0.95);
-        let error_text = with_alpha(palette.danger, 0.95);
-        let btn_bg = with_alpha(palette.accent, 0.82);
-        let btn_off_bg = with_alpha(palette.surface_alt, 0.92);
-        let danger_bg = with_alpha(palette.danger, 0.78);
-        let btn_text = with_alpha(palette.text, 0.96);
-        let modal_radius = radius_tokens.xl;
-        let control_radius = radius_tokens.md;
-        let panel_shadow = shadow_tokens.lg;
-        let title_pad_x = spacing_tokens.xl;
-        let title_pad_y = spacing_tokens.lg;
-        let control_pad_x = spacing_tokens.sm;
-        let control_pad_y = spacing_tokens.xs + 1.0;
-        let control_text_rect = |rect: Rect| Rect {
-            x: rect.x + control_pad_x,
-            y: rect.y + control_pad_y,
-            width: (rect.width - control_pad_x * 2.0).max(0.0),
-            height: (rect.height - control_pad_y * 2.0).max(0.0),
-        };
-
-        let viewport = app.viewport;
-        let scrim_rect = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: viewport.width,
-            height: viewport.height,
-        };
-        self.fill_rounded_rect(scrim_rect, modal_scrim, BorderRadius::ZERO)?;
-
-        let modal = settings_plugins_modal_rect(viewport);
-        let modal_shadow_rect = settings_panel_shadow_rect(modal, panel_shadow);
-        self.fill_rounded_rect(modal_shadow_rect, panel_shadow.color, modal_radius)?;
-        self.fill_rounded_rect(modal, modal_bg, modal_radius)?;
-
-        let title_rect = Rect {
-            x: modal.x + title_pad_x,
-            y: modal.y + title_pad_y,
-            width: 118.0,
-            height: 24.0,
-        };
-        self.draw_text(
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_PLUGINS),
-            title_rect,
-            title_color,
-        )?;
-
-        let status_rect = Rect {
-            x: modal.x + 132.0,
-            y: modal.y + title_pad_y,
-            width: (settings_plugins_install_rect(viewport).x - modal.x - 140.0).max(0.0),
-            height: 24.0,
-        };
-        let plugin_status = app.settings_plugin_status.borrow();
-        match plugin_status.as_ref() {
-            Some(crate::state::SettingsBackupStatus::Success(text)) => {
-                self.draw_text(text.as_str(), status_rect, success_text)?
-            }
-            Some(crate::state::SettingsBackupStatus::Error(text)) => {
-                self.draw_text(text.as_str(), status_rect, error_text)?
-            }
-            None => self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REGISTRY_HINT),
-                status_rect,
-                muted_text,
-            )?,
-        }
-        drop(plugin_status);
-
-        let install_rect = settings_plugins_install_rect(viewport);
-        self.fill_rounded_rect(install_rect, btn_off_bg, control_radius)?;
-        self.draw_text(
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_INSTALL),
-            control_text_rect(install_rect),
-            btn_text,
-        )?;
-        let refresh_rect = settings_plugins_refresh_rect(viewport);
-        self.fill_rounded_rect(refresh_rect, btn_bg, control_radius)?;
-        self.draw_text(
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REFRESH),
-            control_text_rect(refresh_rect),
-            btn_text,
-        )?;
-        let close_rect = settings_plugins_close_rect(viewport);
-        self.fill_rounded_rect(close_rect, btn_bg, control_radius)?;
-        self.draw_text("×", control_text_rect(close_rect), btn_text)?;
-
-        let plugins = app.settings_plugin_entries.borrow();
-        if plugins.is_empty() {
-            let empty_rect = Rect {
-                x: modal.x + title_pad_x,
-                y: modal.y + 76.0,
-                width: modal.width - title_pad_x * 2.0,
-                height: 42.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_EMPTY_HINT),
-                empty_rect,
-                muted_text,
-            )?;
-        } else {
-            for (row_index, plugin) in plugins
-                .iter()
-                .take(SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
-                .enumerate()
-            {
-                let row = settings_plugin_row_rect(viewport, row_index);
-                self.fill_rounded_rect(row, row_bg, control_radius)?;
-                let title = format!(
-                    "{} · {} · v{}",
-                    plugin.name, plugin.plugin_type, plugin.version
-                );
-                let title_rect = Rect {
-                    x: row.x + spacing_tokens.sm,
-                    y: row.y + 3.0,
-                    width: row.width - 146.0,
-                    height: 14.0,
-                };
-                self.draw_text(title.as_str(), title_rect, label_color)?;
-                let id_rect = Rect {
-                    x: row.x + spacing_tokens.sm,
-                    y: row.y + 17.0,
-                    width: row.width - 146.0,
-                    height: 12.0,
-                };
-                self.draw_text(plugin.id.as_str(), id_rect, muted_text)?;
-
-                let toggle_rect = settings_plugin_toggle_rect(viewport, row_index);
-                self.fill_rounded_rect(
-                    toggle_rect,
-                    if plugin.enabled { btn_bg } else { btn_off_bg },
-                    control_radius,
-                )?;
-                self.draw_text(
-                    if plugin.enabled {
-                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_ON)
-                    } else {
-                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_OFF)
-                    },
-                    control_text_rect(toggle_rect),
-                    btn_text,
-                )?;
-                let uninstall_rect = settings_plugin_uninstall_rect(viewport, row_index);
-                self.fill_rounded_rect(uninstall_rect, danger_bg, control_radius)?;
-                self.draw_text(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGINS_REMOVE),
-                    control_text_rect(uninstall_rect),
-                    btn_text,
-                )?;
-            }
-        }
-        drop(plugins);
-
-        Ok(())
-    }
+    // M1h (2026-05-29) — `draw_plugins_modal` was deleted. The plugins surface
+    // moved from a gated, light-`active_theme_palette()` in-panel MODAL to an
+    // always-inline §11 section of the dark scrollable Settings body, painted by
+    // the M1h block inside `draw_settings_panel`'s body-paint closure (dark
+    // dialog tokens, full-width Install button, plugin-card list with type
+    // badge + toggle + author + description + Uninstall). Reachability is
+    // unchanged: Install → `InstallPlugin` (file picker), per-card toggle →
+    // `TogglePlugin(idx)`, per-card uninstall → `UninstallPlugin(idx)`.
 
     /// Draw the selected-stack keybindings recorder/reset modal. This is the
     /// native D2D replacement for the Tauri KeybindingsSection portal: rows
