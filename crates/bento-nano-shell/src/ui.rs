@@ -471,7 +471,7 @@ pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<Zon
 pub use bento_nano_app::settings_panel::{
     SETTINGS_BACKUP_ENTRY_VISIBLE_MAX, SETTINGS_CLOSE_BTN_H, SETTINGS_CLOSE_BTN_W,
     SETTINGS_PANEL_HEIGHT, SETTINGS_PANEL_PADDING, SETTINGS_PANEL_WIDTH, SETTINGS_SWITCH_BTN_H,
-    SETTINGS_SWITCH_BTN_W, settings_active_theme_rect, settings_keybinding_record_rect,
+    SETTINGS_SWITCH_BTN_W, settings_keybinding_record_rect,
     settings_keybinding_reset_rect, settings_keybindings_close_rect,
     settings_keybindings_modal_rect,
 };
@@ -518,8 +518,18 @@ pub enum SettingsHit {
     OpenThemeBasePalette,
     /// Native JSON theme import row.
     ImportTheme,
-    /// Full active-theme cycle row.
-    CycleActiveTheme,
+    // M6-UI (2026-05-29) — `CycleActiveTheme` (the Row-5 chip that toggled the
+    // now-deleted swatch popup) was removed. Theme selection is the inline §3
+    // Appearance grid: `SelectTheme(id)` below re-skins live.
+    /// M6-UI — §3 Appearance grid: a ThemeCard click. `id` is the preset id
+    /// (`0..PRESET_COUNT`, == `theme_picker::BUILTIN_THEMES` index). The
+    /// dispatch arm resolves `preset.theme_id` → `apply_active_theme_by_id`
+    /// (live re-skin) + sets `settings_dirty`.
+    SelectTheme(u8),
+    /// M6-UI — §3 Appearance accent row (Control B): an accent swatch click.
+    /// `index` is the VIBRANT strip index (`0..ACCENT_SWATCH_COUNT`). The
+    /// dispatch arm writes `settings_draft_accent_color` + sets `settings_dirty`.
+    SelectAccent(u8),
     /// Process default zone display-mode cycle button.
     CycleZoneDisplayMode,
     /// α4 (Wave I-α, 2026-05-25) — pick a specific zone-display mode
@@ -548,17 +558,12 @@ pub enum SettingsHit {
     Body,
     /// Outside the panel rect — dismiss the panel (Ruling C: click-outside).
     Outside,
-    /// Wave J1b — theme picker swatch popup thumbnail (`0..PRESET_COUNT`).
-    PickerThumbnail(u8),
-    /// Wave J1b — theme picker accent-row dot/label.
-    PickerAccent,
-    /// Wave J1b — theme picker Reset footer button.
-    PickerReset,
-    /// Wave J1b — theme picker Save footer button.
-    PickerSave,
-    /// Wave J1b — click landed outside the open picker → close it; eat the
-    /// click so it does not bubble onto an underlying settings chip.
-    ClosePicker,
+    // M6-UI (2026-05-29) — the Wave J1b swatch-popup hits
+    // (`PickerThumbnail` / `PickerAccent` / `PickerReset` / `PickerSave` /
+    // `ClosePicker`) AND the orphan `CycleActiveTheme` chip (whose sole purpose
+    // was toggling that popup) were removed: §3 Appearance is now an inline
+    // grid. Card / accent-swatch clicks land on `SelectTheme` / `SelectAccent`
+    // below.
     // ------------------------------------------------------------------
     // Round-2 M1 — dark Settings shell hits. New variants only; the K1
     // variants above stay orphan-alive (Ruling B) so the existing dispatch
@@ -653,8 +658,8 @@ pub enum SettingsHit {
 ///
 /// Round-2 M1 — the panel is now the dark shell; only the top 5 toggle rows
 /// + language row + sticky footer + close × hit-test. Wave K1 row helpers
-/// stay live as orphans so the existing match arms in `main.rs` still link
-/// (Ruling B), but no rect emits them in M1.
+///   stay live as orphans so the existing match arms in `main.rs` still link
+///   (Ruling B), but no rect emits them in M1.
 pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     let vp = app.viewport;
     if app.settings_keybindings_open.get() {
@@ -684,35 +689,12 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // (Install / per-card Toggle / per-card Uninstall) near the end of this
     // function, after the Backup §9 hits. `settings_plugins_open` +
     // `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` were deleted.
-    // Wave J1b — theme picker swatch popup. When open the picker layer sits
-    // above every Row 5+ chip in the Settings panel, so it must hit-test
-    // first; otherwise clicks on the popup would punch through to the
-    // active-theme chip / vault chips beneath it.
-    if app.theme_picker_open.get() {
-        let chip = settings_active_theme_rect(vp);
-        let origin = bento_nano_app::theme_picker::theme_picker_popup_origin(chip);
-        let layout = bento_nano_app::theme_picker::theme_picker_layout(origin, vp);
-        match bento_nano_app::theme_picker::hit_test(&layout, x, y) {
-            Some(bento_nano_app::theme_picker::ThemePickerHit::Thumbnail(i)) => {
-                return SettingsHit::PickerThumbnail(i);
-            }
-            Some(bento_nano_app::theme_picker::ThemePickerHit::Accent) => {
-                return SettingsHit::PickerAccent;
-            }
-            Some(bento_nano_app::theme_picker::ThemePickerHit::Reset) => {
-                return SettingsHit::PickerReset;
-            }
-            Some(bento_nano_app::theme_picker::ThemePickerHit::Save) => {
-                return SettingsHit::PickerSave;
-            }
-            None => {
-                // Outside the popup → close it and eat the click so the
-                // user does not also trigger the underlying chip in the
-                // same gesture (matches the Tauri 1.2.4 baseline behavior).
-                return SettingsHit::ClosePicker;
-            }
-        }
-    }
+    // M6-UI (2026-05-29) — the Wave J1b swatch-popup hit block was removed:
+    // §3 Appearance is now an always-inline grid hit-tested at the body level
+    // (cards → `SelectTheme`, accent swatches → `SelectAccent`) near the end of
+    // this function, after the Plugins §11 hits. `theme_picker_open` +
+    // `theme_picker_popup_origin` / `theme_picker_layout` / `hit_test` were
+    // deleted.
     // Round-2 M1 — dark shell hit routing.
     let panel = bento_nano_app::settings_panel::settings_panel_rect_m1(vp);
     if x < panel.x || x >= panel.right() || y < panel.y || y >= panel.bottom() {
@@ -1093,6 +1075,30 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
                 return SettingsHit::UninstallPlugin(card_index);
             }
         }
+    }
+
+    // M6-UI — §3 Appearance inline theme grid. Flows after the Plugins section;
+    // its anchor + content width come from `settings_panel` (shared with the
+    // renderer so paint geometry == hit geometry), and the card / accent-swatch
+    // rects come from `theme_picker::appearance_layout`. Card click →
+    // `SelectTheme(id)` (live re-skin), accent swatch click → `SelectAccent`.
+    let appearance_origin = bento_nano_app::settings_panel::settings_appearance_grid_origin(
+        vp,
+        scroll_y,
+        &plugin_flags,
+    );
+    let appearance_inner_w =
+        bento_nano_app::settings_panel::settings_appearance_inner_width(vp);
+    let appearance =
+        bento_nano_app::theme_picker::appearance_layout(appearance_origin, appearance_inner_w);
+    match bento_nano_app::theme_picker::appearance_hit_test(&appearance, x, y) {
+        Some(bento_nano_app::theme_picker::AppearanceHit::Card(id)) => {
+            return SettingsHit::SelectTheme(id);
+        }
+        Some(bento_nano_app::theme_picker::AppearanceHit::Accent(idx)) => {
+            return SettingsHit::SelectAccent(idx);
+        }
+        None => {}
     }
 
     SettingsHit::Body

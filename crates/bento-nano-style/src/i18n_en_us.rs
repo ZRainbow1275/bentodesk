@@ -233,6 +233,35 @@ pub mod ids {
     // 206 M1i fidelity (2026-05-29) — `.desktop-source-empty` placeholder; see
     // the `i18n_zh_cn` note. Mirrors Tauri's `settingsDesktopPathPlaceholder`.
     pub const SOURCE_EMPTY_PLACEHOLDER: StringId = StringId(206);
+    // 207..231 M6-UI (2026-05-29) — §3 Appearance inline theme grid; see the
+    // `i18n_zh_cn` note. Appended in lockstep (same index, same order). 4
+    // family group headings (207-210), 17 theme display names (211-227),
+    // Appearance group title (228), theme-picker label (229), accent-colour
+    // row label (230). Developer Options ids deferred (not added).
+    pub const THEME_GROUP_ROUNDED: StringId = StringId(207);
+    pub const THEME_GROUP_SOLID: StringId = StringId(208);
+    pub const THEME_GROUP_ANGULAR: StringId = StringId(209);
+    pub const THEME_GROUP_PERSONALITY: StringId = StringId(210);
+    pub const THEME_NAME_DARK: StringId = StringId(211);
+    pub const THEME_NAME_LIGHT: StringId = StringId(212);
+    pub const THEME_NAME_MIDNIGHT: StringId = StringId(213);
+    pub const THEME_NAME_FOREST: StringId = StringId(214);
+    pub const THEME_NAME_SUNSET: StringId = StringId(215);
+    pub const THEME_NAME_FROSTED: StringId = StringId(216);
+    pub const THEME_NAME_OCEAN_BLUE: StringId = StringId(217);
+    pub const THEME_NAME_ROSE_GOLD: StringId = StringId(218);
+    pub const THEME_NAME_FOREST_GREEN: StringId = StringId(219);
+    pub const THEME_NAME_SOLID: StringId = StringId(220);
+    pub const THEME_NAME_ORDER: StringId = StringId(221);
+    pub const THEME_NAME_FLAT: StringId = StringId(222);
+    pub const THEME_NAME_BRUTALISM: StringId = StringId(223);
+    pub const THEME_NAME_EDITORIAL: StringId = StringId(224);
+    pub const THEME_NAME_NEO: StringId = StringId(225);
+    pub const THEME_NAME_TERMINAL: StringId = StringId(226);
+    pub const THEME_NAME_CYBERPUNK: StringId = StringId(227);
+    pub const SETTINGS_GROUP_APPEARANCE: StringId = StringId(228);
+    pub const THEME_PICKER_LABEL: StringId = StringId(229);
+    pub const SETTINGS_ACCENT_COLOR: StringId = StringId(230);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -485,5 +514,31 @@ pub static EN_US: LookupTable = LookupTable {
         "Watched",                    // SOURCE_WATCHED_BADGE (205)
         // 206 M1i fidelity — empty `.desktop-source-empty` placeholder.
         "C:\\Users\\...\\Desktop",    // SOURCE_EMPTY_PLACEHOLDER (206)
+        // 207..231 M6-UI — §3 Appearance inline theme grid
+        // (`SettingsPanel.tsx:396-536`, en.ts:163-183).
+        "Rounded Glass",              // THEME_GROUP_ROUNDED (207)
+        "Solid",                      // THEME_GROUP_SOLID (208)
+        "Angular Modern",             // THEME_GROUP_ANGULAR (209)
+        "Personality",                // THEME_GROUP_PERSONALITY (210)
+        "Dark",                       // THEME_NAME_DARK (211)
+        "Light",                      // THEME_NAME_LIGHT (212)
+        "Midnight",                   // THEME_NAME_MIDNIGHT (213)
+        "Forest",                     // THEME_NAME_FOREST (214)
+        "Sunset",                     // THEME_NAME_SUNSET (215)
+        "Frosted",                    // THEME_NAME_FROSTED (216)
+        "Ocean Blue",                 // THEME_NAME_OCEAN_BLUE (217)
+        "Rose Gold",                  // THEME_NAME_ROSE_GOLD (218)
+        "Forest Green",               // THEME_NAME_FOREST_GREEN (219)
+        "Solid",                      // THEME_NAME_SOLID (220)
+        "Order",                      // THEME_NAME_ORDER (221)
+        "Flat",                       // THEME_NAME_FLAT (222)
+        "Brutalism",                  // THEME_NAME_BRUTALISM (223)
+        "Editorial",                  // THEME_NAME_EDITORIAL (224)
+        "Neo",                        // THEME_NAME_NEO (225)
+        "Terminal",                   // THEME_NAME_TERMINAL (226)
+        "Cyberpunk",                  // THEME_NAME_CYBERPUNK (227)
+        "Appearance",                 // SETTINGS_GROUP_APPEARANCE (228)
+        "Choose Theme",               // THEME_PICKER_LABEL (229)
+        "Accent Color",               // SETTINGS_ACCENT_COLOR (230)
     ],
 };

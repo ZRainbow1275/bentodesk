@@ -442,6 +442,13 @@ pub struct AppState {
     /// row in the open panel. Save dims when `false` (matches Tauri
     /// `disabled={!dirty()}` at `SettingsPanel.tsx:799`); Save/Cancel clear it.
     pub settings_dirty: Cell<bool>,
+    /// M6-UI 2026-05-29 — in-flight accent-colour draft picked in the §3
+    /// Appearance accent row (Control B). `Some("#rrggbb")` after a swatch
+    /// click; the renderer rings the matching swatch, and Save persists it via
+    /// the `accent_color` config-vault key. `None` falls back to the persisted
+    /// `theme_base_accent`. Cancel clears the draft. `RefCell` because the
+    /// value is an owned `SmolStr` (not `Copy`).
+    pub settings_draft_accent_color: RefCell<Option<SmolStr>>,
     /// M1a 2026-05-29 — snapshot of the General-section toggle values taken
     /// when the Settings panel opens. Cancel/Escape/Close × restore from
     /// here so cancelled edits never leak into persisted state. `RefCell`
@@ -614,19 +621,12 @@ pub struct AppState {
     /// The modal is a native selected-stack D2D surface, not the Tauri
     /// KeybindingsSection webview.
     pub settings_keybindings_open: Cell<bool>,
-    /// Wave J1b — `true` when the Tauri 1.2.4 swatch popup hangs below the
-    /// Row 5 active-theme chip. The picker is a sibling D2D popup painted by
-    /// `crate::theme_picker::paint_into`; it lives inside the Settings HWND
-    /// (no new modal / HWND) and stays open across thumbnail clicks until
-    /// Save / Outside / Reset closes it. `Cell` because the dispatcher and
-    /// hit-tester only borrow `&AppState` and the bool is `Copy`.
-    pub theme_picker_open: Cell<bool>,
-    /// Wave J1b — currently highlighted swatch index inside the picker
-    /// (`0..PRESET_COUNT`). The renderer paints the check-mark disc on this
-    /// preset; the hit-tester updates it on every thumbnail click so the
-    /// popup keeps a visible selection while the underlying backend theme
-    /// resolves asynchronously. Default `0` (Default preset).
-    pub theme_picker_selected: Cell<u8>,
+    // M6-UI (2026-05-29) — the Wave J1b swatch-popup gate
+    // (`theme_picker_open: Cell<bool>`) and its highlighted-swatch index
+    // (`theme_picker_selected: Cell<u8>`) were removed: §3 Appearance is now an
+    // always-inline grid in the scrollable Settings body. Selection drives the
+    // live `active_theme_id` directly (via `apply_active_theme_by_id`), so no
+    // separate popup-open / popup-selection state exists.
     /// Action currently recording the next chord.
     pub settings_keybinding_recording: RefCell<Option<SmolStr>>,
     /// Last per-action keybinding success/conflict message visible in the
@@ -806,6 +806,7 @@ impl AppState {
             is_pinned: Cell::new(false),
             settings_open: Cell::new(false),
             settings_dirty: Cell::new(false),
+            settings_draft_accent_color: RefCell::new(None),
             settings_snapshot: RefCell::new(None),
             scroll_offset_y: Cell::new(0.0),
             setting_desktop_embed: Cell::new(true),
@@ -851,8 +852,6 @@ impl AppState {
             settings_plugin_entries: RefCell::new(Vec::new()),
             settings_plugin_status: RefCell::new(None),
             settings_keybindings_open: Cell::new(false),
-            theme_picker_open: Cell::new(false),
-            theme_picker_selected: Cell::new(0),
             settings_keybinding_recording: RefCell::new(None),
             settings_keybinding_feedback: RefCell::new(None),
             about_open: Cell::new(false),

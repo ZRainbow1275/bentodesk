@@ -1,92 +1,89 @@
-//! Wave J1 — Tauri 1.2.4 visual-parity Theme Picker (standalone module).
+//! M6-UI — §3 Appearance inline theme grid (Tauri 1.2.4 visual parity).
 //!
-//! Mirrors the picker visible in `resource/frames/frame_080.png`: a 2 × 5 grid
-//! of rounded-square thumbnails, each showing the four representative colours
-//! of a built-in preset as a 2 × 2 swatch quadrant; the currently-selected
-//! preset displays a small green check mark in its bottom-right corner. Below
-//! the grid sits the "强调色" (accent colour) row with a single tinted dot,
-//! followed by the「重置」/「保存」footer buttons.
+//! Replaces the Wave J1 popup picker (10 bespoke presets in a floating 2×5
+//! grid with a Reset/Save footer + display-only accent dot) with the inline
+//! §3 Appearance section Tauri 1.2.4 ships (`SettingsPanel.tsx:396-536`): the
+//! **17** built-in themes laid out in a **4-column** grid, **grouped into 4
+//! families** (Rounded Glass 9 · Solid 1 · Angular Modern 4 · Personality 3),
+//! each card a 2×2 preview swatch + a centred name label, the active card
+//! drawn with a 2-DIP accent-blue border + 10 %-blue fill tint. Below the
+//! grid sits an editable **accent-colour** swatch row (12 VIBRANT swatches).
 //!
 //! ## Layering & contracts
 //!
-//! - **Pure geometry + paint algorithm.** This module is allocation-free per
-//!   spec §10 hot-path: no `Vec`, no `String`, every returned aggregate is
-//!   `Copy`. The painter [`paint_into`] depends only on a thin
-//!   [`RendererLike`] trait that mirrors the two D2D primitives every paint
-//!   helper in `bento-nano-app::render` uses (`fill_rounded_rect`,
-//!   `draw_text`), so the integrator can wire it in without re-exporting
-//!   private renderer methods.
+//! - **Pure geometry + data.** This module is allocation-free per spec §10:
+//!   no `Vec`, no `String`, every aggregate is `Copy`. [`AppearanceLayout`] is
+//!   a fixed-cap `[Rect; N]` struct; the layout fn walks the preset table and
+//!   computes every rect inline (no per-group `Vec`). The renderer
+//!   (`render.rs::draw_settings_panel`) owns the paint so it can read the live
+//!   `app.active_theme_tauri()` palette + reuse `fill_rounded_rect` /
+//!   `stroke_rounded_rect` / `draw_text` directly.
 //! - **Spec §8 (no new crate deps).** Uses only `bento-nano-style` tokens +
-//!   types that the app crate already depends on.
-//! - **Spec §3.2 (100% self-rolled).** No theme parser, no design-token
-//!   import; the ten built-in presets are baked in as `Color::from_u8`
-//!   literals derived from the Tauri 1.2.4 palette.
-//!
-//! ## Wiring sketch (for Agent A)
-//!
-//! ```ignore
-//! use crate::theme_picker::{theme_picker_layout, paint_into, RendererLike};
-//!
-//! // Inside `Renderer::draw_settings_panel`, after the existing theme rows:
-//! let picker_origin = bento_nano_style::Point { x: panel.x + 16.0, y: panel.y + 88.0 };
-//! let layout = theme_picker_layout(picker_origin, viewport_size);
-//! paint_into(self, &layout, app.selected_theme_preset(), /* accent = */ None)?;
-//! ```
-//!
-//! Agent A is free to inline the paint sequence directly — see the doc-block
-//! on [`paint_into`] for the exact draw-call order Tauri uses.
+//!   types the app crate already depends on. The 17 preview-colour literals
+//!   are baked `Color::from_u8`, honouring alpha for the two translucent
+//!   `frosted` quadrants.
+//! - **Spec §3.2 (100 % self-rolled).** No theme-JSON parser; the swatch
+//!   colours are hand-transcribed from the Tauri `presets.ts` `preview_colors`.
 
-use bento_nano_style::tokens::{PALETTE_DARK, RADIUS, SPACING, TYPOGRAPHY};
-use bento_nano_style::{BorderRadius, Color, Rect, Size, StringId, i18n_zh_cn::ids};
+use bento_nano_style::tokens::SPACING;
+use bento_nano_style::{Color, Rect, StringId, i18n_zh_cn::ids};
 
 // =============================================================================
-// Layout constants (DIPs)
+// Inline layout constants (DIPs) — transcribed from Tauri CSS (§2).
 // =============================================================================
 
-/// One thumbnail is a 52 × 52 rounded square (Tauri 1.2.4 reference).
-pub const THUMBNAIL_SIZE: f32 = 52.0;
-/// Inner gap between adjacent thumbnails on the same row / column.
-pub const THUMBNAIL_GAP: f32 = 10.0;
-/// Two grid rows.
-pub const GRID_ROWS: usize = 2;
-/// Five thumbnails per row.
-pub const GRID_COLS: usize = 5;
-/// Total built-in presets (`GRID_ROWS * GRID_COLS`).
-pub const PRESET_COUNT: usize = GRID_ROWS * GRID_COLS;
-/// Thumbnail corner radius — matches the screenshot (~12 DIPs).
-pub const THUMBNAIL_RADIUS: f32 = 12.0;
+/// `.theme-grid { grid-template-columns: repeat(4, 1fr) }`.
+pub const THEME_GRID_COLS: usize = 4;
+/// `.theme-grid { gap: 10px }` (both axes).
+pub const THEME_GRID_GAP: f32 = 10.0;
+/// `.theme-card { border-radius: 10px }`.
+pub const THEME_CARD_RADIUS: f32 = 10.0;
+/// `.theme-card { border: 2px solid … }`.
+pub const THEME_CARD_BORDER: f32 = 2.0;
+/// `.theme-card { padding: 10px 6px 8px }` — top.
+pub const THEME_CARD_PAD_TOP: f32 = 10.0;
+/// `.theme-card { padding: 10px 6px 8px }` — bottom.
+pub const THEME_CARD_PAD_BOTTOM: f32 = 8.0;
+/// `.theme-card { gap: 6px }` (swatch block → label).
+pub const THEME_CARD_SWATCH_LABEL_GAP: f32 = 6.0;
+/// `.theme-card__swatches { width/height: 40px }`.
+pub const SWATCH_BLOCK_SIZE: f32 = 40.0;
+/// `.theme-card__swatches { border-radius: 8px }`.
+pub const SWATCH_BLOCK_RADIUS: f32 = 8.0;
+/// `.theme-card__swatches { gap: 3px }` (inner quadrant gutter).
+pub const SWATCH_INNER_GAP: f32 = 3.0;
+/// `.theme-group__title { font-size: 10px }` line box + slack.
+pub const GROUP_HEADING_HEIGHT: f32 = 14.0;
+/// `.theme-group { gap: 6px }` (heading → grid).
+pub const GROUP_HEADING_TO_GRID_GAP: f32 = 6.0;
+/// `.theme-card__label { font-size: 10px }` line box.
+pub const CARD_LABEL_HEIGHT: f32 = 14.0;
+/// Vertical gap between two family groups in the stacked column.
+pub const GROUP_TO_GROUP_GAP: f32 = 10.0;
 
-/// Accent-row height (the "强调色" label + colour dot live here).
+/// One card's total height (column: pad-top + swatch + gap + label + pad-bot).
+pub const THEME_CARD_HEIGHT: f32 = THEME_CARD_PAD_TOP
+    + SWATCH_BLOCK_SIZE
+    + THEME_CARD_SWATCH_LABEL_GAP
+    + CARD_LABEL_HEIGHT
+    + THEME_CARD_PAD_BOTTOM;
+
+/// Accent row (Control B) — `.settings-row` label + 12-swatch strip (§7).
 pub const ACCENT_ROW_HEIGHT: f32 = 28.0;
-/// Footer row height (重置 / 保存 buttons).
-pub const FOOTER_ROW_HEIGHT: f32 = 32.0;
-
-/// Reset / Save button width.
-pub const FOOTER_BTN_WIDTH: f32 = 76.0;
-/// Gap between Reset and Save buttons.
-pub const FOOTER_BTN_GAP: f32 = 8.0;
-
-/// Inner padding inside the picker panel chrome.
-pub const PICKER_PADDING: f32 = SPACING.md; // 12.0
-
-/// Diameter of the selection check-mark indicator in the bottom-right corner
-/// of the active thumbnail.
-pub const CHECK_MARK_SIZE: f32 = 14.0;
-/// Inset of the check-mark from the thumbnail's bottom-right corner.
-pub const CHECK_MARK_INSET: f32 = 4.0;
-
-/// Diameter of the accent-colour dot in the accent row.
+/// Accent swatch dot diameter (≈16 DIP, gap 8).
 pub const ACCENT_DOT_SIZE: f32 = 16.0;
-
-/// Vertical gap between grid → accent row → footer row.
-pub const SECTION_GAP: f32 = SPACING.md; // 12.0
+/// Gap between adjacent accent swatch dots.
+pub const ACCENT_DOT_GAP: f32 = 8.0;
+/// Number of VIBRANT accent swatches (Control B MVP strip).
+pub const ACCENT_SWATCH_COUNT: usize = 12;
+/// Vertical gap between the theme grid and the accent row.
+pub const ACCENT_ROW_TOP_GAP: f32 = SPACING.md; // 12.0
 
 // =============================================================================
-// Point — local f32 logical point (mirrors `Rect` axis convention)
+// Point — local f32 logical point.
 // =============================================================================
 
-/// Logical (DIP) point — `f32` to match every other rect / size in the
-/// renderer. Local-only because `dispatcher::Point` is `i32` (event-coords).
+/// Logical (DIP) point — `f32` to match every rect / size in the renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Point {
     pub x: f32,
@@ -102,346 +99,379 @@ impl Point {
 }
 
 // =============================================================================
-// Preset table (10 built-in themes)
+// Theme family group.
 // =============================================================================
 
-/// One built-in theme preset. `swatch_colors` are the four quadrants shown in
-/// the thumbnail (top-left, top-right, bottom-left, bottom-right); `accent`
-/// drives the accent-row dot when this preset is active.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ThemePreset {
-    /// Stable preset id (`0..PRESET_COUNT`). Matches array index in
-    /// [`BUILTIN_THEMES`]; the integrator stores `selected` as this `u8`.
-    pub id: u8,
-    /// i18n string id for the preset's display name.
-    pub name_id: StringId,
-    /// 2 × 2 thumbnail quadrant colours.
-    pub swatch_colors: [Color; 4],
-    /// Accent colour driving the accent-row dot.
-    pub accent: Color,
+/// One of the four Tauri theme families (`THEME_GROUP_ORDER`). Drives the
+/// group heading painted above each family's 4-col grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeGroup {
+    /// 圆角玻璃 / Rounded Glass (9 themes).
+    Rounded,
+    /// 实心 / Solid (1 theme).
+    Solid,
+    /// 方角现代 / Angular Modern (4 themes).
+    Angular,
+    /// 个性 / Personality (3 themes).
+    Personality,
 }
 
-/// The ten built-in theme presets. Colours derive from `PALETTE_DARK` (Wave B
-/// SSoT) for tints that exist in the token table, and from hand-rolled
-/// Tauri-aligned literals for the bespoke themes (Daylight / Sunset / etc.).
-///
-/// Ordering matches the screenshot reading order (left-to-right, top-to-bottom).
-pub const BUILTIN_THEMES: [ThemePreset; PRESET_COUNT] = [
-    // Row 0
-    ThemePreset {
-        id: 0,
-        name_id: ids::THEME_DEFAULT, // "默认" / "Default" (reuses existing id 87)
-        swatch_colors: [
-            PALETTE_DARK.surface_zen,
-            PALETTE_DARK.surface_expanded,
-            PALETTE_DARK.surface_hover,
-            PALETTE_DARK.accent_blue,
-        ],
-        accent: PALETTE_DARK.accent_blue,
-    },
-    ThemePreset {
-        id: 1,
-        name_id: ids::THEME_DAYLIGHT,
-        swatch_colors: [
-            Color::from_u8(0xFF, 0xFB, 0xEB, 0xFF), // warm white
-            Color::from_u8(0xFE, 0xF3, 0xC7, 0xFF), // amber-50
-            Color::from_u8(0xFC, 0xD3, 0x4D, 0xFF), // amber-300
-            Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF), // amber-500
-        ],
-        accent: Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
-    },
-    ThemePreset {
-        id: 2,
-        name_id: ids::THEME_SUNSET,
-        swatch_colors: [
-            Color::from_u8(0xFE, 0xCA, 0xCA, 0xFF), // pink wash
-            Color::from_u8(0xF9, 0x73, 0x16, 0xFF), // orange-500
-            Color::from_u8(0xC2, 0x41, 0x0C, 0xFF), // orange-700
-            Color::from_u8(0x7C, 0x2D, 0x12, 0xFF), // deep ember
-        ],
-        accent: Color::from_u8(0xF9, 0x73, 0x16, 0xFF),
-    },
-    ThemePreset {
-        id: 3,
-        name_id: ids::THEME_OCEAN,
-        swatch_colors: [
-            Color::from_u8(0xDB, 0xEA, 0xFE, 0xFF), // blue-100
-            Color::from_u8(0x60, 0xA5, 0xFA, 0xFF), // blue-400
-            Color::from_u8(0x1D, 0x4E, 0xD8, 0xFF), // blue-700
-            Color::from_u8(0x0C, 0x4A, 0x6E, 0xFF), // sky-900
-        ],
-        accent: PALETTE_DARK.accent_blue,
-    },
-    ThemePreset {
-        id: 4,
-        name_id: ids::THEME_FOREST,
-        swatch_colors: [
-            Color::from_u8(0xD1, 0xFA, 0xE5, 0xFF), // emerald-100
-            Color::from_u8(0x34, 0xD3, 0x99, 0xFF), // emerald-400
-            Color::from_u8(0x05, 0x96, 0x69, 0xFF), // emerald-600
-            Color::from_u8(0x06, 0x4E, 0x3B, 0xFF), // emerald-900
-        ],
-        accent: PALETTE_DARK.accent_green,
-    },
-    // Row 1
-    ThemePreset {
-        id: 5,
-        name_id: ids::THEME_LAVENDER,
-        swatch_colors: [
-            Color::from_u8(0xEE, 0xE5, 0xFD, 0xFF), // violet-100
-            Color::from_u8(0xC4, 0xB5, 0xFD, 0xFF), // violet-300
-            Color::from_u8(0x8B, 0x5C, 0xF6, 0xFF), // violet-500
-            Color::from_u8(0x5B, 0x21, 0xB6, 0xFF), // violet-800
-        ],
-        accent: PALETTE_DARK.accent_purple,
-    },
-    ThemePreset {
-        id: 6,
-        name_id: ids::THEME_ROSE,
-        swatch_colors: [
-            Color::from_u8(0xFF, 0xE4, 0xE6, 0xFF), // rose-100
-            Color::from_u8(0xFB, 0x71, 0x85, 0xFF), // rose-400
-            Color::from_u8(0xE1, 0x1D, 0x48, 0xFF), // rose-600
-            Color::from_u8(0x88, 0x13, 0x37, 0xFF), // rose-900
-        ],
-        accent: PALETTE_DARK.accent_pink,
-    },
-    ThemePreset {
-        id: 7,
-        name_id: ids::THEME_MIDNIGHT,
-        swatch_colors: [
-            Color::from_u8(0x1E, 0x1B, 0x4B, 0xFF), // indigo-950
-            Color::from_u8(0x31, 0x2E, 0x81, 0xFF), // indigo-900
-            Color::from_u8(0x4F, 0x46, 0xE5, 0xFF), // indigo-600
-            Color::from_u8(0x82, 0x7E, 0xF7, 0xFF), // indigo-300 lift
-        ],
-        accent: Color::from_u8(0x4F, 0x46, 0xE5, 0xFF),
-    },
-    ThemePreset {
-        id: 8,
-        name_id: ids::THEME_MONOCHROME,
-        swatch_colors: [
-            Color::from_u8(0xF5, 0xF5, 0xF5, 0xFF), // zinc-100
-            Color::from_u8(0xA1, 0xA1, 0xAA, 0xFF), // zinc-400
-            Color::from_u8(0x52, 0x52, 0x5B, 0xFF), // zinc-600
-            Color::from_u8(0x18, 0x18, 0x1B, 0xFF), // zinc-900
-        ],
-        accent: Color::from_u8(0x71, 0x71, 0x7A, 0xFF),
-    },
-    ThemePreset {
-        id: 9,
-        name_id: ids::THEME_EMBER,
-        swatch_colors: [
-            Color::from_u8(0xFE, 0xE2, 0xE2, 0xFF), // red-100
-            Color::from_u8(0xF8, 0x71, 0x71, 0xFF), // red-400
-            Color::from_u8(0xDC, 0x26, 0x26, 0xFF), // red-600
-            Color::from_u8(0x7F, 0x1D, 0x1D, 0xFF), // red-900
-        ],
-        accent: PALETTE_DARK.accent_red,
-    },
+impl ThemeGroup {
+    /// i18n string id for the group heading.
+    pub const fn heading_id(self) -> StringId {
+        match self {
+            ThemeGroup::Rounded => ids::THEME_GROUP_ROUNDED,
+            ThemeGroup::Solid => ids::THEME_GROUP_SOLID,
+            ThemeGroup::Angular => ids::THEME_GROUP_ANGULAR,
+            ThemeGroup::Personality => ids::THEME_GROUP_PERSONALITY,
+        }
+    }
+}
+
+/// Render order of the four families (Tauri `THEME_GROUP_ORDER`). The paint /
+/// layout loops walk groups in this order; `ThemePreset::id` stays the flat
+/// `BUILTIN_THEMES` array index (stable) regardless of visual order.
+pub const THEME_GROUP_ORDER: [ThemeGroup; 4] = [
+    ThemeGroup::Rounded,
+    ThemeGroup::Solid,
+    ThemeGroup::Angular,
+    ThemeGroup::Personality,
 ];
 
 // =============================================================================
-// Layout output
+// Preset table (17 built-in themes).
 // =============================================================================
 
-/// Picker layout in absolute (viewport-space) DIPs. Every rect is `Copy` and
-/// allocation-free; arrays are fixed-size.
+/// Total built-in theme presets (Tauri `BUILTIN_THEMES`).
+pub const PRESET_COUNT: usize = 17;
+
+/// One built-in theme preset. `swatch_colors` are the four 2×2 preview
+/// quadrants (`[TL, TR, BL, BR]`, row-major); `theme_id` maps to the live
+/// `active_theme_id` + persistence; `group` drives the family heading.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ThemePickerLayout {
-    /// Outer picker panel rect — caller paints chrome (rounded fill + border).
-    pub panel: Rect,
-    /// Per-preset thumbnail rects, indexed by `ThemePreset::id`.
-    pub thumbnails: [Rect; PRESET_COUNT],
-    /// Accent-row container rect ("强调色" label + dot).
-    pub accent_row: Rect,
-    /// Reset button rect.
-    pub reset_btn: Rect,
-    /// Save button rect.
-    pub save_btn: Rect,
+pub struct ThemePreset {
+    /// Stable preset id (`0..PRESET_COUNT`) == [`BUILTIN_THEMES`] array index.
+    pub id: u8,
+    /// Live theme id ("dark", "light", …) for `apply_active_theme_by_id` +
+    /// `active_theme` persistence.
+    pub theme_id: &'static str,
+    /// Family group (drives the heading the card sits under).
+    pub group: ThemeGroup,
+    /// i18n string id for the preset's display name.
+    pub name_id: StringId,
+    /// 2×2 preview quadrant colours, row-major `[TL, TR, BL, BR]`.
+    pub swatch_colors: [Color; 4],
+}
+
+/// File-local 4-quadrant swatch constructor. Keeps [`BUILTIN_THEMES`] dense
+/// (one preset per block, swatch row on one line) so the 17-entry table stays
+/// well under the §15 module-size budget without losing the 1:1 colour values.
+/// Order matches [`ThemePreset::swatch_colors`] — `[TL, TR, BL, BR]`.
+const fn sw(tl: u32, tr: u32, bl: u32, br: u32) -> [Color; 4] {
+    [color(tl), color(tr), color(bl), color(br)]
+}
+
+/// `0xRRGGBBAA` → [`Color`]. Lets each swatch quadrant read as the literal hex
+/// transcribed from Tauri `presets.ts` (alpha in the low byte).
+const fn color(rgba: u32) -> Color {
+    Color::from_u8(
+        (rgba >> 24) as u8,
+        (rgba >> 16) as u8,
+        (rgba >> 8) as u8,
+        rgba as u8,
+    )
+}
+
+/// The 17 built-in theme presets, in `THEME_GROUP_ORDER` render order
+/// (Rounded 9 → Solid 1 → Angular 4 → Personality 3). `id` is the flat array
+/// index so it stays stable; the paint loop walks groups. Colours transcribed
+/// 1:1 from Tauri `presets.ts` `preview_colors` (alpha honoured — `frosted`
+/// has two translucent quadrants `0x26` ≈ 0.15 / `0x40` ≈ 0.25). Swatch order
+/// is `[TL, TR, BL, BR]`; each value is `0xRRGGBBAA`.
+pub const BUILTIN_THEMES: [ThemePreset; PRESET_COUNT] = [
+    // ── Rounded Glass (9) ────────────────────────────────────────────────
+    ThemePreset { id: 0, theme_id: "dark", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_DARK,
+        swatch_colors: sw(0x12121AFF, 0x3B82F6FF, 0xF0F0F5FF, 0x1A1A24FF) },
+    ThemePreset { id: 1, theme_id: "light", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_LIGHT,
+        swatch_colors: sw(0xFAFAFCFF, 0x3B82F6FF, 0x111118FF, 0xFFFFFFFF) },
+    ThemePreset { id: 2, theme_id: "midnight", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_MIDNIGHT,
+        swatch_colors: sw(0x0F172AFF, 0x6366F1FF, 0xE2E8F0FF, 0x1E293BFF) },
+    ThemePreset { id: 3, theme_id: "forest", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_FOREST,
+        swatch_colors: sw(0x1A2E1AFF, 0x22C55EFF, 0xE8F5E9FF, 0x2D4A2DFF) },
+    ThemePreset { id: 4, theme_id: "sunset", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_SUNSET,
+        swatch_colors: sw(0x2A1A0AFF, 0xF59E0BFF, 0xFEF3C7FF, 0x3D2B16FF) },
+    // `frosted` TL/BR are translucent (0x26 ≈ rgba .15 / 0x40 ≈ rgba .25).
+    ThemePreset { id: 5, theme_id: "frosted", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_FROSTED,
+        swatch_colors: sw(0xFFFFFF26, 0x60A5FAFF, 0xF0F0F5FF, 0xFFFFFF40) },
+    ThemePreset { id: 6, theme_id: "ocean-blue", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_OCEAN_BLUE,
+        swatch_colors: sw(0x082F49FF, 0x0EA5E9FF, 0xE0F2FEFF, 0x0C4A6EFF) },
+    ThemePreset { id: 7, theme_id: "rose-gold", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_ROSE_GOLD,
+        swatch_colors: sw(0x4C1D27FF, 0xF43F5EFF, 0xFFF1F2FF, 0x881337FF) },
+    ThemePreset { id: 8, theme_id: "forest-green", group: ThemeGroup::Rounded,
+        name_id: ids::THEME_NAME_FOREST_GREEN,
+        swatch_colors: sw(0x142E1AFF, 0x22C55EFF, 0xDCFCE7FF, 0x166534FF) },
+    // ── Solid (1) ────────────────────────────────────────────────────────
+    ThemePreset { id: 9, theme_id: "solid", group: ThemeGroup::Solid,
+        name_id: ids::THEME_NAME_SOLID,
+        swatch_colors: sw(0x1E1E2EFF, 0x89B4FAFF, 0xCDD6F4FF, 0x313244FF) },
+    // ── Angular Modern (4) ─────────────────────────────────────────────────
+    ThemePreset { id: 10, theme_id: "order", group: ThemeGroup::Angular,
+        name_id: ids::THEME_NAME_ORDER,
+        swatch_colors: sw(0xFF512FFF, 0xFAFAFAFF, 0x1F2937FF, 0xCBD5E1FF) },
+    ThemePreset { id: 11, theme_id: "flat", group: ThemeGroup::Angular,
+        name_id: ids::THEME_NAME_FLAT,
+        swatch_colors: sw(0xE74C3CFF, 0x2C3E50FF, 0xECF0F1FF, 0x3498DBFF) },
+    ThemePreset { id: 12, theme_id: "brutalism", group: ThemeGroup::Angular,
+        name_id: ids::THEME_NAME_BRUTALISM,
+        swatch_colors: sw(0xFFD400FF, 0x000000FF, 0xFFFFFFFF, 0xE63946FF) },
+    ThemePreset { id: 13, theme_id: "editorial", group: ThemeGroup::Angular,
+        name_id: ids::THEME_NAME_EDITORIAL,
+        swatch_colors: sw(0xFAFAFAFF, 0x0A0A0AFF, 0xD7263DFF, 0xE5E5E5FF) },
+    // ── Personality (3) ────────────────────────────────────────────────────
+    ThemePreset { id: 14, theme_id: "neo", group: ThemeGroup::Personality,
+        name_id: ids::THEME_NAME_NEO,
+        swatch_colors: sw(0x667EEAFF, 0xE6E8EEFF, 0x2D3748FF, 0xFFFFFFFF) },
+    ThemePreset { id: 15, theme_id: "terminal", group: ThemeGroup::Personality,
+        name_id: ids::THEME_NAME_TERMINAL,
+        swatch_colors: sw(0x0A0E0CFF, 0x00FF9CFF, 0x050705FF, 0x003D24FF) },
+    ThemePreset { id: 16, theme_id: "cyberpunk", group: ThemeGroup::Personality,
+        name_id: ids::THEME_NAME_CYBERPUNK,
+        swatch_colors: sw(0x0C0420FF, 0x00F0FFFF, 0xFF2E93FF, 0x1A0B3BFF) },
+];
+
+/// VIBRANT accent-swatch palette (Control B MVP, §7). The 12 hex values are
+/// transcribed from Tauri `accentPresets.ts` `VIBRANT.colors`; the inline
+/// strip lets the user pick an accent without an OS colour dialog.
+pub const ACCENT_SWATCHES: [Color; ACCENT_SWATCH_COUNT] = [
+    Color::from_u8(0xEF, 0x44, 0x44, 0xFF), // #ef4444
+    Color::from_u8(0xF9, 0x73, 0x16, 0xFF), // #f97316
+    Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF), // #f59e0b
+    Color::from_u8(0xEA, 0xB3, 0x08, 0xFF), // #eab308
+    Color::from_u8(0x84, 0xCC, 0x16, 0xFF), // #84cc16
+    Color::from_u8(0x22, 0xC5, 0x5E, 0xFF), // #22c55e
+    Color::from_u8(0x14, 0xB8, 0xA6, 0xFF), // #14b8a6
+    Color::from_u8(0x06, 0xB6, 0xD4, 0xFF), // #06b6d4
+    Color::from_u8(0x3B, 0x82, 0xF6, 0xFF), // #3b82f6
+    Color::from_u8(0x8B, 0x5C, 0xF6, 0xFF), // #8b5cf6
+    Color::from_u8(0xD9, 0x46, 0xEF, 0xFF), // #d946ef
+    Color::from_u8(0xEC, 0x48, 0x99, 0xFF), // #ec4899
+];
+
+/// The 7-character lowercase hex string for accent swatch `index`
+/// (`#rrggbb`). Returns `None` for an out-of-range index. Used by the shell to
+/// persist the picked accent without formatting (allocation-free, `&'static`).
+pub const fn accent_swatch_hex(index: usize) -> Option<&'static str> {
+    // Parallel to `ACCENT_SWATCHES` — the hit-tester returns the index, the
+    // shell maps it to the canonical hex for `draft_accent_color` /
+    // `Vault::set_setting("accent_color", …)`.
+    const HEXES: [&str; ACCENT_SWATCH_COUNT] = [
+        "#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16", "#22c55e", "#14b8a6", "#06b6d4",
+        "#3b82f6", "#8b5cf6", "#d946ef", "#ec4899",
+    ];
+    if index < HEXES.len() {
+        Some(HEXES[index])
+    } else {
+        None
+    }
 }
 
 // =============================================================================
-// Layout function — pure / allocation-free
+// Layout output — fixed-cap, Copy, allocation-free (§10).
 // =============================================================================
 
-/// Build a [`ThemePickerLayout`] anchored at `origin`. `viewport` is used only
-/// to clamp the panel width so the picker never spills past the host viewport
-/// (matches `settings_panel_rect`'s saturation policy).
-///
-/// Allocation-free; safe to call every frame.
-pub fn theme_picker_layout(origin: Point, viewport: Size) -> ThemePickerLayout {
-    // Grid inner span: 5 thumbnails + 4 gaps.
-    let grid_inner_w =
-        (GRID_COLS as f32) * THUMBNAIL_SIZE + ((GRID_COLS - 1) as f32) * THUMBNAIL_GAP;
-    let grid_inner_h =
-        (GRID_ROWS as f32) * THUMBNAIL_SIZE + ((GRID_ROWS - 1) as f32) * THUMBNAIL_GAP;
+/// Inline §3 Appearance layout in absolute (body scroll-space) DIPs. Every
+/// field is `Copy`; the arrays are fixed-size (no `Vec`). `cards` /
+/// `swatch_blocks` are indexed by `ThemePreset::id`; `group_headings` by
+/// `THEME_GROUP_ORDER` position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppearanceLayout {
+    /// Group-heading rects, indexed by [`THEME_GROUP_ORDER`] position.
+    pub group_headings: [Rect; 4],
+    /// Per-preset card rects, indexed by [`ThemePreset::id`].
+    pub cards: [Rect; PRESET_COUNT],
+    /// 40×40 swatch block rects (centred inside each card), by preset id.
+    pub swatch_blocks: [Rect; PRESET_COUNT],
+    /// Accent row container rect (label + swatch strip).
+    pub accent_row: Rect,
+    /// Per-swatch accent dot rects (right-aligned strip in the accent row).
+    pub accent_swatches: [Rect; ACCENT_SWATCH_COUNT],
+    /// Total laid-out height (grid + accent row) for the body content height.
+    pub total_height: f32,
+}
 
-    // Panel = inner span + padding on both sides, top and bottom.
-    let panel_width = grid_inner_w + PICKER_PADDING * 2.0;
-    let panel_height = PICKER_PADDING
-        + grid_inner_h
-        + SECTION_GAP
-        + ACCENT_ROW_HEIGHT
-        + SECTION_GAP
-        + FOOTER_ROW_HEIGHT
-        + PICKER_PADDING;
+// =============================================================================
+// Layout function — pure / allocation-free.
+// =============================================================================
 
-    // Clamp panel to viewport when the host can't host the whole picker.
-    let panel_width = panel_width.min(viewport.width.max(0.0));
-    let panel_height = panel_height.min(viewport.height.max(0.0));
+/// Build an [`AppearanceLayout`] anchored at `origin` (top-left of the section
+/// in body scroll-space) with the given content `inner_w` (the body width
+/// minus section padding). Walks the four families in [`THEME_GROUP_ORDER`],
+/// placing each family's cards in a 4-column grid under its heading, then the
+/// accent row below the grid. Allocation-free; safe to call every frame.
+pub fn appearance_layout(origin: Point, inner_w: f32) -> AppearanceLayout {
+    let cols = THEME_GRID_COLS as f32;
+    let card_w =
+        ((inner_w - (cols - 1.0) * THEME_GRID_GAP) / cols).max(SWATCH_BLOCK_SIZE);
 
-    let panel = Rect {
-        x: origin.x,
-        y: origin.y,
-        width: panel_width,
-        height: panel_height,
-    };
+    let mut cards = [Rect::ZERO; PRESET_COUNT];
+    let mut swatch_blocks = [Rect::ZERO; PRESET_COUNT];
+    let mut group_headings = [Rect::ZERO; 4];
 
-    let grid_origin_x = panel.x + PICKER_PADDING;
-    let grid_origin_y = panel.y + PICKER_PADDING;
-
-    let mut thumbnails = [Rect::ZERO; PRESET_COUNT];
-    let mut i = 0;
-    while i < PRESET_COUNT {
-        let row = i / GRID_COLS;
-        let col = i % GRID_COLS;
-        thumbnails[i] = Rect {
-            x: grid_origin_x + (col as f32) * (THUMBNAIL_SIZE + THUMBNAIL_GAP),
-            y: grid_origin_y + (row as f32) * (THUMBNAIL_SIZE + THUMBNAIL_GAP),
-            width: THUMBNAIL_SIZE,
-            height: THUMBNAIL_SIZE,
+    let mut y = origin.y;
+    let mut group_pos = 0usize;
+    while group_pos < THEME_GROUP_ORDER.len() {
+        let group = THEME_GROUP_ORDER[group_pos];
+        // Group heading sits at the top of the family block.
+        group_headings[group_pos] = Rect {
+            x: origin.x,
+            y,
+            width: inner_w,
+            height: GROUP_HEADING_HEIGHT,
         };
-        i += 1;
+        let grid_top = y + GROUP_HEADING_HEIGHT + GROUP_HEADING_TO_GRID_GAP;
+
+        // Walk the preset table; place every card whose group matches, in flat
+        // id order (== array order), into this family's grid. `cell` counts
+        // matched cards so the row/col is family-local.
+        let mut cell = 0usize;
+        let mut i = 0usize;
+        while i < PRESET_COUNT {
+            if BUILTIN_THEMES[i].group as u8 == group as u8 {
+                let row = cell / THEME_GRID_COLS;
+                let col = cell % THEME_GRID_COLS;
+                let card = Rect {
+                    x: origin.x + (col as f32) * (card_w + THEME_GRID_GAP),
+                    y: grid_top + (row as f32) * (THEME_CARD_HEIGHT + THEME_GRID_GAP),
+                    width: card_w,
+                    height: THEME_CARD_HEIGHT,
+                };
+                cards[i] = card;
+                // Swatch block — 40×40, centred horizontally, pad-top from card.
+                swatch_blocks[i] = Rect {
+                    x: card.x + (card.width - SWATCH_BLOCK_SIZE) * 0.5,
+                    y: card.y + THEME_CARD_PAD_TOP,
+                    width: SWATCH_BLOCK_SIZE,
+                    height: SWATCH_BLOCK_SIZE,
+                };
+                cell += 1;
+            }
+            i += 1;
+        }
+
+        // Advance y past this family's grid. ceil(cell / cols) rows.
+        let rows = cell.div_ceil(THEME_GRID_COLS);
+        let grid_h = if rows == 0 {
+            0.0
+        } else {
+            (rows as f32) * THEME_CARD_HEIGHT + (rows as f32 - 1.0) * THEME_GRID_GAP
+        };
+        y = grid_top + grid_h + GROUP_TO_GROUP_GAP;
+        group_pos += 1;
     }
 
-    let accent_row_y = grid_origin_y + grid_inner_h + SECTION_GAP;
+    // Accent row sits below the last family's grid (drop the trailing
+    // group-to-group gap, add the explicit accent top gap instead).
+    let accent_row_y = y - GROUP_TO_GROUP_GAP + ACCENT_ROW_TOP_GAP;
     let accent_row = Rect {
-        x: grid_origin_x,
+        x: origin.x,
         y: accent_row_y,
-        width: grid_inner_w,
+        width: inner_w,
         height: ACCENT_ROW_HEIGHT,
     };
+    // 12 dots right-aligned in the accent row, vertically centred.
+    let strip_w = ACCENT_DOT_SIZE * ACCENT_SWATCH_COUNT as f32
+        + ACCENT_DOT_GAP * (ACCENT_SWATCH_COUNT as f32 - 1.0);
+    let strip_x = accent_row.right() - strip_w;
+    let dot_y = accent_row.y + (accent_row.height - ACCENT_DOT_SIZE) * 0.5;
+    let mut accent_swatches = [Rect::ZERO; ACCENT_SWATCH_COUNT];
+    let mut s = 0usize;
+    while s < ACCENT_SWATCH_COUNT {
+        accent_swatches[s] = Rect {
+            x: strip_x + (ACCENT_DOT_SIZE + ACCENT_DOT_GAP) * s as f32,
+            y: dot_y,
+            width: ACCENT_DOT_SIZE,
+            height: ACCENT_DOT_SIZE,
+        };
+        s += 1;
+    }
 
-    let footer_y = accent_row.y + accent_row.height + SECTION_GAP;
-    // Right-align the footer pair (Save on the right, Reset to its left).
-    let save_x = grid_origin_x + grid_inner_w - FOOTER_BTN_WIDTH;
-    let reset_x = save_x - FOOTER_BTN_GAP - FOOTER_BTN_WIDTH;
-    let reset_btn = Rect {
-        x: reset_x,
-        y: footer_y,
-        width: FOOTER_BTN_WIDTH,
-        height: FOOTER_ROW_HEIGHT,
-    };
-    let save_btn = Rect {
-        x: save_x,
-        y: footer_y,
-        width: FOOTER_BTN_WIDTH,
-        height: FOOTER_ROW_HEIGHT,
-    };
+    let total_height = accent_row.bottom() - origin.y;
 
-    ThemePickerLayout {
-        panel,
-        thumbnails,
+    AppearanceLayout {
+        group_headings,
+        cards,
+        swatch_blocks,
         accent_row,
-        reset_btn,
-        save_btn,
+        accent_swatches,
+        total_height,
     }
 }
 
-/// Wave J1b — picker popup origin anchored just below the Settings Row 5
-/// active-theme chip. The integrator (`render.rs::draw_settings_panel` and
-/// the shell hit-tester) calls this so both paint and hit-test share one
-/// source of truth — required because the popup has no static rect in
-/// `settings_panel.rs` and recomputing it inline would diverge between
-/// callers.
-///
-/// `chip` is the `settings_active_theme_rect(viewport)` rect; the popup
-/// hangs `POPUP_GAP_BELOW_CHIP` DIPs below the chip's bottom edge and is
-/// left-aligned with the chip so it never spills outside the Settings panel
-/// chrome on the right. Allocation-free / `Copy`-only.
-pub const POPUP_GAP_BELOW_CHIP: f32 = 6.0;
-
-/// Compute the picker popup origin (top-left corner) for the given Row 5
-/// chip rect. Allocation-free.
-#[inline]
-pub fn theme_picker_popup_origin(chip: Rect) -> Point {
-    Point {
-        x: chip.x,
-        y: chip.bottom() + POPUP_GAP_BELOW_CHIP,
-    }
+/// Total laid-out height of the §3 Appearance section for the given content
+/// width — fed into `settings_body_content_height` so the scroll clamp matches
+/// what is painted. Equals `appearance_layout(_, inner_w).total_height`; the
+/// section anchor Y does not affect the height.
+pub fn appearance_content_height(inner_w: f32) -> f32 {
+    appearance_layout(Point::ZERO, inner_w).total_height
 }
 
-/// Compute the four 2 × 2 swatch quadrant rects inside `thumb`. Order: top-
-/// left, top-right, bottom-left, bottom-right — matches `ThemePreset::
-/// swatch_colors` indexing.
-///
-/// The quadrants share a centred 1-DIP "gutter" so the corner radii of the
-/// thumbnail outer-clip read cleanly even when the four colours are similar.
-pub fn thumbnail_swatch_quadrants(thumb: Rect) -> [Rect; 4] {
-    let half_w = (thumb.width - 1.0) * 0.5;
-    let half_h = (thumb.height - 1.0) * 0.5;
-    let mid_x = thumb.x + half_w;
-    let mid_y = thumb.y + half_h;
+/// Compute the four 2×2 swatch quadrant rects inside `block`. Order: top-left,
+/// top-right, bottom-left, bottom-right — matches `ThemePreset::swatch_colors`
+/// indexing. The quadrants share a centred `gutter`-DIP divider (Tauri
+/// `.theme-card__swatches { gap: 3px }` → pass [`SWATCH_INNER_GAP`]) so the
+/// four colours read distinctly even when similar.
+pub fn thumbnail_swatch_quadrants(block: Rect, gutter: f32) -> [Rect; 4] {
+    let half_w = ((block.width - gutter) * 0.5).max(0.0);
+    let half_h = ((block.height - gutter) * 0.5).max(0.0);
+    let right_x = block.x + half_w + gutter;
+    let bottom_y = block.y + half_h + gutter;
     [
-        Rect { x: thumb.x, y: thumb.y, width: half_w, height: half_h },
-        Rect { x: mid_x + 1.0, y: thumb.y, width: half_w, height: half_h },
-        Rect { x: thumb.x, y: mid_y + 1.0, width: half_w, height: half_h },
-        Rect { x: mid_x + 1.0, y: mid_y + 1.0, width: half_w, height: half_h },
+        Rect { x: block.x, y: block.y, width: half_w, height: half_h },
+        Rect { x: right_x, y: block.y, width: half_w, height: half_h },
+        Rect { x: block.x, y: bottom_y, width: half_w, height: half_h },
+        Rect { x: right_x, y: bottom_y, width: half_w, height: half_h },
     ]
-}
-
-/// Return the small selection-indicator rect anchored at the thumbnail's
-/// bottom-right corner. The renderer paints a filled green disc here when
-/// the thumbnail is the active preset.
-pub fn thumbnail_check_mark_rect(thumb: Rect) -> Rect {
-    Rect {
-        x: thumb.right() - CHECK_MARK_INSET - CHECK_MARK_SIZE,
-        y: thumb.bottom() - CHECK_MARK_INSET - CHECK_MARK_SIZE,
-        width: CHECK_MARK_SIZE,
-        height: CHECK_MARK_SIZE,
-    }
 }
 
 // =============================================================================
 // Hit testing
 // =============================================================================
 
-/// Hit-test result for a `(x, y)` viewport-space cursor against a
-/// [`ThemePickerLayout`].
+/// Hit-test result for a cursor against an [`AppearanceLayout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemePickerHit {
-    /// Cursor fell on the thumbnail with this `id` (`0..PRESET_COUNT`).
-    Thumbnail(u8),
-    /// Cursor fell on the accent-row dot / label.
-    Accent,
-    /// Cursor fell on the Reset button.
-    Reset,
-    /// Cursor fell on the Save button.
-    Save,
+pub enum AppearanceHit {
+    /// Cursor fell on the ThemeCard with this preset id (`0..PRESET_COUNT`).
+    Card(u8),
+    /// Cursor fell on the accent swatch with this strip index
+    /// (`0..ACCENT_SWATCH_COUNT`).
+    Accent(u8),
 }
 
-/// Hit-test `(x, y)` against `layout`. Returns the deepest match (thumbnails
-/// take priority over the accent row, which takes priority over the footer
-/// because they are spatially disjoint anyway). `None` when the cursor sits
-/// inside the panel chrome but outside every interactive region.
-pub fn hit_test(layout: &ThemePickerLayout, x: f32, y: f32) -> Option<ThemePickerHit> {
-    // Thumbnails first — they are the densest hit region.
+/// Hit-test `(x, y)` against `layout`. Cards take priority over accent
+/// swatches (spatially disjoint anyway). `None` when the cursor sits in the
+/// section but outside every interactive rect. Allocation-free.
+pub fn appearance_hit_test(layout: &AppearanceLayout, x: f32, y: f32) -> Option<AppearanceHit> {
     let mut i = 0;
     while i < PRESET_COUNT {
-        if rect_contains(layout.thumbnails[i], x, y) {
-            return Some(ThemePickerHit::Thumbnail(i as u8));
+        if rect_contains(layout.cards[i], x, y) {
+            return Some(AppearanceHit::Card(i as u8));
         }
         i += 1;
     }
-    if rect_contains(layout.accent_row, x, y) {
-        return Some(ThemePickerHit::Accent);
-    }
-    if rect_contains(layout.reset_btn, x, y) {
-        return Some(ThemePickerHit::Reset);
-    }
-    if rect_contains(layout.save_btn, x, y) {
-        return Some(ThemePickerHit::Save);
+    let mut s = 0;
+    while s < ACCENT_SWATCH_COUNT {
+        if rect_contains(layout.accent_swatches[s], x, y) {
+            return Some(AppearanceHit::Accent(s as u8));
+        }
+        s += 1;
     }
     None
 }
@@ -452,180 +482,6 @@ fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {
 }
 
 // =============================================================================
-// Paint adapter — RendererLike trait + paint_into
-// =============================================================================
-
-/// Thin paint-surface trait used by [`paint_into`]. Mirrors the two D2D
-/// primitives every paint helper in `bento-nano-app::render` uses; the
-/// integrator implements it by forwarding to `Renderer::fill_rounded_rect` /
-/// `Renderer::draw_text` (which are `pub(super)` to the render module — the
-/// integrator can lift the adapter into the same `impl Renderer` block).
-///
-/// The trait carries an associated `Error` type so the implementer can return
-/// its native `RenderError` without us coupling to it here (spec §13 — leaf
-/// modules must not depend back on the app crate's error type).
-pub trait RendererLike {
-    type Error;
-
-    /// Fill `rect` with `color`, rounding to `radius`.
-    fn fill_rounded_rect(
-        &mut self,
-        rect: Rect,
-        color: Color,
-        radius: BorderRadius,
-    ) -> Result<(), Self::Error>;
-
-    /// Draw `text` inside `rect` with `color`. Single-line, wrapping is the
-    /// renderer's choice (the picker only uses short labels).
-    fn draw_text(
-        &mut self,
-        text: &str,
-        rect: Rect,
-        color: Color,
-    ) -> Result<(), Self::Error>;
-}
-
-/// Optional override accent — when `Some`, the accent-row dot uses this
-/// instead of the selected preset's built-in accent (matches the user-edit
-/// flow where the accent picker is a separate sub-modal).
-pub type AccentOverride = Option<Color>;
-
-/// Paint a [`ThemePickerLayout`] to `renderer`. `selected` is the index of
-/// the currently-active preset (`0..PRESET_COUNT`); out-of-range values
-/// suppress the check mark.
-///
-/// ## Draw-call sequence (in order)
-///
-/// 1. **Panel chrome** — `fill_rounded_rect(layout.panel, surface_expanded,
-///    RADIUS.expanded)`. (Caller may layer a shadow underneath beforehand
-///    using `SHADOW.expanded`.)
-/// 2. **For each preset `i in 0..PRESET_COUNT`:**
-///    a. `fill_rounded_rect(thumbnails[i], surface_subtle, R)` — clip pad.
-///    b. For each `q in 0..4`: `fill_rounded_rect(quadrants[q],
-///       preset.swatch_colors[q], R)` — `R` is rounded only when `q` is in
-///       the matching corner; we keep all corners rounded here for
-///       simplicity — the outer rect already clips the silhouette.
-///    c. If `i == selected`: `fill_rounded_rect(check_mark_rect,
-///       accent_green, full-round)` — small selection indicator disc.
-/// 3. **Accent row** — `draw_text(t(THEME_PICKER_ACCENT), accent_row,
-///    text_secondary)` then `fill_rounded_rect(accent_dot, accent,
-///    full-round)` at the right edge.
-/// 4. **Footer** — `fill_rounded_rect(reset_btn, surface_hover, RADIUS.card)`,
-///    `draw_text(t(KEYBINDINGS_RESET), reset_btn, text_primary)` →
-///    `fill_rounded_rect(save_btn, accent_blue, RADIUS.card)`,
-///    `draw_text(t(BTN_SAVE), save_btn, text_primary)`.
-///
-/// Allocation-free. No frame state retained between calls.
-pub fn paint_into<R: RendererLike>(
-    renderer: &mut R,
-    layout: &ThemePickerLayout,
-    selected: u8,
-    accent: AccentOverride,
-) -> Result<(), R::Error> {
-    let panel_radius = BorderRadius::all(RADIUS.expanded);
-    let thumb_radius = BorderRadius::all(THUMBNAIL_RADIUS);
-    let inner_thumb_radius = BorderRadius::all(THUMBNAIL_RADIUS - 4.0);
-    let btn_radius = BorderRadius::all(RADIUS.card);
-    let full_round = BorderRadius::all(CHECK_MARK_SIZE);
-
-    // 1. Panel chrome.
-    renderer.fill_rounded_rect(layout.panel, PALETTE_DARK.surface_expanded, panel_radius)?;
-
-    // 2. Thumbnails + selection indicator.
-    let mut i = 0;
-    while i < PRESET_COUNT {
-        let thumb = layout.thumbnails[i];
-        let preset = &BUILTIN_THEMES[i];
-
-        // Thumbnail outer pad (surface lift behind the swatch quadrants).
-        renderer.fill_rounded_rect(thumb, PALETTE_DARK.surface_subtle, thumb_radius)?;
-
-        // 2 × 2 swatch quadrants.
-        let quads = thumbnail_swatch_quadrants(thumb);
-        let mut q = 0;
-        while q < 4 {
-            renderer.fill_rounded_rect(
-                quads[q],
-                preset.swatch_colors[q],
-                inner_thumb_radius,
-            )?;
-            q += 1;
-        }
-
-        // Selection check mark.
-        if (preset.id) == selected {
-            let mark = thumbnail_check_mark_rect(thumb);
-            renderer.fill_rounded_rect(mark, PALETTE_DARK.accent_green, full_round)?;
-        }
-
-        i += 1;
-    }
-
-    // 3. Accent row — label + dot.
-    let accent_label_rect = Rect {
-        x: layout.accent_row.x,
-        y: layout.accent_row.y,
-        width: layout.accent_row.width - ACCENT_DOT_SIZE - SPACING.sm,
-        height: layout.accent_row.height,
-    };
-    renderer.draw_text(
-        bento_nano_style::t(ids::THEME_PICKER_ACCENT),
-        accent_label_rect,
-        PALETTE_DARK.text_secondary,
-    )?;
-    let accent_color = match accent {
-        Some(c) => c,
-        None => {
-            // Default to the selected preset's accent (when selected is in range).
-            if (selected as usize) < PRESET_COUNT {
-                BUILTIN_THEMES[selected as usize].accent
-            } else {
-                BUILTIN_THEMES[0].accent
-            }
-        }
-    };
-    let accent_dot_rect = Rect {
-        x: layout.accent_row.right() - ACCENT_DOT_SIZE,
-        y: layout.accent_row.y + (layout.accent_row.height - ACCENT_DOT_SIZE) * 0.5,
-        width: ACCENT_DOT_SIZE,
-        height: ACCENT_DOT_SIZE,
-    };
-    renderer.fill_rounded_rect(accent_dot_rect, accent_color, BorderRadius::all(ACCENT_DOT_SIZE))?;
-
-    // 4. Footer — Reset (ghost) + Save (accent-tinted).
-    renderer.fill_rounded_rect(layout.reset_btn, PALETTE_DARK.surface_hover, btn_radius)?;
-    let reset_text_rect = button_text_rect(layout.reset_btn);
-    renderer.draw_text(
-        bento_nano_style::t(ids::KEYBINDINGS_RESET),
-        reset_text_rect,
-        PALETTE_DARK.text_primary,
-    )?;
-    renderer.fill_rounded_rect(layout.save_btn, PALETTE_DARK.accent_blue, btn_radius)?;
-    let save_text_rect = button_text_rect(layout.save_btn);
-    renderer.draw_text(
-        bento_nano_style::t(ids::BTN_SAVE),
-        save_text_rect,
-        PALETTE_DARK.text_primary,
-    )?;
-
-    Ok(())
-}
-
-/// Tight text rect inside a button — vertically centred using TYPOGRAPHY.md
-/// line-height. Matches the convention used by the surrounding settings
-/// panel paint helpers.
-#[inline]
-fn button_text_rect(btn: Rect) -> Rect {
-    let text_h = TYPOGRAPHY.md.size_px * TYPOGRAPHY.md.line_height;
-    Rect {
-        x: btn.x + SPACING.sm,
-        y: btn.y + (btn.height - text_h) * 0.5,
-        width: (btn.width - SPACING.sm * 2.0).max(0.0),
-        height: text_h,
-    }
-}
-
-// =============================================================================
 // Tests
 // =============================================================================
 
@@ -633,35 +489,22 @@ fn button_text_rect(btn: Rect) -> Rect {
 mod tests {
     use super::*;
 
-    fn default_viewport() -> Size {
-        Size {
-            width: 1024.0,
-            height: 768.0,
-        }
-    }
+    const INNER_W: f32 = 440.0;
 
     #[test]
-    fn ten_presets_with_4_swatch_colors_each() {
+    fn seventeen_presets_with_4_swatch_colors_each() {
         assert_eq!(BUILTIN_THEMES.len(), PRESET_COUNT);
         for (i, preset) in BUILTIN_THEMES.iter().enumerate() {
             assert_eq!(preset.id as usize, i, "preset id must equal its array index");
-            assert_eq!(
-                preset.swatch_colors.len(),
-                4,
-                "preset {i} must carry exactly 4 swatch colours",
-            );
-            // Every swatch + accent must be fully opaque — half-translucent
-            // swatches read as washed against the surface_subtle pad.
+            assert_eq!(preset.swatch_colors.len(), 4);
             for (q, c) in preset.swatch_colors.iter().enumerate() {
                 assert!(c.a > 0.0, "preset {i} quadrant {q} alpha must be > 0");
             }
-            assert!(preset.accent.a > 0.0, "preset {i} accent alpha must be > 0");
         }
     }
 
     #[test]
     fn preset_name_ids_are_distinct() {
-        // 10 distinct StringIds — no preset shares its display name with another.
         for i in 0..PRESET_COUNT {
             for j in (i + 1)..PRESET_COUNT {
                 assert_ne!(
@@ -673,306 +516,187 @@ mod tests {
     }
 
     #[test]
-    fn layout_panel_anchors_at_origin() {
-        let layout = theme_picker_layout(Point::new(40.0, 60.0), default_viewport());
-        assert_eq!(layout.panel.x, 40.0);
-        assert_eq!(layout.panel.y, 60.0);
-        assert!(layout.panel.width > 0.0);
-        assert!(layout.panel.height > 0.0);
-    }
-
-    #[test]
-    fn layout_ten_thumbnails_inside_panel_no_overlap() {
-        let layout = theme_picker_layout(Point::ZERO, default_viewport());
-        for (i, t) in layout.thumbnails.iter().enumerate() {
-            // Positive dimensions.
-            assert!(t.width > 0.0, "thumbnail {i} width must be positive");
-            assert!(t.height > 0.0, "thumbnail {i} height must be positive");
-            // Inside the panel.
-            assert!(t.x >= layout.panel.x, "thumbnail {i} spills left of panel");
-            assert!(t.y >= layout.panel.y, "thumbnail {i} spills above panel");
-            assert!(
-                t.right() <= layout.panel.right() + 0.01,
-                "thumbnail {i} spills right of panel ({} > {})",
-                t.right(),
-                layout.panel.right(),
-            );
-            assert!(
-                t.bottom() <= layout.panel.bottom() + 0.01,
-                "thumbnail {i} spills below panel",
-            );
-        }
-
-        // No two thumbnails overlap.
+    fn preset_theme_ids_are_distinct_and_match_builtin_set() {
+        // Every theme_id resolves through the M6a 17-id palette lookup.
         for i in 0..PRESET_COUNT {
             for j in (i + 1)..PRESET_COUNT {
-                let a = layout.thumbnails[i];
-                let b = layout.thumbnails[j];
-                let disjoint = a.right() <= b.x
-                    || b.right() <= a.x
-                    || a.bottom() <= b.y
-                    || b.bottom() <= a.y;
-                assert!(
-                    disjoint,
-                    "thumbnails {i} and {j} overlap: {a:?} vs {b:?}",
+                assert_ne!(
+                    BUILTIN_THEMES[i].theme_id, BUILTIN_THEMES[j].theme_id,
+                    "presets {i} and {j} must have distinct theme ids",
                 );
             }
+            assert!(
+                bento_nano_style::tokens::palette_tauri_for_theme(BUILTIN_THEMES[i].theme_id)
+                    .is_some(),
+                "preset {i} theme_id {} must be a known builtin",
+                BUILTIN_THEMES[i].theme_id,
+            );
         }
     }
 
     #[test]
-    fn layout_grid_is_2x5() {
-        let layout = theme_picker_layout(Point::ZERO, default_viewport());
-        // Row 0: first 5 share the same y.
-        let row0_y = layout.thumbnails[0].y;
-        for i in 0..GRID_COLS {
-            assert_eq!(layout.thumbnails[i].y, row0_y, "row 0 thumb {i} y mismatch");
+    fn group_counts_match_tauri_families() {
+        let mut rounded = 0;
+        let mut solid = 0;
+        let mut angular = 0;
+        let mut personality = 0;
+        for p in &BUILTIN_THEMES {
+            match p.group {
+                ThemeGroup::Rounded => rounded += 1,
+                ThemeGroup::Solid => solid += 1,
+                ThemeGroup::Angular => angular += 1,
+                ThemeGroup::Personality => personality += 1,
+            }
         }
-        // Row 1: next 5 share the same y, larger than row 0.
-        let row1_y = layout.thumbnails[GRID_COLS].y;
-        assert!(row1_y > row0_y, "row 1 must sit below row 0");
-        for i in GRID_COLS..PRESET_COUNT {
-            assert_eq!(layout.thumbnails[i].y, row1_y, "row 1 thumb {i} y mismatch");
-        }
-        // Columns: within each row, x strictly increases.
-        for i in 1..GRID_COLS {
-            assert!(layout.thumbnails[i].x > layout.thumbnails[i - 1].x);
+        assert_eq!((rounded, solid, angular, personality), (9, 1, 4, 3));
+    }
+
+    #[test]
+    fn frosted_has_two_translucent_quadrants() {
+        let frosted = BUILTIN_THEMES.iter().find(|p| p.theme_id == "frosted").unwrap();
+        // TL ≈ 0.15, BR ≈ 0.25 — translucent; TR/BL opaque.
+        assert!(frosted.swatch_colors[0].a < 0.99 && frosted.swatch_colors[0].a > 0.0);
+        assert!(frosted.swatch_colors[3].a < 0.99 && frosted.swatch_colors[3].a > 0.0);
+        assert!((frosted.swatch_colors[1].a - 1.0).abs() < f32::EPSILON);
+        assert!((frosted.swatch_colors[2].a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn layout_cards_are_in_four_columns_per_group() {
+        let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
+        // Rounded group has 9 cards (ids 0..9): rows 0,1 full (4 each), row 2 = 1.
+        // Card 0 (col 0) and card 3 (col 3) share a row; card 4 starts row 1.
+        let c0 = layout.cards[0];
+        let c3 = layout.cards[3];
+        let c4 = layout.cards[4];
+        assert!((c0.y - c3.y).abs() < 0.01, "first 4 cards share a row");
+        assert!(c4.y > c0.y, "5th card wraps to the next row");
+        assert!(c3.x > c0.x, "columns increase left→right");
+        // All card widths equal.
+        for i in 1..PRESET_COUNT {
+            assert!((layout.cards[i].width - c0.width).abs() < 0.01);
         }
     }
 
     #[test]
-    fn layout_accent_row_below_grid_and_above_footer() {
-        let layout = theme_picker_layout(Point::ZERO, default_viewport());
-        let last_thumb_bottom = layout.thumbnails[PRESET_COUNT - 1].bottom();
-        assert!(
-            layout.accent_row.y >= last_thumb_bottom,
-            "accent row must sit below the grid",
-        );
-        assert!(
-            layout.reset_btn.y >= layout.accent_row.bottom(),
-            "reset button must sit below accent row",
-        );
-        assert!(
-            layout.save_btn.y >= layout.accent_row.bottom(),
-            "save button must sit below accent row",
-        );
-        // Reset is to the left of Save.
-        assert!(layout.reset_btn.x < layout.save_btn.x);
-        // Same vertical alignment.
-        assert_eq!(layout.reset_btn.y, layout.save_btn.y);
-        assert_eq!(layout.reset_btn.height, layout.save_btn.height);
+    fn layout_groups_stack_in_render_order() {
+        let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
+        // Heading 0 (Rounded) above heading 1 (Solid) above 2 (Angular) above
+        // 3 (Personality).
+        assert!(layout.group_headings[0].y < layout.group_headings[1].y);
+        assert!(layout.group_headings[1].y < layout.group_headings[2].y);
+        assert!(layout.group_headings[2].y < layout.group_headings[3].y);
+        // Solid heading sits below the last Rounded card (id 8).
+        assert!(layout.group_headings[1].y > layout.cards[8].bottom());
     }
 
     #[test]
-    fn layout_panel_clamps_to_viewport_when_too_small() {
-        // Viewport narrower than the natural picker width must clamp panel.
-        let tiny = Size {
-            width: 100.0,
-            height: 100.0,
-        };
-        let layout = theme_picker_layout(Point::ZERO, tiny);
-        assert!(layout.panel.width <= tiny.width);
-        assert!(layout.panel.height <= tiny.height);
+    fn layout_swatch_blocks_centred_in_cards() {
+        let layout = appearance_layout(Point::ZERO, INNER_W);
+        for i in 0..PRESET_COUNT {
+            let card = layout.cards[i];
+            let block = layout.swatch_blocks[i];
+            assert_eq!(block.width, SWATCH_BLOCK_SIZE);
+            assert_eq!(block.height, SWATCH_BLOCK_SIZE);
+            // Horizontally centred.
+            let lead = block.x - card.x;
+            let trail = card.right() - block.right();
+            assert!((lead - trail).abs() < 0.01, "block {i} not centred");
+            // Pad-top from card top.
+            assert!((block.y - card.y - THEME_CARD_PAD_TOP).abs() < 0.01);
+        }
     }
 
     #[test]
-    fn thumbnail_swatch_quadrants_tile_without_overlap_and_fit() {
-        let thumb = Rect {
-            x: 100.0,
-            y: 200.0,
-            width: THUMBNAIL_SIZE,
-            height: THUMBNAIL_SIZE,
-        };
-        let quads = thumbnail_swatch_quadrants(thumb);
+    fn layout_accent_row_below_grid_with_12_swatches() {
+        let layout = appearance_layout(Point::ZERO, INNER_W);
+        // Accent row sits below every theme card.
+        for i in 0..PRESET_COUNT {
+            assert!(layout.accent_row.y >= layout.cards[i].bottom() - 0.01);
+        }
+        // 12 swatches, right-aligned, strictly increasing x, inside the row.
+        for s in 1..ACCENT_SWATCH_COUNT {
+            assert!(layout.accent_swatches[s].x > layout.accent_swatches[s - 1].x);
+        }
+        assert!(layout.accent_swatches[ACCENT_SWATCH_COUNT - 1].right() <= layout.accent_row.right() + 0.01);
+        assert!(layout.accent_swatches[0].x >= layout.accent_row.x);
+    }
+
+    #[test]
+    fn total_height_spans_grid_plus_accent_row() {
+        let layout = appearance_layout(Point::new(0.0, 100.0), INNER_W);
+        assert!((layout.total_height - (layout.accent_row.bottom() - 100.0)).abs() < 0.01);
+        assert!(layout.total_height > 0.0);
+        // appearance_content_height agrees (anchor-independent).
+        assert!((appearance_content_height(INNER_W) - layout.total_height).abs() < 0.01);
+    }
+
+    #[test]
+    fn quadrants_tile_without_overlap_inside_block() {
+        let block = Rect { x: 100.0, y: 200.0, width: SWATCH_BLOCK_SIZE, height: SWATCH_BLOCK_SIZE };
+        let quads = thumbnail_swatch_quadrants(block, SWATCH_INNER_GAP);
         for q in &quads {
             assert!(q.width > 0.0 && q.height > 0.0);
-            assert!(q.x >= thumb.x);
-            assert!(q.y >= thumb.y);
-            assert!(q.right() <= thumb.right() + 0.01);
-            assert!(q.bottom() <= thumb.bottom() + 0.01);
+            assert!(q.x >= block.x);
+            assert!(q.y >= block.y);
+            assert!(q.right() <= block.right() + 0.01);
+            assert!(q.bottom() <= block.bottom() + 0.01);
         }
-        // Top row shares y; bottom row shares y; left col shares x; right col shares x.
         assert_eq!(quads[0].y, quads[1].y);
         assert_eq!(quads[2].y, quads[3].y);
         assert_eq!(quads[0].x, quads[2].x);
         assert_eq!(quads[1].x, quads[3].x);
-        // Quadrants do not overlap each other (1 DIP gutter is the divider).
-        assert!(quads[0].right() < quads[1].x);
-        assert!(quads[0].bottom() < quads[2].y);
+        // 3-DIP gutter divides them.
+        assert!((quads[1].x - quads[0].right() - SWATCH_INNER_GAP).abs() < 0.01);
+        assert!((quads[2].y - quads[0].bottom() - SWATCH_INNER_GAP).abs() < 0.01);
     }
 
     #[test]
-    fn thumbnail_check_mark_sits_inside_bottom_right_corner() {
-        let thumb = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: THUMBNAIL_SIZE,
-            height: THUMBNAIL_SIZE,
-        };
-        let mark = thumbnail_check_mark_rect(thumb);
-        assert_eq!(mark.width, CHECK_MARK_SIZE);
-        assert_eq!(mark.height, CHECK_MARK_SIZE);
-        assert!(mark.right() <= thumb.right());
-        assert!(mark.bottom() <= thumb.bottom());
-        // Snug to the corner — inset by exactly CHECK_MARK_INSET.
-        assert!((thumb.right() - mark.right() - CHECK_MARK_INSET).abs() < 0.001);
-        assert!((thumb.bottom() - mark.bottom() - CHECK_MARK_INSET).abs() < 0.001);
-    }
-
-    #[test]
-    fn hit_test_thumbnails_each_index() {
-        let layout = theme_picker_layout(Point::new(50.0, 50.0), default_viewport());
+    fn hit_test_each_card_centre() {
+        let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
         for i in 0..PRESET_COUNT {
-            let t = layout.thumbnails[i];
-            let cx = t.x + t.width * 0.5;
-            let cy = t.y + t.height * 0.5;
+            let c = layout.cards[i];
+            let cx = c.x + c.width * 0.5;
+            let cy = c.y + c.height * 0.5;
             assert_eq!(
-                hit_test(&layout, cx, cy),
-                Some(ThemePickerHit::Thumbnail(i as u8)),
-                "centre of thumbnail {i} must hit-test to Thumbnail({i})",
+                appearance_hit_test(&layout, cx, cy),
+                Some(AppearanceHit::Card(i as u8)),
+                "centre of card {i} must hit-test to Card({i})",
             );
         }
     }
 
     #[test]
-    fn hit_test_accent_reset_save() {
-        let layout = theme_picker_layout(Point::new(50.0, 50.0), default_viewport());
-        let accent_centre_x = layout.accent_row.x + layout.accent_row.width * 0.5;
-        let accent_centre_y = layout.accent_row.y + layout.accent_row.height * 0.5;
-        assert_eq!(
-            hit_test(&layout, accent_centre_x, accent_centre_y),
-            Some(ThemePickerHit::Accent),
-        );
-
-        let reset_cx = layout.reset_btn.x + layout.reset_btn.width * 0.5;
-        let reset_cy = layout.reset_btn.y + layout.reset_btn.height * 0.5;
-        assert_eq!(
-            hit_test(&layout, reset_cx, reset_cy),
-            Some(ThemePickerHit::Reset),
-        );
-
-        let save_cx = layout.save_btn.x + layout.save_btn.width * 0.5;
-        let save_cy = layout.save_btn.y + layout.save_btn.height * 0.5;
-        assert_eq!(
-            hit_test(&layout, save_cx, save_cy),
-            Some(ThemePickerHit::Save),
-        );
-    }
-
-    #[test]
-    fn hit_test_returns_none_outside_all_regions() {
-        let layout = theme_picker_layout(Point::new(50.0, 50.0), default_viewport());
-        // Far from anything inside or outside the panel.
-        assert_eq!(hit_test(&layout, -100.0, -100.0), None);
-        // Inside the panel but in the padding gutter between thumbnails (just
-        // below the first thumbnail row, just above the accent row).
-        let in_gutter_y = layout.thumbnails[0].bottom() + THUMBNAIL_GAP * 0.5;
-        let in_gutter_x = layout.thumbnails[0].x + 1.0;
-        // Sanity: this gutter point is above the second row.
-        assert!(in_gutter_y < layout.thumbnails[GRID_COLS].y);
-        assert_eq!(hit_test(&layout, in_gutter_x, in_gutter_y), None);
-    }
-
-    // -------------------------------------------------------------------------
-    // Paint-adapter smoke test — exercises every draw branch without a real
-    // D2D context. Confirms paint_into is allocation-free (Vec/String would
-    // not compile under the recorder anyway since we never construct one).
-    // -------------------------------------------------------------------------
-
-    /// Recorder implementing `RendererLike` — counts draw calls per kind so
-    /// we can assert the paint sequence without a real D2D context.
-    #[derive(Default)]
-    struct Recorder {
-        fill_count: u32,
-        text_count: u32,
-        last_text: Option<&'static str>,
-    }
-
-    impl RendererLike for Recorder {
-        type Error = ();
-
-        fn fill_rounded_rect(
-            &mut self,
-            _rect: Rect,
-            _color: Color,
-            _radius: BorderRadius,
-        ) -> Result<(), Self::Error> {
-            self.fill_count += 1;
-            Ok(())
-        }
-
-        fn draw_text(
-            &mut self,
-            text: &str,
-            _rect: Rect,
-            _color: Color,
-        ) -> Result<(), Self::Error> {
-            self.text_count += 1;
-            // SAFETY: `t()` returns `&'static str`, so the lifetime extends.
-            // We need a way to remember the last value; for the recorder we
-            // copy the pointer-equivalent (the `&'static str` itself).
-            // We promote via transmute-free path: `t()` already returns
-            // `&'static str`, so the test caller should pass that directly.
-            // For paint_into's general signature we accept `&str`, so we
-            // store a leaked &'static via a coarse trick: only when the
-            // caller passes a 'static str (which paint_into does).
-            //
-            // For this smoke test we only need the call count, not the value,
-            // so leave `last_text` untouched; the `&'static str` API is
-            // preserved by paint_into's call sites which all use `t()`.
-            let _ = text;
-            self.last_text = None;
-            Ok(())
+    fn hit_test_each_accent_swatch() {
+        let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
+        for s in 0..ACCENT_SWATCH_COUNT {
+            let d = layout.accent_swatches[s];
+            let cx = d.x + d.width * 0.5;
+            let cy = d.y + d.height * 0.5;
+            assert_eq!(
+                appearance_hit_test(&layout, cx, cy),
+                Some(AppearanceHit::Accent(s as u8)),
+            );
         }
     }
 
     #[test]
-    fn paint_into_emits_expected_draw_call_counts() {
-        // Locale must be installed for `t(...)` to return a non-empty string.
-        // The shared i18n locale is process-global; install zh-CN if not yet.
-        bento_nano_style::init_locale(&bento_nano_style::ZH_CN);
-
-        let layout = theme_picker_layout(Point::new(0.0, 0.0), default_viewport());
-        let mut rec = Recorder::default();
-        let res = paint_into(&mut rec, &layout, /* selected = */ 3, /* accent = */ None);
-        assert!(res.is_ok());
-
-        // Expected fills:
-        //   1 panel
-        // + 10 thumbnail outer pads
-        // + 40 quadrant fills (10 thumbnails × 4)
-        // +  1 selection check mark (for index 3)
-        // +  1 accent dot
-        // +  2 footer buttons (reset + save)
-        // = 55 fills total.
-        assert_eq!(rec.fill_count, 1 + 10 + 40 + 1 + 1 + 2);
-
-        // Expected texts: accent label + reset label + save label = 3.
-        assert_eq!(rec.text_count, 3);
+    fn hit_test_none_outside_all_regions() {
+        let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
+        assert_eq!(appearance_hit_test(&layout, -100.0, -100.0), None);
     }
 
     #[test]
-    fn paint_into_suppresses_check_mark_for_out_of_range_selection() {
-        bento_nano_style::init_locale(&bento_nano_style::ZH_CN);
-
-        let layout = theme_picker_layout(Point::new(0.0, 0.0), default_viewport());
-        let mut rec = Recorder::default();
-        paint_into(&mut rec, &layout, /* selected = */ 250, /* accent = */ None).unwrap();
-
-        // No selection → one fewer fill (the check mark disc) than the
-        // baseline 55 = 54 fills.
-        assert_eq!(rec.fill_count, 1 + 10 + 40 + 0 + 1 + 2);
+    fn accent_swatch_hex_matches_swatch_count_and_clamps() {
+        for s in 0..ACCENT_SWATCH_COUNT {
+            assert!(accent_swatch_hex(s).unwrap().starts_with('#'));
+            assert_eq!(accent_swatch_hex(s).unwrap().len(), 7);
+        }
+        assert_eq!(accent_swatch_hex(ACCENT_SWATCH_COUNT), None);
     }
 
     #[test]
-    fn paint_into_respects_accent_override() {
-        bento_nano_style::init_locale(&bento_nano_style::ZH_CN);
-
-        // Sanity check — paint_into must accept Some(color) without erroring.
-        let layout = theme_picker_layout(Point::new(0.0, 0.0), default_viewport());
-        let mut rec = Recorder::default();
-        let red = Color::from_u8(0xFF, 0x00, 0x00, 0xFF);
-        paint_into(&mut rec, &layout, 0, Some(red)).unwrap();
-        assert!(rec.fill_count > 0);
+    fn point_zero_constructs() {
+        assert_eq!(Point::ZERO, Point::new(0.0, 0.0));
     }
 }

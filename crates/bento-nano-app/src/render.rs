@@ -2208,7 +2208,7 @@ impl Renderer {
             SETTINGS_PANEL_RADIUS, SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_PERF_ROW_COUNT,
             SETTINGS_RADIO_INNER_D, SETTINGS_RADIO_OUTER_D, SETTINGS_ROW_PAD_X,
             SETTINGS_SLIDER_THUMB_D, SETTINGS_SOURCE_ROW_VISIBLE_MAX, SETTINGS_TOP_TOGGLE_COUNT,
-            SETTINGS_ZONE_DISPLAY_MODE_COUNT, settings_active_theme_rect, settings_body_rect,
+            SETTINGS_ZONE_DISPLAY_MODE_COUNT, settings_body_rect,
             settings_cancel_button_rect, settings_close_button_rect_m1,
             settings_crash_max_retries_row_rect, settings_crash_restart_row_rect,
             settings_crash_window_row_rect, settings_desktop_path_input_rect,
@@ -4042,6 +4042,216 @@ impl Renderer {
             }
         }
 
+        // ── M6-UI — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
+        //
+        // Flows LAST in the nano body order (…→Plugins→**Appearance**). The
+        // grid geometry (group headings + 17 ThemeCards + accent swatch row) is
+        // owned by `theme_picker::appearance_layout`; the section anchor +
+        // content width come from `settings_panel`. Selecting a card re-skins
+        // the app live (the active card draws a 2-DIP accent-blue border + a
+        // 10%-blue fill tint, compared against `app.active_theme_id`). The
+        // accent swatch row is the editable accent picker (Control B MVP).
+        //
+        // Developer Options (custom-theme textarea + Import/Export) is DEFERRED
+        // (no nano keyboard/text-input infra + no JSON theme parser) — see the
+        // M6-UI carve-out note; no dead toggle is painted.
+        use crate::settings_panel::{
+            settings_appearance_grid_origin, settings_appearance_inner_width,
+            settings_appearance_label_rect, settings_appearance_picker_label_rect,
+        };
+        use crate::theme_picker::{
+            self as tp, AppearanceLayout, BUILTIN_THEMES, SWATCH_BLOCK_RADIUS, SWATCH_INNER_GAP,
+            THEME_CARD_BORDER, THEME_CARD_RADIUS, THEME_GROUP_ORDER,
+        };
+        // Live theme id (the active card highlight) — borrowed once.
+        let active_theme_id = app.active_theme_id.borrow().clone();
+        // Live accent (the ringed accent swatch) — the in-flight draft wins,
+        // else the persisted theme-base accent. Owned snapshot so no RefCell
+        // borrow spans the fallible paint calls below.
+        let active_accent: Option<smol_str::SmolStr> = app
+            .settings_draft_accent_color
+            .borrow()
+            .clone()
+            .or_else(|| app.theme_base_accent.borrow().clone());
+        // Group title — 外观 / Appearance.
+        let appearance_label = settings_appearance_label_rect(viewport, scroll, &plugin_flags);
+        if row_visible(appearance_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_APPEARANCE),
+                appearance_label,
+                label_color,
+            )?;
+        }
+        // "选择主题 / Choose Theme" picker label.
+        let picker_label = settings_appearance_picker_label_rect(viewport, scroll, &plugin_flags);
+        if row_visible(picker_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::THEME_PICKER_LABEL),
+                picker_label,
+                label_color,
+            )?;
+        }
+        // Grid layout — body-width-driven, Copy, allocation-free.
+        let appearance_origin = settings_appearance_grid_origin(viewport, scroll, &plugin_flags);
+        let appearance_inner_w = settings_appearance_inner_width(viewport);
+        let appearance: AppearanceLayout = tp::appearance_layout(appearance_origin, appearance_inner_w);
+        // surface_subtle = rgba(white, 0.04) card bg (live theme). Active card
+        // overrides to accent-blue@0.10 + a 2-DIP accent-blue rounded border.
+        let card_bg = palette.surface_subtle;
+        let active_card_bg = with_alpha(palette.accent_blue, 0.10);
+        let card_radius = bento_nano_style::BorderRadius::all(THEME_CARD_RADIUS);
+        let swatch_radius = bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS);
+        // Group headings — Tauri `.theme-group__title`: UPPERCASE,
+        // letter-spacing 1px, font-size 10px, weight 600, color text-muted.
+        // `draw_text_tracked` upper-cases (no-op for CJK) + applies the 1-DIP
+        // per-glyph tracking via DWrite SetCharacterSpacing (both locales).
+        for (group_pos, group) in THEME_GROUP_ORDER.iter().enumerate() {
+            let heading = appearance.group_headings[group_pos];
+            if row_visible(heading, body) {
+                self.draw_text_tracked(
+                    bento_nano_style::t(group.heading_id()),
+                    heading,
+                    palette.text_muted,
+                    10.0,
+                    600,
+                    1.0,
+                )?;
+            }
+        }
+        // 17 ThemeCards (walk the preset table; rects indexed by preset id).
+        for preset in BUILTIN_THEMES.iter() {
+            let i = preset.id as usize;
+            let card = appearance.cards[i];
+            if !row_visible(card, body) {
+                continue;
+            }
+            let is_active = preset.theme_id == active_theme_id.as_str();
+            // Card surface.
+            self.fill_rounded_rect(card, if is_active { active_card_bg } else { card_bg }, card_radius)?;
+            // Active card border — 2-DIP accent-blue. Tauri's CSS `border` is a
+            // fully-inset border-box; D2D strokes centred on the geometric edge,
+            // so the rect is inset by half the stroke width (1 DIP) on all sides
+            // and the radius shrinks to stay concentric — no bleed past the card.
+            if is_active {
+                let inset = THEME_CARD_BORDER * 0.5;
+                let border_rect = bento_nano_style::Rect {
+                    x: card.x + inset,
+                    y: card.y + inset,
+                    width: (card.width - THEME_CARD_BORDER).max(0.0),
+                    height: (card.height - THEME_CARD_BORDER).max(0.0),
+                };
+                let border_radius =
+                    bento_nano_style::BorderRadius::all((THEME_CARD_RADIUS - inset).max(0.0));
+                self.stroke_rounded_rect(
+                    border_rect,
+                    palette.accent_blue,
+                    border_radius,
+                    THEME_CARD_BORDER,
+                )?;
+            }
+            // 40×40 swatch block — 4 quadrant fills (3-DIP gutter == gap:3px).
+            let block = appearance.swatch_blocks[i];
+            // Drop shadow behind the block — Tauri `.theme-card__swatches`
+            // `box-shadow: 0 1px 3px rgba(0,0,0,0.15)`. Simulated (as elsewhere
+            // in this renderer) by a translucent rounded fill offset +1 DIP in Y
+            // and spread the 3-DIP blur on every side, painted before the block.
+            const SWATCH_SHADOW_OFFSET_Y: f32 = 1.0;
+            const SWATCH_SHADOW_BLUR: f32 = 3.0;
+            let block_shadow = bento_nano_style::Rect {
+                x: block.x - SWATCH_SHADOW_BLUR,
+                y: block.y + SWATCH_SHADOW_OFFSET_Y - SWATCH_SHADOW_BLUR,
+                width: block.width + SWATCH_SHADOW_BLUR * 2.0,
+                height: block.height + SWATCH_SHADOW_BLUR * 2.0,
+            };
+            self.fill_rounded_rect(
+                block_shadow,
+                with_alpha(Color::BLACK, 0.15),
+                bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS + SWATCH_SHADOW_BLUR),
+            )?;
+            // Block pad behind the quadrants (rounded clip silhouette).
+            self.fill_rounded_rect(block, palette.surface_subtle, swatch_radius)?;
+            // Quadrants — Tauri `.theme-card__swatches { border-radius:8;
+            // overflow:hidden }` masks SHARP-cornered quadrants behind an 8-DIP
+            // rounded square. No rounded-clip primitive exists (PushAxisAlignedClip
+            // is rectangular), so each corner quadrant rounds ONLY its single
+            // OUTER corner to 8 (TL→top-left, TR→top-right, BL→bottom-left,
+            // BR→bottom-right) and stays square at the inner centre cross — the
+            // visible-correct per-corner approximation via `fill_partial_rounded_rect`.
+            const QUADRANT_OUTER_CORNER: [[bool; 4]; 4] = [
+                [true, false, false, false],  // 0 = TL
+                [false, true, false, false],  // 1 = TR
+                [false, false, false, true],  // 2 = BL
+                [false, false, true, false],  // 3 = BR
+            ];
+            let quads = tp::thumbnail_swatch_quadrants(block, SWATCH_INNER_GAP);
+            let mut q = 0usize;
+            while q < 4 {
+                self.fill_partial_rounded_rect(
+                    quads[q],
+                    preset.swatch_colors[q],
+                    SWATCH_BLOCK_RADIUS,
+                    QUADRANT_OUTER_CORNER[q],
+                )?;
+                q += 1;
+            }
+            // Name label below the swatch — Tauri `.theme-card__label`:
+            // text-align:center, 10px, color text-secondary, single line.
+            let label_rect = bento_nano_style::Rect {
+                x: card.x,
+                y: block.bottom() + crate::theme_picker::THEME_CARD_SWATCH_LABEL_GAP,
+                width: card.width,
+                height: crate::theme_picker::CARD_LABEL_HEIGHT,
+            };
+            self.draw_text_centered(
+                bento_nano_style::t(preset.name_id),
+                label_rect,
+                palette.text_secondary,
+                10.0,
+                400,
+            )?;
+        }
+        // Accent row (Control B) — label + 12-swatch VIBRANT strip + value ring.
+        if row_visible(appearance.accent_row, body) {
+            let accent_label_rect = bento_nano_style::Rect {
+                x: appearance.accent_row.x,
+                y: appearance.accent_row.y,
+                width: appearance.accent_row.width * 0.5,
+                height: appearance.accent_row.height,
+            };
+            self.draw_text_no_wrap(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_ACCENT_COLOR),
+                accent_label_rect,
+                label_color,
+            )?;
+        }
+        for s in 0..crate::theme_picker::ACCENT_SWATCH_COUNT {
+            let dot = appearance.accent_swatches[s];
+            if !row_visible(dot, body) {
+                continue;
+            }
+            let dot_radius = bento_nano_style::BorderRadius::all(dot.height * 0.5);
+            self.fill_rounded_rect(dot, crate::theme_picker::ACCENT_SWATCHES[s], dot_radius)?;
+            // Current-value ring on the active accent swatch.
+            let is_active_accent = active_accent
+                .as_deref()
+                .map(|hex| crate::theme_picker::accent_swatch_hex(s) == Some(hex))
+                .unwrap_or(false);
+            if is_active_accent {
+                let ring = bento_nano_style::Rect {
+                    x: dot.x - 2.0,
+                    y: dot.y - 2.0,
+                    width: dot.width + 4.0,
+                    height: dot.height + 4.0,
+                };
+                self.stroke_rounded_rect(
+                    ring,
+                    palette.text_primary,
+                    bento_nano_style::BorderRadius::all(ring.height * 0.5),
+                    2.0,
+                )?;
+            }
+        }
+
             Ok(())
         })();
         // Balance the body clip BEFORE propagating any body-paint error so the
@@ -4093,14 +4303,12 @@ impl Renderer {
         // now an always-inline §11 section painted inside the scrollable body
         // (see the M1h block in the body-paint closure above). `draw_plugins_modal`
         // + `settings_plugins_open` were deleted.
-        if app.theme_picker_open.get() {
-            let chip = settings_active_theme_rect(viewport);
-            let origin = crate::theme_picker::theme_picker_popup_origin(chip);
-            let layout = crate::theme_picker::theme_picker_layout(origin, viewport);
-            let selected = app.theme_picker_selected.get();
-            let mut adapter = ThemePickerAdapter { renderer: self };
-            crate::theme_picker::paint_into(&mut adapter, &layout, selected, None)?;
-        }
+        // M6-UI (2026-05-29) — the Wave J1b swatch-popup paint
+        // (`if app.theme_picker_open { paint_into(ThemePickerAdapter, …) }`)
+        // was removed: §3 Appearance is now an always-inline grid painted by
+        // the M6-UI block inside the scrollable body-paint closure above
+        // (group headings + 17 ThemeCards + accent swatch row), re-skinning
+        // live off `app.active_theme_tauri()`.
 
         Ok(())
     }
@@ -6539,6 +6747,105 @@ impl Renderer {
         Ok(())
     }
 
+    /// M6-UI fidelity (2026-05-29) — fill a rectangle rounding ONLY the corners
+    /// flagged in `corners` (`[top_left, top_right, bottom_right, bottom_left]`)
+    /// to `radius`; flagged-off corners stay square. D2D's `FillRoundedRectangle`
+    /// only supports a single uniform radius and there is no rounded-clip
+    /// primitive (`PushAxisAlignedClip` is rectangular), so the per-corner
+    /// silhouette is materialised as a closed `ID2D1PathGeometry` (one
+    /// arc per rounded corner, straight `AddLine` for square ones). This is the
+    /// visible-correct approximation for Tauri's `.theme-card__swatches
+    /// { border-radius: 8px; overflow: hidden }` masking the 2×2 quadrants:
+    /// each corner quadrant rounds only its single OUTER corner so the four
+    /// quadrants meet square at the centre cross while the block silhouette is
+    /// an 8-DIP rounded square. Path-sink build uses no Rust String/Vec/format!
+    /// (§10) — same mechanism as `svg::build` for icon glyphs.
+    fn fill_partial_rounded_rect(
+        &self,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        radius: f32,
+        corners: [bool; 4],
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::Direct2D::Common::{
+            D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_SIZE_F,
+        };
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            ID2D1GeometrySink,
+        };
+        if color.a <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        // Clamp the radius so it never exceeds half the shortest edge.
+        let r = radius.max(0.0).min(rect.width * 0.5).min(rect.height * 0.5);
+        if r <= 0.0 || corners == [false; 4] {
+            // Nothing to round — fall back to the cheap square fill.
+            return self.fill_rounded_rect(rect, color, BorderRadius::ZERO);
+        }
+        let l = rect.x;
+        let t = rect.y;
+        let rt_x = rect.right();
+        let b = rect.bottom();
+        // Per-corner inset (0 when the corner is square so the figure walks
+        // straight into the geometric corner).
+        let tl = if corners[0] { r } else { 0.0 };
+        let tr = if corners[1] { r } else { 0.0 };
+        let br = if corners[2] { r } else { 0.0 };
+        let bl = if corners[3] { r } else { 0.0 };
+        let arc = |to_x: f32, to_y: f32| D2D1_ARC_SEGMENT {
+            point: D2D_POINT_2F { x: to_x, y: to_y },
+            size: D2D_SIZE_F { width: r, height: r },
+            rotationAngle: 90.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: D2D1_ARC_SIZE_SMALL,
+        };
+        let factory = &d2d::factory()?.factory;
+        // SAFETY: factory valid; geometry + sink are freshly created and the
+        // sink is closed before this fn returns (mirrors svg::to_d2d_geometry).
+        let geom = ok("CreatePathGeometry", unsafe { factory.CreatePathGeometry() })?;
+        let sink: ID2D1GeometrySink = ok("PathGeometry::Open", unsafe { geom.Open() })?;
+        // Walk the perimeter clockwise from the top edge, arcing rounded
+        // corners and cutting straight to the geometric corner on square ones.
+        // SAFETY: sink valid until Close() below; all points live on the stack.
+        unsafe {
+            sink.BeginFigure(
+                D2D_POINT_2F { x: l + tl, y: t },
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            // Top edge → top-right corner.
+            sink.AddLine(D2D_POINT_2F { x: rt_x - tr, y: t });
+            if corners[1] {
+                sink.AddArc(&arc(rt_x, t + tr));
+            }
+            // Right edge → bottom-right corner.
+            sink.AddLine(D2D_POINT_2F { x: rt_x, y: b - br });
+            if corners[2] {
+                sink.AddArc(&arc(rt_x - br, b));
+            }
+            // Bottom edge → bottom-left corner.
+            sink.AddLine(D2D_POINT_2F { x: l + bl, y: b });
+            if corners[3] {
+                sink.AddArc(&arc(l, b - bl));
+            }
+            // Left edge → top-left corner.
+            sink.AddLine(D2D_POINT_2F { x: l, y: t + tl });
+            if corners[0] {
+                sink.AddArc(&arc(l + tl, t));
+            }
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+        // SAFETY: sink valid; Close finalises the geometry before any fill.
+        ok("GeometrySink::Close", unsafe { sink.Close() })?;
+        let brush = self.solid_brush(color)?;
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; geom + brush outlive the call; no transform change.
+        unsafe {
+            ctx.FillGeometry(&geom, &brush, None);
+        }
+        Ok(())
+    }
+
     fn draw_text(
         &mut self,
         text: &str,
@@ -6816,6 +7123,69 @@ impl Renderer {
         Ok(())
     }
 
+    /// M6-UI fidelity (2026-05-29) — draw an UPPERCASE, letter-tracked label.
+    /// Mirrors Tauri `.theme-group__title { text-transform: uppercase;
+    /// letter-spacing: 1px }`. The `text` is upper-cased the same way the
+    /// watched badge path does (`to_uppercase()` — a no-op for the CJK zh
+    /// headings 圆角玻璃/实心/方角现代/个性, an EN-glyph caps fold otherwise),
+    /// and the 1-DIP per-glyph tracking is applied via DWrite
+    /// `IDWriteTextLayout1::SetCharacterSpacing` (trailing advance) over the
+    /// whole run — the true typographic equivalent of CSS letter-spacing, for
+    /// both locales. The `to_uppercase()` allocation matches the already-shipped
+    /// badge pattern (§10: the headings paint once per visible frame, not on the
+    /// per-item hot path).
+    fn draw_text_tracked(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+        weight: u16,
+        tracking: f32,
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout1, DWRITE_TEXT_RANGE};
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let upper = text.to_uppercase();
+        let format = self.text_format_for_style(size_pt, weight, 1.0)?;
+        self.utf16_scratch.clear();
+        for u in upper.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+        )?;
+        // SetCharacterSpacing lives on IDWriteTextLayout1 — cross-cast per
+        // spec §15.1 (canonical Interface::cast). Apply `tracking` as the
+        // trailing advance over the entire glyph run; leading + min-advance 0.
+        let layout1: IDWriteTextLayout1 =
+            ok("TextLayout::cast<TextLayout1>", layout.cast())?;
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: self.utf16_scratch.len() as u32,
+        };
+        // SAFETY: layout1 is a freshly-created COM interface; SetCharacterSpacing
+        // only mutates per-instance spacing state over the canonical full range.
+        unsafe {
+            let _ = layout1.SetCharacterSpacing(0.0, tracking, 0.0, range);
+        }
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout1, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
     /// Draw a 1:1 SVG path translated into `rect.origin`. Caller takes
     /// responsibility for sizing — `draw_svg_fit` is the safer entry when
     /// the path's viewbox doesn't match the destination rect.
@@ -6978,50 +7348,12 @@ impl Renderer {
     }
 }
 
-// =============================================================================
-// Wave J1b — ThemePicker paint adapter
-// =============================================================================
-//
-// Forwards `crate::theme_picker::RendererLike` calls onto a borrowed
-// `&mut Renderer`. The adapter is a plain newtype around the renderer
-// reference: zero heap, no `String`/`Vec`, no per-call state. The single
-// allocation-sensitive sink (`draw_text`) routes through the renderer's
-// reusable `utf16_scratch` buffer per spec §10 hot-path discipline.
-//
-// Lives in `render.rs` rather than `theme_picker.rs` because the trait impl
-// must reach `Renderer`'s `pub(super)` paint helpers without re-exporting
-// them.
-struct ThemePickerAdapter<'a> {
-    renderer: &'a mut Renderer,
-}
-
-impl<'a> crate::theme_picker::RendererLike for ThemePickerAdapter<'a> {
-    type Error = RenderError;
-
-    #[inline]
-    fn fill_rounded_rect(
-        &mut self,
-        rect: bento_nano_style::Rect,
-        color: Color,
-        radius: BorderRadius,
-    ) -> Result<(), Self::Error> {
-        self.renderer.fill_rounded_rect(rect, color, radius)
-    }
-
-    #[inline]
-    fn draw_text(
-        &mut self,
-        text: &str,
-        rect: bento_nano_style::Rect,
-        color: Color,
-    ) -> Result<(), Self::Error> {
-        // `draw_text_no_wrap` is the right choice for the picker's short
-        // single-line labels ("强调色", "重置", "保存") — it ellipsizes
-        // rather than wrapping into a second line that would spill onto the
-        // accent dot / footer chrome.
-        self.renderer.draw_text_no_wrap(text, rect, color)
-    }
-}
+// M6-UI (2026-05-29) — the Wave J1b `ThemePickerAdapter` (the
+// `RendererLike` bridge that forwarded the popup `paint_into` onto the
+// renderer) was removed alongside the popup. §3 Appearance now paints inline
+// in `draw_settings_panel`'s body closure using the renderer's own
+// `fill_rounded_rect` / `stroke_rounded_rect` / `draw_text` directly, so no
+// adapter trait object is needed.
 
 /// Phase 2.3.1b — pure-scale 3×2 matrix used as the per-frame base
 /// transform. Free function so caller sites avoid an extra `&self` borrow

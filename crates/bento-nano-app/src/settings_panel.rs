@@ -1071,6 +1071,9 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
         + settings_updater_content_height(flags.updater_kind)
         + settings_backup_content_height(flags.backup_row_count)
         + settings_plugins_content_height(flags.plugin_row_count)
+        // M6-UI — §3 Appearance grid flows last in the nano body order; its
+        // height is body-width-driven (4-col card grid) so it takes `viewport`.
+        + settings_appearance_content_height(viewport)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -2646,6 +2649,93 @@ pub fn settings_plugins_content_height(plugin_row_count: usize) -> f32 {
             + SETTINGS_PLUGIN_CARD_GAP * (rows as f32 - 1.0)
     };
     base + list + SETTINGS_SECTION_GAP
+}
+
+// ── M6-UI 2026-05-29 — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
+//
+// Sits AFTER the Plugins §11 section in the (currently shipped) nano body
+// order. The grid geometry (group headings + 17 ThemeCards + accent swatch
+// row) is owned by `crate::theme_picker::appearance_layout`, which is body-
+// width-driven and fully `Copy` (fixed-cap `[Rect; N]`, no `Vec` — §10). These
+// helpers only resolve the section's scroll-space ANCHOR (so paint / hit /
+// scroll all agree) and the content-width fed to the layout.
+//
+// The section flows inside the body D2D scroll-clip (`push_clip(body_rect)`),
+// so partial rows at the body edge are masked exactly like every other section.
+
+/// M6-UI — the §3 Appearance group title rect. Anchors off the Plugins
+/// section's bottom (its last laid-out element is the plugin list, whose bottom
+/// is `plugins_content_height − section_gap` below the plugins title) plus a
+/// section gap. Takes the full flag set so its Y follows whatever rows above it
+/// are currently visible.
+pub fn settings_appearance_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let plugins_label = settings_plugins_label_rect(viewport, scroll_offset_y, flags);
+    // Bottom of the plugins section content, excluding its trailing pad gap.
+    let plugins_bottom = plugins_label.y
+        + settings_plugins_content_height(flags.plugin_row_count)
+        - SETTINGS_SECTION_GAP;
+    let body = settings_body_rect(viewport);
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: plugins_bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M6-UI — content width fed to `theme_picker::appearance_layout` (body width
+/// minus the two row pads). The 4-col card width derives from this.
+pub fn settings_appearance_inner_width(viewport: Size) -> f32 {
+    let body = settings_body_rect(viewport);
+    (body.width - SETTINGS_ROW_PAD_X * 2.0).max(0.0)
+}
+
+/// M6-UI — scroll-space origin (top-left of the grid, below the group title +
+/// the picker label) for `theme_picker::appearance_layout`. The renderer + the
+/// hit-tester both call this so the inline layout shares one anchor.
+pub fn settings_appearance_grid_origin(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> crate::theme_picker::Point {
+    let label = settings_appearance_label_rect(viewport, scroll_offset_y, flags);
+    crate::theme_picker::Point {
+        x: label.x,
+        // Group title + a "Choose Theme" picker label line precede the grid.
+        y: label.bottom() + SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M6-UI — the "选择主题 / Choose Theme" picker-label rect (between the
+/// Appearance group title and the grid).
+pub fn settings_appearance_picker_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let label = settings_appearance_label_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M6-UI — height the §3 Appearance section contributes to
+/// `settings_body_content_height`: the group title + the picker label + the
+/// grid/accent layout `total_height` + a trailing section gap. PURE — the grid
+/// height delegates to `theme_picker::appearance_content_height` (single source
+/// of truth) for the given body width; no global state is read.
+pub fn settings_appearance_content_height(viewport: Size) -> f32 {
+    SETTINGS_SECTION_LABEL_H
+        + SETTINGS_SECTION_LABEL_H
+        + crate::theme_picker::appearance_content_height(settings_appearance_inner_width(viewport))
+        + SETTINGS_SECTION_GAP
 }
 
 #[cfg(test)]

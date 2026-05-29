@@ -4905,7 +4905,7 @@ fn restore_general_bool_cell(
 /// the write completes the dirty flag clears, leaving the panel in a
 /// "just-saved" state until the next toggle.
 fn save_settings_general(root: &AppRoot) {
-    let (dirty, values, perf_startup) = {
+    let (dirty, values, perf_startup, accent_draft) = {
         let app = root.app.borrow();
         let dirty = app.settings_dirty.get();
         let values = (
@@ -4929,7 +4929,10 @@ fn save_settings_general(root: &AppRoot) {
             app.safe_start_after_hibernation.get(),
             app.hibernate_resume_delay_ms.get(),
         );
-        (dirty, values, perf_startup)
+        // M6-UI — §3 Appearance accent draft, captured under the same borrow so
+        // Save flushes it in the same batch as the General/Perf/Startup rows.
+        let accent_draft = app.settings_draft_accent_color.borrow().clone();
+        (dirty, values, perf_startup, accent_draft)
     };
     if !dirty {
         return;
@@ -4947,6 +4950,7 @@ fn save_settings_general(root: &AppRoot) {
         let app = root.app.borrow();
         app.settings_dirty.set(false);
         app.settings_snapshot.borrow_mut().take();
+        app.settings_draft_accent_color.borrow_mut().take();
         return;
     };
     let Ok(mut vault) = mtx.lock() else {
@@ -4957,6 +4961,7 @@ fn save_settings_general(root: &AppRoot) {
         let app = root.app.borrow();
         app.settings_dirty.set(false);
         app.settings_snapshot.borrow_mut().take();
+        app.settings_draft_accent_color.borrow_mut().take();
         return;
     };
     let (ghost, startup, taskbar, auto_group, portable) = values;
@@ -5028,6 +5033,15 @@ fn save_settings_general(root: &AppRoot) {
         SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS,
         bento_nano_backend::config_vault::SettingValue::Int(hibernate_delay as i64),
     );
+    // M6-UI — §3 Appearance accent colour. Tauri persists the picked hex under
+    // the `accent_color` settings key (`tauri_settings.rs` migrates it on load).
+    // Only write when the user actually picked a swatch this session.
+    if let Some(accent) = accent_draft.as_ref() {
+        vault.set_setting(
+            "accent_color",
+            bento_nano_backend::config_vault::SettingValue::Str(accent.clone()),
+        );
+    }
     if let Err(error) = vault.flush() {
         tracing::warn!(
             target: "bentodesk::vault",
@@ -5040,6 +5054,13 @@ fn save_settings_general(root: &AppRoot) {
     let app = root.app.borrow();
     app.settings_dirty.set(false);
     app.settings_snapshot.borrow_mut().take();
+    // M6-UI — fold the saved accent into the live `theme_base_accent` so the
+    // ringed swatch + zone accents reflect the persisted value, then clear the
+    // in-flight draft (Save consumes it).
+    if let Some(accent) = accent_draft {
+        *app.theme_base_accent.borrow_mut() = Some(accent);
+    }
+    app.settings_draft_accent_color.borrow_mut().take();
 }
 
 /// M1a 2026-05-29 — discard pending General-section edits by replaying the
@@ -5054,6 +5075,9 @@ fn cancel_settings_general(root: &AppRoot) {
         app.restore_settings(&snap);
     }
     app.settings_dirty.set(false);
+    // M6-UI — discard the in-flight §3 Appearance accent draft (Cancel reverts
+    // the edit; the persisted `theme_base_accent` is untouched).
+    app.settings_draft_accent_color.borrow_mut().take();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5448,63 +5472,14 @@ fn queue_active_theme_cycle(root: &AppRoot, hwnd: HWND) {
     }
 }
 
-// Wave J1b — picker preset ↔ backend theme id mapping. The ThemePicker
-// visual layer ships ten built-in presets while `bento_nano_backend::themes`
-// only resolves three real builtins ("ocean-blue", "rose-gold",
-// "forest-green") plus "dark"/"light". The picker offers a wider visual
-// palette than backend can actually paint today, so the table below maps
-// only the matchable presets and falls back to a status-only preview for
-// the rest. Pure / allocation-free.
-const PICKER_TO_BACKEND: &[(u8, &str)] = &[
-    (0, "dark"),
-    (3, "ocean-blue"),
-    (4, "forest-green"),
-    (6, "rose-gold"),
-];
-
-#[inline]
-fn backend_theme_id_for_picker_index(index: u8) -> Option<&'static str> {
-    let mut i = 0;
-    while i < PICKER_TO_BACKEND.len() {
-        if PICKER_TO_BACKEND[i].0 == index {
-            return Some(PICKER_TO_BACKEND[i].1);
-        }
-        i += 1;
-    }
-    None
-}
-
-#[inline]
-fn picker_index_for_backend_id(backend_id: &str) -> u8 {
-    let mut i = 0;
-    while i < PICKER_TO_BACKEND.len() {
-        if PICKER_TO_BACKEND[i].1 == backend_id {
-            return PICKER_TO_BACKEND[i].0;
-        }
-        i += 1;
-    }
-     0
-}
-
-/// English short label for picker preset `index` — used in the status row
-/// when no backend theme matches. Mirrors the Tauri 1.2.4 reference labels;
-/// the popup itself still draws the i18n-resolved swatch names.
-#[inline]
-fn picker_preset_display_name(index: u8) -> &'static str {
-    match index {
-        0 => "Default",
-        1 => "Daylight",
-        2 => "Sunset",
-        3 => "Ocean",
-        4 => "Forest",
-        5 => "Lavender",
-        6 => "Rose",
-        7 => "Midnight",
-        8 => "Monochrome",
-        9 => "Ember",
-        _ => "Unknown",
-    }
-}
+// M6-UI (2026-05-29) — the Wave J1b popup picker↔backend mapping table
+// (`PICKER_TO_BACKEND`) and its three lookup helpers
+// (`backend_theme_id_for_picker_index` / `picker_index_for_backend_id` /
+// `picker_preset_display_name`) were removed: §3 Appearance is now the inline
+// grid. Each ThemeCard carries its own stable `theme_id`
+// (`theme_picker::BUILTIN_THEMES[i].theme_id`) which routes straight through
+// M6a's `apply_active_theme_by_id` (all 17 builtins, no partial-preview
+// fallback), so no index↔id translation table is needed.
 
 fn queue_zone_display_mode_cycle(root: &AppRoot) {
     let next_mode = root.app.borrow().zone_display_mode.get().next();
@@ -11873,7 +11848,10 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         }
         ui::SettingsHit::OpenThemeBasePalette => Some(SmolStr::new_static("Choose theme accent")),
         ui::SettingsHit::ImportTheme => Some(SmolStr::new_static("Import theme JSON file")),
-        ui::SettingsHit::CycleActiveTheme => Some(SmolStr::new_static("Switch active theme")),
+        // M6-UI — inline §3 Appearance grid hover tooltips (replaces the
+        // removed `CycleActiveTheme` / `Picker*` arms).
+        ui::SettingsHit::SelectTheme(_) => Some(SmolStr::new_static("Apply this theme")),
+        ui::SettingsHit::SelectAccent(_) => Some(SmolStr::new_static("Set accent color")),
         ui::SettingsHit::CycleZoneDisplayMode => {
             Some(SmolStr::new_static("Cycle zone display mode"))
         }
@@ -11900,11 +11878,6 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
             Some(SmolStr::new_static("Restore recovery bundle"))
         }
         ui::SettingsHit::Close => Some(SmolStr::new_static("Close settings")),
-        ui::SettingsHit::PickerThumbnail(_) => Some(SmolStr::new_static("Pick theme preset")),
-        ui::SettingsHit::PickerAccent => Some(SmolStr::new_static("Edit accent color")),
-        ui::SettingsHit::PickerReset => Some(SmolStr::new_static("Reset theme to Default")),
-        ui::SettingsHit::PickerSave => Some(SmolStr::new_static("Save theme selection")),
-        ui::SettingsHit::ClosePicker => None,
         ui::SettingsHit::ToggleDesktopEmbed => Some(SmolStr::new_static("Toggle desktop embed")),
         ui::SettingsHit::ToggleAutostart => Some(SmolStr::new_static("Toggle run-at-startup")),
         ui::SettingsHit::ToggleShowInTaskbar => Some(SmolStr::new_static("Toggle show in taskbar")),
@@ -13234,80 +13207,46 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     request_redraw(hwnd);
                 }
             },
-            ui::SettingsHit::CycleActiveTheme => {
-                // Wave J1b — clicking the Row 5 chip toggles the swatch
-                // popup instead of immediately cycling through every
-                // available theme. The popup hosts thumbnail / accent /
-                // reset / save controls; keyboard / tray paths can still
-                // call `queue_active_theme_cycle` directly when needed.
-                let app = root.app.borrow();
-                let new_state = !app.theme_picker_open.get();
-                app.theme_picker_open.set(new_state);
-                // Seed the highlighted swatch from the currently active
-                // theme id so the popup opens on a sensible preset rather
-                // than always Default.
-                if new_state {
-                    let current_id = app.active_theme_id.borrow().clone();
-                    let initial = picker_index_for_backend_id(current_id.as_str());
-                    app.theme_picker_selected.set(initial);
-                }
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::PickerThumbnail(index) => {
-                let app = root.app.borrow();
-                app.theme_picker_selected.set(index);
-                drop(app);
-                if let Some(backend_id) = backend_theme_id_for_picker_index(index) {
+            ui::SettingsHit::SelectTheme(id) => {
+                // M6-UI — §3 Appearance grid: a ThemeCard click re-skins the
+                // app live end-to-end. Resolve the preset's stable string
+                // theme id and route it through M6a's `apply_active_theme_by_id`
+                // (all 17 builtins resolve to a byte-exact PaletteTauri +
+                // ThemeTokens). Also dispatch the backend `SetActiveTheme` so
+                // the choice persists through the config vault, and mark the
+                // panel dirty so Save lights up (Tauri `setTheme(id); setDirty`).
+                if let Some(preset) =
+                    bento_nano_app::theme_picker::BUILTIN_THEMES.iter().find(|p| p.id == id)
+                {
+                    let theme_id = preset.theme_id;
+                    let app = root.app.borrow();
+                    let changed = app.apply_active_theme_by_id(theme_id).unwrap_or(false);
+                    app.settings_dirty.set(true);
+                    drop(app);
+                    // Persist via the backend loader (writes `active_theme`).
                     root.dispatcher
-                        .push(Command::SetActiveTheme(SmolStr::new_static(backend_id)));
-                } else {
-                    // No matching backend builtin for this visual preset
-                    // (eight of the ten swatches are bespoke). Surface a
-                    // visible status so the user knows the click registered.
-                    let name = picker_preset_display_name(index);
-                    set_theme_setting_success(
-                        root,
-                        SmolStr::new(format!("Theme preset {name} preview")),
-                    );
+                        .push(Command::SetActiveTheme(SmolStr::new_static(theme_id)));
+                    if changed {
+                        request_redraw(hwnd);
+                    } else {
+                        // Re-selecting the active theme still re-arms Save +
+                        // repaints the dirty footer.
+                        request_redraw(hwnd);
+                    }
                 }
-                let app = root.app.borrow();
-                app.theme_picker_open.set(false);
-                drop(app);
-                request_redraw(hwnd);
             }
-            ui::SettingsHit::PickerAccent => {
-                log_static("settings: PickerAccent producer\n");
-                root.dispatcher.push(Command::OpenPalettePicker {
-                    target: PaletteTarget::ThemeBase,
-                });
-                let app = root.app.borrow();
-                app.theme_picker_open.set(false);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::PickerReset => {
-                // Reset → Default preset (highlight 0) + dispatch backend
-                // default theme so the active surface actually reverts.
-                let app = root.app.borrow();
-                app.theme_picker_selected.set(0);
-                app.theme_picker_open.set(false);
-                drop(app);
-                root.dispatcher
-                    .push(Command::SetActiveTheme(SmolStr::new_static("dark")));
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::PickerSave => {
-                let app = root.app.borrow();
-                app.theme_picker_open.set(false);
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::ClosePicker => {
-                let app = root.app.borrow();
-                app.theme_picker_open.set(false);
-                drop(app);
-                request_redraw(hwnd);
+            ui::SettingsHit::SelectAccent(index) => {
+                // M6-UI — §3 Appearance accent row (Control B): write the picked
+                // VIBRANT swatch hex into the in-flight draft + mark dirty. The
+                // value persists on Save via the `accent_color` config-vault key
+                // (wired in the SaveSettings path below).
+                if let Some(hex) = bento_nano_app::theme_picker::accent_swatch_hex(index as usize) {
+                    let app = root.app.borrow();
+                    *app.settings_draft_accent_color.borrow_mut() = Some(SmolStr::new_static(hex));
+                    app.settings_dirty.set(true);
+                    drop(app);
+                    request_redraw(hwnd);
+                }
             }
             ui::SettingsHit::CycleZoneDisplayMode => {
                 queue_zone_display_mode_cycle(root);

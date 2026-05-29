@@ -309,6 +309,39 @@ pub mod ids {
     // hint here; nano has no existing equivalent string, so this id is appended
     // in lockstep with `i18n_en_us`.
     pub const SOURCE_EMPTY_PLACEHOLDER: StringId = StringId(206);
+    // 207..231 M6-UI (2026-05-29) — §3 Appearance inline theme grid
+    // (`SettingsPanel.tsx:396-536`). Appended in lockstep with `i18n_en_us`
+    // (same index, same order) per the positional-array contract; the
+    // `lookup_tables_have_matching_length` test enforces parity. 4 family
+    // group headings (207-210), the 17 Tauri theme display names (211-227),
+    // the Appearance group title (228), the theme-picker label (229) and the
+    // editable accent-colour row label (230). Developer Options (custom-theme
+    // textarea + Import/Export) is deferred (no nano keyboard/text-input infra
+    // + no JSON theme parser), so its ids are NOT added.
+    pub const THEME_GROUP_ROUNDED: StringId = StringId(207);
+    pub const THEME_GROUP_SOLID: StringId = StringId(208);
+    pub const THEME_GROUP_ANGULAR: StringId = StringId(209);
+    pub const THEME_GROUP_PERSONALITY: StringId = StringId(210);
+    pub const THEME_NAME_DARK: StringId = StringId(211);
+    pub const THEME_NAME_LIGHT: StringId = StringId(212);
+    pub const THEME_NAME_MIDNIGHT: StringId = StringId(213);
+    pub const THEME_NAME_FOREST: StringId = StringId(214);
+    pub const THEME_NAME_SUNSET: StringId = StringId(215);
+    pub const THEME_NAME_FROSTED: StringId = StringId(216);
+    pub const THEME_NAME_OCEAN_BLUE: StringId = StringId(217);
+    pub const THEME_NAME_ROSE_GOLD: StringId = StringId(218);
+    pub const THEME_NAME_FOREST_GREEN: StringId = StringId(219);
+    pub const THEME_NAME_SOLID: StringId = StringId(220);
+    pub const THEME_NAME_ORDER: StringId = StringId(221);
+    pub const THEME_NAME_FLAT: StringId = StringId(222);
+    pub const THEME_NAME_BRUTALISM: StringId = StringId(223);
+    pub const THEME_NAME_EDITORIAL: StringId = StringId(224);
+    pub const THEME_NAME_NEO: StringId = StringId(225);
+    pub const THEME_NAME_TERMINAL: StringId = StringId(226);
+    pub const THEME_NAME_CYBERPUNK: StringId = StringId(227);
+    pub const SETTINGS_GROUP_APPEARANCE: StringId = StringId(228);
+    pub const THEME_PICKER_LABEL: StringId = StringId(229);
+    pub const SETTINGS_ACCENT_COLOR: StringId = StringId(230);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -568,5 +601,33 @@ pub static ZH_CN: LookupTable = LookupTable {
         // 206 M1i fidelity — empty `.desktop-source-empty` placeholder; mirrors
         // Tauri's reuse of the desktop-path format hint.
         "C:\\Users\\...\\Desktop", // SOURCE_EMPTY_PLACEHOLDER (206)
+        // 207..231 M6-UI — §3 Appearance inline theme grid
+        // (`SettingsPanel.tsx:396-536`, zh-CN.ts:163-183). Group headings,
+        // the 17 theme display names, the Appearance group title, the
+        // theme-picker label and the accent-colour row label.
+        "圆角玻璃",   // THEME_GROUP_ROUNDED (207)
+        "实心",       // THEME_GROUP_SOLID (208)
+        "方角现代",   // THEME_GROUP_ANGULAR (209)
+        "个性",       // THEME_GROUP_PERSONALITY (210)
+        "深色",       // THEME_NAME_DARK (211)
+        "浅色",       // THEME_NAME_LIGHT (212)
+        "午夜",       // THEME_NAME_MIDNIGHT (213)
+        "森林",       // THEME_NAME_FOREST (214)
+        "日落",       // THEME_NAME_SUNSET (215)
+        "毛玻璃",     // THEME_NAME_FROSTED (216)
+        "海洋蓝",     // THEME_NAME_OCEAN_BLUE (217)
+        "玫瑰金",     // THEME_NAME_ROSE_GOLD (218)
+        "森林绿",     // THEME_NAME_FOREST_GREEN (219)
+        "纯色",       // THEME_NAME_SOLID (220)
+        "秩序",       // THEME_NAME_ORDER (221)
+        "扁平",       // THEME_NAME_FLAT (222)
+        "粗野派",     // THEME_NAME_BRUTALISM (223)
+        "杂志",       // THEME_NAME_EDITORIAL (224)
+        "新拟态",     // THEME_NAME_NEO (225)
+        "终端",       // THEME_NAME_TERMINAL (226)
+        "赛博朋克",   // THEME_NAME_CYBERPUNK (227)
+        "外观",       // SETTINGS_GROUP_APPEARANCE (228)
+        "选择主题",   // THEME_PICKER_LABEL (229)
+        "强调色",     // SETTINGS_ACCENT_COLOR (230)
     ],
 };
