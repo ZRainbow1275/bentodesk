@@ -39,6 +39,17 @@
 
 use crate::{Color, Shadow};
 
+// M6a — the 15 remaining builtin theme palettes live in a submodule so this
+// file stays under the §15 800-line cap. Re-exported at the `tokens` root so
+// callers keep using `style::tokens::PALETTE_<ID>`.
+pub mod theme_palettes;
+
+pub use theme_palettes::{
+    PALETTE_BRUTALISM, PALETTE_CYBERPUNK, PALETTE_EDITORIAL, PALETTE_FLAT, PALETTE_FOREST,
+    PALETTE_FOREST_GREEN, PALETTE_FROSTED, PALETTE_MIDNIGHT, PALETTE_NEO, PALETTE_OCEAN_BLUE,
+    PALETTE_ORDER, PALETTE_ROSE_GOLD, PALETTE_SOLID, PALETTE_SUNSET, PALETTE_TERMINAL,
+};
+
 // =============================================================================
 // Palette — surface / border / text / accent / badge / scrim.
 //
@@ -181,6 +192,36 @@ pub const PALETTE_LIGHT: PaletteTauri = PaletteTauri {
     // Light tooltip — white at 0.9 alpha; mirrors dark behaviour.
     tooltip_bg: Color::from_u8(0xFF, 0xFF, 0xFF, 0xE6),
 };
+
+/// M6a — resolve a builtin theme id to its authored `PaletteTauri`.
+///
+/// Matches all 17 builtin ids 1:1 to their byte-exact const. Unknown ids
+/// (custom JSON themes) return `None`; the app crate then derives a palette
+/// from the live `PaletteTokens` instead. Returns `Copy`, no allocation
+/// (§10); panic-free (§11).
+pub fn palette_tauri_for_theme(theme_id: &str) -> Option<PaletteTauri> {
+    let palette = match theme_id {
+        "dark" => PALETTE_DARK,
+        "light" => PALETTE_LIGHT,
+        "midnight" => PALETTE_MIDNIGHT,
+        "forest" => PALETTE_FOREST,
+        "sunset" => PALETTE_SUNSET,
+        "frosted" => PALETTE_FROSTED,
+        "ocean-blue" => PALETTE_OCEAN_BLUE,
+        "rose-gold" => PALETTE_ROSE_GOLD,
+        "forest-green" => PALETTE_FOREST_GREEN,
+        "solid" => PALETTE_SOLID,
+        "order" => PALETTE_ORDER,
+        "flat" => PALETTE_FLAT,
+        "brutalism" => PALETTE_BRUTALISM,
+        "editorial" => PALETTE_EDITORIAL,
+        "neo" => PALETTE_NEO,
+        "terminal" => PALETTE_TERMINAL,
+        "cyberpunk" => PALETTE_CYBERPUNK,
+        _ => return None,
+    };
+    Some(palette)
+}
 
 /// Acrylic fallback per parent PRD D5 — solid `rgba(20,20,20,0.55)` glass tint
 /// when Mica/Acrylic runtime is unavailable. Sits at module root so the
@@ -710,6 +751,21 @@ mod tests {
             PALETTE_DARK.minibar_gradient_top,
             PALETTE_DARK.surface_zen,
         );
+    }
+
+    // --- M6a: byte-parity anchors for the lookup fn. The full 17-id lookup +
+    //         polarity coverage lives in `theme_palettes::tests` (keeps this
+    //         module under the §15 800-line cap). ---
+
+    #[test]
+    fn lookup_dark_is_byte_identical() {
+        // The dark theme must stay BYTE-IDENTICAL — this is the safety net.
+        assert_eq!(palette_tauri_for_theme("dark"), Some(PALETTE_DARK));
+    }
+
+    #[test]
+    fn lookup_light_is_byte_identical() {
+        assert_eq!(palette_tauri_for_theme("light"), Some(PALETTE_LIGHT));
     }
 
     // --- Coverage marker for Wave A ledger ---

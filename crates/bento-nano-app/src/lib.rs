@@ -19,6 +19,7 @@ pub mod picker_geometry;
 pub mod render;
 pub mod settings_panel;
 pub mod state;
+pub mod theme_bridge;
 pub mod theme_picker;
 pub mod widgets;
 pub mod window_registry;

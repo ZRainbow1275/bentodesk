@@ -53,7 +53,15 @@ pub struct ItemCardChrome {
 impl ItemCardChrome {
     /// Build ItemCard chrome from explicit active palette tokens.
     pub fn from_palette(palette: PaletteTokens) -> Self {
-        Self::from_tokens(palette, radius::DEFAULT)
+        // Dark-default surface_subtle / text_secondary so callers that only
+        // have a `PaletteTokens` keep the pre-M6a byte-exact dark card.
+        use bento_nano_style::tokens::PALETTE_DARK;
+        Self::from_tokens(
+            palette,
+            radius::DEFAULT,
+            PALETTE_DARK.surface_subtle,
+            PALETTE_DARK.text_secondary,
+        )
     }
 
     /// Build ItemCard chrome from explicit active theme token groups.
@@ -65,21 +73,28 @@ impl ItemCardChrome {
     /// (was `text @0.82`); missing bg is softened toward Tauri's
     /// `rgba(239,68,68,0.08)` (was `danger @0.55`, far too strong).
     ///
-    /// The `--surface-subtle` / `--text-secondary` values are pulled from
-    /// the static `bento_nano_style::tokens` SSoT (the dark-theme Tauri
-    /// parity table the renderer already uses for the zone surface) so the
-    /// card matches the reference exactly rather than re-deriving an alpha
-    /// off the live palette.
-    pub fn from_tokens(palette: PaletteTokens, _radius: RadiusTokens) -> Self {
-        use bento_nano_style::tokens::{PALETTE_DARK, RADIUS};
+    /// M6a (2026-05-29) — `surface_subtle` (normal card fill) and
+    /// `text_secondary` (card name text) now arrive as explicit args from the
+    /// renderer's live `PaletteTauri` (`pal.surface_subtle` / `pal.text_secondary`)
+    /// so the card re-skins with the active theme. The dark-default values
+    /// reproduce the prior static `PALETTE_DARK` bytes 1:1 (cfg(test) callers
+    /// pass them explicitly to lock byte-parity). The leaf crate stays free of
+    /// any theme dependency — these are plain `Color`s.
+    pub fn from_tokens(
+        palette: PaletteTokens,
+        _radius: RadiusTokens,
+        surface_subtle: Color,
+        text_secondary: Color,
+    ) -> Self {
+        use bento_nano_style::tokens::RADIUS;
         Self {
             card_radius: BorderRadius::all(RADIUS.card),
-            normal_background: PALETTE_DARK.surface_subtle,
+            normal_background: surface_subtle,
             drag_source_background: with_alpha(palette.surface_alt, 0.18),
             ghost_background: with_alpha(palette.surface, 0.86),
             ghost_shadow: with_alpha(palette.scrim, 0.24),
             missing_background: with_alpha(palette.danger, 0.10),
-            text: PALETTE_DARK.text_secondary,
+            text: text_secondary,
             icon_text: with_alpha(palette.text, 0.94),
         }
     }
@@ -308,7 +323,12 @@ mod tests {
             full: BorderRadius::all(999.0),
         };
 
-        let chrome = ItemCardChrome::from_tokens(palette, radius);
+        let chrome = ItemCardChrome::from_tokens(
+            palette,
+            radius,
+            bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+        );
 
         assert_eq!(
             chrome.card_radius,

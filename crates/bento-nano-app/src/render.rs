@@ -662,9 +662,11 @@ impl Renderer {
             return Ok(());
         }
         // Wave E: Tauri SSoT tokens for highlight overlay accents.
+        // M6a — re-skin from the live theme palette (bound once per fn, §10).
         use bento_nano_style::tokens as style_tokens;
-        let fill = highlight_overlay::fill_color_from_tauri_palette(style_tokens::PALETTE_DARK);
-        let outline = highlight_overlay::outline_color_from_tauri_palette(style_tokens::PALETTE_DARK);
+        let pal = app.active_theme_tauri();
+        let fill = highlight_overlay::fill_color_from_tauri_palette(pal);
+        let outline = highlight_overlay::outline_color_from_tauri_palette(pal);
         let radius = highlight_overlay::target_radius_from_tauri_tokens(style_tokens::RADIUS);
         for target in overlay.targets().iter().copied() {
             let paint = highlight_overlay::paint_rect(target);
@@ -681,10 +683,8 @@ impl Renderer {
         }
         if !overlay.pulses().is_empty() {
             let phase = overlay.current_pulse_phase();
-            let halo =
-                highlight_overlay::pulse_halo_color_from_tauri_palette(style_tokens::PALETTE_DARK, phase);
-            let core =
-                highlight_overlay::pulse_core_color_from_tauri_palette(style_tokens::PALETTE_DARK);
+            let halo = highlight_overlay::pulse_halo_color_from_tauri_palette(pal, phase);
+            let core = highlight_overlay::pulse_core_color_from_tauri_palette(pal);
             for target in overlay.pulses() {
                 let halo_rect = highlight_overlay::pulse_halo_rect(target, phase);
                 if halo_rect.width > 0.0 && halo_rect.height > 0.0 {
@@ -946,7 +946,7 @@ impl Renderer {
         // instead of the legacy `bento-nano-theme` palette.
         use bento_nano_style::tokens as style_tokens;
         let chrome = stack_tray::StackTrayChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -1215,10 +1215,18 @@ impl Renderer {
         // SAFETY: `GetTickCount` is total + thread-safe.
         let anim_now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
         let palette = app.active_theme_palette();
+        // M6a — live Tauri-parity palette for this frame. Bound ONCE here and
+        // threaded into the pill / morph paint helpers so the whole zone
+        // surface re-skins with the active theme (§10: Copy, no re-borrow).
+        let pal = app.active_theme_tauri();
         let zone_chrome =
             zone_surface_geometry::ZoneSurfaceChrome::from_radius(app.active_theme_radius());
-        let item_chrome =
-            item_card::ItemCardChrome::from_tokens(palette, app.active_theme_radius());
+        let item_chrome = item_card::ItemCardChrome::from_tokens(
+            palette,
+            app.active_theme_radius(),
+            pal.surface_subtle,
+            pal.text_secondary,
+        );
         // V-9 round 4 (2026-05-21) — Tauri 1.2.4 reference (frame_010 / 015
         // of resource/屏幕录制 2026-05-20 161936.mp4) paints the expanded
         // zone surface with `--surface-dialog` (rgba 12,12,18,0.92) AND
@@ -1229,7 +1237,7 @@ impl Renderer {
         // and use the token directly. The 0.38/0.34 baseline (pre-round-2)
         // was the opposite failure: too transparent, desktop icons visible
         // at full saturation. The 0.92 token alpha is the Tauri-pinned mid.
-        let zone_fill_idle = bento_nano_style::tokens::PALETTE_DARK.surface_dialog;
+        let zone_fill_idle = pal.surface_dialog;
         let zone_fill_active = with_alpha(palette.accent, 0.92);
         let zone_title = with_alpha(palette.text, 0.88);
         let zone_icon_chip = with_alpha(palette.surface_alt, 0.58);
@@ -1307,6 +1315,7 @@ impl Renderer {
                     expanded_rect,
                     morph,
                     theme_base_accent.as_deref(),
+                    pal,
                 )?;
                 continue;
             }
@@ -1330,6 +1339,7 @@ impl Renderer {
                     hover_t,
                     press_t,
                     anim_now_ms,
+                    pal,
                 )?;
                 continue;
             }
@@ -1452,7 +1462,7 @@ impl Renderer {
                         .as_deref()
                         .or(theme_base_accent.as_deref())
                         .and_then(parse_hex_color)
-                        .unwrap_or(bento_nano_style::tokens::PALETTE_DARK.badge_bg);
+                        .unwrap_or(pal.badge_bg);
                     self.fill_rounded_rect(
                         badge_rect,
                         badge_fill,
@@ -1470,7 +1480,7 @@ impl Renderer {
                     self.draw_text(
                         count_str.as_str(),
                         count_rect,
-                        bento_nano_style::tokens::PALETTE_DARK.text_primary,
+                        pal.text_primary,
                     )?;
                 }
             }
@@ -1793,6 +1803,12 @@ impl Renderer {
     /// `SHADOW`, `ACRYLIC_FALLBACK`) and `zone_pill_geometry::ZonePillLayout`
     /// to paint that surface in our D2D pump. Per parent PRD D5, acrylic is
     /// the solid `ACRYLIC_FALLBACK` tint only.
+    ///
+    /// M6a — the live `pal: PaletteTauri` is the 8th arg, threaded in from
+    /// `draw_zones` (bound once per frame, §10) so the pill re-skins with the
+    /// active theme. The paint inputs (zone / layout / anim channels / palette)
+    /// are all genuinely distinct, so the arity is allowed rather than bundled.
+    #[allow(clippy::too_many_arguments)]
     fn draw_zone_pill(
         &mut self,
         zone: &Zone,
@@ -1801,8 +1817,12 @@ impl Renderer {
         hover_t: f32,
         press_t: f32,
         anim_now_ms: u32,
+        pal: bento_nano_style::tokens::PaletteTauri,
     ) -> Result<(), RenderError> {
-        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, PALETTE_DARK};
+        // M6a — the live theme palette is passed in by `draw_zones` (bound
+        // once per frame). Read `pal.X` instead of the static `PALETTE_DARK`
+        // so the collapsed pill re-skins with the active theme.
+        use bento_nano_style::tokens::ACRYLIC_FALLBACK;
         // V-8 — compose hover + press into the final scale multiplier and
         // expand the pill rect about its center. Persisted geometry tokens
         // are NEVER mutated (hard constraint) — `scale_rect_centered`
@@ -1819,14 +1839,14 @@ impl Renderer {
         // the geometry, but the collapsed paint no longer fills them.
         // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
         self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
-        // Surface fill on top of the glass — `PALETTE_DARK.surface_zen`.
+        // Surface fill on top of the glass — `pal.surface_zen` (live theme).
         // V-8 — hover brightens the surface tone subtly (+8% on hover).
         let surface_brighten = 1.0 + hover_t * 0.08;
         let surface_color = Color {
-            r: (PALETTE_DARK.surface_zen.r * surface_brighten).min(1.0),
-            g: (PALETTE_DARK.surface_zen.g * surface_brighten).min(1.0),
-            b: (PALETTE_DARK.surface_zen.b * surface_brighten).min(1.0),
-            a: PALETTE_DARK.surface_zen.a,
+            r: (pal.surface_zen.r * surface_brighten).min(1.0),
+            g: (pal.surface_zen.g * surface_brighten).min(1.0),
+            b: (pal.surface_zen.b * surface_brighten).min(1.0),
+            a: pal.surface_zen.a,
         };
         self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
         // M2 S2a (2026-05-29) — Tauri's `.zen-capsule` carries a 1px solid
@@ -1835,7 +1855,7 @@ impl Renderer {
         // hairline edge. Pure-paint via the existing `stroke_rounded_rect`.
         self.stroke_rounded_rect(
             scaled_rect,
-            PALETTE_DARK.border_zen,
+            pal.border_zen,
             scaled_radius,
             1.0,
         )?;
@@ -1850,14 +1870,14 @@ impl Renderer {
         // raw name like "settings" → DWrite wrapped it to "set tin gs") to
         // `draw_icon_glyph`, which looks up the built-in `IconKind` and
         // renders the cached source SVG. Unknown names fall back to text.
-        self.draw_icon_glyph(zone.icon.as_ref(), layout.icon, PALETTE_DARK.text_primary)?;
+        self.draw_icon_glyph(zone.icon.as_ref(), layout.icon, pal.text_primary)?;
         // Label — zone.title in TEXT_PRIMARY. M2 R3 (2026-05-29) — Tauri's
         // `.zen-capsule__title` is single-line `white-space:nowrap`; the
         // proportional `draw_text` wrapped long names onto a second row.
         // Switched to `draw_text_no_wrap`, which disables DWrite word-wrap
         // and `…`-trims when the glyph run overflows — matching Tauri's
         // shrink-then-clip behaviour without the wrap regression.
-        self.draw_text_no_wrap(zone.title.as_ref(), layout.label, PALETTE_DARK.text_primary)?;
+        self.draw_text_no_wrap(zone.title.as_ref(), layout.label, pal.text_primary)?;
         // Count badge — M2 B3 (2026-05-29): bg follows Tauri
         // `var(--zone-accent, --badge-bg)` (zone accent tint when set, else
         // the neutral `--badge-bg`), and the count text is `--text-primary`
@@ -1865,7 +1885,7 @@ impl Renderer {
         let count = zone.items.len();
         let badge_fill = accent_hex
             .and_then(parse_hex_color)
-            .unwrap_or(PALETTE_DARK.badge_bg);
+            .unwrap_or(pal.badge_bg);
         self.fill_rounded_rect(
             layout.badge,
             badge_fill,
@@ -1881,7 +1901,7 @@ impl Renderer {
         self.draw_text(
             count_str.as_str(),
             badge_text_rect,
-            PALETTE_DARK.text_primary,
+            pal.text_primary,
         )?;
         // V-9 round 3 (2026-05-21) — Wave H2 status dot removed. User
         // flagged the blue dot at the top of every collapsed pill as a
@@ -1894,7 +1914,7 @@ impl Renderer {
         // / active / expanded zone. The dot fades in with hover_t and
         // covers the numeric count while the cursor is parked on the pill.
         // Position: centered on badge rect, diameter ~ badge height. Color:
-        // PALETTE_DARK.accent_green (#22C55E). The fill rounded-rect uses
+        // `pal.accent_green` (dark theme #22C55E). The fill rounded-rect uses
         // half-height radius to render a perfect circle. The count text is
         // still painted underneath; the dot just overlays it on hover.
         if hover_t > 0.0 {
@@ -1906,8 +1926,8 @@ impl Renderer {
                 height: dot_size,
             };
             let dot_color = Color {
-                a: PALETTE_DARK.accent_green.a * hover_t.clamp(0.0, 1.0),
-                ..PALETTE_DARK.accent_green
+                a: pal.accent_green.a * hover_t.clamp(0.0, 1.0),
+                ..pal.accent_green
             };
             self.fill_rounded_rect(
                 dot_rect,
@@ -1932,8 +1952,10 @@ impl Renderer {
         expanded_rect: bento_nano_style::Rect,
         morph: f32,
         theme_base_accent: Option<&str>,
+        pal: bento_nano_style::tokens::PaletteTauri,
     ) -> Result<(), RenderError> {
-        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, PALETTE_DARK, RADIUS, SHADOW};
+        // M6a — live theme palette passed in by `draw_zones` (§10).
+        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, RADIUS, SHADOW};
         let morph_clamped = morph.clamp(0.0, 1.0);
         let pill_rect = pill_layout.rect;
         let rect =
@@ -1964,7 +1986,7 @@ impl Renderer {
         self.fill_rounded_rect(shadow_outer, SHADOW.zen.color, border_radius)?;
         self.fill_rounded_rect(shadow_inner, SHADOW.zen_inner.color, border_radius)?;
         self.fill_rounded_rect(rect, ACRYLIC_FALLBACK, border_radius)?;
-        self.fill_rounded_rect(rect, PALETTE_DARK.surface_zen, border_radius)?;
+        self.fill_rounded_rect(rect, pal.surface_zen, border_radius)?;
         // Accent stripe (matches expanded chrome accent dot above the icon
         // band — drawn at the top of the morph so the eye picks up the zone
         // identity even during the transition).
@@ -1991,7 +2013,7 @@ impl Renderer {
             width: (rect.width - 20.0).max(0.0),
             height: title_height,
         };
-        let title_color = with_alpha(PALETTE_DARK.text_primary, 0.6 + 0.4 * morph_clamped);
+        let title_color = with_alpha(pal.text_primary, 0.6 + 0.4 * morph_clamped);
         self.draw_text(zone.title.as_ref(), title_rect, title_color)?;
         Ok(())
     }
@@ -2238,7 +2260,10 @@ impl Renderer {
         // as orphan paint paths gated on their own `*_open` Cells. They never
         // fire from M1 hit-test but compile-clean per Ruling B.
         use bento_nano_style::tokens as style_tokens;
-        let palette = style_tokens::PALETTE_DARK;
+        // M6a — read the live theme palette so the whole Settings paint (panel
+        // / header / footer / labels / accent / track) re-skins with the
+        // active theme. Bound once; `PaletteTauri: Copy` (§10).
+        let palette = app.active_theme_tauri();
         // A-path + V-3 (TL Ruling 2026-05-21): no fullscreen scrim — Tauri
         // 1.2.4 baseline (frame_060) leaves the desktop wallpaper visible
         // around the floating 420×580 modal. Panel/header/footer surfaces
@@ -4354,7 +4379,7 @@ impl Renderer {
         use bento_nano_style::tokens as style_tokens;
         let descriptor = tooltip::Tooltip::from_tauri_tokens(
             session.text,
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SPACING,
         );
@@ -4373,7 +4398,7 @@ impl Renderer {
         // top stop + 14 px radius — Wave A flagged gap).
         use bento_nano_style::tokens as style_tokens;
         let bar = bar.with_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SPACING,
         );
@@ -4697,7 +4722,7 @@ impl Renderer {
         // Wave D: consume Wave B Tauri-token SSoT.
         use bento_nano_style::tokens as style_tokens;
         let chrome = icon_picker::IconPickerChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -4809,7 +4834,7 @@ impl Renderer {
         // Wave D: consume Wave B Tauri-token SSoT.
         use bento_nano_style::tokens as style_tokens;
         let chrome = palette_picker::PalettePickerChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -4913,7 +4938,7 @@ impl Renderer {
         // Wave D: consume Wave B Tauri-token SSoT.
         use bento_nano_style::tokens as style_tokens;
         let chrome = capsule_picker::CapsulePickerChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -4997,7 +5022,7 @@ impl Renderer {
         // Wave E: Tauri SSoT tokens for the BulkManager panel.
         use bento_nano_style::tokens as style_tokens;
         let chrome = bulk_manager_panel::BulkManagerChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -5264,7 +5289,7 @@ impl Renderer {
         // Wave E: Tauri SSoT tokens for the Timeline panel.
         use bento_nano_style::tokens as style_tokens;
         let chrome = timeline_panel::TimelinePanelChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -5417,7 +5442,7 @@ impl Renderer {
             // Wave E: Tauri SSoT tokens for the inline snapshot thumbnail.
             use bento_nano_style::tokens as style_tokens;
             let thumbnail_chrome = snapshot_picker::SnapshotThumbnailChrome::from_tauri_tokens(
-                style_tokens::PALETTE_DARK,
+                app.active_theme_tauri(),
                 style_tokens::RADIUS,
             );
             self.draw_snapshot_thumbnail(&active.snapshot, thumbnail_rect, thumbnail_chrome)?;
@@ -5429,7 +5454,7 @@ impl Renderer {
         // Wave E: Tauri SSoT tokens for the Snapshot picker panel.
         use bento_nano_style::tokens as style_tokens;
         let chrome = snapshot_picker::SnapshotPickerChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -5942,7 +5967,7 @@ impl Renderer {
         // retained for back-compat callers (theme palette mutation tests).
         use bento_nano_style::tokens as style_tokens;
         let chrome = search_bar::SearchBarChrome::from_tauri_tokens(
-            style_tokens::PALETTE_DARK,
+            app.active_theme_tauri(),
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
@@ -6097,7 +6122,8 @@ impl Renderer {
         // helper so badges use `accent_green` / `accent_orange` / `text_muted`
         // per Wave A `search-bar-and-suggestor.md`.
         use bento_nano_style::tokens as style_tokens;
-        let palette = style_tokens::PALETTE_DARK;
+        // M6a — live theme palette for the suggestor panel chrome.
+        let palette = app.active_theme_tauri();
         let chrome = smart_group_suggestor::SmartGroupSuggestorChrome::from_tauri_tokens(
             palette,
             style_tokens::RADIUS,

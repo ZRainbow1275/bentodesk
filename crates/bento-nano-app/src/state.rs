@@ -17,8 +17,10 @@ use bento_nano_backend::{
 use bento_nano_layout::{LayoutEngine, LayoutError};
 use bento_nano_platform::MonitorInfo;
 use bento_nano_style::Size;
+use bento_nano_style::tokens::{PALETTE_DARK, PaletteTauri};
 use bento_nano_theme::{
-    DARK_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens, ThemeTokens, TypoTokens,
+    DARK_DEFAULT, LIGHT_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens,
+    THEMES, ThemeTokens, TypoTokens,
 };
 use bento_nano_tree::{NodeId, Tree, TreeError};
 use bento_nano_widget::WidgetNode;
@@ -85,6 +87,35 @@ pub fn slider_fraction_to_value(frac: f32, min: i32, max: i32, step: i32) -> i32
     }
     let steps = ((raw - min as f32) / step as f32).round() as i32;
     (min + steps * step).clamp(min, max)
+}
+
+/// M6a — English display name for a builtin theme id. The localized (zh)
+/// names land in M6-UI alongside the theme grid; this map only supplies a
+/// stable English label for the Settings active-theme row when a theme is
+/// applied by id without the backend loader. Unknown ids echo the id back.
+/// (No i18n table is touched — M6a adds no `StringId`.)
+pub fn builtin_theme_display_name(id: &str) -> SmolStr {
+    let name = match id {
+        "dark" => "Dark",
+        "light" => "Light",
+        "midnight" => "Midnight",
+        "forest" => "Forest",
+        "sunset" => "Sunset",
+        "frosted" => "Frosted",
+        "ocean-blue" => "Ocean Blue",
+        "rose-gold" => "Rose Gold",
+        "forest-green" => "Forest Green",
+        "solid" => "Solid",
+        "order" => "Order",
+        "flat" => "Flat",
+        "brutalism" => "Brutalism",
+        "editorial" => "Editorial",
+        "neo" => "Neo",
+        "terminal" => "Terminal",
+        "cyberpunk" => "Cyberpunk",
+        other => return SmolStr::new(other),
+    };
+    SmolStr::new_static(name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,6 +572,13 @@ pub struct AppState {
     /// a persisted theme id through `bento_nano_backend::themes`, then writes
     /// the converted tokens here only after the config-vault write succeeds.
     pub active_theme_tokens: RefCell<ThemeTokens>,
+    /// M6a — renderer-ready Tauri-parity palette for the active theme. The 17
+    /// builtins resolve to a byte-exact `PaletteTauri` const; custom JSON
+    /// themes derive one off `active_theme_tokens`. Populated at the same
+    /// `apply_active_theme` choke-point as `active_theme_tokens`, so boot
+    /// restore and live `SetActiveTheme` both keep it in lockstep. Read by
+    /// `active_theme_tauri()` (Copy, no per-frame alloc — §10).
+    pub active_theme_tauri: RefCell<PaletteTauri>,
     /// Theme picker rows discovered from built-ins and `{app_data}/themes`.
     pub available_themes: RefCell<Vec<ThemeOption>>,
     /// Visible status for full-theme selection and display-mode settings.
@@ -802,6 +840,7 @@ impl AppState {
             active_theme_id: RefCell::new(SmolStr::new_static("dark")),
             active_theme_name: RefCell::new(SmolStr::new_static("Dark")),
             active_theme_tokens: RefCell::new(DARK_DEFAULT.clone()),
+            active_theme_tauri: RefCell::new(PALETTE_DARK),
             available_themes: RefCell::new(Vec::new()),
             settings_theme_status: RefCell::new(None),
             zone_display_mode: Cell::new(ZoneDisplayMode::default()),
@@ -915,6 +954,13 @@ impl AppState {
         self.active_theme_tokens.borrow().palette
     }
 
+    /// M6a — the active theme's Tauri-parity palette. `PaletteTauri: Copy`, so
+    /// the renderer binds this ONCE per paint fn and reads slots by value
+    /// (no per-frame alloc, no repeated RefCell borrows — §10).
+    pub fn active_theme_tauri(&self) -> PaletteTauri {
+        *self.active_theme_tauri.borrow()
+    }
+
     pub fn active_theme_radius(&self) -> RadiusTokens {
         self.active_theme_tokens.borrow().radius
     }
@@ -933,6 +979,12 @@ impl AppState {
 
     pub fn apply_active_theme(&self, id: SmolStr, name: SmolStr, tokens: ThemeTokens) -> bool {
         let mut changed = false;
+        // M6a — resolve the Tauri-parity palette FIRST, while `id` + `tokens`
+        // are still borrowable (both are moved into their RefCells below). The
+        // 17 builtins hit a byte-exact const; custom JSON themes derive off the
+        // live tokens. This is the single choke-point both boot-restore and
+        // live `SetActiveTheme` route through, so one resolve covers both.
+        let tauri = crate::theme_bridge::resolve_palette_tauri(id.as_str(), &tokens.palette);
         {
             let mut current_id = self.active_theme_id.borrow_mut();
             if *current_id != id {
@@ -948,6 +1000,13 @@ impl AppState {
             }
         }
         {
+            let mut current_tauri = self.active_theme_tauri.borrow_mut();
+            if *current_tauri != tauri {
+                *current_tauri = tauri;
+                changed = true;
+            }
+        }
+        {
             let mut current_tokens = self.active_theme_tokens.borrow_mut();
             if *current_tokens != tokens {
                 *current_tokens = tokens;
@@ -955,6 +1014,40 @@ impl AppState {
             }
         }
         changed
+    }
+
+    /// M6a — apply ANY of the 17 builtin themes by id, end-to-end, without
+    /// going through the shell's backend loader.
+    ///
+    /// Sets `active_theme_id` / `active_theme_name`, the renderer `ThemeTokens`
+    /// (registry lookup for `dark`/`light`; the other 15 fall back to
+    /// `DARK_DEFAULT` / `LIGHT_DEFAULT` by polarity — documented partial, the
+    /// widget-layer tokens are not yet per-theme authored) and the byte-exact
+    /// `PaletteTauri` (resolved inside `apply_active_theme`).
+    ///
+    /// Returns `Some(changed)` for a known builtin id, `None` for an unknown
+    /// id (panic-free, §11 — caller decides whether to route to the custom
+    /// JSON loader instead).
+    pub fn apply_active_theme_by_id(&self, id: &str) -> Option<bool> {
+        // Builtin-only entry point: the id must be one of the 17. The exact
+        // `PaletteTauri` is re-resolved inside `apply_active_theme`.
+        let tauri = bento_nano_style::tokens::palette_tauri_for_theme(id)?;
+        // Renderer ThemeTokens: registry lookup first (dark/light have
+        // authored token sets); the remaining 15 use the matching-polarity
+        // default so widgets stay legible until per-theme tokens land.
+        let tokens = THEMES
+            .iter()
+            .find(|(theme_id, _)| *theme_id == id)
+            .map(|(_, tokens)| (*tokens).clone())
+            .unwrap_or_else(|| {
+                if tauri.is_dark {
+                    DARK_DEFAULT.clone()
+                } else {
+                    LIGHT_DEFAULT.clone()
+                }
+            });
+        let name = builtin_theme_display_name(id);
+        Some(self.apply_active_theme(SmolStr::new(id), name, tokens))
     }
 
     pub fn set_available_themes(&self, themes: Vec<ThemeOption>) -> bool {
@@ -1229,6 +1322,103 @@ mod tests {
             "Segoe UI Variable"
         );
         assert_eq!(app.active_theme_typography().sizes.md, 15.0);
+    }
+
+    #[test]
+    fn fresh_appstate_active_theme_tauri_is_dark_default() {
+        // Boot default must be byte-identical to PALETTE_DARK.
+        let app = AppState::new();
+        assert_eq!(
+            app.active_theme_tauri(),
+            bento_nano_style::tokens::PALETTE_DARK,
+        );
+    }
+
+    #[test]
+    fn apply_dark_by_id_yields_exact_palette_dark() {
+        let app = AppState::new();
+        // Move off dark first so the apply is observable as a change.
+        assert_eq!(app.apply_active_theme_by_id("ocean-blue"), Some(true));
+        assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
+        assert_eq!(
+            app.active_theme_tauri(),
+            bento_nano_style::tokens::PALETTE_DARK,
+        );
+        assert_eq!(app.active_theme_id.borrow().as_str(), "dark");
+    }
+
+    #[test]
+    fn apply_ocean_blue_by_id_yields_exact_palette_ocean_blue() {
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("ocean-blue"), Some(true));
+        assert_eq!(
+            app.active_theme_tauri(),
+            bento_nano_style::tokens::PALETTE_OCEAN_BLUE,
+        );
+        assert_eq!(app.active_theme_id.borrow().as_str(), "ocean-blue");
+        // ocean-blue has no authored ThemeTokens — falls back to the dark
+        // default by polarity (documented partial; widgets only).
+        assert_eq!(
+            app.active_theme_palette().bg,
+            bento_nano_theme::DARK_DEFAULT.palette.bg,
+        );
+    }
+
+    #[test]
+    fn apply_light_by_id_yields_exact_palette_light_and_polarity() {
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("light"), Some(true));
+        let pal = app.active_theme_tauri();
+        assert_eq!(pal, bento_nano_style::tokens::PALETTE_LIGHT);
+        assert!(!pal.is_dark);
+        // light HAS an authored ThemeTokens (registry) — uses LIGHT_DEFAULT.
+        assert_eq!(
+            app.active_theme_palette().bg,
+            bento_nano_theme::LIGHT_DEFAULT.palette.bg,
+        );
+    }
+
+    #[test]
+    fn apply_all_17_builtin_ids_resolves_exact_const() {
+        let app = AppState::new();
+        for id in [
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
+        ] {
+            assert!(app.apply_active_theme_by_id(id).is_some(), "{id} applied");
+            assert_eq!(
+                Some(app.active_theme_tauri()),
+                bento_nano_style::tokens::palette_tauri_for_theme(id),
+                "{id} active_theme_tauri must equal its authored const",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_unknown_id_returns_none_and_leaves_theme_unchanged() {
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("shell-purple"), None);
+        // Untouched — still the dark default.
+        assert_eq!(
+            app.active_theme_tauri(),
+            bento_nano_style::tokens::PALETTE_DARK,
+        );
+        assert_eq!(app.active_theme_id.borrow().as_str(), "dark");
     }
 
     /// α5 (S2, 2026-05-24) — pin AppState invariant that `theme_base_accent`
