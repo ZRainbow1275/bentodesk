@@ -1340,20 +1340,15 @@ impl Renderer {
                 height: zone.h as f32,
             };
             // Wave I2 — expanded body chrome (panel shadow / header band /
-            // divider / status dot / footer thumbs). Stack anchors keep
-            // their bespoke halo + shadow chrome below so we feed the helper
-            // the same zone rect either way; the shadow band is suppressed
-            // for anchors so we don't double-stamp shadows.
-            let stack_member_ids_for_footer = app.zones.stack_member_ids(zone.id);
-            let footer_thumb_count = stack_member_ids_for_footer
-                .as_ref()
-                .map(|ids| {
-                    ids.iter()
-                        .filter(|member_id| **member_id != zone.id)
-                        .count()
-                })
-                .unwrap_or(0);
-            let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone, footer_thumb_count);
+            // divider / count badge). M2 (05-29): the footer thumbnail strip
+            // (E-01) was deleted — Tauri's BentoPanel has no footer node.
+            // `stack_member_ids_for_anchor` is still bound here because the
+            // stack-anchor halo / "Stack ×N" badge / peek chrome below all
+            // read it. Stack anchors keep their bespoke halo + shadow chrome
+            // below; the shadow band is suppressed for anchors so we don't
+            // double-stamp shadows.
+            let stack_member_ids_for_anchor = app.zones.stack_member_ids(zone.id);
+            let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone);
             if !zone.is_stack_anchor() {
                 // SHADOW.expanded — single soft drop under the panel band so
                 // the expanded surface lifts off the desktop backdrop, mirror
@@ -1365,7 +1360,7 @@ impl Renderer {
                 )?;
             }
             if zone.is_stack_anchor() {
-                let member_count = stack_member_ids_for_footer
+                let member_count = stack_member_ids_for_anchor
                     .as_ref()
                     .map(|ids| ids.len())
                     .unwrap_or(1);
@@ -1439,40 +1434,43 @@ impl Renderer {
             };
             self.draw_text(&zone.title, title_rect, zone_title)?;
             let body_visible = app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
-            // V-14 (2026-05-22) — Tauri 1.2.4 reference frames 005/006/007/008
-            // /088 (`resource/屏幕录制 2026-05-20 161936.mp4`) paint a bright
-            // green status dot on the EXPANDED zone's top-right corner — the
-            // same #22C55E dot that overlays the collapsed pill's badge slot.
-            // Mirrors the `draw_zone_pill` hover-dot at ~line 1854. We sample
-            // the same `PillHover` channel here so a zone that was hovered
-            // into expansion keeps its dot lit, and `body_visible` forces it
-            // on for `Always` / `Click` display modes that don't transit
-            // through hover. Skipped for stack anchors — the "Stack ×N" badge
+            // M2 E-02 (2026-05-29) — Tauri's `PanelHeader` carries an item
+            // COUNT BADGE (`.panel-header__badge`), NOT a status dot. The
+            // V-14 green status dot was DELETED here (Tauri's expanded header
+            // has no dot). The badge mirrors the ZenCapsule badge style:
+            // radius 10 (`RADIUS.badge`), bg `var(--zone-accent, --badge-bg)`,
+            // 11px count text in `--text-primary`. Right-aligned in the
+            // header band. Skipped for stack anchors — the "Stack ×N" badge
             // below claims the same top-right slot (avoids overlap).
             if !zone.is_stack_anchor() {
-                let hover_t = {
-                    let anim = app.pill_animator.borrow();
-                    anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms)
-                };
-                let dot_alpha_scale = hover_t
-                    .max(if body_visible { 1.0 } else { 0.0 })
-                    .clamp(0.0, 1.0);
-                if dot_alpha_scale > 0.0 {
-                    let dot_rect = bento_nano_style::Rect {
-                        x: rect.right() - 20.0,
-                        y: rect.y + 14.0,
-                        width: 10.0,
-                        height: 10.0,
-                    };
-                    let accent_green = bento_nano_style::tokens::PALETTE_DARK.accent_green;
-                    let dot_color = bento_nano_style::Color {
-                        a: accent_green.a * dot_alpha_scale,
-                        ..accent_green
-                    };
+                let badge_rect = expanded_layout.header_badge;
+                if badge_rect.width > 0.0 && badge_rect.height > 0.0 {
+                    // Prefer the zone's accent tint (Tauri `--zone-accent`),
+                    // falling back to the neutral `--badge-bg`.
+                    let badge_fill = zone
+                        .accent_color
+                        .as_deref()
+                        .or(theme_base_accent.as_deref())
+                        .and_then(parse_hex_color)
+                        .unwrap_or(bento_nano_style::tokens::PALETTE_DARK.badge_bg);
                     self.fill_rounded_rect(
-                        dot_rect,
-                        dot_color,
-                        bento_nano_style::BorderRadius::all(5.0),
+                        badge_rect,
+                        badge_fill,
+                        bento_nano_style::BorderRadius::all(
+                            bento_nano_style::tokens::RADIUS.badge,
+                        ),
+                    )?;
+                    let count_str = format_small_count(zone.items.len());
+                    let count_rect = bento_nano_style::Rect {
+                        x: badge_rect.x + 4.0,
+                        y: badge_rect.y + 2.0,
+                        width: (badge_rect.width - 8.0).max(0.0),
+                        height: (badge_rect.height - 4.0).max(0.0),
+                    };
+                    self.draw_text(
+                        count_str.as_str(),
+                        count_rect,
+                        bento_nano_style::tokens::PALETTE_DARK.text_primary,
                     )?;
                 }
             }
@@ -1546,12 +1544,14 @@ impl Renderer {
             if !body_visible {
                 continue;
             }
-            // Wave I2 — divider hairline between the header band and the
-            // item grid. `with_alpha(palette.text, 0.10)` matches the
-            // Tauri 1.2.4 expanded-panel divider tint.
+            // Wave I2 / M2 E-04 — divider hairline between the header band
+            // and the item grid. Tauri's `.panel-header` border-bottom is
+            // `rgba(255,255,255,0.05)` — pure WHITE at alpha 0.05, NOT the
+            // tinted `palette.text` at 0.10 (which read 2× too strong and
+            // slightly warm). Corrected to match exactly.
             self.fill_rounded_rect(
                 expanded_layout.divider,
-                with_alpha(palette.text, 0.10),
+                with_alpha(bento_nano_style::Color::WHITE, 0.05),
                 bento_nano_style::BorderRadius::ZERO,
             )?;
             // V-9 round 2 (2026-05-21) — expanded-body status dot removed.
@@ -1616,42 +1616,10 @@ impl Renderer {
                     item_chrome.icon_text,
                 )?;
             }
-            // Wave I2 — sub-zone thumbnail strip at the bottom of an
-            // expanded stack anchor body. Mirrors frame_010's row of small
-            // 16×16 folder thumbnails. Non-stack zones produce zero
-            // thumbnails so the layout helper is a no-op for them.
-            if expanded_layout.footer_thumb_count > 0 {
-                if let Some(member_ids) = stack_member_ids_for_footer.as_ref() {
-                    let mut paint_index = 0usize;
-                    for member_id in member_ids
-                        .iter()
-                        .copied()
-                        .filter(|member_id| *member_id != zone.id)
-                    {
-                        if paint_index >= expanded_layout.footer_thumb_count {
-                            break;
-                        }
-                        let thumb_rect = expanded_layout.footer_thumbs[paint_index];
-                        if thumb_rect.width <= 0.0 || thumb_rect.height <= 0.0 {
-                            paint_index += 1;
-                            continue;
-                        }
-                        self.fill_rounded_rect(
-                            thumb_rect,
-                            zone_icon_chip,
-                            zone_chrome.icon_chip_radius,
-                        )?;
-                        if let Some(member) = app.zones.get(member_id) {
-                            self.draw_icon_glyph(
-                                member.icon.as_ref(),
-                                thumb_rect,
-                                zone_icon_text,
-                            )?;
-                        }
-                        paint_index += 1;
-                    }
-                }
-            }
+            // M2 E-01 (2026-05-29) — the 16×16 sub-zone footer thumbnail
+            // strip was DELETED. Tauri's `BentoPanel` renders header + grid
+            // only with no footer node; the strip was an additive nano
+            // divergence visible only on stack anchors. Removed for 1:1.
         }
         if let Some(anchor_id) = app
             .hovered_zone
@@ -1861,38 +1829,46 @@ impl Renderer {
             a: PALETTE_DARK.surface_zen.a,
         };
         self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
-        // Accent stripe — zone's accent_color (or theme base accent) painted
-        // as a small chip behind the icon, mirroring Tauri's accent dot.
-        let accent_hex = zone
-            .accent_color
-            .as_deref()
-            .or(theme_base_accent);
-        if let Some(accent) = accent_hex.and_then(parse_hex_color) {
-            let accent_dot = bento_nano_style::Rect {
-                x: layout.icon.x + 2.0,
-                y: layout.icon.y + layout.icon.height - 5.0,
-                width: (layout.icon.width - 4.0).max(0.0),
-                height: 3.0,
-            };
-            self.fill_rounded_rect(
-                accent_dot,
-                accent,
-                BorderRadius::all(1.5),
-            )?;
-        }
+        // M2 S2a (2026-05-29) — Tauri's `.zen-capsule` carries a 1px solid
+        // `var(--border-zen)` = `rgba(255,255,255,0.1)` outline. nano drew no
+        // stroke at all; added here so the capsule reads as glass with a
+        // hairline edge. Pure-paint via the existing `stroke_rounded_rect`.
+        self.stroke_rounded_rect(
+            scaled_rect,
+            PALETTE_DARK.border_zen,
+            scaled_radius,
+            1.0,
+        )?;
+        // M2 S2b (2026-05-29) — the under-icon accent stripe was REMOVED.
+        // Tauri's collapsed ZenCapsule has no such stripe (the 2px accent
+        // border-top belongs to the EXPANDED body only). The zone accent is
+        // still consulted below to tint the count badge (Tauri
+        // `var(--zone-accent, --badge-bg)`).
+        let accent_hex = zone.accent_color.as_deref().or(theme_base_accent);
         // Icon glyph — Tauri renders zone.icon as a 24×24 line-art SVG.
         // RC-4 Gap 1 — switched from `draw_text(zone.icon)` (which drew the
         // raw name like "settings" → DWrite wrapped it to "set tin gs") to
         // `draw_icon_glyph`, which looks up the built-in `IconKind` and
         // renders the cached source SVG. Unknown names fall back to text.
         self.draw_icon_glyph(zone.icon.as_ref(), layout.icon, PALETTE_DARK.text_primary)?;
-        // Label — zone.title in TEXT_PRIMARY.
-        self.draw_text(zone.title.as_ref(), layout.label, PALETTE_DARK.text_primary)?;
-        // Count badge — fill BADGE_BG, paint count in TEXT_SECONDARY.
+        // Label — zone.title in TEXT_PRIMARY. M2 R3 (2026-05-29) — Tauri's
+        // `.zen-capsule__title` is single-line `white-space:nowrap`; the
+        // proportional `draw_text` wrapped long names onto a second row.
+        // Switched to `draw_text_no_wrap`, which disables DWrite word-wrap
+        // and `…`-trims when the glyph run overflows — matching Tauri's
+        // shrink-then-clip behaviour without the wrap regression.
+        self.draw_text_no_wrap(zone.title.as_ref(), layout.label, PALETTE_DARK.text_primary)?;
+        // Count badge — M2 B3 (2026-05-29): bg follows Tauri
+        // `var(--zone-accent, --badge-bg)` (zone accent tint when set, else
+        // the neutral `--badge-bg`), and the count text is `--text-primary`
+        // (#f0f0f5) NOT the dimmer `--text-secondary` it used before.
         let count = zone.items.len();
+        let badge_fill = accent_hex
+            .and_then(parse_hex_color)
+            .unwrap_or(PALETTE_DARK.badge_bg);
         self.fill_rounded_rect(
             layout.badge,
-            PALETTE_DARK.badge_bg,
+            badge_fill,
             layout.badge_radius,
         )?;
         let count_str = format_small_count(count);
@@ -1905,7 +1881,7 @@ impl Renderer {
         self.draw_text(
             count_str.as_str(),
             badge_text_rect,
-            PALETTE_DARK.text_secondary,
+            PALETTE_DARK.text_primary,
         )?;
         // V-9 round 3 (2026-05-21) — Wave H2 status dot removed. User
         // flagged the blue dot at the top of every collapsed pill as a
@@ -1939,7 +1915,7 @@ impl Renderer {
                 BorderRadius::all(dot_size * 0.5),
             )?;
         }
-        let _ = (accent_hex, anim_now_ms, press_t);
+        let _ = (anim_now_ms, press_t);
         Ok(())
     }
 
@@ -4432,19 +4408,24 @@ impl Renderer {
                             bar.unpin_button.hover_background,
                             BorderRadius::all(8.0),
                         )?;
-                        // RC-4 Gap 1 — the 32×32 item capsule is far too narrow
-                        // for a full file name (the old "ite ite ite" symptom).
-                        // Mirror `draw_item_card`'s fallback path and draw the
-                        // extension-derived emoji instead — the capsule is a
-                        // glance affordance, the full name lives in the tray.
-                        let text_rect = bento_nano_style::Rect {
+                        // M2 R4 (2026-05-29) — try the REAL extracted icon
+                        // bitmap first (mirrors `draw_item_card`'s branch at
+                        // ~2025). Only when the cache misses / decode fails do
+                        // we fall back to the extension-derived emoji glyph.
+                        // RC-4 Gap 1 — the 32×32 capsule is far too narrow for
+                        // a full file name (the old "ite ite ite" symptom);
+                        // the capsule is a glance affordance, the full name
+                        // lives in the tray.
+                        let icon_rect = bento_nano_style::Rect {
                             x: item_rect.x + 4.0,
-                            y: item_rect.y + 6.0,
-                            width: item_rect.width - 8.0,
-                            height: item_rect.height - 8.0,
+                            y: item_rect.y + 4.0,
+                            width: (item_rect.width - 8.0).max(0.0),
+                            height: (item_rect.height - 8.0).max(0.0),
                         };
-                        let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
-                        self.draw_text(glyph.as_str(), text_rect, bar.unpin_button.tint)?;
+                        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect)? {
+                            let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
+                            self.draw_text(glyph.as_str(), icon_rect, bar.unpin_button.tint)?;
+                        }
                     }
                 }
             }

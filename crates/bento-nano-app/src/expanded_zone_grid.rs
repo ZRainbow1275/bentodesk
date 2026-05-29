@@ -1,11 +1,16 @@
 //! Wave I2 (05-20 visual parity) — expanded zone body chrome geometry.
 //!
-//! Tauri 1.2.4 renders a clicked-open zone as a dark translucent rounded
-//! panel with: a panel drop shadow, a header band (folder glyph + title +
-//! status dot), a 1-DIP divider line between the header and the item grid,
-//! a grid of item cards, and (optionally for stack anchors) a footer strip
-//! of 16×16 sub-zone thumbnails. Geometry constants live here so the
-//! renderer + future hit-test surfaces share one source of truth.
+//! Tauri 1.2.4 renders a clicked-open zone (`BentoPanel.tsx`) as a dark
+//! translucent rounded panel with: a panel drop shadow, a header band
+//! (folder glyph + title + item-count badge), a 1-DIP divider line between
+//! the header and the item grid, and a grid of item cards. Geometry
+//! constants live here so the renderer + future hit-test surfaces share one
+//! source of truth.
+//!
+//! M2 (05-29 1:1 fixes): the old 16×16 sub-zone footer thumbnail strip
+//! (E-01) was DELETED — Tauri's `BentoPanel` renders header + grid only,
+//! with no footer node. The expanded green status dot (E-02) was likewise
+//! removed; Tauri's `PanelHeader` carries a numeric count badge, not a dot.
 //!
 //! The item-card rectangles themselves are **not** owned by this module —
 //! they are sourced from
@@ -15,16 +20,11 @@
 //!
 //! Spec §3.2 100% self-rolled / spec §8 no new crate deps / spec §10 zero
 //! allocation hot-path: every helper here returns `Copy` rects, no `Vec`,
-//! no `String`. `footer_thumbs` is a fixed-N array with an explicit count.
+//! no `String`.
 
 use bento_nano_style::Rect;
 use bento_nano_style::tokens::SHADOW;
 use bento_nano_zone::Zone;
-
-/// Maximum number of 16×16 footer thumbnail slots reserved in the layout.
-/// frame_010 shows ~4 sub-zone icons in the bottom strip of an expanded
-/// stack-anchor body; four covers the common case allocation-free.
-pub const FOOTER_THUMB_CAP: usize = 4;
 
 /// Header band height in DIPs — matches the +30 vertical offset that
 /// `highlight_overlay::item_card_rect_for_grid` already uses to push the
@@ -32,33 +32,20 @@ pub const FOOTER_THUMB_CAP: usize = 4;
 /// divider line lands exactly on the seam between header and items.
 pub const HEADER_BAND_HEIGHT: f32 = 30.0;
 
-/// Horizontal inset applied to header content + divider. Same 8-DIP
+/// Horizontal inset applied to the header band + count badge. Same 8-DIP
 /// padding the existing zone chrome uses for the icon chip / accent stripe.
 pub const HEADER_INSET_X: f32 = 8.0;
 
+/// Horizontal inset of the divider line from the panel edges. M2 E-04
+/// realigns this to Tauri's `--spacing-lg` (16) header padding, distinct
+/// from the 8-DIP header content inset so the seam reads as Tauri's
+/// `.panel-header` border-bottom without disturbing the (HELD) header
+/// content geometry.
+pub const DIVIDER_INSET_X: f32 = 16.0;
+
 /// Divider line thickness in DIPs. 1-DIP hairline; the renderer paints
-/// it as a filled rect at `with_alpha(palette.text, 0.10)`.
+/// it as a filled rect at `rgba(255,255,255,0.05)` (E-04).
 pub const DIVIDER_THICKNESS: f32 = 1.0;
-
-/// Side length of the top-right status dot, mirroring the collapsed pill's
-/// `PILL_STATUS_DOT_SIZE` so the chrome reads at the same scale across
-/// the morph.
-pub const STATUS_DOT_SIZE: f32 = 6.0;
-
-/// Inset of the status dot from the top-right corner of the panel.
-pub const STATUS_DOT_INSET: f32 = 8.0;
-
-/// Side length of a single footer thumbnail (Tauri reference: 16 DIPs).
-pub const FOOTER_THUMB_SIZE: f32 = 16.0;
-
-/// Vertical inset of the footer strip from the panel bottom edge.
-pub const FOOTER_INSET_Y: f32 = 8.0;
-
-/// Horizontal inset of the leftmost footer thumbnail from the panel edge.
-pub const FOOTER_INSET_X: f32 = 8.0;
-
-/// Gap between adjacent footer thumbnails in DIPs.
-pub const FOOTER_THUMB_GAP: f32 = 6.0;
 
 /// Layout slots for the expanded zone body chrome (everything except the
 /// item cards themselves — those stay sourced from
@@ -72,42 +59,46 @@ pub struct ExpandedZoneLayout {
     pub panel_shadow: Rect,
     /// The panel rect itself — equal to the zone's outer rectangle in DIPs.
     pub panel: Rect,
-    /// Header band at the top of the panel — folder icon + title + status
-    /// dot live inside this rect. Bottom edge of this rect is the divider.
+    /// Header band at the top of the panel — folder icon + title + count
+    /// badge live inside this rect. Bottom edge of this rect is the divider.
     pub header_band: Rect,
     /// 1-DIP horizontal line separating the header band from the item grid.
     pub divider: Rect,
-    /// Top-right status dot rectangle. Renderer paints it only when
-    /// `zone.items.len() > 0` so empty zones stay calm.
-    pub status_dot: Rect,
-    /// Reserved slots for 16×16 sub-zone thumbnails in the bottom strip.
-    /// `footer_thumb_count` indicates how many of these are valid.
-    pub footer_thumbs: [Rect; FOOTER_THUMB_CAP],
-    /// Number of valid entries in `footer_thumbs` (0..=FOOTER_THUMB_CAP).
-    pub footer_thumb_count: usize,
+    /// Right-aligned item-count badge slot inside the header band (E-02).
+    /// Mirrors Tauri `.panel-header__badge` — radius 10, accent/`badge_bg`
+    /// fill, semibold count text. Renderer fills + labels this rect.
+    pub header_badge: Rect,
 }
 
-/// Build the expanded zone layout for `zone` with `footer_thumb_count`
-/// requested sub-zone thumbnails (e.g. the stack anchor's member count).
-/// Pure / allocation-free / `Copy` output. Safe to call every frame.
+/// Fixed width of the header count badge slot in DIPs. Wide enough for a
+/// three-glyph count ("999+") at the 11px badge font; the renderer insets
+/// the count text horizontally. Kept fixed so the layout stays `Copy` and
+/// allocation-free (§10) — no per-frame text measurement.
+pub const HEADER_BADGE_WIDTH: f32 = 34.0;
+
+/// Height of the header count badge slot in DIPs.
+pub const HEADER_BADGE_HEIGHT: f32 = 18.0;
+
+/// Inset of the header count badge from the right edge of the header band.
+pub const HEADER_BADGE_INSET_X: f32 = 0.0;
+
+/// Build the expanded zone layout for `zone`. Pure / allocation-free /
+/// `Copy` output. Safe to call every frame.
 #[inline]
-pub fn expanded_zone_layout(zone: &Zone, footer_thumb_count: usize) -> ExpandedZoneLayout {
+pub fn expanded_zone_layout(zone: &Zone) -> ExpandedZoneLayout {
     let panel = Rect {
         x: zone.x as f32,
         y: zone.y as f32,
         width: zone.w as f32,
         height: zone.h as f32,
     };
-    expanded_zone_layout_for_rect(panel, footer_thumb_count)
+    expanded_zone_layout_for_rect(panel)
 }
 
 /// Like [`expanded_zone_layout`] but takes the panel rect directly. Used
 /// by tests and any caller that has already computed the zone rect.
 #[inline]
-pub fn expanded_zone_layout_for_rect(
-    panel: Rect,
-    footer_thumb_count: usize,
-) -> ExpandedZoneLayout {
+pub fn expanded_zone_layout_for_rect(panel: Rect) -> ExpandedZoneLayout {
     let shadow = SHADOW.expanded;
     let spread = shadow.blur.max(0.0);
     let panel_shadow = Rect {
@@ -123,39 +114,19 @@ pub fn expanded_zone_layout_for_rect(
         height: HEADER_BAND_HEIGHT.min(panel.height.max(0.0)),
     };
     let divider = Rect {
-        x: panel.x + HEADER_INSET_X,
+        x: panel.x + DIVIDER_INSET_X,
         y: panel.y + HEADER_BAND_HEIGHT - DIVIDER_THICKNESS,
-        width: (panel.width - HEADER_INSET_X * 2.0).max(0.0),
+        width: (panel.width - DIVIDER_INSET_X * 2.0).max(0.0),
         height: DIVIDER_THICKNESS,
     };
-    let status_dot = Rect {
-        x: panel.right() - STATUS_DOT_INSET - STATUS_DOT_SIZE,
-        y: panel.y + STATUS_DOT_INSET,
-        width: STATUS_DOT_SIZE,
-        height: STATUS_DOT_SIZE,
-    };
-
-    let mut footer_thumbs = [Rect::ZERO; FOOTER_THUMB_CAP];
-    let clamped_count = footer_thumb_count.min(FOOTER_THUMB_CAP);
-    let footer_y = panel.bottom() - FOOTER_INSET_Y - FOOTER_THUMB_SIZE;
-    // Suppress the footer if the panel is too short to clear the divider.
-    let footer_clears_divider = footer_y > divider.bottom() + 2.0;
-    if footer_clears_divider {
-        for (i, slot) in footer_thumbs.iter_mut().take(clamped_count).enumerate() {
-            *slot = Rect {
-                x: panel.x
-                    + FOOTER_INSET_X
-                    + (i as f32) * (FOOTER_THUMB_SIZE + FOOTER_THUMB_GAP),
-                y: footer_y,
-                width: FOOTER_THUMB_SIZE,
-                height: FOOTER_THUMB_SIZE,
-            };
-        }
-    }
-    let effective_count = if footer_clears_divider {
-        clamped_count
-    } else {
-        0
+    // Right-aligned within the header band, vertically centred in the band.
+    let badge_w = HEADER_BADGE_WIDTH.min(header_band.width);
+    let badge_h = HEADER_BADGE_HEIGHT.min(header_band.height);
+    let header_badge = Rect {
+        x: header_band.right() - HEADER_BADGE_INSET_X - badge_w,
+        y: header_band.y + ((header_band.height - badge_h) * 0.5).max(0.0),
+        width: badge_w,
+        height: badge_h,
     };
 
     ExpandedZoneLayout {
@@ -163,9 +134,7 @@ pub fn expanded_zone_layout_for_rect(
         panel,
         header_band,
         divider,
-        status_dot,
-        footer_thumbs,
-        footer_thumb_count: effective_count,
+        header_badge,
     }
 }
 
@@ -182,7 +151,7 @@ mod tests {
     #[test]
     fn panel_rect_matches_zone_rect() {
         let zone = fixture(120, 80, 260, 200);
-        let layout = expanded_zone_layout(&zone, 0);
+        let layout = expanded_zone_layout(&zone);
         assert_eq!(layout.panel.x, 120.0);
         assert_eq!(layout.panel.y, 80.0);
         assert_eq!(layout.panel.width, 260.0);
@@ -195,7 +164,7 @@ mod tests {
         // on every side so the renderer paints the soft drop under the
         // panel rather than truncated at the panel edge.
         let zone = fixture(100, 100, 200, 150);
-        let layout = expanded_zone_layout(&zone, 0);
+        let layout = expanded_zone_layout(&zone);
         assert!(layout.panel_shadow.x < layout.panel.x);
         assert!(layout.panel_shadow.y < layout.panel.y);
         assert!(layout.panel_shadow.right() > layout.panel.right());
@@ -205,7 +174,7 @@ mod tests {
     #[test]
     fn header_band_sits_above_divider() {
         let zone = fixture(0, 0, 240, 180);
-        let layout = expanded_zone_layout(&zone, 0);
+        let layout = expanded_zone_layout(&zone);
         // Header bottom touches the divider band bottom — divider rests
         // on the seam between header and items.
         assert!((layout.header_band.bottom() - layout.divider.bottom()).abs() < 0.01);
@@ -215,81 +184,53 @@ mod tests {
     }
 
     #[test]
-    fn divider_is_a_one_dip_hairline_centered_horizontally() {
+    fn divider_is_a_one_dip_hairline_inset_horizontally() {
         let zone = fixture(50, 50, 300, 200);
-        let layout = expanded_zone_layout(&zone, 0);
+        let layout = expanded_zone_layout(&zone);
         assert_eq!(layout.divider.height, DIVIDER_THICKNESS);
-        // Same horizontal inset as the header.
-        assert_eq!(layout.divider.x, layout.header_band.x);
-        assert_eq!(layout.divider.width, layout.header_band.width);
+        // E-04 — divider sits at the wider `DIVIDER_INSET_X` (16) inset,
+        // distinct from the 8-DIP header content inset, and stays centred.
+        assert_eq!(layout.divider.x, layout.panel.x + DIVIDER_INSET_X);
+        assert_eq!(
+            layout.divider.width,
+            (layout.panel.width - DIVIDER_INSET_X * 2.0).max(0.0)
+        );
+        let divider_center = layout.divider.x + layout.divider.width * 0.5;
+        let panel_center = layout.panel.x + layout.panel.width * 0.5;
+        assert!((divider_center - panel_center).abs() < 0.01);
     }
 
     #[test]
-    fn status_dot_sits_at_top_right_inside_panel() {
-        let zone = fixture(0, 0, 240, 180);
-        let layout = expanded_zone_layout(&zone, 0);
-        assert!(layout.status_dot.right() <= layout.panel.right());
-        assert!(layout.status_dot.y >= layout.panel.y);
-        assert!(layout.status_dot.y < layout.header_band.bottom());
-        // Sits flush with the right inset.
+    fn header_badge_is_right_aligned_inside_header_band() {
+        // E-02 count badge — sits flush with the header band's right edge,
+        // vertically centred, at the locked badge size.
+        let zone = fixture(0, 0, 300, 200);
+        let layout = expanded_zone_layout(&zone);
         assert!(
-            (layout.status_dot.right() - (layout.panel.right() - STATUS_DOT_INSET)).abs()
+            (layout.header_badge.right()
+                - (layout.header_band.right() - HEADER_BADGE_INSET_X))
+                .abs()
                 < 0.01
         );
+        assert_eq!(layout.header_badge.width, HEADER_BADGE_WIDTH);
+        assert_eq!(layout.header_badge.height, HEADER_BADGE_HEIGHT);
+        // Vertically centred inside the band.
+        let badge_center = layout.header_badge.y + layout.header_badge.height * 0.5;
+        let band_center = layout.header_band.y + layout.header_band.height * 0.5;
+        assert!((badge_center - band_center).abs() < 0.01);
+        // Stays inside the panel.
+        assert!(layout.header_badge.right() <= layout.panel.right());
+        assert!(layout.header_badge.bottom() <= layout.header_band.bottom() + 0.01);
     }
 
     #[test]
-    fn status_dot_is_square_at_token_size() {
-        let zone = fixture(0, 0, 240, 180);
-        let layout = expanded_zone_layout(&zone, 0);
-        assert_eq!(layout.status_dot.width, STATUS_DOT_SIZE);
-        assert_eq!(layout.status_dot.height, STATUS_DOT_SIZE);
-    }
-
-    #[test]
-    fn footer_thumbs_lay_in_a_row_at_panel_bottom() {
-        let zone = fixture(0, 0, 240, 200);
-        let layout = expanded_zone_layout(&zone, 3);
-        assert_eq!(layout.footer_thumb_count, 3);
-        // All thumbs share the same y row and sit inside the panel.
-        let first_y = layout.footer_thumbs[0].y;
-        for slot in &layout.footer_thumbs[..layout.footer_thumb_count] {
-            assert_eq!(slot.y, first_y);
-            assert_eq!(slot.width, FOOTER_THUMB_SIZE);
-            assert_eq!(slot.height, FOOTER_THUMB_SIZE);
-            assert!(slot.bottom() <= layout.panel.bottom());
-            assert!(slot.x >= layout.panel.x);
-        }
-        // Strict spacing between adjacent thumbs.
-        let dx = layout.footer_thumbs[1].x - layout.footer_thumbs[0].x;
-        assert!((dx - (FOOTER_THUMB_SIZE + FOOTER_THUMB_GAP)).abs() < 0.01);
-    }
-
-    #[test]
-    fn footer_thumbs_clamp_to_cap() {
-        let zone = fixture(0, 0, 240, 200);
-        // Asking for more than the cap saturates to FOOTER_THUMB_CAP.
-        let layout = expanded_zone_layout(&zone, FOOTER_THUMB_CAP + 99);
-        assert_eq!(layout.footer_thumb_count, FOOTER_THUMB_CAP);
-    }
-
-    #[test]
-    fn footer_thumbs_zero_when_panel_too_short() {
-        // Panel barely taller than the header band — no room for footer.
-        let zone = fixture(0, 0, 240, (HEADER_BAND_HEIGHT as i32) + 8);
-        let layout = expanded_zone_layout(&zone, 3);
-        assert_eq!(layout.footer_thumb_count, 0);
-    }
-
-    #[test]
-    fn footer_thumbs_count_zero_leaves_slots_zeroed() {
-        let zone = fixture(0, 0, 240, 200);
-        let layout = expanded_zone_layout(&zone, 0);
-        assert_eq!(layout.footer_thumb_count, 0);
-        // All four slots are Rect::ZERO so accidental paint loops are no-ops.
-        for slot in &layout.footer_thumbs {
-            assert_eq!(*slot, Rect::ZERO);
-        }
+    fn header_badge_clamps_for_narrow_panels() {
+        // A pathologically narrow panel — badge width must clamp to the
+        // header band so it never overflows the panel edge.
+        let zone = fixture(0, 0, 40, 200);
+        let layout = expanded_zone_layout(&zone);
+        assert!(layout.header_badge.width <= layout.header_band.width + 0.01);
+        assert!(layout.header_badge.x >= layout.header_band.x - 0.01);
     }
 
     #[test]
@@ -306,7 +247,7 @@ mod tests {
         // A pathological tiny panel — header_band height must clamp so the
         // helper never produces a header that overflows the panel.
         let zone = fixture(0, 0, 240, 10);
-        let layout = expanded_zone_layout(&zone, 0);
+        let layout = expanded_zone_layout(&zone);
         assert!(layout.header_band.height <= layout.panel.height + 0.01);
     }
 }

@@ -8,12 +8,15 @@ spans 2 grid columns).
 |--------------------|----------------------------------------|
 | min-width          | 88 px (Standard) / 200 px (Wide)       |
 | height             | 80 px (matches `ITEM_GRID_ROW_HEIGHT_PX`)|
-| corner-radius      | 8 px                                   |
+| corner-radius      | 10 px (`--radius-card`)                |
+| background         | `--surface-subtle` `rgba(255,255,255,0.03)` |
+| missing background | `rgba(239,68,68,0.08)` (softened)      |
 | padding            | 6 px (Standard) / 8 px horiz (Wide)    |
 | layout             | column / center / center (Standard)    |
 |                    | row / start / center (Wide)            |
 | icon size          | 28 px container (Wide) / 36 px (Standard)|
 | name font          | 11 px default (panel-scope FontGroup)  |
+| name color         | `--text-secondary` `#c0c0cc`           |
 | name max-lines     | 2 (Standard) / 1 (Wide)                |
 | selected outline   | 1.5 px `palette.accent_primary`        |
 | dragging opacity   | 0.5 (animated 120 ms)                  |

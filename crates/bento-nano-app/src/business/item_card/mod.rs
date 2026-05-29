@@ -57,15 +57,29 @@ impl ItemCardChrome {
     }
 
     /// Build ItemCard chrome from explicit active theme token groups.
-    pub fn from_tokens(palette: PaletteTokens, radius: RadiusTokens) -> Self {
+    ///
+    /// M2 E-03 (2026-05-29) — corrected to Tauri `ItemCard.css` 1:1.
+    /// Radius is `--radius-card` = 10 (was `radius.md` = 6); normal bg is
+    /// `--surface-subtle` = `rgba(255,255,255,0.03)` (was the warm/opaque
+    /// `surface_alt @0.46`); name text is `--text-secondary` = `#c0c0cc`
+    /// (was `text @0.82`); missing bg is softened toward Tauri's
+    /// `rgba(239,68,68,0.08)` (was `danger @0.55`, far too strong).
+    ///
+    /// The `--surface-subtle` / `--text-secondary` values are pulled from
+    /// the static `bento_nano_style::tokens` SSoT (the dark-theme Tauri
+    /// parity table the renderer already uses for the zone surface) so the
+    /// card matches the reference exactly rather than re-deriving an alpha
+    /// off the live palette.
+    pub fn from_tokens(palette: PaletteTokens, _radius: RadiusTokens) -> Self {
+        use bento_nano_style::tokens::{PALETTE_DARK, RADIUS};
         Self {
-            card_radius: radius.md,
-            normal_background: with_alpha(palette.surface_alt, 0.46),
+            card_radius: BorderRadius::all(RADIUS.card),
+            normal_background: PALETTE_DARK.surface_subtle,
             drag_source_background: with_alpha(palette.surface_alt, 0.18),
             ghost_background: with_alpha(palette.surface, 0.86),
             ghost_shadow: with_alpha(palette.scrim, 0.24),
-            missing_background: with_alpha(palette.danger, 0.55),
-            text: with_alpha(palette.text, 0.82),
+            missing_background: with_alpha(palette.danger, 0.10),
+            text: PALETTE_DARK.text_secondary,
             icon_text: with_alpha(palette.text, 0.94),
         }
     }
@@ -252,10 +266,17 @@ mod tests {
 
         let chrome = ItemCardChrome::from_palette(palette);
 
-        assert_eq!(chrome.card_radius, radius::DEFAULT.md);
+        // M2 E-03 — card radius is the Tauri `--radius-card` (10), NOT the
+        // live `radius.md` (6).
+        assert_eq!(
+            chrome.card_radius,
+            BorderRadius::all(bento_nano_style::tokens::RADIUS.card)
+        );
+        // Normal bg is the Tauri `--surface-subtle` (white @ 0.03), not the
+        // warm `surface_alt @ 0.46`.
         assert_eq!(
             chrome.normal_background,
-            with_alpha(palette.surface_alt, 0.46)
+            bento_nano_style::tokens::PALETTE_DARK.surface_subtle
         );
         assert_eq!(
             chrome.drag_source_background,
@@ -263,13 +284,21 @@ mod tests {
         );
         assert_eq!(chrome.ghost_background, with_alpha(palette.surface, 0.86));
         assert_eq!(chrome.ghost_shadow, with_alpha(palette.scrim, 0.24));
-        assert_eq!(chrome.missing_background, with_alpha(palette.danger, 0.55));
-        assert_eq!(chrome.text, with_alpha(palette.text, 0.82));
+        // Missing fill softened toward Tauri `rgba(239,68,68,0.08)`.
+        assert_eq!(chrome.missing_background, with_alpha(palette.danger, 0.10));
+        // Name text is the Tauri `--text-secondary` (#c0c0cc).
+        assert_eq!(
+            chrome.text,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary
+        );
         assert_eq!(chrome.icon_text, with_alpha(palette.text, 0.94));
     }
 
     #[test]
-    fn item_card_chrome_accepts_explicit_active_radius_tokens() {
+    fn item_card_chrome_uses_tauri_card_radius_token() {
+        // E-03 — `card_radius` is pinned to the static Tauri `--radius-card`
+        // (10) regardless of the passed live `radius.md`, so the card corner
+        // matches the reference exactly.
         let palette = bento_nano_theme::current().palette;
         let radius = RadiusTokens {
             sm: BorderRadius::all(3.0),
@@ -281,6 +310,9 @@ mod tests {
 
         let chrome = ItemCardChrome::from_tokens(palette, radius);
 
-        assert_eq!(chrome.card_radius, BorderRadius::all(7.0));
+        assert_eq!(
+            chrome.card_radius,
+            BorderRadius::all(bento_nano_style::tokens::RADIUS.card)
+        );
     }
 }

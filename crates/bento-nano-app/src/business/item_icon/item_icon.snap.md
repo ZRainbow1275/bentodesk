@@ -6,9 +6,9 @@ emoji glyph keyed off the file extension when extraction fails.
 
 | token             | value                                |
 |-------------------|--------------------------------------|
-| container width   | 28 px (Standard) / 36 px (Wide)      |
-| container height  | 28 px (Standard) / 36 px (Wide)      |
-| render size       | 20 px (Standard) / 24 px (Wide)      |
+| container width   | 36 px (Standard) / 28 px (Wide)      |
+| container height  | 36 px (Standard) / 28 px (Wide)      |
+| render size       | 24 px (Standard) / 20 px (Wide)      |
 | flex-shrink       | 0 (locked)                           |
 | placeholder       | pulse animation (2 phase, 800 ms)    |
 | error fallback    | glyph at `render_size − 4` px        |
