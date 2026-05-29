@@ -43,6 +43,7 @@ use crate::{
         timeline::{TimelinePanelState, snapshot_picker::SnapshotPickerState},
     },
     dispatcher::PaletteTarget,
+    zone_pill_geometry::HoverScheduler,
 };
 
 // ── M1d 2026-05-29 — Performance §5 + Startup management §6 bounds ──────
@@ -704,6 +705,13 @@ pub struct AppState {
     /// pill rect). Cleared on mouse-up regardless of release location so
     /// the press channel never lingers if the user drags off the pill.
     pub pill_pressed_zone: Cell<Option<ZoneId>>,
+    /// A3 (2026-05-29) — pure hover-intent / grace-collapse scheduler. The
+    /// shell feeds it `on_enter`/`on_leave` from the cursor stream and polls
+    /// it once per frame; it defers expand by `expand_delay_ms`, holds the
+    /// 550ms expand-lock so the easeOutBack overshoot can't be race-collapsed,
+    /// and defers collapse by `collapse_delay_ms` so a transient leave doesn't
+    /// drop the zone. `Copy` so a `Cell` keeps the hot path lock-free (§10).
+    pub hover_scheduler: Cell<HoverScheduler>,
     /// In-flight selected-stack ZoneEditor session. Set by
     /// `Command::OpenZoneEditor`, edited by the ZoneEditor aux HWND's
     /// keyboard path, rendered by the ZoneEditor window, and saved through
@@ -872,6 +880,7 @@ impl AppState {
             zone_pill_anim_expanding: Cell::new(false),
             pill_animator: RefCell::new(Animator::new()),
             pill_pressed_zone: Cell::new(None),
+            hover_scheduler: Cell::new(HoverScheduler::new()),
             zone_editor: RefCell::new(None),
             item_file_rename: RefCell::new(None),
             item_operation_status: RefCell::new(None),

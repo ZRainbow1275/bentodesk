@@ -29,6 +29,42 @@ pub enum CardVariant {
     Wide,
 }
 
+// --- A2 (M3 2026-05-29) item-card hover / press scale ---------------------
+//
+// Tauri ground truth `ItemCard/ItemCard.css:20-31`:
+//   .item-card:hover  { transform: translateY(-1px) scale(1.02); }
+//   .item-card:active { transform: scale(0.97); transition: ...80ms; }
+// (Resolution #3: unlike the collapsed PILL — nano V-12, no scale — the item
+// card DOES scale on hover/press.) These constants + `card_scale_for` are the
+// single source of truth for the multiplier; the renderer applies it at paint
+// time via a centred scale, leaving the persisted card geometry untouched
+// (mirrors the pill animator's V-8 contract). Pure / stack-only (spec §10).
+
+/// Hover scale multiplier — Tauri `scale(1.02)` (+2%).
+pub const CARD_HOVER_SCALE: f32 = 1.02;
+/// Press/active scale multiplier — Tauri `scale(0.97)` (-3%).
+pub const CARD_PRESS_SCALE: f32 = 0.97;
+/// Press transition duration — Tauri `...80ms` active transition.
+pub const CARD_PRESS_DURATION_MS: u32 = 80;
+/// Hover-lift vertical offset — Tauri `translateY(-1px)`.
+pub const CARD_HOVER_LIFT_DY: f32 = -1.0;
+
+/// Compose hover + press into the item-card scale multiplier. `hover_t` and
+/// `press_t` are 0..1 animator progress values (e.g. from a future per-item
+/// hover channel). Press takes precedence when both are active — Tauri's
+/// `:active` overrides `:hover` (the card shrinks under the pointer-down even
+/// while hovered). Returns 1.0 when idle.
+#[inline]
+pub fn card_scale_for(hover_t: f32, press_t: f32) -> f32 {
+    let h = hover_t.clamp(0.0, 1.0);
+    let p = press_t.clamp(0.0, 1.0);
+    // Hover inflates toward 1.02; press then deflates toward 0.97. Compose
+    // multiplicatively so a mid-hover press still reads as a relative shrink.
+    let hover_scale = 1.0 + h * (CARD_HOVER_SCALE - 1.0);
+    let press_scale = 1.0 + p * (CARD_PRESS_SCALE - 1.0);
+    hover_scale * press_scale
+}
+
 /// D2D ItemCard chrome derived from the active theme palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemCardChrome {
@@ -205,6 +241,42 @@ mod tests {
     fn variant_direction_per_snap_md() {
         assert_eq!(CardVariant::Standard.direction(), Direction::Column);
         assert_eq!(CardVariant::Wide.direction(), Direction::Row);
+    }
+
+    #[test]
+    fn card_scale_idle_is_identity() {
+        assert!((card_scale_for(0.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn card_scale_hover_inflates_to_tauri_1_02() {
+        // Full hover, no press → scale(1.02).
+        assert!((card_scale_for(1.0, 0.0) - CARD_HOVER_SCALE).abs() < 1e-5);
+        // Half hover sits between 1.0 and 1.02.
+        let half = card_scale_for(0.5, 0.0);
+        assert!(half > 1.0 && half < CARD_HOVER_SCALE);
+    }
+
+    #[test]
+    fn card_scale_press_deflates_to_tauri_0_97() {
+        // Full press, no hover → scale(0.97).
+        assert!((card_scale_for(0.0, 1.0) - CARD_PRESS_SCALE).abs() < 1e-5);
+    }
+
+    #[test]
+    fn card_scale_press_overrides_hover_to_a_net_shrink() {
+        // Pressing while hovered must read as a relative shrink (< the hover
+        // peak) — Tauri `:active` overrides `:hover`.
+        let pressed_while_hovered = card_scale_for(1.0, 1.0);
+        assert!(pressed_while_hovered < CARD_HOVER_SCALE);
+        // 1.02 * 0.97 = 0.9894 — below 1.0, a visible shrink.
+        assert!((pressed_while_hovered - (CARD_HOVER_SCALE * CARD_PRESS_SCALE)).abs() < 1e-5);
+        assert!(pressed_while_hovered < 1.0);
+    }
+
+    #[test]
+    fn card_press_duration_matches_tauri_80ms() {
+        assert_eq!(CARD_PRESS_DURATION_MS, 80);
     }
 
     #[test]

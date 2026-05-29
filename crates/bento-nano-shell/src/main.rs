@@ -1925,6 +1925,81 @@ fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
     changed || progress < 1.0
 }
 
+/// A3 (2026-05-29) — true when leaving `zone` should auto-collapse it. Only
+/// the HOVER display mode auto-collapses on leave; ALWAYS keeps the body
+/// open and CLICK is dismissed by click-away, not pointer leave (mirrors
+/// Tauri `BentoZone.tsx:589`).
+fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> bool {
+    app.zones
+        .get(zone_id)
+        .map(|zone| {
+            matches!(
+                app.effective_zone_display_mode(zone),
+                bento_nano_app::ZoneDisplayMode::Hover
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// A3 — feed the hover-intent and grace-collapse scheduler from a hover-target
+/// change. `hover_zone` is the zone the cursor is now over (already resolved
+/// and stack-anchor-filtered upstream). The scheduler defers the structural
+/// expand or collapse morph by the user-tunable `expand_delay_ms` and
+/// `collapse_delay_ms` (M1d Settings sliders) so a transient pointer twitch no
+/// longer instantly opens or closes a zone. Stack anchors keep their bespoke
+/// chrome and never enter the pill scheduler.
+fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) {
+    // Treat stack anchors as non-pill so they don't engage the scheduler.
+    let next_zone = hover_zone.and_then(|id| {
+        let zone = app.zones.get(id)?;
+        if zone.is_stack_anchor() { None } else { Some(id) }
+    });
+    let expand_delay = app.expand_delay_ms.get().max(0) as u32;
+    let collapse_delay = app.collapse_delay_ms.get().max(0) as u32;
+    let mut scheduler = app.hover_scheduler.get();
+    let expanded = scheduler.expanded_zone();
+
+    match next_zone {
+        Some(zone) => {
+            // Cursor is over a zone. nano morphs a single zone at a time, so
+            // a direct zone→zone hand-off is handled by the morph's single
+            // slot (the new expand replaces the old expanded body — Tauri
+            // treats position as instant). on_enter cancels any pending
+            // collapse for this zone (re-enter aborts the grace) and arms the
+            // hover-intent expand timer when it isn't already expanded.
+            scheduler.on_enter(zone, now_ms, expand_delay);
+        }
+        None => {
+            // Cursor moved to empty space. Arm the grace collapse for the
+            // expanded zone (HOVER mode only); clears any pending expand.
+            let auto = expanded
+                .map(|z| zone_auto_collapses_on_leave(app, z))
+                .unwrap_or(false);
+            scheduler.on_leave(now_ms, collapse_delay, auto);
+        }
+    }
+    app.hover_scheduler.set(scheduler);
+}
+
+/// A3 — poll the scheduler once per frame and apply any due expand/collapse to
+/// the Wave G2 morph state machine. Returns `true` when a structural change
+/// fired (the caller should request a redraw). The morph itself is still
+/// advanced by `tick_zone_pill_animation`; this just flips the target.
+fn poll_hover_scheduler(app: &AppState, now_ms: u32) -> bool {
+    let mut scheduler = app.hover_scheduler.get();
+    let action = scheduler.poll(now_ms);
+    app.hover_scheduler.set(scheduler);
+    match action {
+        zone_pill_geometry::HoverAction::None => false,
+        zone_pill_geometry::HoverAction::Expand(zone) => {
+            update_zone_pill_hover(app, Some(zone), now_ms)
+        }
+        zone_pill_geometry::HoverAction::Collapse(_zone) => {
+            update_zone_pill_hover(app, None, now_ms)
+        }
+    }
+}
+
 /// V-8 (2026-05-21) — drive the pill hover animator channel.
 ///
 /// The Wave G2 `update_zone_pill_hover` above handles the **rect/radius
@@ -12854,10 +12929,14 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
             update_pill_hover_animator(&app, hover_zone, now_ms);
             app.hovered_zone.set(hover_zone);
             update_stack_bloom_hover(&app, hover_zone, now_ms);
-            // Wave G2 — start / cancel the capsule pill morph in lockstep
-            // with the hover change so the renderer can paint the
-            // interpolated rect on this and subsequent frames.
-            update_zone_pill_hover(&app, hover_zone, now_ms);
+            // A3 (2026-05-29) — feed the hover-intent / grace-collapse
+            // scheduler. The structural expand/collapse morph is NO LONGER
+            // fired immediately here; the scheduler defers it by the
+            // user-tunable expand_delay_ms / collapse_delay_ms (M1d) and the
+            // per-frame `poll_hover_scheduler` (ghost-passthrough timer pump)
+            // applies the morph when the grace elapses. This replaces the
+            // pre-A3 instant-expand-on-move behaviour.
+            drive_hover_scheduler(&app, hover_zone, now_ms);
             request_redraw(slot.hwnd);
         }
         let item_candidate = app.item_drag.borrow().clone();
@@ -13010,18 +13089,6 @@ fn apply_ghost_cursor_passthrough_for_point(
     passthrough
 }
 
-/// α3 (A3 auto-return, 2026-05-24): grace period the WM_TIMER passthrough
-/// poll waits before letting `clear_hover` fire the recover tween. Sized
-/// at 80 ms so a momentary cursor twitch off a pill does not collapse the
-/// hover state before the user returns. P9-sanctioned per memory entry
-/// `feedback_compiles_clean_stub_during_multi_agent_coord` — the constant
-/// site is the load-bearing piece (no `todo!()`, no behavioural drift on
-/// today's clear_hover invocations) and β1 takes ownership when
-/// AppState.settings.collapse_delay_ms persists user-tunable timings.
-// TODO(β1): replace const with persisted setting from AppState.settings.collapse_delay_ms once A2 lands. Sanctioned compile-clean stub per memory/feedback_compiles_clean_stub_during_multi_agent_coord.
-#[allow(dead_code)]
-const LEAVE_GRACE_MS: u64 = 80;
-
 fn clear_hover(root: &AppRoot) {
     let mut app = root.app.borrow_mut();
     // SAFETY: GetTickCount is total + thread-safe.
@@ -13032,9 +13099,14 @@ fn clear_hover(root: &AppRoot) {
     app.hovered_zone.set(None);
     app.stack_bloom_anchor.set(None);
     app.stack_bloom_progress.set(1.0);
-    // Wave G2 — if a pill morph was open, drive it back to collapse so the
-    // shrink animation still plays when the pointer leaves the HWND.
-    update_zone_pill_hover(&app, None, now_ms);
+    // A3 (2026-05-29) — pointer left the overlay. Do NOT collapse the open
+    // zone instantly; arm the grace-collapse so a transient twitch off a pill
+    // (or a brief WS_EX_TRANSPARENT passthrough flicker) doesn't drop the
+    // zone before the user returns. The former 80ms `LEAVE_GRACE_MS` dead
+    // const is now LIVE as the user-tunable `collapse_delay_ms` consumed
+    // inside `drive_hover_scheduler`. The per-frame `poll_hover_scheduler`
+    // fires the actual collapse morph once the grace elapses (HOVER mode).
+    drive_hover_scheduler(&app, None, now_ms);
     let should_hide_tooltip = app.active_tooltip.borrow().is_some();
     let mut prev = root.hovered.borrow_mut();
     if let Some(old) = *prev {
@@ -21471,6 +21543,18 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
     if tick_stack_bloom_animation(&app, now) {
         any_active = true;
     }
+    // A3 (2026-05-29) — poll the hover-intent / grace-collapse scheduler on
+    // the frame-tick timestamp (no WM_TIMER, fits the immediate-mode pump).
+    // When an expand/collapse deadline elapses this flips the Wave G2 morph
+    // target, which `tick_zone_pill_animation` below then advances.
+    if poll_hover_scheduler(&app, now) {
+        any_active = true;
+    }
+    // A3 — keep the pump alive while a hover/collapse timer is still armed so
+    // the deadline is actually reached even if the cursor has gone idle.
+    if app.hover_scheduler.get().is_pending() {
+        any_active = true;
+    }
     // Wave G2 — capsule pill expand/shrink morph.
     if tick_zone_pill_animation(&app, now) {
         any_active = true;
@@ -21886,7 +21970,7 @@ mod tests {
         tooltip_command_for_snapshot_picker_hover,
         tooltip_command_for_suggestor_hover, tooltip_command_for_timeline_hover,
         tooltip_command_for_zone_editor_hover, tray_command_for_callback,
-        LEAVE_GRACE_MS, tray_menu_command_for_choice, tray_menu_command_for_item, ui, unlock_passphrase_vault,
+        tray_menu_command_for_choice, tray_menu_command_for_item, ui, unlock_passphrase_vault,
         unpin_zone_minibar, update_check_interval, update_frequency_from_wire,
         update_frequency_setting_command_for,
         update_stack_bloom_hover, update_zone_pill_hover,
@@ -21948,19 +22032,76 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP};
     use zip::write::FileOptions;
 
-    /// α3 (A3 auto-return, 2026-05-24) — pin the sanctioned 80 ms grace
-    /// period. P9 ruled this exact value lands as a compile-clean stub at
-    /// the `clear_hover` consumer site; β1 owns the migration to a
-    /// persisted setting. Changing this number without β1 movement is a
-    /// hand-off failure — flip the test when β1 plumbs the value through
-    /// `AppState.settings.collapse_delay_ms`, not before.
+    /// A3 (2026-05-29) — the former 80ms `LEAVE_GRACE_MS` dead stub is now
+    /// LIVE: the hover-intent expand and grace-collapse are driven by the
+    /// user-tunable `expand_delay_ms` / `collapse_delay_ms` settings through
+    /// `drive_hover_scheduler` + `poll_hover_scheduler`. This test exercises
+    /// the full shell wiring (enter → deferred expand; leave → deferred
+    /// collapse) using frame-tick timestamps, the no-live-mouse substitute.
     #[test]
-    fn leave_grace_ms_pinned_at_eighty_for_alpha3_stub() {
-        assert_eq!(
-            LEAVE_GRACE_MS, 80,
-            "α3 sanctioned stub must remain 80 ms until β1 swaps it for \
-             the persisted `collapse_delay_ms` setting"
-        );
+    fn hover_scheduler_defers_expand_and_collapse_via_settings_delays() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            // Default ZoneDisplayMode::Hover so the leave auto-collapses.
+            app.zones.add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+            app.expand_delay_ms.set(150);
+            app.collapse_delay_ms.set(300);
+        }
+        let app = root.app.borrow();
+        let expand_delay = app.expand_delay_ms.get() as u32;
+        let collapse_delay = app.collapse_delay_ms.get() as u32;
+
+        // 1. Cursor enters the pill at t=1000 — expand is ARMED, not fired.
+        drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
+        assert!(app.hover_scheduler.get().is_pending());
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+        // Polling before the delay does nothing.
+        assert!(!poll_hover_scheduler(&app, 1_000 + expand_delay - 1));
+        assert_eq!(app.zone_pill_anim_zone.get(), None);
+
+        // 2. At now + expand_delay the morph flips to expanding.
+        assert!(poll_hover_scheduler(&app, 1_000 + expand_delay));
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
+        assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
+        assert!(app.zone_pill_anim_expanding.get());
+
+        // 3. Cursor leaves to empty space well after the 550ms expand-lock
+        //    (lock window was [t_expand, t_expand+550]); collapse is ARMED.
+        let leave = 1_000 + expand_delay + zone_pill_geometry::EXPAND_LOCK_MS + 10;
+        drive_hover_scheduler(&app, None, leave);
+        assert!(app.hover_scheduler.get().is_pending());
+        // Before now + collapse_delay the morph is still expanding.
+        assert!(!poll_hover_scheduler(&app, leave + collapse_delay - 1));
+        assert!(app.zone_pill_anim_expanding.get());
+
+        // 4. At now + collapse_delay the collapse morph fires.
+        assert!(poll_hover_scheduler(&app, leave + collapse_delay));
+        assert!(!app.zone_pill_anim_expanding.get());
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+    }
+
+    /// A3 — ALWAYS display mode must NOT auto-collapse on leave (Tauri
+    /// `BentoZone.tsx:589`). The grace timer stays unarmed for the collapse.
+    #[test]
+    fn hover_scheduler_always_mode_does_not_collapse_on_leave() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones.add(Zone::new(ZoneId(1), "Pinned", 100, 100, 240, 180));
+            app.zone_display_mode.set(bento_nano_app::ZoneDisplayMode::Always);
+            app.expand_delay_ms.set(150);
+            app.collapse_delay_ms.set(300);
+        }
+        let app = root.app.borrow();
+        // Expand the zone via the scheduler.
+        drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
+        assert!(poll_hover_scheduler(&app, 1_000 + 150));
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
+        // Leave far in the future — ALWAYS mode never auto-collapses.
+        drive_hover_scheduler(&app, None, 100_000);
+        assert!(!poll_hover_scheduler(&app, 200_000));
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
     }
 
     #[test]
@@ -30213,9 +30354,11 @@ mod tests {
     }
 
     #[test]
-    fn pill_hover_animation_respects_200ms_cap() {
-        // Wave G2 prompt mandates ≤200ms total morph time.
-        assert!(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS <= 200);
+    fn pill_hover_animation_matches_tauri_spring_expand_duration() {
+        // M3 (2026-05-29) — the live morph now mirrors Tauri `.spring-expand`
+        // (width/height/--rad over 0.5s, `animations.css:41-43`). The pre-M3
+        // ≤200ms Wave G2 cap is superseded by 1:1 Tauri parity.
+        assert_eq!(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS, 500);
     }
 
     #[test]

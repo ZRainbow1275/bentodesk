@@ -90,7 +90,12 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
     if app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() {
         let raw = app.zone_pill_anim_progress.get();
         if raw > 0.0 && raw < 1.0 {
-            let eased = zone_pill_geometry::ease_out_cubic_progress(raw);
+            // V-13 paint–hit parity: mirror EXACTLY the curve render.rs:1308
+            // paints (M3 easeOutBack `cubic-bezier(0.34,1.56,0.64,1)`). During
+            // the ~10% overshoot window the painted rect bulges past the
+            // expanded target; the hit-rect must bulge with it or clicks fall
+            // outside the visible shape.
+            let eased = zone_pill_geometry::ease_out_back_progress(raw);
             // `expanding` true → morph from pill (0) → expanded (1); false
             // reverses the morph so the shrink animation tracks correctly.
             let morph = if app.zone_pill_anim_expanding.get() {
@@ -1378,8 +1383,11 @@ mod phase21_tests {
         let zone = Zone::new(ZoneId(45), Cow::Borrowed("Docs"), 100, 100, 240, 180);
         let app = app_with_zones(vec![zone]);
         // Hover + morph half-way through expanding. Renderer paints
-        // morph_pill_to_rect(pill, expanded, eased(0.5)). Hit-rect must
-        // mirror that exactly (paint–hit parity within 1 DIP).
+        // morph_pill_to_rect(pill, expanded, ease_out_back(0.5)). Hit-rect
+        // must mirror that exactly (paint–hit parity within 1 DIP). Note the
+        // easeOutBack curve OVERSHOOTS at raw=0.5 (eased ≈ 1.087), so the
+        // morphed rect extrapolates ~8.7% PAST the expanded target — the
+        // hit-rect tracks that bulge, which is the whole point of the V-13 fix.
         app.hovered_zone.set(Some(ZoneId(45)));
         app.zone_pill_anim_zone.set(Some(ZoneId(45)));
         app.zone_pill_anim_expanding.set(true);
@@ -1394,7 +1402,7 @@ mod phase21_tests {
             width: 240.0,
             height: 180.0,
         };
-        let eased = bento_nano_app::zone_pill_geometry::ease_out_cubic_progress(0.5);
+        let eased = bento_nano_app::zone_pill_geometry::ease_out_back_progress(0.5);
         let morphed =
             bento_nano_app::zone_pill_geometry::morph_pill_to_rect(layout.rect, expanded, eased);
         // Inside the morphed rect → hit.

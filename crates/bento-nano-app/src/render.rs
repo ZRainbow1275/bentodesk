@@ -1299,7 +1299,13 @@ impl Renderer {
                     height: zone.h as f32,
                 };
                 let raw = app.zone_pill_anim_progress.get();
-                let eased = zone_pill_geometry::ease_out_cubic_progress(raw);
+                // M3 (2026-05-29) — Tauri `.spring-expand` easeOutBack curve
+                // (cubic-bezier(0.34,1.56,0.64,1)). `eased` overshoots ~10%
+                // past 1.0 mid-flight then settles exactly to 1.0; the
+                // overshoot flows through `morph_pill_to_rect`/`_radius`
+                // (which no longer upper-clamp) so the rect+radius bulge then
+                // snap back, 1:1 with the Tauri capsule<->panel transition.
+                let eased = zone_pill_geometry::ease_out_back_progress(raw);
                 // `expanding` true → morph from pill (0) to expanded (1);
                 // false → morph from expanded (0) to pill (1). We flip when
                 // collapsing so the same morph helper still produces the
@@ -1309,11 +1315,26 @@ impl Renderer {
                 } else {
                     1.0 - eased
                 };
+                // B2 (2026-05-29) — Tauri drives `background`/`border-color`
+                // on a SEPARATE 0.3s CSS-`ease` timeline (animations.css:44-45),
+                // NOT the 0.5s easeOutBack size curve. The morph `raw` fraction
+                // spans the full 500ms; the color transition completes in the
+                // FIRST 300ms, so we rescale raw by 500/300 (clamped) then run
+                // the CSS-`ease` curve. Collapse reverses it in lockstep with
+                // the size morph so the channels stay phase-aligned.
+                let color_raw = (raw * 500.0 / 300.0).min(1.0);
+                let color_eased = zone_pill_geometry::ease_standard_progress(color_raw);
+                let color_t = if app.zone_pill_anim_expanding.get() {
+                    color_eased
+                } else {
+                    1.0 - color_eased
+                };
                 self.draw_zone_pill_morph(
                     zone,
                     &pill_layout,
                     expanded_rect,
                     morph,
+                    color_t,
                     theme_base_accent.as_deref(),
                     pal,
                 )?;
@@ -1945,27 +1966,42 @@ impl Renderer {
     /// radius + lerped fill alpha. Glyph + label + count badge fade in
     /// proportional to `morph` so the transient frame doesn't show truncated
     /// text. Allocation-free hot-path per spec §10.
+    ///
+    /// Matches the sibling `draw_zone_pill` arity allowance: the inputs
+    /// (zone / layout / expanded rect / two independently-eased animation
+    /// channels / theme accent / palette) are all genuinely distinct paint
+    /// data — `morph` rides the 0.5 s easeOutBack size curve and `color_t`
+    /// rides the SEPARATE 0.3 s CSS-`ease` color curve, so neither can be
+    /// derived from the other locally.
+    #[allow(clippy::too_many_arguments)]
     fn draw_zone_pill_morph(
         &mut self,
         zone: &Zone,
         pill_layout: &ZonePillLayout,
         expanded_rect: bento_nano_style::Rect,
         morph: f32,
+        color_t: f32,
         theme_base_accent: Option<&str>,
         pal: bento_nano_style::tokens::PaletteTauri,
     ) -> Result<(), RenderError> {
         // M6a — live theme palette passed in by `draw_zones` (§10).
         use bento_nano_style::tokens::{ACRYLIC_FALLBACK, RADIUS, SHADOW};
+        // M3 — `morph` may exceed 1.0 (easeOutBack ~10% overshoot). Geometry
+        // (rect + radius) consumes the RAW value so the bulge is visible; the
+        // shadow / fade interpolations use the [0,1] clamped value so the
+        // chrome never over-saturates during the overshoot frame.
+        // B2 — `color_t` is the SEPARATE 0.3s CSS-`ease` color channel (already
+        // direction-resolved by the caller); the title-alpha rides it, NOT the
+        // 500ms back curve.
         let morph_clamped = morph.clamp(0.0, 1.0);
         let pill_rect = pill_layout.rect;
-        let rect =
-            zone_pill_geometry::morph_pill_to_rect(pill_rect, expanded_rect, morph_clamped);
+        let rect = zone_pill_geometry::morph_pill_to_rect(pill_rect, expanded_rect, morph);
         // Capsule radius → expanded surface radius (RADIUS.expanded = 16 px,
         // matches the legacy zone chrome rounding).
         let radius_px = zone_pill_geometry::morph_pill_radius(
             RADIUS.capsule,
             RADIUS.expanded,
-            morph_clamped,
+            morph,
         );
         let border_radius = BorderRadius::all(radius_px);
         let inv = 1.0 - morph_clamped;
@@ -1986,6 +2022,13 @@ impl Renderer {
         self.fill_rounded_rect(shadow_outer, SHADOW.zen.color, border_radius)?;
         self.fill_rounded_rect(shadow_inner, SHADOW.zen_inner.color, border_radius)?;
         self.fill_rounded_rect(rect, ACRYLIC_FALLBACK, border_radius)?;
+        // B2 (2026-05-29): Tauri's 0.3s `background`/`border-color` transition
+        // is a visual no-op here: the collapsed pill and the expanded panel
+        // share `surface_zen` (see `draw_zone_pill` line ~1848 and the expanded
+        // chrome), and the morph path paints no border stroke — there is no
+        // pill-vs-panel COLOR delta to crossfade, so the fill stays flat. The
+        // 300ms `ease` channel (`color_t`) is therefore expressed only through
+        // the title-alpha below, where it is genuinely visible.
         self.fill_rounded_rect(rect, pal.surface_zen, border_radius)?;
         // Accent stripe (matches expanded chrome accent dot above the icon
         // band — drawn at the top of the morph so the eye picks up the zone
@@ -2013,7 +2056,11 @@ impl Renderer {
             width: (rect.width - 20.0).max(0.0),
             height: title_height,
         };
-        let title_color = with_alpha(pal.text_primary, 0.6 + 0.4 * morph_clamped);
+        // B2 — title-alpha rides the 0.3s CSS-`ease` color channel (`color_t`),
+        // NOT the 0.5s easeOutBack size curve, so the text fade completes in
+        // the first 300ms and matches Tauri's `background`/`border-color`
+        // timeline rather than the springy size morph.
+        let title_color = with_alpha(pal.text_primary, 0.6 + 0.4 * color_t);
         self.draw_text(zone.title.as_ref(), title_rect, title_color)?;
         Ok(())
     }

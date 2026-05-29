@@ -83,8 +83,10 @@ pub enum Easing {
     /// Linear — `t`. Used by `StatusDotPulse` for its triangle-wave phase
     /// before the sine remap.
     Linear,
-    /// Ease-out cubic — matches `zone_pill_geometry::ease_out_cubic_progress`.
-    /// Decelerating curve so the pill snaps quickly then settles.
+    /// Ease-out cubic — `1 - (1-t)³`. Decelerating curve so the pill snaps
+    /// quickly then settles. (The standalone `zone_pill_geometry`
+    /// ease-out-cubic helper was removed in M3 once the live pill morph moved
+    /// to the easeOutBack curve; this variant keeps its own inline impl below.)
     EaseOutCubic,
     /// Ease-in-out quadratic — symmetric S-curve. Reference Tauri's CSS
     /// `cubic-bezier(0.25, 0.1, 0.25, 1.0)` close enough for the 200 ms
