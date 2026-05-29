@@ -589,10 +589,14 @@ pub enum SettingsHit {
     /// in DIPs). The wheel handler dispatches this so the wheel-routing path
     /// stays single-purpose; mouse hit-test never emits it directly.
     ScrollBodyDelta(i32),
-    /// Round-2 M2 — 桌面源 card 0 (海桌面) toggle hit.
-    ToggleSourcePrimary,
-    /// Round-2 M2 — 桌面源 card 1 (公共桌面) toggle hit.
-    ToggleSourcePublic,
+    /// M1i 2026-05-29 — 桌面源 §2 refresh (`↻`) button: re-run
+    /// `desktop_sources::all_desktop_dirs` and repopulate the cached
+    /// `AppState::desktop_sources` read-only list, then redraw. Replaces the
+    /// two per-card cosmetic enable toggles (`ToggleSourcePrimary` /
+    /// `ToggleSourcePublic`), which were removed as a deliberate Tauri-parity
+    /// change — the Tauri `desktop-source-card` has no toggle, only a 已监视
+    /// badge.
+    RefreshDesktopSources,
     /// Round-2 M2 — 桌面路径 input click. M2 logs + redraws; live keyboard
     /// editing lands in a later wave.
     EditDesktopPath,
@@ -777,29 +781,38 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
             return SettingsHit::SetZoneDisplayMode(mode);
         }
     }
-    // Round-2 M2 — 桌面源 card toggles (right-anchored on each row).
-    for index in 0..bento_nano_app::settings_panel::SETTINGS_SOURCE_COUNT {
-        let hit = bento_nano_app::settings_panel::settings_source_toggle_hit_rect(
-            vp, scroll_y, index,
-        );
-        if x >= hit.x && x < hit.right() && y >= hit.y && y < hit.bottom() {
-            return match index {
-                0 => SettingsHit::ToggleSourcePrimary,
-                1 => SettingsHit::ToggleSourcePublic,
-                _ => SettingsHit::Body,
-            };
-        }
+    // M1i fidelity — the §2 source list reflows to the LIVE source count;
+    // the hit geometry must read the same count the renderer paints.
+    let source_count = app.desktop_sources.borrow().len();
+    // M1i fidelity — 桌面源 §2 refresh (`↻`) button. Now the LAST child of the
+    // list, right-anchored BELOW the live card stack (not on the heading row).
+    // Click re-resolves the desktop sources and repopulates the read-only list.
+    // The source cards themselves are display-only (no per-card hit-box).
+    let refresh = bento_nano_app::settings_panel::settings_sources_refresh_button_rect(
+        vp, scroll_y, source_count,
+    );
+    if x >= refresh.x && x < refresh.right() && y >= refresh.y && y < refresh.bottom() {
+        return SettingsHit::RefreshDesktopSources;
     }
-    // Round-2 M2 — 桌面路径 input box.
-    let path_box = bento_nano_app::settings_panel::settings_desktop_path_input_rect(vp, scroll_y);
+    // Round-2 M2 — 桌面路径 input box (reflows below the live source stack).
+    let path_box =
+        bento_nano_app::settings_panel::settings_desktop_path_input_rect(vp, scroll_y, source_count);
     if x >= path_box.x && x < path_box.right() && y >= path_box.y && y < path_box.bottom() {
         return SettingsHit::EditDesktopPath;
     }
-    // Round-2 M2 — 监控值 textarea.
-    let watch_box = bento_nano_app::settings_panel::settings_watch_textarea_rect(vp, scroll_y);
+    // Round-2 M2 — 监控值 textarea (reflows below the live source stack).
+    let watch_box =
+        bento_nano_app::settings_panel::settings_watch_textarea_rect(vp, scroll_y, source_count);
     if x >= watch_box.x && x < watch_box.right() && y >= watch_box.y && y < watch_box.bottom() {
         return SettingsHit::EditWatchValues;
     }
+    // M1i fidelity — single-base-offset reflow (mirrors the renderer's `scroll`
+    // shadow in `render.rs`). Everything from Performance §5 downward roots at
+    // the fixed 4-card source reserve; fold the live reserve delta into
+    // `scroll_y` so the hit geometry shifts UP by the height of the missing
+    // source cards in lockstep with what is painted.
+    let scroll_y =
+        scroll_y + bento_nano_app::settings_panel::settings_sources_reserve_delta(source_count);
     // M1d — Performance §5: 3 SliderRows (no conditionals). The slider track
     // band sits on the lower line of each row; a click anywhere on it starts
     // a drag carrying the quantized client x for the dispatcher's
@@ -1631,7 +1644,14 @@ mod phase21_tests {
         let max_scroll =
             bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
         app.scroll_offset_y.set(max_scroll);
-        let scroll_y = max_scroll;
+        // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
+        // the scroll for all perf-and-below geometry; this test populates no
+        // desktop sources (count 0), so apply the matching fold to the rects we
+        // compare against, exactly as production paint/hit does.
+        let scroll_y = max_scroll
+            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
+                flags.source_row_count,
+            );
         let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
         let label = bento_nano_app::settings_panel::settings_backup_label_rect(
             app.viewport,
@@ -1706,7 +1726,14 @@ mod phase21_tests {
         let max_scroll =
             bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
         app.scroll_offset_y.set(max_scroll);
-        let scroll_y = max_scroll;
+        // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
+        // the scroll for all perf-and-below geometry; this test populates no
+        // desktop sources (count 0), so apply the matching fold to the rects we
+        // compare against, exactly as production paint/hit does.
+        let scroll_y = max_scroll
+            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
+                flags.source_row_count,
+            );
         let actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
             app.viewport,
             scroll_y,
@@ -1888,7 +1915,14 @@ mod phase21_tests {
         let max_scroll =
             bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
         app.scroll_offset_y.set(max_scroll);
-        let scroll_y = max_scroll;
+        // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
+        // the scroll for all perf-and-below geometry; this test populates no
+        // desktop sources (count 0), so apply the matching fold to the rects we
+        // compare against, exactly as production paint/hit does.
+        let scroll_y = max_scroll
+            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
+                flags.source_row_count,
+            );
         let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
         let label =
             bento_nano_app::settings_panel::settings_plugins_label_rect(app.viewport, scroll_y, &flags);
@@ -1961,7 +1995,14 @@ mod phase21_tests {
         let max_scroll =
             bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
         app.scroll_offset_y.set(max_scroll);
-        let scroll_y = max_scroll;
+        // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
+        // the scroll for all perf-and-below geometry; this test populates no
+        // desktop sources (count 0), so apply the matching fold to the rects we
+        // compare against, exactly as production paint/hit does.
+        let scroll_y = max_scroll
+            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
+                flags.source_row_count,
+            );
         let install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
             app.viewport,
             scroll_y,

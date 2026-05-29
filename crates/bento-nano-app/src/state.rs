@@ -11,7 +11,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use bento_nano_backend::{rules::Rule, updater::UpdateCheckFrequency};
+use bento_nano_backend::{
+    desktop_sources::DesktopSourceKind, rules::Rule, updater::UpdateCheckFrequency,
+};
 use bento_nano_layout::{LayoutEngine, LayoutError};
 use bento_nano_platform::MonitorInfo;
 use bento_nano_style::Size;
@@ -434,12 +436,16 @@ pub struct AppState {
     /// Tauri (`SettingsPanel.tsx:294`, bound field `portable_mode`).
     /// Default off.
     pub setting_portable_mode: Cell<bool>,
-    /// Round-2 M2 — 桌面源 toggle: 海桌面 (the user's personal Desktop).
-    /// Default on. Real backend wiring is M3 (`DesktopSourceProbe`).
-    pub source_primary_enabled: Cell<bool>,
-    /// Round-2 M2 — 桌面源 toggle: 公共桌面 (`C:\Users\Public\Desktop`).
-    /// Default off.
-    pub source_public_enabled: Cell<bool>,
+    /// M1i 2026-05-29 — 桌面源 §2 dynamic, READ-ONLY source list. Replaces the
+    /// two hardcoded cosmetic-toggle cards with the real resolved Desktop
+    /// directories from `bento_nano_backend::desktop_sources::all_desktop_dirs`,
+    /// each classified into a [`DesktopSourceKind`] and tagged with a `watched`
+    /// flag (path present in the watch-paths draft). The shell repopulates this
+    /// on Settings-open and on the Refresh button (`RefreshDesktopSources`); the
+    /// renderer paints one read-only card per entry (Tauri `desktop-source-card`
+    /// parity — `SettingsPanel.tsx:320-362`). `SmolStr` (not `PathBuf`) keeps the
+    /// display string allocation-light per architecture §10.
+    pub desktop_sources: RefCell<Vec<(DesktopSourceKind, SmolStr, bool)>>,
     /// Round-2 M2 — 桌面路径 draft string editing the user's primary desktop
     /// path. Wired to a single-line text input row. Persists on Save (M4).
     pub desktop_path_draft: RefCell<SmolStr>,
@@ -769,8 +775,7 @@ impl AppState {
             setting_show_in_taskbar: Cell::new(true),
             setting_smart_layout: Cell::new(true),
             setting_portable_mode: Cell::new(false),
-            source_primary_enabled: Cell::new(true),
-            source_public_enabled: Cell::new(false),
+            desktop_sources: RefCell::new(Vec::new()),
             desktop_path_draft: RefCell::new(SmolStr::new_static("D:\\Desktop")),
             watch_paths_draft: RefCell::new(SmolStr::default()),
             expand_delay_ms: Cell::new(150),

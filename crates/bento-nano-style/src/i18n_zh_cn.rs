@@ -292,6 +292,23 @@ pub mod ids {
     pub const PLUGIN_TYPE_WIDGET: StringId = StringId(200);
     pub const PLUGIN_TYPE_ORGANIZER: StringId = StringId(201);
     pub const PLUGIN_UNINSTALL: StringId = StringId(202);
+    // 203..205 M1i (2026-05-29) — Paths §2 dynamic desktop-source list
+    // (`SettingsPanel.tsx:320-362`). Appended in lockstep with `i18n_en_us`
+    // (same index, same order) per the positional-array contract; the
+    // `lookup_tables_have_matching_length` test enforces parity. The User /
+    // Public card labels reuse `SOURCE_PRIMARY_LABEL` (124) / `SOURCE_PUBLIC_LABEL`
+    // (125); these add the OneDrive + Custom kind labels and the 已监视 badge
+    // (Tauri keys `desktopSourceOneDrive` / `desktopSourceCustom` /
+    // `desktopSourceWatched`, `zh-CN.ts:30-32`).
+    pub const SOURCE_ONEDRIVE_LABEL: StringId = StringId(203);
+    pub const SOURCE_CUSTOM_LABEL: StringId = StringId(204);
+    pub const SOURCE_WATCHED_BADGE: StringId = StringId(205);
+    // 206 M1i fidelity (2026-05-29) — `.desktop-source-empty` placeholder for
+    // the §2 list when no desktop sources resolve. Tauri reuses its
+    // `settingsDesktopPathPlaceholder` ("C:\Users\...\Desktop") path-format
+    // hint here; nano has no existing equivalent string, so this id is appended
+    // in lockstep with `i18n_en_us`.
+    pub const SOURCE_EMPTY_PLACEHOLDER: StringId = StringId(206);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -543,5 +560,13 @@ pub static ZH_CN: LookupTable = LookupTable {
         "组件",                  // PLUGIN_TYPE_WIDGET (200)
         "整理器",                // PLUGIN_TYPE_ORGANIZER (201)
         "卸载",                  // PLUGIN_UNINSTALL (202)
+        // 203..205 M1i — Paths §2 dynamic desktop-source list
+        // (`SettingsPanel.tsx:320-362`, zh-CN.ts:30-32).
+        "OneDrive 桌面",         // SOURCE_ONEDRIVE_LABEL (203)
+        "自定义来源",            // SOURCE_CUSTOM_LABEL (204)
+        "已监视",                // SOURCE_WATCHED_BADGE (205)
+        // 206 M1i fidelity — empty `.desktop-source-empty` placeholder; mirrors
+        // Tauri's reuse of the desktop-path format hint.
+        "C:\\Users\\...\\Desktop", // SOURCE_EMPTY_PLACEHOLDER (206)
     ],
 };

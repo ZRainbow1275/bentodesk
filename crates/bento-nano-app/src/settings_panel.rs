@@ -639,21 +639,39 @@ pub const SETTINGS_RADIO_GAP: f32 = 4.0;
 /// 桌面源 / 桌面路径 / 监控值).
 pub const SETTINGS_SECTION_LABEL_H: f32 = 24.0;
 
-/// Round-2 M2 — height of one 桌面源 card row (icon + label + meta + state
-/// chip + chevron). Slightly taller than a toggle row to host the secondary
-/// text line.
-pub const SETTINGS_SOURCE_ROW_H: f32 = 56.0;
+/// Round-2 M2 / M1i fidelity (2026-05-29) — height of one 桌面源 card row.
+/// Tauri `.desktop-source-card` is `padding: 8px 10px` around a 28-DIP icon /
+/// two-line body (13 + 11 px text + 2 px internal gap). 8 (top pad) + 28
+/// (icon, the tallest flex child) + 8 (bottom pad) = 44.
+pub const SETTINGS_SOURCE_ROW_H: f32 = 44.0;
 
-/// Round-2 M2 — number of source rows painted in M2 (1=primary, 2=public).
-pub const SETTINGS_SOURCE_COUNT: u8 = 2;
+/// M1i 2026-05-29 — number of source-card slots the §2 Paths layout caps the
+/// list at (and the max cards the renderer paints). The list is dynamic, fed
+/// from `desktop_sources::all_desktop_dirs`; the realistic Windows ceiling is
+/// User + Public + OneDrive + Custom = 4. M1i fidelity fix — the list now
+/// reflows to the LIVE count (Tauri's flex column): every section below it
+/// shifts up/down by the height of the missing/extra cards. The renderer
+/// paints `min(live_count, MAX)` cards. Mirrors the visible-cap rhythm of
+/// [`SETTINGS_PLUGINS_ROW_VISIBLE_MAX`] / [`SETTINGS_BACKUP_ROW_VISIBLE_MAX`].
+pub const SETTINGS_SOURCE_ROW_VISIBLE_MAX: u8 = 4;
 
-/// Round-2 M2 — gap between two source cards.
-pub const SETTINGS_SOURCE_GAP: f32 = 8.0;
+/// Round-2 M2 / M1i fidelity — vertical gap between two source cards. Tauri
+/// `.desktop-source-list { gap: 6px }`.
+pub const SETTINGS_SOURCE_GAP: f32 = 6.0;
 
-/// Round-2 M2 — width of the right-anchored toggle hit-box inside a
-/// source-card row (mirrors `SETTINGS_TOP_TOGGLE_HIT_W` for consistency).
-pub const SETTINGS_SOURCE_TOGGLE_HIT_W: f32 = 60.0;
-pub const SETTINGS_SOURCE_TOGGLE_HIT_H: f32 = 28.0;
+/// M1i fidelity — the `.desktop-source-empty` placeholder height (one italic
+/// 11-px line, `padding: 6px 4px`). 6 + ~12 (line box) + 6 = 24.
+pub const SETTINGS_SOURCE_EMPTY_H: f32 = 24.0;
+
+/// M1i fidelity — the `.desktop-source-refresh` button row. The button is the
+/// LAST child of the list (`align-self: flex-end`), below the cards. Tauri
+/// `padding: 4px 10px; min-width: 32px; font-size: 14px`. 4 + ~16 + 4 = 24
+/// tall.
+pub const SETTINGS_SOURCE_REFRESH_BTN_W: f32 = 36.0;
+pub const SETTINGS_SOURCE_REFRESH_BTN_H: f32 = 24.0;
+/// M1i fidelity — gap between the last card (or empty placeholder) and the
+/// right-anchored refresh button.
+pub const SETTINGS_SOURCE_REFRESH_GAP: f32 = 6.0;
 
 /// Round-2 M2 — text input row (single-line) used by 桌面路径.
 pub const SETTINGS_INPUT_ROW_H: f32 = 40.0;
@@ -974,6 +992,16 @@ pub struct SettingsBodyFlags {
     /// [`SETTINGS_PLUGIN_CARD_H`] (+ inter-card gap); an empty list shows the
     /// single `pluginEmpty` placeholder row instead.
     pub plugin_row_count: usize,
+    /// Paths §2 — number of dynamic desktop-source cards the §2 list paints
+    /// (already capped at [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`] by the caller).
+    /// M1i fidelity (2026-05-29) — this section sits MID-body and now REFLOWS:
+    /// the live count drives the source-block height
+    /// ([`settings_sources_content_height`]) and, via
+    /// [`settings_sources_reserve_delta`], shifts every section below it
+    /// up/down (Tauri's flex column). The count threads into
+    /// [`settings_body_content_height`] so the scroll clamp matches the live
+    /// height, exactly like `with_backup_rows` / `with_plugin_rows`.
+    pub source_row_count: usize,
 }
 
 impl SettingsBodyFlags {
@@ -995,6 +1023,7 @@ impl SettingsBodyFlags {
             updater_kind,
             backup_row_count: 0,
             plugin_row_count: 0,
+            source_row_count: 0,
         }
     }
 
@@ -1015,6 +1044,15 @@ impl SettingsBodyFlags {
         self.plugin_row_count = plugin_row_count;
         self
     }
+
+    /// M1i — return a copy with the Paths §2 source-card count set. Same
+    /// builder rationale as [`Self::with_plugin_rows`]: keeps `new()`'s arity
+    /// fixed while feeding the live capped desktop-source count through the
+    /// shared `SettingsBodyFlags` so paint / hit / scroll all read one count.
+    pub const fn with_source_rows(mut self, source_row_count: usize) -> Self {
+        self.source_row_count = source_row_count;
+        self
+    }
 }
 
 /// Round-2 M1/M2 + M1d + M1e + M1f — total content height inside the body.
@@ -1023,7 +1061,7 @@ impl SettingsBodyFlags {
 /// [`SettingsBodyFlags`] (passed by ref) — geometry never reads global state,
 /// the shell passes the live values.
 pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -> f32 {
-    settings_m2_content_height(viewport)
+    settings_m2_content_height(viewport, flags.source_row_count)
         + settings_perf_startup_content_height(
             viewport,
             flags.crash_restart_enabled,
@@ -1092,40 +1130,74 @@ pub fn settings_source_row_rect(viewport: Size, scroll_offset_y: f32, index: u8)
     }
 }
 
-/// Round-2 M2 — right-anchored toggle hit-box on a source card row.
-pub fn settings_source_toggle_hit_rect(
+/// M1i fidelity (2026-05-29) — refresh (`↻`) button. In Tauri it is the LAST
+/// child of `.desktop-source-list` (`align-self: flex-end`), sitting directly
+/// BELOW the cards / empty placeholder at the list's bottom-right — NOT on the
+/// section heading row (`SettingsPanel.tsx:354-360`). Click re-runs
+/// `all_desktop_dirs` and repopulates `AppState::desktop_sources`
+/// (`RefreshDesktopSources`). Its Y follows the live card stack, so the hit
+/// rect (`ui::settings_hit`) must pass the same live `source_row_count`.
+pub fn settings_sources_refresh_button_rect(
     viewport: Size,
     scroll_offset_y: f32,
-    index: u8,
+    source_row_count: usize,
 ) -> Rect {
-    let row = settings_source_row_rect(viewport, scroll_offset_y, index);
+    let last_bottom = settings_sources_cards_bottom(viewport, scroll_offset_y, source_row_count);
+    let label = settings_sources_label_rect(viewport, scroll_offset_y);
     Rect {
-        x: row.right() - SETTINGS_SOURCE_TOGGLE_HIT_W,
-        y: row.y + (row.height - SETTINGS_SOURCE_TOGGLE_HIT_H) * 0.5,
-        width: SETTINGS_SOURCE_TOGGLE_HIT_W,
-        height: SETTINGS_SOURCE_TOGGLE_HIT_H,
+        x: label.right() - SETTINGS_SOURCE_REFRESH_BTN_W,
+        y: last_bottom + SETTINGS_SOURCE_REFRESH_GAP,
+        width: SETTINGS_SOURCE_REFRESH_BTN_W,
+        height: SETTINGS_SOURCE_REFRESH_BTN_H,
     }
 }
 
-/// Round-2 M2 — `桌面路径` section label rect.
-pub fn settings_desktop_path_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let last_source = settings_source_row_rect(
-        viewport,
-        scroll_offset_y,
-        SETTINGS_SOURCE_COUNT - 1,
-    );
+/// M1i fidelity — scroll-space bottom Y of the live source-card stack (or the
+/// empty placeholder when the list is empty). The refresh button hangs below
+/// this, and the 桌面路径 section anchors off the refresh button's bottom.
+/// `source_row_count` is the LIVE count (clamped to the cap).
+pub fn settings_sources_cards_bottom(
+    viewport: Size,
+    scroll_offset_y: f32,
+    source_row_count: usize,
+) -> f32 {
+    let label = settings_sources_label_rect(viewport, scroll_offset_y);
+    let live = source_row_count.min(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+    if live == 0 {
+        // Empty `.desktop-source-empty` placeholder occupies one short line.
+        label.bottom() + SETTINGS_SOURCE_EMPTY_H
+    } else {
+        let last = settings_source_row_rect(viewport, scroll_offset_y, (live - 1) as u8);
+        last.bottom()
+    }
+}
+
+/// Round-2 M2 / M1i fidelity — `桌面路径` section label rect. Anchors off the
+/// refresh button bottom (the list's last child), which itself follows the
+/// LIVE `source_row_count` — so this section reflows up/down with the live
+/// source count (Tauri's flex column).
+pub fn settings_desktop_path_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    source_row_count: usize,
+) -> Rect {
+    let refresh = settings_sources_refresh_button_rect(viewport, scroll_offset_y, source_row_count);
     let body = settings_body_rect(viewport);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
-        y: last_source.bottom() + SETTINGS_SECTION_GAP,
+        y: refresh.bottom() + SETTINGS_SECTION_GAP,
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
         height: SETTINGS_SECTION_LABEL_H,
     }
 }
 
 /// Round-2 M2 — `桌面路径` input rect (single-line dark rounded box).
-pub fn settings_desktop_path_input_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let label = settings_desktop_path_label_rect(viewport, scroll_offset_y);
+pub fn settings_desktop_path_input_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    source_row_count: usize,
+) -> Rect {
+    let label = settings_desktop_path_label_rect(viewport, scroll_offset_y, source_row_count);
     Rect {
         x: label.x,
         y: label.bottom(),
@@ -1135,8 +1207,12 @@ pub fn settings_desktop_path_input_rect(viewport: Size, scroll_offset_y: f32) ->
 }
 
 /// Round-2 M2 — `监控值` section label rect.
-pub fn settings_watch_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let input = settings_desktop_path_input_rect(viewport, scroll_offset_y);
+pub fn settings_watch_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    source_row_count: usize,
+) -> Rect {
+    let input = settings_desktop_path_input_rect(viewport, scroll_offset_y, source_row_count);
     let body = settings_body_rect(viewport);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
@@ -1147,8 +1223,12 @@ pub fn settings_watch_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
 }
 
 /// Round-2 M2 — `监控值` textarea rect (multi-line dark rounded box).
-pub fn settings_watch_textarea_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
-    let label = settings_watch_label_rect(viewport, scroll_offset_y);
+pub fn settings_watch_textarea_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    source_row_count: usize,
+) -> Rect {
+    let label = settings_watch_label_rect(viewport, scroll_offset_y, source_row_count);
     Rect {
         x: label.x,
         y: label.bottom(),
@@ -1157,14 +1237,58 @@ pub fn settings_watch_textarea_rect(viewport: Size, scroll_offset_y: f32) -> Rec
     }
 }
 
-/// Round-2 M2 — total content height of M1 + M2 sections only. M3 helpers
-/// extend this further.
-pub fn settings_m2_content_height(_viewport: Size) -> f32 {
+/// M1i fidelity (2026-05-29) — the live height of the inner card+refresh stack
+/// of the 桌面源 §2 list, EXCLUDING the heading label and the trailing section
+/// gap. Drives the reflow (Tauri's flex column): `live` cards plus the
+/// `align-self: flex-end` refresh button below them, or the single empty
+/// placeholder + refresh button when the list is empty. `source_row_count` is
+/// clamped to [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`].
+fn settings_sources_stack_height(source_row_count: usize) -> f32 {
+    let live = source_row_count.min(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+    let cards = if live == 0 {
+        // Empty `.desktop-source-empty` placeholder.
+        SETTINGS_SOURCE_EMPTY_H
+    } else {
+        SETTINGS_SOURCE_ROW_H * live as f32 + SETTINGS_SOURCE_GAP * (live - 1) as f32
+    };
+    // Refresh button hangs below the cards / placeholder (list's last child).
+    cards + SETTINGS_SOURCE_REFRESH_GAP + SETTINGS_SOURCE_REFRESH_BTN_H
+}
+
+/// M1i fidelity — height the 桌面源 §2 source block contributes to the body:
+/// heading label + the LIVE card+refresh stack + the trailing section gap.
+/// Unlike the old fixed-reserve version, this now REFLOWS with the live count
+/// so the scroll clamp matches what is painted (Tauri's flex column). Single
+/// source of truth for the source-block height, folded into
+/// [`settings_m2_content_height`].
+pub fn settings_sources_content_height(source_row_count: usize) -> f32 {
+    SETTINGS_SECTION_LABEL_H + settings_sources_stack_height(source_row_count) + SETTINGS_SECTION_GAP
+}
+
+/// M1i fidelity — the scroll-space SHIFT (>= 0) every section below the 桌面源
+/// block moves UP relative to the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`]
+/// reserve baseline, for the given live source count. The perf-and-below
+/// geometry fns root at [`settings_perf_origin_y_offset`], which is pinned at
+/// the max-reserve baseline; callers fold this delta into the `scroll_offset_y`
+/// they pass to those fns (shifting content UP by `delta` is identical to
+/// scrolling DOWN by `delta`). This is the single-base-offset reflow mechanism
+/// — no per-section signature churn. The 桌面路径 / 监控值 rows take the live
+/// count directly instead (they anchor off the refresh button), so the delta
+/// is applied only from Performance §5 downward.
+pub fn settings_sources_reserve_delta(source_row_count: usize) -> f32 {
+    let max = settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+    let live = settings_sources_content_height(source_row_count);
+    (max - live).max(0.0)
+}
+
+/// Round-2 M2 / M1i fidelity — total content height of M1 + M2 sections only.
+/// M3 helpers extend this further. The source-block contribution is delegated
+/// to [`settings_sources_content_height`] (single source of truth) and now
+/// reflects the LIVE `source_row_count` so the scroll clamp shrinks/grows with
+/// the rendered list.
+pub fn settings_m2_content_height(_viewport: Size, source_row_count: usize) -> f32 {
     settings_m2_origin_y_offset()
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_SOURCE_ROW_H * SETTINGS_SOURCE_COUNT as f32
-        + SETTINGS_SOURCE_GAP * (SETTINGS_SOURCE_COUNT - 1) as f32
-        + SETTINGS_SECTION_GAP
+        + settings_sources_content_height(source_row_count)
         + SETTINGS_SECTION_LABEL_H
         + SETTINGS_INPUT_ROW_H
         + SETTINGS_SECTION_GAP
@@ -1211,15 +1335,16 @@ pub const SETTINGS_DESC_H: f32 = 18.0;
 
 // ── Performance §5 geometry (3 SliderRows, no conditionals) ────────────
 
-/// M1d — scroll-space Y at which the Performance group title starts. Sits
-/// below the full M2 block + a section gap (the M3 advanced/overlay block
-/// it replaces used the same origin).
+/// M1d / M1i fidelity — scroll-space Y at which the Performance group title
+/// starts, PINNED at the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`] source
+/// reserve baseline. The live source-count reflow is applied by callers folding
+/// [`settings_sources_reserve_delta`] into `scroll_offset_y` (single-base-offset
+/// mechanism) rather than threading the count through every perf-and-below rect
+/// fn — so this and all sections rooted on it keep their `(viewport,
+/// scroll_offset_y)` signatures untouched.
 fn settings_perf_origin_y_offset() -> f32 {
     settings_m2_origin_y_offset()
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_SOURCE_ROW_H * SETTINGS_SOURCE_COUNT as f32
-        + SETTINGS_SOURCE_GAP * (SETTINGS_SOURCE_COUNT - 1) as f32
-        + SETTINGS_SECTION_GAP
+        + settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize)
         + SETTINGS_SECTION_LABEL_H
         + SETTINGS_INPUT_ROW_H
         + SETTINGS_SECTION_GAP
@@ -2934,32 +3059,67 @@ mod m2_tests {
     }
 
     #[test]
-    fn m2_source_toggle_hit_right_anchored_inside_row() {
+    fn m1i_sources_refresh_button_is_last_child_below_cards() {
+        // M1i fidelity — the refresh button is the LAST child of the list,
+        // right-anchored BELOW the live card stack (not on the heading row).
         let v = vp();
-        let row = settings_source_row_rect(v, 0.0, 0);
-        let hit = settings_source_toggle_hit_rect(v, 0.0, 0);
-        assert!((hit.right() - row.right()).abs() < 0.01);
-        assert!(hit.y >= row.y);
-        assert!(hit.bottom() <= row.bottom() + 0.01);
+        let label = settings_sources_label_rect(v, 0.0);
+        let refresh = settings_sources_refresh_button_rect(v, 0.0, 4);
+        let last_card = settings_source_row_rect(v, 0.0, 3);
+        assert!((refresh.right() - label.right()).abs() < 0.01);
+        // Sits below the last card (heading-row anchor would put it at label.y).
+        assert!(refresh.y >= last_card.bottom() - 0.01);
+        assert!(refresh.y > label.bottom());
+        assert_eq!(refresh.width, SETTINGS_SOURCE_REFRESH_BTN_W);
+    }
+
+    #[test]
+    fn m1i_refresh_button_follows_live_card_count() {
+        // Fewer live cards → the refresh button rides up by exactly the height
+        // of each missing card slot.
+        let v = vp();
+        let r4 = settings_sources_refresh_button_rect(v, 0.0, 4);
+        let r2 = settings_sources_refresh_button_rect(v, 0.0, 2);
+        let per_card = SETTINGS_SOURCE_ROW_H + SETTINGS_SOURCE_GAP;
+        assert!((r4.y - r2.y - 2.0 * per_card).abs() < 0.01);
     }
 
     #[test]
     fn m2_desktop_path_input_sits_below_last_source() {
+        // Existing invariant must still hold at the full 4-card reserve.
         let v = vp();
-        let last_src = settings_source_row_rect(v, 0.0, SETTINGS_SOURCE_COUNT - 1);
-        let label = settings_desktop_path_label_rect(v, 0.0);
-        let input = settings_desktop_path_input_rect(v, 0.0);
-        assert!(label.y >= last_src.bottom() + SETTINGS_SECTION_GAP - 0.01);
+        let refresh = settings_sources_refresh_button_rect(
+            v,
+            0.0,
+            SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize,
+        );
+        let label =
+            settings_desktop_path_label_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+        let input =
+            settings_desktop_path_input_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+        assert!(label.y >= refresh.bottom() + SETTINGS_SECTION_GAP - 0.01);
         assert!((input.y - label.bottom()).abs() < 0.01);
         assert_eq!(input.height, SETTINGS_INPUT_ROW_H);
     }
 
     #[test]
+    fn m1i_desktop_path_reflows_with_live_source_count() {
+        // M1i fidelity — the 桌面路径 row sits HIGHER with 2 sources than with
+        // 4, by exactly 2*(card_height + gap) (Tauri's flex column).
+        let v = vp();
+        let input2 = settings_desktop_path_input_rect(v, 0.0, 2);
+        let input4 = settings_desktop_path_input_rect(v, 0.0, 4);
+        let per_card = SETTINGS_SOURCE_ROW_H + SETTINGS_SOURCE_GAP;
+        assert!((input4.y - input2.y - 2.0 * per_card).abs() < 0.01);
+        assert!(input2.y < input4.y);
+    }
+
+    #[test]
     fn m2_watch_textarea_sits_below_path_input() {
         let v = vp();
-        let input = settings_desktop_path_input_rect(v, 0.0);
-        let label = settings_watch_label_rect(v, 0.0);
-        let area = settings_watch_textarea_rect(v, 0.0);
+        let input = settings_desktop_path_input_rect(v, 0.0, 4);
+        let label = settings_watch_label_rect(v, 0.0, 4);
+        let area = settings_watch_textarea_rect(v, 0.0, 4);
         assert!(label.y >= input.bottom() + SETTINGS_SECTION_GAP - 0.01);
         assert!((area.y - label.bottom()).abs() < 0.01);
         assert_eq!(area.height, SETTINGS_TEXTAREA_H);
@@ -2969,10 +3129,10 @@ mod m2_tests {
     fn m2_content_height_exceeds_body_to_trigger_scroll() {
         let v = vp();
         let body = settings_body_rect(v);
-        let content_h = settings_m2_content_height(v);
+        let content_h = settings_m2_content_height(v, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
         // M2 should make the body scroll on an 800×800 viewport (since the
         // panel caps at 700 DIP height, body band is ~596 DIP). Five toggles
-        // + language + 桌面源(2 cards) + 桌面路径 + 监控值 must exceed body.
+        // + language + 桌面源(4 cards) + 桌面路径 + 监控值 must exceed body.
         assert!(content_h > body.height);
     }
 
@@ -2985,8 +3145,47 @@ mod m2_tests {
     }
 
     #[test]
-    fn m2_source_count_pinned() {
-        assert_eq!(SETTINGS_SOURCE_COUNT, 2);
+    fn m1i_source_cap_is_four() {
+        // The §2 list caps at the 4-slot Windows ceiling (User/Public/
+        // OneDrive/Custom). Beyond that the live count is clamped.
+        assert_eq!(SETTINGS_SOURCE_ROW_VISIBLE_MAX, 4);
+    }
+
+    #[test]
+    fn m1i_sources_content_height_reflows_with_count() {
+        // M1i fidelity — the source-block height now GROWS with the live count
+        // (one card_height + gap per card), and is clamped at the cap.
+        let at1 = settings_sources_content_height(1);
+        let at2 = settings_sources_content_height(2);
+        let at_cap = settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+        let over = settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize + 7);
+        let per_card = SETTINGS_SOURCE_ROW_H + SETTINGS_SOURCE_GAP;
+        assert!((at2 - at1 - per_card).abs() < 0.01);
+        assert!(at2 > at1);
+        assert!(at_cap > at2);
+        // Clamped past the cap.
+        assert!((over - at_cap).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1i_reserve_delta_shrinks_with_live_count() {
+        // The scroll-fold delta is 0 at the full reserve and grows as cards
+        // are missing — exactly the blank space the old fixed reserve left.
+        let d_full = settings_sources_reserve_delta(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+        let d2 = settings_sources_reserve_delta(2);
+        let per_card = SETTINGS_SOURCE_ROW_H + SETTINGS_SOURCE_GAP;
+        assert!(d_full.abs() < 0.01);
+        assert!((d2 - 2.0 * per_card).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1i_empty_list_uses_placeholder_height() {
+        // Empty list: the block reserves one placeholder line + the refresh
+        // button, not zero — so downstream sections do not collide upward.
+        let empty = settings_sources_content_height(0);
+        let label_plus_gap = SETTINGS_SECTION_LABEL_H + SETTINGS_SECTION_GAP;
+        let stack = SETTINGS_SOURCE_EMPTY_H + SETTINGS_SOURCE_REFRESH_GAP + SETTINGS_SOURCE_REFRESH_BTN_H;
+        assert!((empty - (label_plus_gap + stack)).abs() < 0.01);
     }
 }
 
@@ -3005,10 +3204,27 @@ mod m1d_tests {
 
     #[test]
     fn perf_label_sits_below_m2_textarea() {
+        // The Performance label roots at the FIXED 4-card reserve baseline
+        // (scroll 0, no reflow delta), so it must clear the watch textarea
+        // computed at the same full reserve (count = cap).
         let v = vp();
-        let textarea = settings_watch_textarea_rect(v, 0.0);
+        let textarea =
+            settings_watch_textarea_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
         let label = settings_performance_label_rect(v, 0.0);
         assert!(label.y >= textarea.bottom());
+    }
+
+    #[test]
+    fn m1i_perf_reflows_via_reserve_delta() {
+        // M1i fidelity — folding the reserve delta into scroll shifts the
+        // Performance label (and everything below it) UP by exactly the delta,
+        // proving the single-base-offset reflow reaches the lower sections.
+        let v = vp();
+        let base = settings_performance_label_rect(v, 0.0);
+        let delta = settings_sources_reserve_delta(2);
+        let reflowed = settings_performance_label_rect(v, delta);
+        assert!(delta > 0.0);
+        assert!((base.y - reflowed.y - delta).abs() < 0.01);
     }
 
     #[test]
@@ -3125,7 +3341,9 @@ mod m1d_tests {
     #[test]
     fn content_height_exceeds_m2_total() {
         let v = vp();
-        let m2 = settings_m2_content_height(v);
+        // `SettingsBodyFlags::new` defaults source_row_count to 0, so measure
+        // the M2 block at the same count for an apples-to-apples comparison.
+        let m2 = settings_m2_content_height(v, 0);
         let total = settings_body_content_height(
             v,
             &SettingsBodyFlags::new(true, true, false, false, UpdaterHeightKind::StatusOnly),

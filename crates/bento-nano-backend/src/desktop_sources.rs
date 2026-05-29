@@ -215,6 +215,53 @@ pub fn all_desktop_dirs(custom: Option<&str>) -> Vec<PathBuf> {
     out
 }
 
+// ─── Source classification (M1i — Settings §2 Paths) ─────────────────
+
+/// The provenance bucket of a resolved Desktop source path. Mirrors the Tauri
+/// `DesktopSourceInfo.kind` discriminant (`types/system`) so the Settings §2
+/// Paths card list can render the same `U`/`P`/`O`/`C` leading-character chip
+/// + kind label the SolidJS reference paints (`SettingsPanel.tsx:320-362`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopSourceKind {
+    /// The current user's own Desktop (`FOLDERID_Desktop`).
+    User,
+    /// The shared public Desktop (`C:\Users\Public\Desktop`).
+    Public,
+    /// A OneDrive-redirected Desktop (`%OneDrive%\Desktop`).
+    OneDrive,
+    /// An explicit `settings.desktop_path` override or any other location.
+    Custom,
+}
+
+/// Classify a resolved Desktop source `path` into a [`DesktopSourceKind`] by
+/// pure path inspection. The order of checks matters:
+///
+/// 1. A path containing the `onedrive` token (case-insensitive) is OneDrive —
+///    OneDrive redirection wins over a "user Desktop" match because the
+///    redirected Desktop is itself owned by the current user.
+/// 2. A path under the Public profile (`\Users\Public\`) is Public.
+/// 3. A path equal to the current user's own Desktop is User.
+/// 4. Everything else (an explicit override, a mapped drive, etc.) is Custom.
+///
+/// Classification is case-insensitive and slash-agnostic (reusing the same
+/// [`normalize_key`] the dedup path uses) so callers can pass either a raw or
+/// canonicalised path.
+pub fn classify_desktop_source(path: &Path) -> DesktopSourceKind {
+    let key = normalize_key(path);
+    if key.contains("onedrive") {
+        return DesktopSourceKind::OneDrive;
+    }
+    if key.contains("\\users\\public\\") || key.ends_with("\\users\\public\\desktop") {
+        return DesktopSourceKind::Public;
+    }
+    if let Some(user) = user_desktop_dir() {
+        if normalize_key(&user) == key {
+            return DesktopSourceKind::User;
+        }
+    }
+    DesktopSourceKind::Custom
+}
+
 /// True iff the parent directory of `path` matches (case-insensitively) any
 /// of the legitimate Desktop sources. Intended for drag-and-drop validation.
 pub fn is_under_any_desktop(path: &Path, custom: Option<&str>) -> bool {
@@ -304,5 +351,59 @@ mod tests {
         let raw = PathBuf::from(r"C:\Users\Alice\Desktop");
         let stripped = strip_unc_prefix(&raw);
         assert_eq!(stripped, raw);
+    }
+
+    // ── M1i — DesktopSourceKind classifier ──────────────────────────────
+
+    #[test]
+    fn classify_onedrive_redirected_desktop() {
+        // A OneDrive-redirected Desktop is OneDrive even though it is the
+        // current user's; the `onedrive` token wins over the user-Desktop
+        // match by design (case-insensitive).
+        let p = PathBuf::from(r"C:\Users\Alice\OneDrive\Desktop");
+        assert_eq!(
+            classify_desktop_source(&p),
+            DesktopSourceKind::OneDrive
+        );
+        let mixed = PathBuf::from(r"C:\Users\Bob\oneDrive - Contoso\Desktop");
+        assert_eq!(
+            classify_desktop_source(&mixed),
+            DesktopSourceKind::OneDrive
+        );
+    }
+
+    #[test]
+    fn classify_public_shared_desktop() {
+        let p = PathBuf::from(r"C:\Users\Public\Desktop");
+        assert_eq!(classify_desktop_source(&p), DesktopSourceKind::Public);
+        // Slash-agnostic + case-insensitive.
+        let alt = PathBuf::from("c:/users/public/desktop");
+        assert_eq!(classify_desktop_source(&alt), DesktopSourceKind::Public);
+    }
+
+    #[test]
+    fn classify_user_own_desktop() {
+        // The current user's own Desktop, resolved via the same Shell call
+        // the classifier consults, must report `User`. Skip on boxes where
+        // the Shell folder cannot be resolved (headless CI) — there is no
+        // ground truth to assert against there.
+        if let Some(user) = user_desktop_dir() {
+            // Guard: a OneDrive-redirected own-Desktop is intentionally
+            // OneDrive, not User (see `classify_onedrive_redirected_desktop`).
+            if !normalize_key(&user).contains("onedrive") {
+                assert_eq!(
+                    classify_desktop_source(&user),
+                    DesktopSourceKind::User
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_custom_override_path() {
+        // An explicit non-standard override that is neither OneDrive, Public,
+        // nor the user's own Desktop is Custom.
+        let p = PathBuf::from(r"D:\Projects\SharedDesktop");
+        assert_eq!(classify_desktop_source(&p), DesktopSourceKind::Custom);
     }
 }

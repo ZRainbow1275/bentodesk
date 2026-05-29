@@ -222,6 +222,17 @@ pub mod ids {
     pub const PLUGIN_TYPE_WIDGET: StringId = StringId(200);
     pub const PLUGIN_TYPE_ORGANIZER: StringId = StringId(201);
     pub const PLUGIN_UNINSTALL: StringId = StringId(202);
+    // 203..205 M1i (2026-05-29) — Paths §2 dynamic desktop-source list
+    // (`SettingsPanel.tsx:320-362`, en.ts:30-32). Lockstep with `i18n_zh_cn`
+    // (same index/order; `lookup_tables_have_matching_length` enforces parity).
+    // User/Public labels reuse `SOURCE_PRIMARY_LABEL` (124) / `SOURCE_PUBLIC_LABEL`
+    // (125); these add OneDrive + Custom kind labels and the Watched badge.
+    pub const SOURCE_ONEDRIVE_LABEL: StringId = StringId(203);
+    pub const SOURCE_CUSTOM_LABEL: StringId = StringId(204);
+    pub const SOURCE_WATCHED_BADGE: StringId = StringId(205);
+    // 206 M1i fidelity (2026-05-29) — `.desktop-source-empty` placeholder; see
+    // the `i18n_zh_cn` note. Mirrors Tauri's `settingsDesktopPathPlaceholder`.
+    pub const SOURCE_EMPTY_PLACEHOLDER: StringId = StringId(206);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -467,5 +478,12 @@ pub static EN_US: LookupTable = LookupTable {
         "Widget",                     // PLUGIN_TYPE_WIDGET (200)
         "Organizer",                  // PLUGIN_TYPE_ORGANIZER (201)
         "Uninstall",                  // PLUGIN_UNINSTALL (202)
+        // 203..205 M1i — Paths §2 dynamic desktop-source list
+        // (`SettingsPanel.tsx:320-362`, en.ts:30-32).
+        "OneDrive Desktop",           // SOURCE_ONEDRIVE_LABEL (203)
+        "Custom Source",              // SOURCE_CUSTOM_LABEL (204)
+        "Watched",                    // SOURCE_WATCHED_BADGE (205)
+        // 206 M1i fidelity — empty `.desktop-source-empty` placeholder.
+        "C:\\Users\\...\\Desktop",    // SOURCE_EMPTY_PLACEHOLDER (206)
     ],
 };

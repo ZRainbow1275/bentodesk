@@ -11914,11 +11914,8 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
         ui::SettingsHit::CancelSettings => Some(SmolStr::new_static("Cancel and close settings")),
         ui::SettingsHit::SaveSettings => Some(SmolStr::new_static("Save settings")),
         ui::SettingsHit::ScrollBodyDelta(_) => None,
-        ui::SettingsHit::ToggleSourcePrimary => {
-            Some(SmolStr::new_static("Toggle personal desktop source"))
-        }
-        ui::SettingsHit::ToggleSourcePublic => {
-            Some(SmolStr::new_static("Toggle public desktop source"))
+        ui::SettingsHit::RefreshDesktopSources => {
+            Some(SmolStr::new_static("Refresh desktop sources"))
         }
         ui::SettingsHit::EditDesktopPath => Some(SmolStr::new_static("Edit desktop path")),
         ui::SettingsHit::EditWatchValues => Some(SmolStr::new_static("Edit watch values")),
@@ -13440,25 +13437,22 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     stealth_has_retry,
                     stealth_has_error,
                     updater_kind,
-                );
+                )
+                // M1i fidelity — the §2 source list reflows to the live count,
+                // so the body content height (and thus the max-scroll clamp)
+                // shrinks/grows with it. Thread the live count in lockstep with
+                // the renderer + hit-tester.
+                .with_source_rows(app.desktop_sources.borrow().len());
                 let next =
                     settings_clamp_scroll(app.scroll_offset_y.get(), delta as f32, vp, &flags);
                 app.scroll_offset_y.set(next);
                 drop(app);
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::ToggleSourcePrimary => {
-                let app = root.app.borrow();
-                app.source_primary_enabled
-                    .set(!app.source_primary_enabled.get());
-                drop(app);
-                request_redraw(hwnd);
-            }
-            ui::SettingsHit::ToggleSourcePublic => {
-                let app = root.app.borrow();
-                app.source_public_enabled
-                    .set(!app.source_public_enabled.get());
-                drop(app);
+            ui::SettingsHit::RefreshDesktopSources => {
+                // M1i — re-resolve the real Desktop sources and repopulate the
+                // cached read-only list, then redraw (Tauri `↻` parity).
+                refresh_desktop_sources(root);
                 request_redraw(hwnd);
             }
             ui::SettingsHit::EditDesktopPath => {
@@ -16082,6 +16076,11 @@ fn show_settings_surface(root: &AppRoot) -> bool {
         *app.settings_snapshot.borrow_mut() = Some(app.snapshot_settings());
         app.settings_dirty.set(false);
     }
+    // M1i — populate the §2 Paths desktop-source list on open (mirrors Tauri's
+    // `getDesktopSources()` on mount) so the dynamic read-only cards reflect the
+    // real resolved sources on first paint. Runs the same path as the Refresh
+    // (`↻`) button.
+    refresh_desktop_sources(root);
     // M1e — refresh the cached Stealth §7 status snapshot on open so the card
     // (and its conditional retry/error/OneDrive rows) reflect the live probe.
     refresh_stealth_status(root);
@@ -19354,6 +19353,57 @@ fn refresh_stealth_status(root: &AppRoot) {
     let status = bento_nano_backend::stealth::status();
     let app = root.app.borrow();
     *app.stealth_status.borrow_mut() = Some(status);
+}
+
+/// M1i 2026-05-29 — re-resolve the real Desktop sources and repopulate the
+/// cached read-only §2 list on `AppState`. Called on Settings-open and on the
+/// Refresh (`↻`) button (`RefreshDesktopSources`). Each resolved path is
+/// classified via `desktop_sources::classify_desktop_source` and tagged with a
+/// `watched` flag derived from the `watch_paths_draft` contents (case- and
+/// slash-insensitive line match). Runs ONCE per refresh — never per frame.
+fn refresh_desktop_sources(root: &AppRoot) {
+    let app = root.app.borrow();
+    // Resolve the live sources, threading the user's custom override so a
+    // non-standard `desktop_path` shows up as a Custom card.
+    let custom = app.desktop_path_draft.borrow().clone();
+    let custom_opt = if custom.trim().is_empty() {
+        None
+    } else {
+        Some(custom.as_str())
+    };
+    let dirs = bento_nano_backend::desktop_sources::all_desktop_dirs(custom_opt);
+    // Build the case/slash-insensitive watch-key set from the draft (one path
+    // per line). Empty lines are skipped.
+    let watch_draft = app.watch_paths_draft.borrow();
+    let watch_keys: std::collections::HashSet<String> = watch_draft
+        .lines()
+        .map(|line| {
+            line.trim()
+                .to_lowercase()
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_string()
+        })
+        .filter(|key| !key.is_empty())
+        .collect();
+    drop(watch_draft);
+    let mut rows: Vec<(
+        bento_nano_backend::desktop_sources::DesktopSourceKind,
+        SmolStr,
+        bool,
+    )> = Vec::with_capacity(dirs.len());
+    for dir in &dirs {
+        let kind = bento_nano_backend::desktop_sources::classify_desktop_source(dir);
+        let display = dir.to_string_lossy();
+        let watch_key = display
+            .to_lowercase()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_string();
+        let watched = watch_keys.contains(&watch_key);
+        rows.push((kind, SmolStr::new(display.as_ref()), watched));
+    }
+    app.desktop_sources.replace(rows);
 }
 
 fn stealth_file_type(path: &Path) -> &'static str {

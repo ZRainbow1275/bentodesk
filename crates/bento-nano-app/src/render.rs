@@ -146,6 +146,16 @@ pub struct Renderer {
     /// underlying format so the `…` glyph stays in sync with theme typography.
     /// Spec §10 — one COM allocation per format recreate, zero per frame.
     ellipsis_sign: Option<IDWriteInlineObject>,
+    /// M1i fidelity (2026-05-29) — lazily-created monospace text format for the
+    /// §2 desktop-source `.desktop-source-card__path` line (Tauri
+    /// `font-family: ui-monospace, Consolas, monospace`, `font-size: 11px`).
+    /// Cached per (size_pt) so the path run uses fixed-pitch glyphs instead of
+    /// the proportional YaHei UI body font. One COM allocation per recreate,
+    /// zero per frame (spec §10). Paired with [`Self::monospace_ellipsis_sign`]
+    /// so the path can character-trim with an inline `…` when it overflows.
+    monospace_format: Option<CachedTextFormat>,
+    /// M1i fidelity — `…` trimming sign tied to [`Self::monospace_format`].
+    monospace_ellipsis_sign: Option<IDWriteInlineObject>,
     pub width: u32,
     pub height: u32,
     /// Reusable UTF-16 scratch buffer (spec §10).
@@ -203,6 +213,8 @@ impl Renderer {
             text_format_line_height: 1.4,
             text_format_cache: SmallVec::new(),
             ellipsis_sign: None,
+            monospace_format: None,
+            monospace_ellipsis_sign: None,
             width,
             height,
             utf16_scratch: SmallVec::new(),
@@ -2197,7 +2209,7 @@ impl Renderer {
         use crate::settings_panel::{
             SETTINGS_PANEL_RADIUS, SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_PERF_ROW_COUNT,
             SETTINGS_RADIO_INNER_D, SETTINGS_RADIO_OUTER_D, SETTINGS_ROW_PAD_X,
-            SETTINGS_SLIDER_THUMB_D, SETTINGS_SOURCE_COUNT, SETTINGS_TOP_TOGGLE_COUNT,
+            SETTINGS_SLIDER_THUMB_D, SETTINGS_SOURCE_ROW_VISIBLE_MAX, SETTINGS_TOP_TOGGLE_COUNT,
             SETTINGS_ZONE_DISPLAY_MODE_COUNT, settings_active_theme_rect, settings_body_rect,
             settings_cancel_button_rect, settings_close_button_rect_m1,
             settings_crash_max_retries_row_rect, settings_crash_restart_row_rect,
@@ -2208,8 +2220,10 @@ impl Renderer {
             settings_language_chip_rect, settings_language_row_rect,
             settings_performance_label_rect, settings_performance_slider_rect,
             settings_performance_slider_row_rect, settings_panel_rect_m1, settings_safe_start_row_rect,
-            settings_save_button_rect, settings_source_row_rect, settings_source_toggle_hit_rect,
-            settings_sources_label_rect, settings_startup_high_priority_row_rect,
+            settings_save_button_rect, settings_source_row_rect,
+            settings_sources_label_rect, settings_sources_refresh_button_rect,
+            settings_sources_reserve_delta,
+            settings_startup_high_priority_row_rect,
             settings_startup_label_rect, settings_startup_toggle_hit_rect,
             settings_stealth_buttons_row_rect, settings_stealth_error_block_rect,
             settings_stealth_label_rect, settings_stealth_mirror_row_rect,
@@ -2571,7 +2585,10 @@ impl Renderer {
 
         // ── Round-2 M2 sections ──────────────────────────────────────────
 
-        // 桌面源 label.
+        // 桌面源 label (M1i fidelity — Tauri `.settings-row__label` ABOVE the
+        // `.desktop-source-list`; refresh button is now the list's LAST child,
+        // painted after the cards below, `SettingsPanel.tsx:317-361`).
+        let source_count = app.desktop_sources.borrow().len();
         let sources_label = settings_sources_label_rect(viewport, scroll);
         if row_visible(sources_label, body) {
             self.draw_text(
@@ -2581,128 +2598,221 @@ impl Renderer {
             )?;
         }
 
-        // 桌面源 cards (海桌面 + 公共桌面).
-        let source_card_radius = bento_nano_style::BorderRadius::all(10.0);
-        let source_labels: [u16; 2] = [
-            bento_nano_style::i18n_zh_cn::ids::SOURCE_PRIMARY_LABEL.0,
-            bento_nano_style::i18n_zh_cn::ids::SOURCE_PUBLIC_LABEL.0,
-        ];
-        for index in 0..SETTINGS_SOURCE_COUNT {
-            let row = settings_source_row_rect(viewport, scroll, index);
+        // M1i fidelity — `.desktop-source-card` geometry/typography translated
+        // 1:1 from `SettingsPanel.css:665-770`:
+        //   card  : radius 8, bg white@4%, border 1px solid border_zen,
+        //           padding 8/10, icon→body gap 10, inter-card gap 6
+        //   icon  : 28×28 CIRCLE, white initial, font 12 semibold, per-kind bg
+        //           @0.75 (User=blue Public=green OneDrive=sky Custom=purple)
+        //   body  : label 13 medium text_primary, path 11 MONOSPACE text_muted
+        //           with ellipsis trim, internal gap 2
+        //   badge : green@0.18 bg, accent_green text, 9px semibold UPPERCASE,
+        //           padding 2/8, radius 10, AUTO width right-aligned, centred
+        // The list snapshot is owned by AppState and refreshed on open /
+        // RefreshDesktopSources, never built per-frame (architecture §10).
+        const CARD_PAD_X: f32 = 10.0;
+        const ICON_SIZE: f32 = 28.0;
+        const ICON_BODY_GAP: f32 = 10.0;
+        const BODY_GAP: f32 = 2.0;
+        const LABEL_LINE_H: f32 = 16.0;
+        const PATH_LINE_H: f32 = 14.0;
+        let card_radius = bento_nano_style::BorderRadius::all(8.0);
+        let card_bg = bento_nano_style::Color::from_u8(0xFF, 0xFF, 0xFF, 0x0A); // white @ ~4%
+        let card_border = palette.border_zen;
+        let sources = app.desktop_sources.borrow();
+        let visible_sources = sources.len().min(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+        for index in 0..visible_sources {
+            let row = settings_source_row_rect(viewport, scroll, index as u8);
             if !row_visible(row, body) {
                 continue;
             }
-            // Card surface.
-            self.fill_rounded_rect(row, chip_bg, source_card_radius)?;
-            // D-1 (frame_060/085 parity, 2026-05-22): leading 24×24 coloured
-            // glyph chip — Tauri baseline paints a blue tile for 海桌面 and a
-            // green tile for 公共桌面 with a white leading-character glyph.
-            // The chip occupies a 24+12 = 36 DIP left gutter; downstream label
-            // and sub-text columns shift right by `icon_gutter` to clear it.
-            let icon_size: f32 = 24.0;
-            let icon_gutter: f32 = icon_size + 12.0;
-            let icon_radius = bento_nano_style::BorderRadius::all(6.0);
+            let (kind, path_text, watched) = &sources[index];
+            // Card surface + 1px hairline border (Tauri `border: 1px solid
+            // var(--border-zen)` — the nano card previously had NO stroke).
+            self.fill_rounded_rect(row, card_bg, card_radius)?;
+            self.stroke_rounded_rect(row, card_border, card_radius, 1.0)?;
+            // 28×28 CIRCLE with the kind initial (was a 24×24 rounded square).
+            // A square fill_rounded_rect with radius = half-side is a true
+            // circle. Per-kind LITERAL rgba @0.75 (palette.accent_purple is
+            // 139,92,246 — NOT the 168,85,247 Tauri purple — so Custom uses a
+            // literal; OneDrive's sky 14,165,233 has no palette token either).
             let icon_rect = bento_nano_style::Rect {
-                x: row.x + 14.0,
-                y: row.y + (row.height - icon_size) * 0.5,
-                width: icon_size,
-                height: icon_size,
+                x: row.x + CARD_PAD_X,
+                y: row.y + (row.height - ICON_SIZE) * 0.5,
+                width: ICON_SIZE,
+                height: ICON_SIZE,
             };
-            let icon_bg = if index == 0 {
-                palette.accent_blue
-            } else {
-                palette.accent_green
+            let (icon_bg, icon_glyph, kind_label_id) = match kind {
+                bento_nano_backend::desktop_sources::DesktopSourceKind::User => (
+                    bento_nano_style::Color::from_u8(59, 130, 246, 191), // 0.75
+                    "U",
+                    bento_nano_style::i18n_zh_cn::ids::SOURCE_PRIMARY_LABEL,
+                ),
+                bento_nano_backend::desktop_sources::DesktopSourceKind::Public => (
+                    bento_nano_style::Color::from_u8(34, 197, 94, 191),
+                    "P",
+                    bento_nano_style::i18n_zh_cn::ids::SOURCE_PUBLIC_LABEL,
+                ),
+                bento_nano_backend::desktop_sources::DesktopSourceKind::OneDrive => (
+                    bento_nano_style::Color::from_u8(14, 165, 233, 191), // sky (fixed)
+                    "O",
+                    bento_nano_style::i18n_zh_cn::ids::SOURCE_ONEDRIVE_LABEL,
+                ),
+                bento_nano_backend::desktop_sources::DesktopSourceKind::Custom => (
+                    bento_nano_style::Color::from_u8(168, 85, 247, 191), // purple (fixed)
+                    "C",
+                    bento_nano_style::i18n_zh_cn::ids::SOURCE_CUSTOM_LABEL,
+                ),
             };
-            self.fill_rounded_rect(icon_rect, icon_bg, icon_radius)?;
-            let source_label_text = bento_nano_style::t(bento_nano_style::StringId(
-                source_labels[index as usize],
-            ));
-            let icon_glyph: smol_str::SmolStr = source_label_text
-                .chars()
-                .next()
-                .map(|c| smol_str::SmolStr::from(c.to_string()))
-                .unwrap_or_else(|| smol_str::SmolStr::from("•"));
-            self.draw_text_no_wrap(
-                icon_glyph.as_str(),
+            self.fill_rounded_rect(
+                icon_rect,
+                icon_bg,
+                bento_nano_style::BorderRadius::all(ICON_SIZE * 0.5),
+            )?;
+            self.draw_text_centered(
+                icon_glyph,
                 icon_rect,
                 bento_nano_style::Color::WHITE,
+                12.0,
+                600,
             )?;
-            // Card label (shifted right of the icon gutter).
+            // Body column (flex:1, gap 2): label line on top, path line below,
+            // the pair vertically centred against the icon.
+            let body_x = icon_rect.right() + ICON_BODY_GAP;
+            // Reserve room on the right for the badge so the path never runs
+            // under it (Tauri's flex `min-width:0` body shrinks for the badge).
+            let badge_reserve: f32 = if *watched { 76.0 } else { 0.0 };
+            let body_w = (row.right() - CARD_PAD_X - badge_reserve - body_x).max(1.0);
+            let block_h = LABEL_LINE_H + BODY_GAP + PATH_LINE_H;
+            let body_top = row.y + (row.height - block_h) * 0.5;
             let label_rect = bento_nano_style::Rect {
-                x: row.x + 14.0 + icon_gutter,
-                y: row.y + 8.0,
-                width: row.width * 0.6,
-                height: 18.0,
+                x: body_x,
+                y: body_top,
+                width: body_w,
+                height: LABEL_LINE_H,
             };
-            self.draw_text(
-                source_label_text,
+            self.draw_text_with_style(
+                bento_nano_style::t(kind_label_id),
                 label_rect,
                 title_color,
+                13.0,
+                500,
+                1.0,
             )?;
-            // Card secondary line (placeholder path — M3 wires real paths).
-            let sub_rect = bento_nano_style::Rect {
-                x: row.x + 14.0 + icon_gutter,
-                y: row.y + row.height - 22.0,
-                width: row.width * 0.6,
-                height: 14.0,
+            // Path line — REAL resolved path, MONOSPACE, ellipsis-trimmed.
+            let path_rect = bento_nano_style::Rect {
+                x: body_x,
+                y: body_top + LABEL_LINE_H + BODY_GAP,
+                width: body_w,
+                height: PATH_LINE_H,
             };
-            let sub_text = if index == 0 {
-                "C:\\Users\\HP\\Desktop"
-            } else {
-                "C:\\Users\\Public\\Desktop"
-            };
-            self.draw_text(sub_text, sub_rect, label_color)?;
-            // D-2 (frame_060/085 parity, 2026-05-22): right-anchored state
-            // pill (capsule, 60×22 DIP) replacing the iOS toggle switch —
-            // Tauri baseline shows a labelled "已启用"/"未启用" pill that
-            // mirrors the overlay-section state pill style at render.rs:2768.
-            // Hit-test rect (60×28) is untouched so click ergonomics survive.
-            let hit = settings_source_toggle_hit_rect(viewport, scroll, index);
-            let on = if index == 0 {
-                app.source_primary_enabled.get()
-            } else {
-                app.source_public_enabled.get()
-            };
-            let source_pill_w: f32 = 60.0;
-            let source_pill_h: f32 = 22.0;
-            let source_pill_radius =
-                bento_nano_style::BorderRadius::all(source_pill_h * 0.5);
-            let source_pill_rect = bento_nano_style::Rect {
-                x: hit.x + (hit.width - source_pill_w) * 0.5,
-                y: hit.y + (hit.height - source_pill_h) * 0.5,
-                width: source_pill_w,
-                height: source_pill_h,
-            };
-            // Mirror M3 overlay pill colours so the two pill renders stay
-            // visually consistent (#36C86B×0.9 ON, surface_subtle×0.85 OFF).
-            let source_pill_on_bg = with_alpha(
-                bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
-                0.90,
-            );
-            let source_pill_off_bg = with_alpha(palette.surface_subtle, 0.85);
-            self.fill_rounded_rect(
-                source_pill_rect,
-                if on {
-                    source_pill_on_bg
-                } else {
-                    source_pill_off_bg
-                },
-                source_pill_radius,
+            self.draw_text_monospace_ellipsis(
+                path_text.as_str(),
+                path_rect,
+                palette.text_muted,
+                11.0,
             )?;
-            let pill_text_id = if on {
-                bento_nano_style::i18n_zh_cn::ids::STATE_ENABLED_PILL
-            } else {
-                bento_nano_style::i18n_zh_cn::ids::STATE_DISABLED_PILL
+            // Watched badge — translucent green tint, accent_green text, auto
+            // width right-aligned, vertically centred (was a solid-green fill
+            // with WHITE text in a fixed 56×22 rect).
+            if *watched {
+                let badge_text = bento_nano_style::t(
+                    bento_nano_style::i18n_zh_cn::ids::SOURCE_WATCHED_BADGE,
+                );
+                let badge_upper = badge_text.to_uppercase();
+                // Auto width: shrink-to-fit the text + 8px padding each side.
+                // CJK glyphs ≈ font_size wide, Latin ≈ font_size*0.62, plus the
+                // 0.8px letter-spacing Tauri applies per glyph.
+                const BADGE_FONT: f32 = 9.0;
+                const BADGE_PAD_X: f32 = 8.0;
+                const BADGE_LETTER_SPACING: f32 = 0.8;
+                let glyph_count = badge_upper.chars().count() as f32;
+                let text_w: f32 = badge_upper
+                    .chars()
+                    .map(|c| {
+                        if (c as u32) > 0x2E80 {
+                            BADGE_FONT
+                        } else {
+                            BADGE_FONT * 0.62
+                        }
+                    })
+                    .sum::<f32>()
+                    + BADGE_LETTER_SPACING * glyph_count;
+                let badge_w = text_w + BADGE_PAD_X * 2.0;
+                let badge_h: f32 = 16.0; // 2px pad + ~12 line box
+                let badge_rect = bento_nano_style::Rect {
+                    x: row.right() - CARD_PAD_X - badge_w,
+                    y: row.y + (row.height - badge_h) * 0.5,
+                    width: badge_w,
+                    height: badge_h,
+                };
+                let badge_bg = with_alpha(palette.accent_green, 0.18);
+                self.fill_rounded_rect(
+                    badge_rect,
+                    badge_bg,
+                    bento_nano_style::BorderRadius::all(10.0),
+                )?;
+                self.draw_text_centered(
+                    badge_upper.as_str(),
+                    badge_rect,
+                    palette.accent_green,
+                    BADGE_FONT,
+                    600,
+                )?;
+            }
+        }
+        drop(sources);
+
+        // M1i fidelity — empty `.desktop-source-empty` placeholder (italic,
+        // 11px, text_muted) when no desktop sources resolve. nano's refresh is
+        // synchronous (no async loading frame), so Tauri's "…" loading glyph is
+        // N/A by construction — there is never a loading state to paint.
+        if visible_sources == 0 {
+            let label = settings_sources_label_rect(viewport, scroll);
+            let empty_rect = bento_nano_style::Rect {
+                x: label.x + 4.0,
+                y: label.bottom() + 6.0,
+                width: (label.width - 8.0).max(1.0),
+                height: 12.0,
             };
-            self.draw_text_no_wrap(
-                bento_nano_style::t(pill_text_id),
-                source_pill_rect,
-                bento_nano_style::Color::WHITE,
-            )?;
+            if row_visible(empty_rect, body) {
+                // No italic system face is loaded; the muted tone + xs size
+                // reads as the de-emphasised placeholder Tauri renders italic.
+                self.draw_text_with_style(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_EMPTY_PLACEHOLDER,
+                    ),
+                    empty_rect,
+                    palette.text_muted,
+                    11.0,
+                    400,
+                    1.0,
+                )?;
+            }
         }
 
-        // 桌面路径 label + input.
-        let path_label = settings_desktop_path_label_rect(viewport, scroll);
+        // M1i fidelity — refresh (`↻`) button: LAST child of the list,
+        // right-anchored BELOW the cards / placeholder (`align-self:flex-end`).
+        // Secondary-button style: chip_bg fill, radius, centred 14px glyph.
+        let refresh_btn = settings_sources_refresh_button_rect(viewport, scroll, source_count);
+        if row_visible(refresh_btn, body) {
+            self.fill_rounded_rect(
+                refresh_btn,
+                chip_bg,
+                bento_nano_style::BorderRadius::all(6.0),
+            )?;
+            self.stroke_rounded_rect(
+                refresh_btn,
+                chip_border,
+                bento_nano_style::BorderRadius::all(6.0),
+                1.0,
+            )?;
+            // U+21BB CLOCKWISE OPEN CIRCLE ARROW — the refresh glyph, centred.
+            self.draw_text_centered("\u{21BB}", refresh_btn, title_color, 14.0, 400)?;
+        }
+
+        // 桌面路径 label + input (reflows below the live source stack).
+        let path_label = settings_desktop_path_label_rect(viewport, scroll, source_count);
         if row_visible(path_label, body) {
             self.draw_text(
                 bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_PATH),
@@ -2710,9 +2820,11 @@ impl Renderer {
                 label_color,
             )?;
         }
-        let path_input = settings_desktop_path_input_rect(viewport, scroll);
+        // Input/textarea boxes keep the radius-10 surface the M2 layout shipped.
+        let input_box_radius = bento_nano_style::BorderRadius::all(10.0);
+        let path_input = settings_desktop_path_input_rect(viewport, scroll, source_count);
         if row_visible(path_input, body) {
-            self.fill_rounded_rect(path_input, chip_bg, source_card_radius)?;
+            self.fill_rounded_rect(path_input, chip_bg, input_box_radius)?;
             let path_text = app.desktop_path_draft.borrow();
             let text_rect = bento_nano_style::Rect {
                 x: path_input.x + 12.0,
@@ -2724,8 +2836,8 @@ impl Renderer {
             drop(path_text);
         }
 
-        // 监控值 label + textarea.
-        let watch_label = settings_watch_label_rect(viewport, scroll);
+        // 监控值 label + textarea (reflows below the live source stack).
+        let watch_label = settings_watch_label_rect(viewport, scroll, source_count);
         if row_visible(watch_label, body) {
             self.draw_text(
                 bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_WATCH_VALUES),
@@ -2733,9 +2845,9 @@ impl Renderer {
                 label_color,
             )?;
         }
-        let watch_area = settings_watch_textarea_rect(viewport, scroll);
+        let watch_area = settings_watch_textarea_rect(viewport, scroll, source_count);
         if row_visible(watch_area, body) {
-            self.fill_rounded_rect(watch_area, chip_bg, source_card_radius)?;
+            self.fill_rounded_rect(watch_area, chip_bg, input_box_radius)?;
             let watch_text = app.watch_paths_draft.borrow();
             if watch_text.is_empty() {
                 // Hint placeholder.
@@ -2780,6 +2892,16 @@ impl Renderer {
         // Read the two gating bools once so paint matches geometry exactly.
         let crash_restart_on = app.crash_restart_enabled.get();
         let safe_start_on = app.safe_start_after_hibernation.get();
+
+        // M1i fidelity — single-base-offset reflow. The Performance §5 group and
+        // EVERY section below it (Startup/Stealth/Updater/Backup/Plugins) root
+        // at `settings_perf_origin_y_offset`, which is pinned at the fixed
+        // 4-card source reserve. Folding the live reserve delta into `scroll`
+        // shifts the whole lower body UP by the height of the missing source
+        // cards (Tauri's flex column) — shadowing `scroll` here propagates the
+        // shift to all perf-and-below geometry fns without touching their
+        // signatures. The hit-tester applies the identical fold (`ui.rs`).
+        let scroll = scroll + settings_sources_reserve_delta(source_count);
 
         // Performance group title.
         let perf_label = settings_performance_label_rect(viewport, scroll);
@@ -6374,6 +6496,42 @@ impl Renderer {
         Ok(())
     }
 
+    /// M1i fidelity (2026-05-29) — stroke a rounded-rect outline (no fill).
+    /// Used for the §2 source-card `border: 1px solid var(--border-zen)`. The
+    /// stroke is centred on the geometric edge (D2D default), which matches the
+    /// CSS `border-box` hairline closely enough at the 1-DIP widths used here.
+    fn stroke_rounded_rect(
+        &self,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        radius: BorderRadius,
+        stroke_width: f32,
+    ) -> Result<(), RenderError> {
+        if color.a <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 || stroke_width <= 0.0 {
+            return Ok(());
+        }
+        let brush = self.solid_brush(color)?;
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.right(),
+                bottom: rect.bottom(),
+            },
+            radiusX: radius.top_left,
+            radiusY: radius.top_left,
+        };
+        let ctx = self.ctx()?;
+        // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        // SAFETY: rt valid; rr lives for the call; brush COM-ref-counted; the
+        // default stroke style (None) is the canonical solid hairline.
+        unsafe {
+            rt.DrawRoundedRectangle(&rr, &brush, stroke_width, None);
+        }
+        Ok(())
+    }
+
     fn draw_text(
         &mut self,
         text: &str,
@@ -6521,6 +6679,134 @@ impl Renderer {
             self.text_format_cache.push(entry);
         }
         Ok(format)
+    }
+
+    /// M1i fidelity (2026-05-29) — lazily create/cache the monospace text
+    /// format for the §2 source-card path line. Tauri's `.desktop-source-card
+    /// __path` uses `font-family: ui-monospace, Consolas, monospace`; Consolas
+    /// is the Win10/11 fixed-pitch system font (no bundled `.ttf`, spec §5).
+    /// `size_pt` is the path font size in DIP (11). Cached against the size so
+    /// a theme swap (which only touches the proportional body font) never
+    /// invalidates it. One COM allocation per recreate, zero per frame.
+    fn ensure_monospace_format(
+        &mut self,
+        size_pt: f32,
+    ) -> Result<IDWriteTextFormat, RenderError> {
+        let size_pt = size_pt.max(1.0);
+        if let Some(cached) = self.monospace_format.as_ref() {
+            if (cached.size_pt - size_pt).abs() < f32::EPSILON {
+                return Ok(cached.format.clone());
+            }
+        }
+        let family = SmolStr::new_static("Consolas");
+        let format = dwrite::text_format_from_family_name_with_metrics(
+            family.as_str(),
+            size_pt,
+            400,
+            1.2,
+            dwrite::locale_zh_cn(),
+        )?;
+        self.monospace_format = Some(CachedTextFormat {
+            family,
+            size_pt,
+            weight: 400,
+            line_height: 1.2,
+            format: format.clone(),
+        });
+        // A new monospace format invalidates the monospace `…` sign.
+        self.monospace_ellipsis_sign = None;
+        Ok(format)
+    }
+
+    /// M1i fidelity — draw the §2 source-card path line in the monospace format
+    /// with DWrite character-trimming (`…`) when it overflows `rect.width`.
+    /// Mirrors Tauri's `overflow: hidden; text-overflow: ellipsis; white-space:
+    /// nowrap` on `.desktop-source-card__path`.
+    fn draw_text_monospace_ellipsis(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+    ) -> Result<(), RenderError> {
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.ensure_monospace_format(size_pt)?;
+        if self.monospace_ellipsis_sign.is_none() {
+            self.monospace_ellipsis_sign = Some(dwrite::create_ellipsis_sign(&format)?);
+        }
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            self.monospace_ellipsis_sign.as_ref(),
+        )?;
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    /// M1i fidelity — draw a short single-line label centred horizontally AND
+    /// vertically inside `rect`. Used for the 28-DIP icon-circle initial glyph,
+    /// the `↻` refresh glyph, and the watched badge text so they read as
+    /// optically centred chips (Tauri uses `display:flex; align-items:center;
+    /// justify-content:center`). Reuses the active body format; no wrap.
+    fn draw_text_centered(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+        weight: u16,
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::DirectWrite::{
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+        };
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.text_format_for_style(size_pt, weight, 1.0)?;
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+        )?;
+        // SAFETY: freshly-created layout; both Set* calls only mutate per-layout
+        // alignment state and take canonical enum values.
+        unsafe {
+            let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
     }
 
     /// Draw a 1:1 SVG path translated into `rect.origin`. Caller takes
