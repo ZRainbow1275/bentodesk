@@ -11,9 +11,11 @@
 
 use std::sync::OnceLock;
 
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
-    D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_9_2, D3D_FEATURE_LEVEL_9_3, D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
@@ -90,6 +92,107 @@ fn enum_adapter(factory6: &IDXGIFactory6, pref: DXGI_GPU_PREFERENCE) -> Option<I
     res.ok()
 }
 
+/// Full descending feature-level negotiation set. D3D11CreateDevice selects
+/// the highest level the device supports, so FL<11 GPUs/WARP and very old
+/// systems can still create instead of being rejected by a single 11_0 entry.
+const FEATURE_LEVELS_ALL: [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL; 7] = [
+    D3D_FEATURE_LEVEL_11_1,
+    D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_10_1,
+    D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_9_3,
+    D3D_FEATURE_LEVEL_9_2,
+    D3D_FEATURE_LEVEL_9_1,
+];
+
+/// Same list minus the leading 11_1 entry. Used as the Win7-RTM/SP1-without-
+/// Platform-Update fallback: those systems lack the D3D11.1 runtime, and
+/// passing `D3D_FEATURE_LEVEL_11_1` makes D3D11CreateDevice fail the ENTIRE
+/// call with E_INVALIDARG rather than skipping that level gracefully.
+const FEATURE_LEVELS_NO_11_1: [windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL; 6] = [
+    D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_10_1,
+    D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_9_3,
+    D3D_FEATURE_LEVEL_9_2,
+    D3D_FEATURE_LEVEL_9_1,
+];
+
+/// Single attempt at `D3D11CreateDevice` for one (adapter, driver_type) pair,
+/// with the descending feature-level negotiation and the Win7 E_INVALIDARG
+/// retry-without-11_1 fallback. Does NOT change driver type — driver-type
+/// fallback is the caller's (`create`) responsibility.
+///
+/// MSDN contract preserved by the caller: an explicit `adapter` REQUIRES
+/// `D3D_DRIVER_TYPE_UNKNOWN`; a `None` adapter REQUIRES a concrete driver type
+/// (HARDWARE or WARP), never UNKNOWN.
+fn try_create_device(
+    adapter: Option<&IDXGIAdapter>,
+    driver_type: D3D_DRIVER_TYPE,
+) -> Result<D3dDevice, PlatformError> {
+    let mut device: Option<ID3D11Device> = None;
+    let mut context: Option<ID3D11DeviceContext> = None;
+    // Sane default; D3D11CreateDevice overwrites with the level it selects.
+    let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+
+    // SAFETY: D3D11CreateDevice canonical; `FEATURE_LEVELS_ALL` is 'static and
+    //         lives for the call; out-params are `Option<T>` per windows-rs
+    //         convention. When `adapter` is Some, `driver_type` is UNKNOWN per
+    //         MSDN (guaranteed by the caller).
+    let result = unsafe {
+        D3D11CreateDevice(
+            adapter,
+            driver_type,
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&FEATURE_LEVELS_ALL),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            Some(&mut feature_level),
+            Some(&mut context),
+        )
+    };
+
+    // Win7 gotcha: E_INVALIDARG for the whole call means the 11_1 runtime is
+    // absent. Retry once with the array MINUS the leading 11_1 entry.
+    let result = match result {
+        Err(e) if e.code() == E_INVALIDARG => {
+            device = None;
+            context = None;
+            feature_level = D3D_FEATURE_LEVEL_11_0;
+            // SAFETY: identical contract to the first call; the only change is
+            //         the (still 'static) feature-level list with 11_1 dropped.
+            unsafe {
+                D3D11CreateDevice(
+                    adapter,
+                    driver_type,
+                    None,
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&FEATURE_LEVELS_NO_11_1),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    Some(&mut feature_level),
+                    Some(&mut context),
+                )
+            }
+        }
+        other => other,
+    };
+    ok("D3D11CreateDevice", result)?;
+
+    let device = device.ok_or(PlatformError::Null {
+        ctx: "D3D11CreateDevice device",
+    })?;
+    let context = context.ok_or(PlatformError::Null {
+        ctx: "D3D11CreateDevice context",
+    })?;
+    Ok(D3dDevice { device, context })
+}
+
+/// Create the process-global device. Tries the primary driver, then falls back
+/// to the OTHER driver type once: WARP-primary → hardware-default fallback;
+/// hardware/explicit-adapter primary → WARP fallback. On dual failure the
+/// primary's (more informative) error is returned — never a panic.
 fn create() -> Result<D3dDevice, PlatformError> {
     // RSS lever: WARP is the default for BentoDesk's small retained desktop
     // surface. Hardware remains an explicit diagnostic fallback.
@@ -106,43 +209,73 @@ fn create() -> Result<D3dDevice, PlatformError> {
         }
     };
 
-    let levels = [D3D_FEATURE_LEVEL_11_0];
-    let mut device: Option<ID3D11Device> = None;
-    let mut context: Option<ID3D11DeviceContext> = None;
-    let mut feature_level = D3D_FEATURE_LEVEL_11_0;
-
     // D3D11CreateDevice wants Param<IDXGIAdapter>; IDXGIAdapter1 derefs to
     // IDXGIAdapter so we project the option through Deref to satisfy the
     // bound. The temporary `&IDXGIAdapter` borrow lives for the call.
     let adapter_base: Option<&IDXGIAdapter> = adapter_opt.as_ref().map(|a| -> &IDXGIAdapter { a });
 
-    // SAFETY: D3D11CreateDevice canonical; `levels` lives for the call;
-    //         out-params are `Option<T>` per windows-rs convention.
-    //         When `padapter` is Some, `driver_type` is UNKNOWN per MSDN.
-    let result = unsafe {
-        D3D11CreateDevice(
-            adapter_base,
-            driver_type,
-            None,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            Some(&mut feature_level),
-            Some(&mut context),
-        )
-    };
-    ok("D3D11CreateDevice", result)?;
+    let primary = try_create_device(adapter_base, driver_type);
+    if primary.is_ok() {
+        return primary;
+    }
 
-    let device = device.ok_or(PlatformError::Null {
-        ctx: "D3D11CreateDevice device",
-    })?;
-    let context = context.ok_or(PlatformError::Null {
-        ctx: "D3D11CreateDevice context",
-    })?;
-    Ok(D3dDevice { device, context })
+    // Mutual driver fallback. The fallback ALWAYS uses a `None` adapter, so it
+    // MUST pair with a concrete driver type (HARDWARE or WARP) — never
+    // UNKNOWN-with-null-adapter, which D3D11CreateDevice rejects with
+    // E_INVALIDARG (MSDN). The explicit-adapter→UNKNOWN rule above is therefore
+    // only ever exercised on the primary attempt that carries the adapter.
+    let fallback_driver = if driver_type == D3D_DRIVER_TYPE_WARP {
+        // WARP failed (rare: missing/locked-down warp dll) → try hardware on
+        // the default adapter.
+        D3D_DRIVER_TYPE_HARDWARE
+    } else {
+        // Hardware or explicit-adapter primary failed → try software WARP, the
+        // always-available reference rasterizer.
+        D3D_DRIVER_TYPE_WARP
+    };
+    if let Ok(dev) = try_create_device(None, fallback_driver) {
+        return Ok(dev);
+    }
+
+    // Both paths failed: surface the PRIMARY error (most informative).
+    primary
 }
 
 fn use_warp_driver() -> bool {
     std::env::var_os(D3D_WARP_ENV).is_some() || std::env::var_os(D3D_HARDWARE_ENV).is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The descending list must lead with 11_1 and the no-11_1 list must be
+    // exactly the tail of it. Pure data assertions — no device creation, so
+    // this runs on any host including headless CI.
+    #[test]
+    fn feature_level_lists_are_consistent() {
+        assert_eq!(FEATURE_LEVELS_ALL[0], D3D_FEATURE_LEVEL_11_1);
+        assert_eq!(FEATURE_LEVELS_NO_11_1, FEATURE_LEVELS_ALL[1..]);
+        // Strictly descending by ordinal value (windows-rs FL = i32 magnitude).
+        for pair in FEATURE_LEVELS_ALL.windows(2) {
+            assert!(pair[0].0 > pair[1].0);
+        }
+    }
+
+    // §11-safe device-creation smoke. WARP is the test default (no env vars)
+    // and is universally available on supported Windows, so on THIS machine
+    // creation must succeed. Uses `device()` (idempotent OnceLock) rather than
+    // re-creating, so it is harmless if another test populated the singleton.
+    // Skips silently if the env-gated hardware path is active to avoid the
+    // documented diagnostic-only crash surface.
+    #[test]
+    fn warp_default_device_creates_on_this_machine() {
+        if std::env::var_os(D3D_HARDWARE_ENV).is_some() {
+            eprintln!("skipped: BENTODESK_NANO_D3D_HARDWARE set, hardware path not asserted");
+            return;
+        }
+        let dev = device().expect("WARP-default D3D11 device should create on this host");
+        // Touch both members so the binding is observably used.
+        let _ = (&dev.device, &dev.context);
+    }
 }
