@@ -16079,6 +16079,34 @@ unsafe extern "system" fn aux_wnd_proc(
                 if !p.is_null() {
                     let slot = &mut *p;
                     slot.state.monitors = bento_nano_platform::enumerate_monitors();
+                    // Mc-3 #13 — rescue a window stranded entirely offscreen by
+                    // a monitor unplug. Per-aux code owns normal geometry;
+                    // clamp_window_to_monitors no-ops unless the window is off
+                    // ALL work areas, so a visible window is never moved.
+                    // SWP_NOSIZE keeps the aux's own size.
+                    let mut wr: RECT = core::mem::zeroed();
+                    if GetWindowRect(hwnd, &mut wr) != 0 {
+                        let w = (wr.right - wr.left).max(1);
+                        let h = (wr.bottom - wr.top).max(1);
+                        let (nx, ny) = bento_nano_platform::clamp_window_to_monitors(
+                            wr.left,
+                            wr.top,
+                            w,
+                            h,
+                            &slot.state.monitors,
+                        );
+                        if nx != wr.left || ny != wr.top {
+                            SetWindowPos(
+                                hwnd,
+                                ptr::null_mut(),
+                                nx,
+                                ny,
+                                0,
+                                0,
+                                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                        }
+                    }
                 }
             }
             0

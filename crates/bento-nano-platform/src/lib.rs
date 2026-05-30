@@ -32,8 +32,8 @@ pub mod window;
 
 pub use errors::{PlatformError, ok};
 pub use monitor::{
-    MonitorInfo, RectI32, clamp_zone_to_monitors, enumerate_monitors, monitor_from_point,
-    monitor_from_window, primary_monitor, zone_active_monitor_index,
+    MonitorInfo, RectI32, clamp_window_to_monitors, clamp_zone_to_monitors, enumerate_monitors,
+    monitor_from_point, monitor_from_window, primary_monitor, zone_active_monitor_index,
 };
 pub use window::{
     WindowDesc, WindowKind, create_transparent_window, create_window, default_size, ex_style_for,

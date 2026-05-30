@@ -244,6 +244,83 @@ pub fn clamp_zone_to_monitors(zone: &mut Zone, monitors: &[MonitorInfo]) {
     zone.y = clamp_i32(zone.y, min_y, max_y);
 }
 
+/// Rescue an offscreen window. If the screen rect `(x, y, w, h)` overlaps
+/// ANY monitor's `rect_work`, returns `(x, y)` unchanged. Otherwise picks
+/// the nearest monitor by L1 distance from the window centre and returns a
+/// `(x, y)` that makes the window overlap that monitor's work area. Size is
+/// never inspected for change — the caller preserves it (e.g. `SWP_NOSIZE`).
+///
+/// Mirrors `clamp_zone_to_monitors` exactly, but operates on a raw screen
+/// rect (top-left + size) instead of a `Zone`, returning the clamped
+/// top-left rather than mutating in place. Panic-free (reuses `clamp_i32`,
+/// never `Ord::clamp`).
+///
+/// Behaviour matrix:
+/// - Empty `monitors` slice → no-op (returns `(x, y)`).
+/// - Zero-or-negative-area window (`w <= 0 || h <= 0`) → no-op.
+/// - Window already overlaps any monitor's work area → no-op (so a still-
+///   visible window is never moved; only a window off ALL work areas is
+///   rescued).
+/// - Otherwise: translate the top-left so the window overlaps the nearest
+///   monitor's work area by exactly 1 px on each axis it had to move.
+pub fn clamp_window_to_monitors(x: i32, y: i32, w: i32, h: i32, monitors: &[MonitorInfo]) -> (i32, i32) {
+    if monitors.is_empty() {
+        return (x, y);
+    }
+    if w <= 0 || h <= 0 {
+        return (x, y);
+    }
+    // Already overlaps any monitor work area → leave it alone. A 1-px
+    // overlap counts as visible under the half-open convention.
+    if monitors
+        .iter()
+        .any(|m| rect_overlaps_rect(x, y, w, h, &m.rect_work))
+    {
+        return (x, y);
+    }
+    // Off all work areas. Pick nearest monitor by L1 distance from the
+    // window centre to the closest point of `rect_work`. Inline (no Vec).
+    let cx = x + w / 2;
+    let cy = y + h / 2;
+    let mut best_idx: usize = 0;
+    let mut best_dist: i64 = i64::MAX;
+    for (i, m) in monitors.iter().enumerate() {
+        // Skip degenerate monitors (e.g. FALLBACK_NO_MONITOR sentinel) so
+        // we never clamp into a zero-area target.
+        if m.rect_work.width() <= 0 || m.rect_work.height() <= 0 {
+            continue;
+        }
+        let clamped_cx = clamp_i32(cx, m.rect_work.left, m.rect_work.right - 1);
+        let clamped_cy = clamp_i32(cy, m.rect_work.top, m.rect_work.bottom - 1);
+        let dx = (cx - clamped_cx).unsigned_abs() as i64;
+        let dy = (cy - clamped_cy).unsigned_abs() as i64;
+        let dist = dx + dy;
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = i;
+        }
+    }
+    // No usable monitor (all degenerate) → nothing safe to do; bail.
+    if best_dist == i64::MAX {
+        return (x, y);
+    }
+    let target = &monitors[best_idx].rect_work;
+    let min_x = target.left - w + 1;
+    let max_x = target.right - 1;
+    let min_y = target.top - h + 1;
+    let max_y = target.bottom - 1;
+    (clamp_i32(x, min_x, max_x), clamp_i32(y, min_y, max_y))
+}
+
+/// `[x, x+w) × [y, y+h)` ∩ `r` non-empty? Half-open on all four sides to
+/// match `RectI32::contains_point`. Screen-rect twin of `zone_overlaps_rect`.
+#[inline]
+fn rect_overlaps_rect(x: i32, y: i32, w: i32, h: i32, r: &RectI32) -> bool {
+    let xr = x + w;
+    let yb = y + h;
+    x < r.right && xr > r.left && y < r.bottom && yb > r.top
+}
+
 /// `[zone.x, zone.x+w) × [zone.y, zone.y+h)` ∩ `r` non-empty? Half-open on
 /// all four sides to match `RectI32::contains_point`.
 #[inline]
@@ -323,5 +400,59 @@ fn info_for_handle(hmonitor: HMONITOR) -> Option<MonitorInfo> {
         None
     } else {
         read_monitor_info(hmonitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic monitor fixture — `clamp_window_to_monitors` never touches
+    /// `hmonitor`, so a NULL sentinel handle is fine.
+    fn fake(left: i32, top: i32, right: i32, bottom: i32, primary: bool) -> MonitorInfo {
+        let rect = RectI32 {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        MonitorInfo {
+            hmonitor: core::ptr::null_mut(),
+            rect_screen: rect,
+            rect_work: rect,
+            is_primary: primary,
+        }
+    }
+
+    #[test]
+    fn clamp_window_offscreen_is_rescued_onto_a_work_area() {
+        let monitors = [fake(0, 0, 1920, 1080, true)];
+        // Window stranded far off all monitors (monitor unplug scenario).
+        let (nx, ny) = clamp_window_to_monitors(99999, 99999, 400, 300, &monitors);
+        // Must have moved back so the window's half-open rect overlaps the
+        // single monitor's work area [0,1920) x [0,1080).
+        assert!(nx != 99999 || ny != 99999, "offscreen window must move");
+        assert!(
+            nx < 1920 && nx + 400 > 0 && ny < 1080 && ny + 300 > 0,
+            "rescued window ({nx},{ny},400,300) must overlap work area [0,1920)x[0,1080)"
+        );
+    }
+
+    #[test]
+    fn clamp_window_already_visible_is_returned_unchanged() {
+        let monitors = [fake(0, 0, 1920, 1080, true)];
+        // Fully inside the work area — must be a no-op.
+        assert_eq!(clamp_window_to_monitors(100, 100, 400, 300, &monitors), (100, 100));
+        // 1-px overlap on the right edge still counts as visible (half-open).
+        assert_eq!(clamp_window_to_monitors(1919, 500, 400, 300, &monitors), (1919, 500));
+    }
+
+    #[test]
+    fn clamp_window_empty_or_degenerate_is_noop() {
+        // Empty monitor list → no-op (defensive guard).
+        assert_eq!(clamp_window_to_monitors(99999, 99999, 400, 300, &[]), (99999, 99999));
+        // Zero-area window → no-op even when offscreen.
+        let monitors = [fake(0, 0, 1920, 1080, true)];
+        assert_eq!(clamp_window_to_monitors(99999, 99999, 0, 0, &monitors), (99999, 99999));
     }
 }
