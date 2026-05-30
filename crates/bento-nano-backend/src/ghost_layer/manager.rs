@@ -56,6 +56,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
+use crate::system;
+
 /// Subclass ID for our overlay WndProc subclass.
 const OVERLAY_SUBCLASS_ID: usize = 0xBE470;
 
@@ -461,7 +463,8 @@ pub fn attach(hwnd: HWND) -> Result<(), GhostLayerError> {
     // SAFETY: DwmSetWindowAttribute with valid HWND and pointers backed by
     // named locals.
     unsafe {
-        // DWMNCRP_DISABLED = 1: no window chrome rendering.
+        // DWMNCRP_DISABLED = 1: no window chrome rendering. DWMWA_NCRENDERING_POLICY
+        // exists on Vista+, so this stays UNGUARDED (must run on Win10).
         let disabled: u32 = 1;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -470,14 +473,20 @@ pub fn attach(hwnd: HWND) -> Result<(), GhostLayerError> {
             std::mem::size_of::<u32>() as u32,
         );
 
-        // Disable Windows 11 rounded corners on the overlay window.
-        let do_not_round: u32 = 1;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &do_not_round as *const u32 as *const _,
-            std::mem::size_of::<u32>() as u32,
-        );
+        // Fix #18 — DWMWA_WINDOW_CORNER_PREFERENCE (33) only exists on Windows 11
+        // (build >= 22000 = Win11 RTM); on Win10 it returns E_INVALIDARG. Guard
+        // the call so we don't invoke a build-specific DWM attribute on a build
+        // that lacks it (Wave-G discipline).
+        if system::windows_build() >= 22000 {
+            // Disable Windows 11 rounded corners on the overlay window.
+            let do_not_round: u32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &do_not_round as *const u32 as *const _,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
     }
 
     // ── Step 5: Force a non-moving frame refresh + HWND_TOPMOST ───

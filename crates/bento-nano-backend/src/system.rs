@@ -33,6 +33,8 @@
 //!   the user toggles OneDrive Desktop backup in Settings.
 
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -212,8 +214,12 @@ fn query_os_version() -> SmolStr {
     info.dwOSVersionInfoSize = core::mem::size_of::<OSVERSIONINFOW>() as u32;
 
     // --- Preferred path: ntdll!RtlGetVersion (truthful, not shimmed). ---
-    if let Some(major_minor_build) = rtl_get_version(&mut info) {
-        return SmolStr::from(major_minor_build);
+    if rtl_get_version(&mut info) {
+        let s = format!(
+            "Windows {}.{}.{}",
+            info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
+        );
+        return SmolStr::from(s);
     }
 
     // --- Fallback path: deprecated GetVersionExW (may be version-lied). ---
@@ -234,14 +240,19 @@ fn query_os_version() -> SmolStr {
     }
 }
 
-/// Resolve and invoke `ntdll!RtlGetVersion`, formatting the result.
+/// Resolve and invoke `ntdll!RtlGetVersion`, filling `info` in place.
 ///
-/// Returns `Some("Windows M.m.build")` on success, `None` if `ntdll` /
-/// `RtlGetVersion` cannot be resolved or the call returns a non-`STATUS_SUCCESS`
-/// status. `info` must already have `dwOSVersionInfoSize` set. Never panics.
+/// Returns `true` on success (struct fully populated with the true, un-shimmed
+/// major/minor/build), `false` if `ntdll` / `RtlGetVersion` cannot be resolved
+/// or the call returns a non-`STATUS_SUCCESS` status. `info` must already have
+/// `dwOSVersionInfoSize` set. Never panics.
+///
+/// Shared by [`query_os_version`] (formats the version string) and
+/// [`windows_build`] (reads `dwBuildNumber`) so the `GetProcAddress` soft-load
+/// lives in exactly one place.
 fn rtl_get_version(
     info: *mut windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW,
-) -> Option<String> {
+) -> bool {
     use windows_sys::Win32::Foundation::{FARPROC, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
     use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
@@ -252,7 +263,7 @@ fn rtl_get_version(
     // the (already-mapped) ntdll handle or null on failure. Never freed.
     let ntdll: HMODULE = unsafe { LoadLibraryA(windows_sys::s!("ntdll.dll")) };
     if ntdll.is_null() {
-        return None;
+        return false;
     }
     // SAFETY: `ntdll` is live and the name is a null-terminated ASCII string;
     // `GetProcAddress` returns null on a missing export.
@@ -263,21 +274,59 @@ fn rtl_get_version(
         Some(p) => unsafe {
             std::mem::transmute::<unsafe extern "system" fn() -> isize, FnRtlGetVersion>(p)
         },
-        None => return None,
+        None => return false,
     };
     // SAFETY: `info` points to a valid, sized `OSVERSIONINFOW` (== layout of
     // `RTL_OSVERSIONINFOW`) with `dwOSVersionInfoSize` set by the caller.
     let status = unsafe { f(info) };
     // STATUS_SUCCESS == 0.
-    if status != 0 {
-        return None;
-    }
-    // SAFETY: on STATUS_SUCCESS the struct is fully populated.
-    let v = unsafe { &*info };
-    Some(format!(
-        "Windows {}.{}.{}",
-        v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber
-    ))
+    status == 0
+}
+
+/// Cached Windows build number (`OSVERSIONINFOW::dwBuildNumber`), e.g. `22631`
+/// for Windows 11 23H2, `19045` for Windows 10 22H2.
+///
+/// Reuses the same `ntdll!RtlGetVersion` soft-load path as [`query_os_version`]
+/// (Mc-1a — truthful, not version-lied, no application manifest required) via
+/// the shared [`rtl_get_version`] helper, falling back to the deprecated
+/// `GetVersionExW` if the soft-load fails. The result is cached in a
+/// `OnceLock<u32>` so the resolve happens at most once per process. Returns `0`
+/// when neither API succeeds (callers treat `0` as "older than any guarded
+/// build", so build-gated DWM attributes are skipped — the safe default).
+///
+/// `pub(crate)` — backend-internal (DWM attribute gating in `ghost_layer`); no
+/// cross-crate leak.
+#[cfg(windows)]
+pub(crate) fn windows_build() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    static BUILD: OnceLock<u32> = OnceLock::new();
+    *BUILD.get_or_init(|| {
+        // SAFETY: zeroed `OSVERSIONINFOW`; `dwOSVersionInfoSize` set before any
+        // query reads it (RtlGetVersion / GetVersionExW both gate on it).
+        let mut info: OSVERSIONINFOW = unsafe { core::mem::zeroed() };
+        info.dwOSVersionInfoSize = core::mem::size_of::<OSVERSIONINFOW>() as u32;
+
+        // Preferred: ntdll!RtlGetVersion (shared soft-load with query_os_version).
+        if rtl_get_version(&mut info) {
+            return info.dwBuildNumber;
+        }
+
+        // Fallback: deprecated GetVersionExW (may be version-lied, but the build
+        // number is still adequate for the >= 22000 Win11 gate in practice).
+        use windows_sys::Win32::System::SystemInformation::GetVersionExW;
+        // SAFETY: `info` is zeroed with `dwOSVersionInfoSize` set; on failure
+        // (return 0) the struct stays valid and we report build 0.
+        let ok = unsafe { GetVersionExW(&mut info) };
+        if ok != 0 { info.dwBuildNumber } else { 0 }
+    })
+}
+
+/// Non-Windows stub — no Windows build number; report `0` so any build-gated
+/// path treats the platform as "older than every guarded build".
+#[cfg(not(windows))]
+pub(crate) fn windows_build() -> u32 {
+    0
 }
 
 /// Query the installed WebView2 runtime version from the registry at

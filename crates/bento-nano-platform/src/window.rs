@@ -14,6 +14,7 @@
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, HCURSOR, HICON, IDC_ARROW, LoadCursorW, RegisterClassExW,
@@ -508,10 +509,76 @@ pub fn create_window(desc: &WindowDesc<'_>, parent: HWND) -> Result<HWND, Platfo
     // D2D paint and produces a whiteboard look), so the attribute is no
     // longer set for the Main HWND.
 
+    // Fix #17 — legacy caption-bearing dialogs (About / PalettePicker /
+    // RulesWizard / BulkManager / ZoneEditor / ItemFileRename / Suggestor /
+    // Timeline / SnapshotPicker / Search; see `ex_style_for`) carry a native
+    // OS title bar. BentoDesk Nano is dark-themed, but on Windows 10 1809+
+    // those captions render light/white by default — a visible mismatch
+    // against the dark panels. Gate the immersive-dark-caption attribute on
+    // the actual `WS_CAPTION` style bit (self-maintaining — any future
+    // caption kind picks it up automatically) rather than a hard-coded kind
+    // list. Borderless windows (Main / Settings / pickers / minibar) have no
+    // caption to darken, so the call is skipped for them.
+    if (style & WS_CAPTION) != 0 {
+        apply_immersive_dark_caption(hwnd);
+    }
+
     // SAFETY: hwnd valid; SW_SHOWNORMAL standard cmd.
     unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
     Ok(hwnd)
 }
+
+/// Set `DWMWA_USE_IMMERSIVE_DARK_MODE = TRUE` on a caption-bearing HWND so the
+/// native OS title bar renders dark, matching BentoDesk Nano's dark theme.
+///
+/// The attribute id changed across Windows 10 builds: 20H1 (build 19041+) and
+/// Windows 11 use `20` (the documented `DWMWA_USE_IMMERSIVE_DARK_MODE`), while
+/// builds 1809–1903 (17763–18362) accepted the *undocumented* pre-20H1 id `19`.
+/// We try `20` first and, on an `HRESULT` failure (`hr < 0`, since `S_OK == 0`),
+/// retry with the raw `19`. Both failures are swallowed — pre-1809 / unsupported
+/// hosts simply keep the default caption, which is harmless.
+///
+/// No build-number probe is needed: the `HRESULT` self-reports support. We also
+/// deliberately do NOT consult the theme crate (platform must not depend on
+/// theme/app — layering). The app is dark-themed unconditionally today; a future
+/// light theme would revisit this gate.
+#[cfg(windows)]
+fn apply_immersive_dark_caption(hwnd: HWND) {
+    // BOOL TRUE — DWM reads `cbAttribute` bytes from `pvAttribute`.
+    let enabled: u32 = 1;
+    // Pre-20H1 undocumented id; no clean const exists in windows-sys 0.59.
+    const DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1: u32 = 19;
+
+    // SAFETY: `hwnd` is the freshly created, non-null HWND from `CreateWindowExW`
+    // above. `&enabled` points to a live `u32` for the duration of the call and
+    // `cbAttribute` matches its size. `DwmSetWindowAttribute` is a no-op + error
+    // return on builds that lack the attribute; we never deref the result.
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &enabled as *const u32 as *const core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if hr < 0 {
+        // Windows 10 1809–1903 (17763–18362) used the undocumented `19` id.
+        // SAFETY: identical contract to the call above; same live `&enabled`.
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1,
+                &enabled as *const u32 as *const core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+    }
+}
+
+/// Non-Windows stub — no DWM, so a dark caption is a no-op. Keeps the
+/// `create_window` call site compiling on non-Windows targets.
+#[cfg(not(windows))]
+fn apply_immersive_dark_caption(_hwnd: HWND) {}
 
 /// Bridge a `windows-sys` HWND (raw `*mut c_void`) into a `windows` HWND
 /// newtype. Both wrap the same pointer; this keeps callers honest about the
