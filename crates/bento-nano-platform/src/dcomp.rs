@@ -10,8 +10,9 @@
 //!     -> SetContent(swap chain)
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HWND};
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionTarget, IDCompositionVisual,
 };
@@ -27,7 +28,8 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SCALING_STRETCH,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, IDXGISwapChain2,
+    DXGI_PRESENT_TEST, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
+    IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::core::Interface;
 
@@ -177,6 +179,14 @@ pub struct WindowComp {
     /// `WindowComp`; only re-read when the chain has been released by T-099
     /// hibernation and a subsequent show / paint requires resurrection.
     hwnd: HWND,
+    /// Mc-2 #11 — occluded-present state. Set when `Present` reports
+    /// `DXGI_STATUS_OCCLUDED` (window fully covered, session locked, or RDP
+    /// client minimised); while set, `present()` polls cheaply with
+    /// `Present(0, DXGI_PRESENT_TEST)` instead of doing a real vsync present
+    /// so we stop burning GPU/CPU compositing frames nobody sees. `AtomicBool`
+    /// (not `Cell`) so the field is `Sync`-safe regardless of how `WindowComp`
+    /// is shared; a relaxed load on the hot path is as cheap as a `Cell` read.
+    occluded: AtomicBool,
 }
 
 // SAFETY: COM ref-counted handles; access pinned to UI thread.
@@ -192,6 +202,7 @@ impl WindowComp {
             target,
             root_visual,
             hwnd,
+            occluded: AtomicBool::new(false),
         })
     }
 
@@ -385,20 +396,90 @@ fn create_visual_tree(
     Ok((target, root))
 }
 
+/// Mc-2 #11 — classification of a raw `IDXGISwapChain1::Present` HRESULT for
+/// the occlusion state machine. Pure (no COM); factored out so the decision
+/// is unit-testable without a live swap chain.
+#[derive(Debug, PartialEq, Eq)]
+enum PresentOutcome {
+    /// `DXGI_STATUS_OCCLUDED` — window fully covered / session locked / RDP
+    /// minimised. SUCCESS HRESULT (high bit clear) so `.ok()` would mask it;
+    /// we must branch on it explicitly.
+    Occluded,
+    /// `S_OK` — presented (or, in TEST mode, the window is visible again).
+    Ok,
+    /// Any other HRESULT — route through the existing `ok()` helper so genuine
+    /// failures still map to `PlatformError` exactly as before.
+    Other,
+}
+
+/// Classify a raw `Present` HRESULT integer (`HRESULT.0`). `S_OK` is `0`;
+/// `DXGI_STATUS_OCCLUDED` is `0x087A_0001`.
+#[inline]
+fn classify_present(hr: i32) -> PresentOutcome {
+    if hr == DXGI_STATUS_OCCLUDED.0 {
+        PresentOutcome::Occluded
+    } else if hr == 0 {
+        PresentOutcome::Ok
+    } else {
+        PresentOutcome::Other
+    }
+}
+
 impl WindowComp {
     /// Present the current backbuffer. Returns `Ok(())` as a no-op when the
     /// swap chain has been hibernated by T-099 — the renderer guards paint
     /// against released chains, so this only fires if a stale `present` was
     /// queued between `release_chain` and the next paint.
+    ///
+    /// Mc-2 #11 — occlusion state machine: a fully-covered / locked-session /
+    /// minimised-RDP window must NOT keep doing full vsync `Present(1, …)`
+    /// every frame (compositing frames nobody sees burns GPU/CPU). When DXGI
+    /// reports `DXGI_STATUS_OCCLUDED` we latch `self.occluded` and, on
+    /// subsequent calls, poll cheaply with `Present(0, DXGI_PRESENT_TEST)`
+    /// (TEST renders nothing — it only reports whether the window is still
+    /// occluded) until it returns `S_OK`, then resume real presenting.
+    ///
+    /// Reachability: this is correct without any timer/thread. When the
+    /// covering window moves away / the session unlocks, Windows invalidates
+    /// the newly-exposed region → a `WM_PAINT` → the normal paint→present path
+    /// re-enters here, the TEST poll returns `S_OK`, and we resume. So we only
+    /// need `present()` to be correct *when called*; we never spin.
     pub fn present(&self) -> Result<(), PlatformError> {
         let Some(swap) = self.swap_chain.as_ref() else {
             return Ok(());
         };
-        // SAFETY: swap valid; sync interval 1 = vsync.
-        ok(
-            "IDXGISwapChain1::Present",
-            unsafe { swap.Present(1, DXGI_PRESENT(0)) }.ok(),
-        )
+
+        // §10 hot path: an AtomicBool load + an HRESULT integer compare + a
+        // branch — no allocation, no logging in the occluded case (it would
+        // spam every frame; the occluded transition is silent by design).
+        if self.occluded.load(Ordering::Relaxed) {
+            // Cheap occlusion poll — PRESENT_TEST renders nothing.
+            // SAFETY: swap valid; sync interval 0 + TEST flag = no render.
+            let hr = unsafe { swap.Present(0, DXGI_PRESENT_TEST) };
+            match classify_present(hr.0) {
+                // Still occluded — cheap no-op, no render this frame.
+                PresentOutcome::Occluded => return Ok(()),
+                // Visible again — clear the latch and fall through to do a
+                // real present so the newly-exposed region isn't stale.
+                PresentOutcome::Ok => self.occluded.store(false, Ordering::Relaxed),
+                // Genuine failure during the poll — surface it via `ok()`.
+                PresentOutcome::Other => return ok("IDXGISwapChain1::Present(TEST)", hr.ok()),
+            }
+        }
+
+        // Normal real present (vsync). SAFETY: swap valid; sync interval 1.
+        let hr = unsafe { swap.Present(1, DXGI_PRESENT(0)) };
+        match classify_present(hr.0) {
+            // Just learned we're occluded — latch so the next frames poll
+            // cheaply instead of presenting into the void.
+            PresentOutcome::Occluded => {
+                self.occluded.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            // S_OK or any other HRESULT routes through `ok()` exactly as
+            // before — preserving both success and error-mapping behaviour.
+            PresentOutcome::Ok | PresentOutcome::Other => ok("IDXGISwapChain1::Present", hr.ok()),
+        }
     }
 
     /// Resize the backbuffer. No-op when hibernated — the next `ensure_chain`
@@ -451,4 +532,27 @@ fn attach_acrylic(
         visual.SetEffect(&blur)
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mc-2 #11 — pure-logic coverage of the present-HRESULT classifier that
+    // drives the occlusion state machine. `present()` itself needs a live
+    // DXGI swap chain (GPU) and can't be unit-tested, but the decision it
+    // makes is fully captured here.
+    #[test]
+    fn classify_present_maps_occluded_ok_and_other() {
+        // DXGI_STATUS_OCCLUDED (0x087A0001) is a *success* HRESULT — the bug
+        // this fix addresses is that `.ok()` masks it; classify must catch it.
+        assert_eq!(classify_present(0x087A_0001), PresentOutcome::Occluded);
+        assert_eq!(classify_present(DXGI_STATUS_OCCLUDED.0), PresentOutcome::Occluded);
+        // S_OK.
+        assert_eq!(classify_present(0), PresentOutcome::Ok);
+        // A genuine failure (DXGI_ERROR_DEVICE_REMOVED) and an unrelated
+        // success both route through the `ok()` helper as `Other`.
+        assert_eq!(classify_present(0x887A_0005u32 as i32), PresentOutcome::Other);
+        assert_eq!(classify_present(1), PresentOutcome::Other);
+    }
 }
