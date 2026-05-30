@@ -191,21 +191,36 @@ fn classify_source(path: &Path, custom: Option<&str>) -> SmolStr {
     SmolStr::new_static("custom")
 }
 
-/// Query the Windows version string via `GetVersionExW`.
+/// Query the Windows version string, preferring `ntdll!RtlGetVersion`.
 ///
-/// Returns e.g. `"Windows 10.0.22631"`. On modern Windows the returned
-/// version may be capped without an app-manifest, but matches 1.x parity.
-/// Falls back to the `OS` env var (typically `"Windows_NT"`) on hard failure.
+/// Returns e.g. `"Windows 10.0.22631"`. `RtlGetVersion` is **not** version-lied
+/// (unlike the deprecated `GetVersionExW`, which the compatibility shim caps at
+/// 6.2 unless an application manifest declares `supportedOS`), so it yields the
+/// true major/minor/build even without a manifest (Mc-1a #3). `RtlGetVersion`
+/// is soft-loaded via `GetProcAddress(ntdll.dll)`; if that ever fails to
+/// resolve (it never does in practice — `ntdll` is always mapped), we fall back
+/// to the legacy `GetVersionExW` path. On hard failure of both, falls back to
+/// the `OS` env var.
 fn query_os_version() -> SmolStr {
-    use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 
+    // `RTL_OSVERSIONINFOW` is layout-identical to `OSVERSIONINFOW`
+    // (dwOSVersionInfoSize / dwMajorVersion / dwMinorVersion / dwBuildNumber /
+    // dwPlatformId / szCSDVersion[128]); windows-sys 0.59 does not emit the RTL
+    // alias, so we reuse `OSVERSIONINFOW` as the binary-compatible payload.
     let mut info: OSVERSIONINFOW = unsafe { core::mem::zeroed() };
     info.dwOSVersionInfoSize = core::mem::size_of::<OSVERSIONINFOW>() as u32;
 
-    // SAFETY: `GetVersionExW` reads `dwOSVersionInfoSize` first to decide
-    // how many bytes to fill. We zeroed the struct and set the size field
-    // before the call. The function is documented as deprecated but never
-    // invalid; on failure (return 0) the struct is left zeroed and we fall
+    // --- Preferred path: ntdll!RtlGetVersion (truthful, not shimmed). ---
+    if let Some(major_minor_build) = rtl_get_version(&mut info) {
+        return SmolStr::from(major_minor_build);
+    }
+
+    // --- Fallback path: deprecated GetVersionExW (may be version-lied). ---
+    use windows_sys::Win32::System::SystemInformation::GetVersionExW;
+    // SAFETY: `GetVersionExW` reads `dwOSVersionInfoSize` first to decide how
+    // many bytes to fill. We zeroed the struct and set the size field before
+    // the call. On failure (return 0) the struct is left valid and we fall
     // back to the env var.
     let ok = unsafe { GetVersionExW(&mut info) };
     if ok != 0 {
@@ -217,6 +232,52 @@ fn query_os_version() -> SmolStr {
     } else {
         SmolStr::from(std::env::var("OS").unwrap_or_else(|_| "Windows".to_string()))
     }
+}
+
+/// Resolve and invoke `ntdll!RtlGetVersion`, formatting the result.
+///
+/// Returns `Some("Windows M.m.build")` on success, `None` if `ntdll` /
+/// `RtlGetVersion` cannot be resolved or the call returns a non-`STATUS_SUCCESS`
+/// status. `info` must already have `dwOSVersionInfoSize` set. Never panics.
+fn rtl_get_version(
+    info: *mut windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW,
+) -> Option<String> {
+    use windows_sys::Win32::Foundation::{FARPROC, HMODULE};
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+    type FnRtlGetVersion = unsafe extern "system" fn(*mut OSVERSIONINFOW) -> i32;
+
+    // SAFETY: `LoadLibraryA` with a valid null-terminated ASCII string returns
+    // the (already-mapped) ntdll handle or null on failure. Never freed.
+    let ntdll: HMODULE = unsafe { LoadLibraryA(windows_sys::s!("ntdll.dll")) };
+    if ntdll.is_null() {
+        return None;
+    }
+    // SAFETY: `ntdll` is live and the name is a null-terminated ASCII string;
+    // `GetProcAddress` returns null on a missing export.
+    let proc: FARPROC = unsafe { GetProcAddress(ntdll, windows_sys::s!("RtlGetVersion")) };
+    let f: FnRtlGetVersion = match proc {
+        // SAFETY: transmuting a non-null FARPROC inner fn-pointer to the
+        // documented signature of `ntdll!RtlGetVersion`.
+        Some(p) => unsafe {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, FnRtlGetVersion>(p)
+        },
+        None => return None,
+    };
+    // SAFETY: `info` points to a valid, sized `OSVERSIONINFOW` (== layout of
+    // `RTL_OSVERSIONINFOW`) with `dwOSVersionInfoSize` set by the caller.
+    let status = unsafe { f(info) };
+    // STATUS_SUCCESS == 0.
+    if status != 0 {
+        return None;
+    }
+    // SAFETY: on STATUS_SUCCESS the struct is fully populated.
+    let v = unsafe { &*info };
+    Some(format!(
+        "Windows {}.{}.{}",
+        v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber
+    ))
 }
 
 /// Query the installed WebView2 runtime version from the registry at

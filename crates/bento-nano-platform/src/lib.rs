@@ -20,6 +20,7 @@ pub mod allocator;
 pub mod d2d;
 pub mod d3d;
 pub mod dcomp;
+pub mod dpi;
 pub mod dwrite;
 pub mod errors;
 pub mod message_loop;

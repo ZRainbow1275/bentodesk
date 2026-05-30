@@ -15,7 +15,6 @@ use std::ptr;
 
 use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, HCURSOR, HICON, IDC_ARROW, LoadCursorW, RegisterClassExW,
     SW_SHOWNORMAL, ShowWindow, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
@@ -529,15 +528,13 @@ fn last_err() -> u32 {
 }
 
 fn creation_dpi(parent: HWND) -> u32 {
+    // Mc-1a — DPI APIs are soft-loaded via `crate::dpi` (GetProcAddress) so the
+    // shell EXE no longer carries a static import of `GetDpiForSystem` /
+    // `GetDpiForWindow` (absent on Win10 <1607 / Win8.1 / 7 → load failure).
     let dpi = if parent.is_null() {
-        // SAFETY: GetDpiForSystem reads process/system DPI state and has no
-        // pointer preconditions.
-        unsafe { GetDpiForSystem() }
+        crate::dpi::get_dpi_for_system()
     } else {
-        // SAFETY: parent is an opaque HWND received from the caller; Win32
-        // accepts stale/invalid HWNDs by returning 0 or a fallback DPI rather
-        // than dereferencing user memory in this process.
-        unsafe { GetDpiForWindow(parent) }
+        crate::dpi::get_dpi_for_window(parent)
     };
     if dpi == 0 { 96 } else { dpi }
 }

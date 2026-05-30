@@ -168,9 +168,11 @@ pub fn current_resolution() -> Resolution {
 ///
 /// Returns a multiplier (1.0 = 96 DPI, 1.25 = 120 DPI, 1.5 = 144 DPI).
 pub fn dpi_scale() -> f64 {
-    // SAFETY: GetDpiForSystem is a documented infallible Win32 call that
-    // returns the system DPI value as a u32.
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() };
+    // Mc-1a — DPI soft-loaded via `crate::dpi_compat` (GetProcAddress). This
+    // previously used the `windows` crate's static `GetDpiForSystem`, which
+    // created a PE import absent on Win10 <1607 / 8.1 / 7; swapping it also
+    // drops that static import.
+    let dpi = crate::dpi_compat::system_dpi();
     dpi as f64 / 96.0
 }
 

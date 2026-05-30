@@ -155,10 +155,6 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, PROCESS_PER_MONITOR_DPI_AWARE,
-    SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
-};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     ReleaseCapture, SetCapture, UnregisterHotKey, VK_CONTROL,
@@ -529,14 +525,11 @@ fn main() {
         "startup: acrylic_feature=off\n"
     });
 
-    // Phase 2.3.1a — PER_MONITOR_AWARE_V2. SAFETY: process-init-time best-effort.
-    let v2_ok =
-        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != 0 };
-    if !v2_ok {
-        // SAFETY: same as above — process-init-time best-effort, return value
-        //         intentionally discarded per §11 init-path policy.
-        let _ = unsafe { SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) };
-    }
+    // Phase 2.3.1a / Mc-1a — per-monitor DPI awareness via the soft-loaded
+    // cascade (PER_MONITOR_AWARE_V2 → PER_MONITOR_AWARE → shcore → SetProcessDPIAware).
+    // GetProcAddress-resolved so the EXE carries no static DPI import and loads
+    // on Win10 <1607/1703, Win8.1/8/7. Best-effort at process-init.
+    bento_nano_platform::dpi::set_process_dpi_awareness();
 
     let ole_drop_ready = if startup_diag_skip("ole") {
         false
@@ -952,7 +945,7 @@ unsafe extern "system" fn wnd_proc(
                 if !p.is_null() {
                     let visible = wparam != 0;
                     let slot = &*p;
-                    let live_dpi = GetDpiForWindow(hwnd);
+                    let live_dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
                     if live_dpi != 0 {
                         slot.state.dpi.set(live_dpi);
                     }
@@ -969,7 +962,7 @@ unsafe extern "system" fn wnd_proc(
                     let dx = (lparam as i32 & 0xFFFF) as i16 as f32;
                     let dy = ((lparam as i32 >> 16) & 0xFFFF) as i16 as f32;
                     let slot = &*p;
-                    let live_dpi = GetDpiForWindow(hwnd);
+                    let live_dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
                     if live_dpi != 0 {
                         slot.state.dpi.set(live_dpi);
                     }
@@ -1102,7 +1095,7 @@ unsafe extern "system" fn wnd_proc(
                     let dx = (lparam as i32 & 0xFFFF) as i16 as f32;
                     let dy = ((lparam as i32 >> 16) & 0xFFFF) as i16 as f32;
                     let slot = &*p;
-                    let live_dpi = GetDpiForWindow(hwnd);
+                    let live_dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
                     if live_dpi != 0 {
                         slot.state.dpi.set(live_dpi);
                     }
@@ -15762,8 +15755,8 @@ fn ensure_aux_window(root: &AppRoot, kind: WindowKind) -> Option<HWND> {
     };
 
     let mut win = WindowState::new();
-    // SAFETY: hwnd is live; GetDpiForWindow is documented total.
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    // Mc-1a — DPI soft-loaded via crate::dpi (GetProcAddress), no static import.
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
     let dpi = if dpi == 0 { 96 } else { dpi };
     win.dpi.set(dpi);
     win.monitors = bento_nano_platform::enumerate_monitors();
@@ -21485,9 +21478,8 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
         let mut win = WindowState::new();
         // Phase 2.3.1a / Ruling 4 — seed the per-window DPI + monitor cache
         // immediately so zone routing / DPI scaling are deterministic from
-        // the first paint.
-        // SAFETY: hwnd is live at this point.
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        // the first paint. Mc-1a — DPI soft-loaded via crate::dpi.
+        let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
         let dpi = if dpi == 0 { 96 } else { dpi };
         win.dpi.set(dpi);
         win.monitors = bento_nano_platform::enumerate_monitors();

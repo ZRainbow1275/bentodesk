@@ -59,6 +59,9 @@
 
 pub mod config_vault;
 pub mod desktop_sources;
+// Mc-1a — soft-loaded system-DPI query (GetProcAddress) so backend carries no
+// static `GetDpiForSystem` import. Self-contained: NO platform dep (spec §8).
+pub(crate) mod dpi_compat;
 pub mod drag_drop;
 pub mod ghost_layer;
 pub mod grouping;
