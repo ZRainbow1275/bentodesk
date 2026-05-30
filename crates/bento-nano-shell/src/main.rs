@@ -417,6 +417,14 @@ struct AppRoot {
     /// bounded retry counter keeps that transient from becoming a silent loss.
     tray_registered: Cell<bool>,
     tray_retry_attempts: Cell<u8>,
+    /// Mc-3 #15 — sticky uID-only fallback. On Win10 1607+ a `NIF_GUID` tray
+    /// identity is bound to the registering EXE's full path; a relocated
+    /// portable install can never re-`NIM_ADD` under the GUID, so retrying is
+    /// futile. Once the GUID retry budget is exhausted we flip this `true`,
+    /// reset the budget, and re-register with the (hWnd, uID) identity (no
+    /// GUID), which is not path-bound. Sticky for the session — kept across
+    /// `TaskbarCreated` so we never relapse to the known-bad GUID path.
+    tray_uid_only: Cell<bool>,
     /// Desktop watcher handle. Keeping it in AppRoot preserves the underlying
     /// notify watcher for the whole process lifetime.
     desktop_watcher: RefCell<Option<bento_nano_backend::watcher::DesktopWatcher>>,
@@ -704,6 +712,7 @@ fn main() {
         global_hotkeys: RefCell::new(smallvec::SmallVec::new()),
         tray_registered: Cell::new(false),
         tray_retry_attempts: Cell::new(0),
+        tray_uid_only: Cell::new(false),
         desktop_watcher: RefCell::new(desktop_watcher),
         desktop_events: desktop_event_rx,
         live_folder_events: live_folder_event_rx,
@@ -928,6 +937,8 @@ unsafe extern "system" fn wnd_proc(
         if let Some(root) = app_root() {
             root.tray_registered.set(false);
             root.tray_retry_attempts.set(0);
+            // Mc-3 #15 — deliberately do NOT reset `tray_uid_only`: if the GUID
+            // identity was already proven unusable this session, stay uID-only.
             // SAFETY: `hwnd` is this window's live handle; register_tray_icon
             //         only touches the tray + the (single-threaded) AppRoot.
             unsafe {
@@ -11704,12 +11715,13 @@ unsafe fn register_tray_icon(root: &AppRoot, hwnd: HWND) {
         return;
     }
 
-    let delete_nid = build_tray_delete_icon_data(hwnd);
+    let uid_only = root.tray_uid_only.get();
+    let delete_nid = build_tray_delete_icon_data(hwnd, uid_only);
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &delete_nid);
     }
 
-    let mut nid = build_tray_notify_icon_data(hwnd, icon);
+    let mut nid = build_tray_notify_icon_data(hwnd, icon, uid_only);
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
     if ok == 0 {
         log_tray_error("NIM_ADD", unsafe { GetLastError() });
@@ -11740,7 +11752,7 @@ unsafe fn unregister_tray_icon(root: &AppRoot, hwnd: HWND) {
     root.tray_registered.set(false);
     root.tray_retry_attempts.set(TRAY_ICON_MAX_RETRIES);
 
-    let nid = build_tray_delete_icon_data(hwnd);
+    let nid = build_tray_delete_icon_data(hwnd, root.tray_uid_only.get());
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &nid);
     }
@@ -11749,26 +11761,40 @@ unsafe fn unregister_tray_icon(root: &AppRoot, hwnd: HWND) {
 fn build_tray_notify_icon_data(
     hwnd: HWND,
     icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+    uid_only: bool,
 ) -> NOTIFYICONDATAW {
     let mut nid: NOTIFYICONDATAW = unsafe { core::mem::zeroed() };
     nid.cbSize = core::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = TRAY_ICON_ID;
-    nid.uFlags = NIF_GUID | NIF_ICON | NIF_MESSAGE | NIF_SHOWTIP | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY_ICON;
     nid.hIcon = icon;
-    nid.guidItem = TRAY_ICON_GUID;
     nid.szTip = widen_static::<128>("BentoDesk Nano");
+    // Mc-3 #15 — the GUID identity is path-bound; the uID-only fallback drops
+    // NIF_GUID + guidItem so the (hWnd, uID) identity registers on relocated
+    // portable installs. `guidItem` stays zeroed from the `zeroed()` init.
+    if uid_only {
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_SHOWTIP | NIF_TIP;
+    } else {
+        nid.uFlags = NIF_GUID | NIF_ICON | NIF_MESSAGE | NIF_SHOWTIP | NIF_TIP;
+        nid.guidItem = TRAY_ICON_GUID;
+    }
     nid
 }
 
-fn build_tray_delete_icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
+fn build_tray_delete_icon_data(hwnd: HWND, uid_only: bool) -> NOTIFYICONDATAW {
     let mut nid: NOTIFYICONDATAW = unsafe { core::mem::zeroed() };
     nid.cbSize = core::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = TRAY_ICON_ID;
-    nid.uFlags = NIF_GUID;
-    nid.guidItem = TRAY_ICON_GUID;
+    // Mc-3 #15 — delete the identity we actually registered. uID-only delete is
+    // `uFlags = 0` with `guidItem` left zeroed; the GUID delete keeps NIF_GUID.
+    if uid_only {
+        nid.uFlags = 0;
+    } else {
+        nid.uFlags = NIF_GUID;
+        nid.guidItem = TRAY_ICON_GUID;
+    }
     nid
 }
 
@@ -11783,6 +11809,25 @@ fn tray_command_for_callback(_wparam: WPARAM, lparam: LPARAM) -> Option<Command>
 fn schedule_tray_retry(root: &AppRoot, hwnd: HWND) {
     let attempt = root.tray_retry_attempts.get();
     if attempt >= TRAY_ICON_MAX_RETRIES {
+        // Mc-3 #15 — the GUID retry budget is spent. On a relocated portable
+        // install the GUID is path-bound to the old EXE location and retrying
+        // can never succeed, so fall back ONCE to a uID-only identity (no
+        // NIF_GUID) and start a fresh budget. The flag is sticky, so this
+        // GUID→uID transition happens at most once; the uID path then has its
+        // own single budget that terminates below.
+        if !root.tray_uid_only.get() {
+            log_static(
+                "tray: GUID NIM_ADD failed after budget; falling back to uID-only identity\n",
+            );
+            root.tray_uid_only.set(true);
+            root.tray_retry_attempts.set(0);
+            let timer =
+                unsafe { SetTimer(hwnd, TRAY_ICON_RETRY_TIMER_ID, TRAY_ICON_RETRY_MS, None) };
+            if timer == 0 {
+                log_tray_error("SetTimer(TRAY_ICON_RETRY)", unsafe { GetLastError() });
+            }
+            return;
+        }
         log_static("tray: NIM_ADD retry budget exhausted; continuing without tray icon\n");
         return;
     }
@@ -22458,7 +22503,7 @@ mod tests {
         let hwnd = 0x1234usize as windows_sys::Win32::Foundation::HWND;
         let icon = 0x5678usize as windows_sys::Win32::UI::WindowsAndMessaging::HICON;
 
-        let nid = build_tray_notify_icon_data(hwnd, icon);
+        let nid = build_tray_notify_icon_data(hwnd, icon, false);
         let expected_tip: Vec<u16> = "BentoDesk Nano".encode_utf16().collect();
 
         assert_eq!(nid.cbSize, core::mem::size_of::<NOTIFYICONDATAW>() as u32);
@@ -22483,7 +22528,7 @@ mod tests {
     fn tray_delete_icon_data_uses_same_guid_identity() {
         let hwnd = 0x1234usize as windows_sys::Win32::Foundation::HWND;
 
-        let nid = build_tray_delete_icon_data(hwnd);
+        let nid = build_tray_delete_icon_data(hwnd, false);
 
         assert_eq!(nid.cbSize, core::mem::size_of::<NOTIFYICONDATAW>() as u32);
         assert_eq!(nid.hWnd, hwnd);
@@ -22493,6 +22538,38 @@ mod tests {
         assert_eq!(nid.guidItem.data2, super::TRAY_ICON_GUID.data2);
         assert_eq!(nid.guidItem.data3, super::TRAY_ICON_GUID.data3);
         assert_eq!(nid.guidItem.data4, super::TRAY_ICON_GUID.data4);
+    }
+
+    #[test]
+    fn tray_uid_only_fallback_drops_guid_identity() {
+        // Mc-3 #15 — the relocated-portable-install fallback registers under
+        // the path-independent (hWnd, uID) identity: no NIF_GUID, zeroed guid.
+        let hwnd = 0x1234usize as windows_sys::Win32::Foundation::HWND;
+        let icon = 0x5678usize as windows_sys::Win32::UI::WindowsAndMessaging::HICON;
+
+        let nid = build_tray_notify_icon_data(hwnd, icon, true);
+        assert_eq!(nid.hWnd, hwnd);
+        assert_eq!(nid.uID, super::TRAY_ICON_ID);
+        assert_eq!(nid.hIcon, icon);
+        assert_eq!(nid.uCallbackMessage, super::WM_TRAY_ICON);
+        // The defining property of the fallback: GUID identity is fully dropped.
+        assert_eq!(nid.uFlags & NIF_GUID, 0);
+        assert_eq!(nid.guidItem.data1, 0);
+        assert_eq!(nid.guidItem.data2, 0);
+        assert_eq!(nid.guidItem.data3, 0);
+        // Functional flags are still present so the icon/menu still work.
+        assert_eq!(nid.uFlags & NIF_ICON, NIF_ICON);
+        assert_eq!(nid.uFlags & NIF_MESSAGE, NIF_MESSAGE);
+        assert_eq!(nid.uFlags & NIF_SHOWTIP, NIF_SHOWTIP);
+        assert_eq!(nid.uFlags & NIF_TIP, NIF_TIP);
+
+        let del = build_tray_delete_icon_data(hwnd, true);
+        assert_eq!(del.hWnd, hwnd);
+        assert_eq!(del.uID, super::TRAY_ICON_ID);
+        assert_eq!(del.uFlags & NIF_GUID, 0);
+        assert_eq!(del.guidItem.data1, 0);
+        assert_eq!(del.guidItem.data2, 0);
+        assert_eq!(del.guidItem.data3, 0);
     }
 
     #[test]
@@ -23876,6 +23953,7 @@ mod tests {
             global_hotkeys: std::cell::RefCell::new(smallvec::SmallVec::new()),
             tray_registered: std::cell::Cell::new(false),
             tray_retry_attempts: std::cell::Cell::new(0),
+            tray_uid_only: std::cell::Cell::new(false),
             desktop_watcher: std::cell::RefCell::new(None),
             desktop_events,
             live_folder_events,
