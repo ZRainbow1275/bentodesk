@@ -57,6 +57,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod autostart;
 pub mod config_vault;
 pub mod desktop_sources;
 // Mc-1a — soft-loaded system-DPI query (GetProcAddress) so backend carries no

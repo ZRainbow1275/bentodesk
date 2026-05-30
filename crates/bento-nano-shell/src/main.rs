@@ -5025,6 +5025,12 @@ fn apply_general_settings_from_vault(app: &AppState) {
 
     restore_general_bool_cell(&app.setting_desktop_embed, ghost, "ghost_layer_enabled");
     restore_general_bool_cell(&app.setting_autostart, startup, "launch_at_startup");
+    // Mc-3 #12 — HKCU\Run is the real source of truth; the toggle previously
+    // never wrote it. Override the persisted mirror with the actual registry
+    // state so the UI is honest. Display-only (no boot re-assert → respects
+    // Task Manager disable).
+    app.setting_autostart
+        .set(bento_nano_backend::autostart::is_enabled());
     restore_general_bool_cell(&app.setting_show_in_taskbar, taskbar, "show_in_taskbar");
     restore_general_bool_cell(&app.setting_smart_layout, auto_group, "auto_group_enabled");
     restore_general_bool_cell(&app.setting_portable_mode, portable, "portable_mode");
@@ -13555,7 +13561,17 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             }
             ui::SettingsHit::ToggleAutostart => {
                 let app = root.app.borrow();
-                app.setting_autostart.set(!app.setting_autostart.get());
+                // Mc-3 #12 — the toggle previously only flipped this Cell and
+                // never touched the registry, so "run at startup" was a lie.
+                // Best-effort write HKCU\Run, then set the Cell from the actual
+                // registry state so the toggle can never lie again.
+                let new_val = !app.setting_autostart.get();
+                if let Err(e) = bento_nano_backend::autostart::set_enabled(new_val) {
+                    log_static(&format!("autostart: set_enabled({new_val}) failed: {e}\n"));
+                }
+                // Reflect actual registry state, not just intent.
+                app.setting_autostart
+                    .set(bento_nano_backend::autostart::is_enabled());
                 app.settings_dirty.set(true);
                 drop(app);
                 request_redraw(hwnd);
