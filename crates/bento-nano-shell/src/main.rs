@@ -47,7 +47,8 @@ use std::cell::{Cell, RefCell};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bento_nano_app::{
@@ -122,7 +123,8 @@ use mimalloc::MiMalloc;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use windows_sys::Win32::Foundation::{
-    BOOL, CloseHandle, GetLastError, GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    BOOL, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HWND, LPARAM, LRESULT,
+    POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 // Wave 15 — Tier 0 #29/#31. `EmptyWorkingSet(GetCurrentProcess())` is the
@@ -145,10 +147,11 @@ use windows_sys::Win32::System::Memory::{
     MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
     PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 use windows_sys::Win32::System::ProcessStatus::{EmptyWorkingSet, GetModuleFileNameExW};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::Dialogs::{
     CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
@@ -167,11 +170,12 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CreatePopupMenu, DefWindowProcW, DestroyMenu, DestroyWindow,
-    EnumWindows, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW,
+    EnumWindows, FindWindowW, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW, GetClientRect,
+    GetCursorPos, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HTTRANSPARENT,
     HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDI_APPLICATION, IsIconic, IsWindowVisible, IsZoomed,
-    KillTimer, LoadIconW, MF_SEPARATOR, MF_STRING, PostMessageW, PostQuitMessage, SW_HIDE,
+    KillTimer, LoadIconW, MB_ICONERROR, MB_OK, MessageBoxW, MF_SEPARATOR, MF_STRING, PostMessageW,
+    PostQuitMessage, RegisterWindowMessageW, SW_HIDE,
     SW_MAXIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CHAR,
@@ -191,6 +195,32 @@ const WM_TRAY_ICON: u32 = 0x0500;
 /// `WM_MOUSEMOVE` returns so `DoDragDrop` enters from a normal UI-pump
 /// message rather than from the middle of the mouse-move handler.
 const WM_ITEM_DRAG_OUT: u32 = WM_APP + 0x0505;
+/// Mc-1b — posted by a second launch attempt to the already-running instance
+/// so the primary instance surfaces its Main window. 0x0505 is taken by
+/// `WM_ITEM_DRAG_OUT` above, so this uses 0x0506.
+const WM_WAKE_INSTANCE: u32 = WM_APP + 0x0506;
+/// Mc-1b — process-wide single-instance mutex HANDLE (stored as `isize`).
+/// Held for the whole process lifetime; we deliberately never `CloseHandle`
+/// it (closing would release the named mutex and defeat the guard — the OS
+/// reclaims the handle on process exit).
+static MUTEX_HANDLE: OnceLock<isize> = OnceLock::new();
+/// Mc-1b — cached `RegisterWindowMessageW("TaskbarCreated")` id. Explorer
+/// broadcasts this when its tray is (re)created (e.g. after an explorer.exe
+/// restart); we re-add the notify icon on receipt.
+static TASKBAR_CREATED_MSG: OnceLock<u32> = OnceLock::new();
+/// Mc-1b(c) — consecutive `paint()` failures. A permanently-dead renderer
+/// (D3D/D2D unavailable) keeps failing; a transient device-loss recovers.
+/// Reset to 0 on the first successful paint. Mc-2 device-recovery will also
+/// reset this once the device is rebuilt, so a recoverable loss never trips
+/// the fatal box.
+static PAINT_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+/// Mc-1b(c) — guards the renderer-unavailable fatal box to a single showing.
+static PAINT_FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
+/// Mc-1b(c) — consecutive-failure threshold before declaring the renderer
+/// permanently unavailable. Deliberately high so a transient device-loss
+/// (TDR/RDP/sleep) never trips the fatal box — only a renderer that cannot
+/// initialise at all does.
+const PAINT_FATAL_STREAK_THRESHOLD: u32 = 120;
 const TRAY_ICON_ID: u32 = 1;
 const TRAY_ICON_RETRY_TIMER_ID: usize = 0xB470_0506;
 const TRAY_ICON_RETRY_MS: u32 = 1_500;
@@ -491,7 +521,15 @@ const WIN_TITLE: &[u16] = &[
 ];
 
 fn main() {
-    // Spec §1 RSS lever — minimal panic hook.
+    // Mc-1b(a) — DELIBERATE behavioural change from the previous "minimal /
+    // silent" hook. With `windows_subsystem="windows"` (no console) and
+    // `panic="abort"` (release), stderr is NULL → a panic vanished entirely.
+    // The hook now ALSO routes the message to the debug stream
+    // (`OutputDebugStringA`) and raises a user-visible `MessageBoxW`. It must
+    // stay panic-free itself (a panic-in-a-panic-hook double-faults): we build
+    // the strings with checked formatting, allocate a `Vec`/`SmallVec` (an
+    // alloc is acceptable here since we are aborting anyway), and use no
+    // unwrap/expect/index.
     std::panic::set_hook(Box::new(|info| {
         use core::fmt::Write as _;
         let mut buf: smallvec::SmallVec<[u8; 256]> = smallvec::SmallVec::new();
@@ -506,12 +544,73 @@ fn main() {
             Some(l) => (l.file(), l.line()),
             None => ("<unknown>", 0),
         };
-        let _ = writeln!(SvWriter(&mut buf), "nano panic at {file}:{line}");
+        // Build the human-readable message once: location + (if available)
+        // the panic payload string.
+        let mut msg = format!("nano panic at {file}:{line}");
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            let _ = write!(&mut msg, ": {s}");
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            let _ = write!(&mut msg, ": {s}");
+        }
+
+        // Keep the existing stderr line (no-op under windows_subsystem, but
+        // visible when launched from a console / under a wrapper).
+        let _ = writeln!(SvWriter(&mut buf), "{msg}");
         let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf);
+
+        // Debug-stream channel (visible in DebugView / a debugger).
+        // `OutputDebugStringA` wants a NUL-terminated ANSI/UTF-8 buffer.
+        let mut dbg_bytes: Vec<u8> = msg.clone().into_bytes();
+        dbg_bytes.push(0);
+        // SAFETY: `dbg_bytes` is NUL-terminated; OutputDebugStringA only reads.
+        unsafe {
+            OutputDebugStringA(dbg_bytes.as_ptr());
+        }
+
+        // User-visible box (the only channel a normal user can see).
+        show_fatal_box("BentoDesk Nano — 致命错误 / Fatal Error", &msg);
     }));
 
     if let Some(code) = live_folder_picker_host_exit_code_from_args() {
         std::process::exit(code);
+    }
+
+    // Mc-1b — single-instance guard. Placed AFTER the live-folder picker-host
+    // early-exit (that self-spawned child legitimately exits above, BEFORE
+    // this point, so it is correctly exempt from the guard) and BEFORE locale
+    // init / window creation. Without this, autorun + a manual double-click
+    // produce two processes racing zones.bin / vault.bin / the tray / hotkeys
+    // / the watcher.
+    //
+    // Session-local name (no `Global\` prefix) → per-session, which is correct
+    // for a per-user desktop overlay (one instance per interactive session).
+    {
+        let mut mutex_name: Vec<u16> = "BentoDeskNano.SingleInstance.7E2A1C90-Nano"
+            .encode_utf16()
+            .collect();
+        mutex_name.push(0);
+        // SAFETY: name buffer is NUL-terminated; bInitialOwner = FALSE (0).
+        let mutex = unsafe { CreateMutexW(ptr::null(), 0, mutex_name.as_ptr()) };
+        // SAFETY: GetLastError reads the calling thread's last-error code set
+        //         by CreateMutexW above.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            // An instance is already running — best-effort wake it, then exit.
+            // SAFETY: CLASS_NAME is a NUL-terminated wide class string; a null
+            //         window title matches any window of that class. All calls
+            //         tolerate a null/!found HWND.
+            unsafe {
+                let existing = FindWindowW(CLASS_NAME.as_ptr(), ptr::null());
+                if !existing.is_null() {
+                    PostMessageW(existing, WM_WAKE_INSTANCE, 0, 0);
+                    SetForegroundWindow(existing);
+                }
+            }
+            std::process::exit(0);
+        }
+        // Keep the HANDLE alive for the whole process: stash it (do NOT
+        // CloseHandle — closing releases the named mutex). `CreateMutexW`
+        // returns a HANDLE (≈ *mut c_void); store as isize.
+        let _ = MUTEX_HANDLE.set(mutex as isize);
     }
 
     // Phase 1.3 — install the zh-CN locale BEFORE any widget asks for a
@@ -690,6 +789,12 @@ fn main() {
                 &mut std::io::stderr(),
                 format!("nano fatal: {e}\n").as_bytes(),
             );
+            // Mc-1b(b) — make the fatal start-up failure visible (stderr is
+            // NULL under windows_subsystem="windows").
+            show_fatal_box(
+                "BentoDesk Nano — 致命错误 / Fatal Error",
+                &format!("窗口创建失败 / Window creation failed: {e}"),
+            );
             std::process::exit(1);
         }
     };
@@ -801,6 +906,37 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // Mc-1b — TaskbarCreated. Explorer broadcasts this registered message to
+    // every top-level window when its tray is (re)created — notably after an
+    // explorer.exe crash/restart, which otherwise drops our notify icon for
+    // the rest of the session. The message id is dynamic (not a compile-time
+    // constant), so it is matched here with an early `if` rather than a match
+    // arm. Lazily register the id once via OnceLock.
+    let taskbar_created = *TASKBAR_CREATED_MSG.get_or_init(|| {
+        let mut name: Vec<u16> = "TaskbarCreated".encode_utf16().collect();
+        name.push(0);
+        // SAFETY: `name` is NUL-terminated; RegisterWindowMessageW only reads.
+        unsafe { RegisterWindowMessageW(name.as_ptr()) }
+    });
+    if taskbar_created != 0 && msg == taskbar_created {
+        // Re-add the tray icon. `register_tray_icon` early-returns when
+        // `tray_registered` is already true, so we must clear that flag (and
+        // the retry budget) first or the re-registration is a no-op. The
+        // `&AppRoot` is obtained via the process-global `app_root()` — the
+        // IDENTICAL acquisition the WM_TIMER tray-retry arm uses. A null root
+        // (pre-install_app_root) just returns without crashing.
+        if let Some(root) = app_root() {
+            root.tray_registered.set(false);
+            root.tray_retry_attempts.set(0);
+            // SAFETY: `hwnd` is this window's live handle; register_tray_icon
+            //         only touches the tray + the (single-threaded) AppRoot.
+            unsafe {
+                register_tray_icon(root, hwnd);
+            }
+        }
+        return 0;
+    }
+
     match msg {
         WM_NCCREATE => {
             // SAFETY: lparam is a valid CREATESTRUCTW pointer per WM_NCCREATE.
@@ -829,11 +965,46 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        // Mc-1b — a second launch attempt posts this to the already-running
+        // instance (single-instance guard). Surface the Main window. Harmless
+        // no-op if it is already visible/foreground.
+        x if x == WM_WAKE_INSTANCE => {
+            // SAFETY: `hwnd` is this window's live handle.
+            unsafe {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+            }
+            0
+        }
         WM_PAINT => {
             // SAFETY: paint handles its own state (lazy slot init).
             unsafe {
-                if let Err(e) = paint(hwnd) {
-                    log_paint_err(e);
+                match paint(hwnd) {
+                    Ok(()) => {
+                        // A successful frame clears the failure streak. Mc-2
+                        // device-recovery will likewise reset this once the
+                        // device is rebuilt, so a recoverable device-loss
+                        // never reaches the fatal threshold below.
+                        PAINT_FAIL_STREAK.store(0, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        log_paint_err(e);
+                        // Mc-1b(c) — a permanently-dead renderer keeps failing
+                        // every frame. After a deliberately high threshold
+                        // (so transient device-loss never trips it) surface a
+                        // single fatal box and quit cleanly rather than spin
+                        // the WM_PAINT loop forever, invisibly, burning CPU.
+                        let n = PAINT_FAIL_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n >= PAINT_FATAL_STREAK_THRESHOLD
+                            && !PAINT_FATAL_SHOWN.swap(true, Ordering::Relaxed)
+                        {
+                            show_fatal_box(
+                                "BentoDesk Nano — 渲染不可用 / Rendering unavailable",
+                                "Direct3D/Direct2D renderer could not initialise on this system.",
+                            );
+                            PostQuitMessage(2);
+                        }
+                    }
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -21394,6 +21565,28 @@ fn log_static(msg: &str) {
     let mut stderr = std::io::stderr();
     let _ = std::io::Write::write_all(&mut stderr, msg.as_bytes());
     let _ = std::io::Write::flush(&mut stderr);
+}
+
+/// Mc-1b — show a modal, user-visible error box. Under
+/// `windows_subsystem="windows"` stderr is NULL, so this is the only channel
+/// a normal (non-debugger) user can see. §11-clean: builds NUL-terminated
+/// UTF-16 buffers without any unwrap/expect/panic, and `MessageBoxW` with a
+/// null owner cannot itself panic. Safe to call from the panic hook.
+fn show_fatal_box(title: &str, body: &str) {
+    let mut title_w: Vec<u16> = title.encode_utf16().collect();
+    title_w.push(0);
+    let mut body_w: Vec<u16> = body.encode_utf16().collect();
+    body_w.push(0);
+    // SAFETY: both buffers are NUL-terminated; a null owner HWND is valid and
+    // documented for an ownerless message box.
+    unsafe {
+        MessageBoxW(
+            ptr::null_mut(),
+            body_w.as_ptr(),
+            title_w.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
 
 /// V-10 (2026-05-21) — Snapshot the Main HWND's GWL_EXSTYLE bitmask and log
