@@ -1141,9 +1141,11 @@ fn winhttp_last_error(context: &str) -> UpdaterError {
 #[cfg(windows)]
 fn open_winhttp_get(source: &str) -> Result<WinHttpRequest, UpdaterError> {
     use windows_sys::Win32::Networking::WinHttp::{
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_STATUS_CODE, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-        WinHttpQueryHeaders, WinHttpReceiveResponse, WinHttpSendRequest,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+        WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
     };
 
     let parsed = parse_http_url(source)?;
@@ -1161,6 +1163,34 @@ fn open_winhttp_get(source: &str) -> Result<WinHttpRequest, UpdaterError> {
         return Err(winhttp_last_error("WinHttpOpen"));
     }
     let session = WinHttpHandle(session);
+
+    // Mc-3 #16: pin TLS 1.2|1.3 on the session handle. On Win8.1 and
+    // Win10 < 1709 WinHTTP defaults to TLS 1.0/1.1, which modern update
+    // servers (e.g. GitHub releases) reject — the handshake would silently
+    // fail. TLS1.2|TLS1.3 is forward+backward safe: OSes lacking 1.3 ignore
+    // the unknown bit and negotiate 1.2; older OSes have 1.2 enabled by this
+    // option. Best-effort: a non-zero failure only loses the hardening on
+    // OSes that already default to 1.2, so we swallow it rather than abort.
+    let protocols: u32 =
+        WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    if unsafe {
+        WinHttpSetOption(
+            session.0,
+            WINHTTP_OPTION_SECURE_PROTOCOLS,
+            &protocols as *const u32 as *const core::ffi::c_void,
+            core::mem::size_of::<u32>() as u32,
+        )
+    } == 0
+    {
+        tracing::warn!("updater: WinHttpSetOption(SECURE_PROTOCOLS) failed, using OS default TLS");
+    }
+
+    // Mc-3 #16: bound every WinHTTP phase so a black-holed connection
+    // (captive portal, dead proxy, firewall drop) can never hang the request
+    // thread indefinitely. Milliseconds; resolve must be > 0 (0 = no timeout).
+    if unsafe { WinHttpSetTimeouts(session.0, 10_000, 15_000, 15_000, 30_000) } == 0 {
+        tracing::warn!("updater: WinHttpSetTimeouts failed, using OS default timeouts");
+    }
 
     let host = wide_null(&parsed.host);
     let connect = unsafe { WinHttpConnect(session.0, host.as_ptr(), parsed.port, 0) };
