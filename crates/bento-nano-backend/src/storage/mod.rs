@@ -495,11 +495,32 @@ fn replace_file_with_backup(
     let path_w = to_wide_path(path);
     let backup_w = to_wide_path(backup_path);
 
-    let result = if path.exists() {
+    // The `path.exists()` probe is only a fast-path selector, never
+    // load-bearing for correctness:
+    //
+    //   * On the common NTFS path the destination exists, so we try
+    //     `ReplaceFileW` first — it gives us an atomic swap *and* writes the
+    //     prior contents into the `.bak` sibling in one call.
+    //   * If `ReplaceFileW` returns `Err`, we do NOT treat it as fatal. It
+    //     can fail on FAT32 / exotic filesystems (USB sticks, SD cards, some
+    //     network shares) that lack the features it relies on — e.g.
+    //     ERROR_UNABLE_TO_REMOVE_REPLACED / ERROR_UNABLE_TO_MOVE_REPLACEMENT
+    //     — and it can also lose a TOCTOU race if the destination is deleted
+    //     between the `exists()` probe and the call (ERROR_FILE_NOT_FOUND).
+    //     In every such case we fall through to the `MoveFileExW` last
+    //     resort so the freshly written `.tmp` is never stranded and the
+    //     user's edits are not silently lost.
+    //   * When the destination is missing there is nothing for
+    //     `ReplaceFileW` to back up, so we go straight to `MoveFileExW`.
+    //
+    // `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` is the
+    // robust fallback: it creates-or-replaces and works on FAT32 (atomic
+    // rename on NTFS, delete+rename on FAT32), flushing before it returns.
+    if path.exists() {
         // SAFETY: All three paths are valid, null-terminated UTF-16 strings
         // that live for the duration of the call. The replacement file is
         // fully written and flushed before ReplaceFileW is invoked.
-        unsafe {
+        let replace_result = unsafe {
             ReplaceFileW(
                 PCWSTR(path_w.as_ptr()),
                 PCWSTR(temp_w.as_ptr()),
@@ -508,21 +529,34 @@ fn replace_file_with_backup(
                 None,
                 None,
             )
+        };
+        if replace_result.is_ok() {
+            return Ok(());
         }
-    } else {
-        // SAFETY: Both paths are valid, null-terminated UTF-16 strings that
-        // live for the duration of the call. MOVEFILE_WRITE_THROUGH ensures
-        // the rename is flushed before the API returns.
-        unsafe {
-            MoveFileExW(
-                PCWSTR(temp_w.as_ptr()),
-                PCWSTR(path_w.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
+        // ReplaceFileW failed (FAT32 / merge / unable-to-remove / TOCTOU) —
+        // fall through to the MoveFileExW fallback below rather than
+        // surfacing a fatal error and stranding the write in `.tmp`.
+    }
+
+    // Fallback path (dest missing, or ReplaceFileW failed). Best-effort
+    // preserve the prior primary as a backup, mirroring the non-Windows arm;
+    // a failed backup copy must NOT fail the write (backup is best-effort).
+    if path.exists() {
+        let _ = std::fs::copy(path, backup_path);
+    }
+
+    // SAFETY: Both paths are valid, null-terminated UTF-16 strings that live
+    // for the duration of the call. MOVEFILE_WRITE_THROUGH ensures the rename
+    // is flushed before the API returns.
+    let move_result = unsafe {
+        MoveFileExW(
+            PCWSTR(temp_w.as_ptr()),
+            PCWSTR(path_w.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
     };
 
-    result.map_err(|err: windows::core::Error| StorageError::Replace {
+    move_result.map_err(|err: windows::core::Error| StorageError::Replace {
         path: path.to_path_buf(),
         message: err.to_string(),
     })
@@ -612,6 +646,44 @@ mod tests {
                 count: 1,
             }
         );
+    }
+
+    #[test]
+    fn atomic_write_roundtrips_through_both_replace_branches() {
+        // First write targets a NON-EXISTENT dest → exercises the
+        // MoveFileExW create branch (which the FAT32 ReplaceFileW-failure
+        // fallback shares). Second write OVERWRITES it → exercises the
+        // ReplaceFileW dest-exists branch. Both must round-trip.
+        let dir = tempdir();
+        let path = dir.join("state.json");
+        assert!(!path.exists(), "precondition: dest must not exist");
+
+        let created = TestData {
+            name: "created".to_string(),
+            count: 7,
+        };
+        write_json_atomic(&path, &created).expect("write to missing dest (MoveFileExW branch)");
+        assert!(path.exists());
+        let after_create: TestData =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(after_create, created);
+
+        let overwritten = TestData {
+            name: "overwritten".to_string(),
+            count: 8,
+        };
+        write_json_atomic(&path, &overwritten)
+            .expect("overwrite existing dest (ReplaceFileW branch)");
+        let after_overwrite: TestData =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(after_overwrite, overwritten);
+
+        // The overwrite must have preserved the prior primary as `.bak`.
+        let backup: TestData = serde_json::from_str(
+            &std::fs::read_to_string(backup_path(&path)).expect("read backup"),
+        )
+        .expect("parse backup");
+        assert_eq!(backup, created);
     }
 
     #[test]
