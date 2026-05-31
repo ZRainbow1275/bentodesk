@@ -100,11 +100,23 @@ struct CachedTextFormat {
 pub enum RenderError {
     Platform(PlatformError),
     Layout(LayoutError),
+    /// Mc-2b — the GPU device was lost (TDR / driver reset / removal). Surfaced
+    /// when `WindowComp::present`/`resize` return `PlatformError::DeviceLost`.
+    /// The shell chokepoint (Impl C) matches this to drive `recover_device_chain`
+    /// + per-window rebuild; the renderer self-heals other windows via the
+    /// generation check at the top of `render`.
+    DeviceLost,
 }
 
 impl From<PlatformError> for RenderError {
     fn from(e: PlatformError) -> Self {
-        RenderError::Platform(e)
+        match e {
+            // Mc-2b — keep the device-lost signal typed so the `?` on
+            // `present()`/`resize()` surfaces a `RenderError::DeviceLost` the
+            // shell can match, rather than burying it in `Platform(_)`.
+            PlatformError::DeviceLost => RenderError::DeviceLost,
+            other => RenderError::Platform(other),
+        }
     }
 }
 
@@ -119,6 +131,7 @@ impl core::fmt::Display for RenderError {
         match self {
             RenderError::Platform(e) => write!(f, "render: {e}"),
             RenderError::Layout(e) => write!(f, "render: layout {e:?}"),
+            RenderError::DeviceLost => write!(f, "render: device lost"),
         }
     }
 }
@@ -182,6 +195,16 @@ pub struct Renderer {
     /// Monotonic clock base for DebugOverlay RSS sampling. Stored on the
     /// renderer so the HUD never depends on wall-clock time changes.
     debug_overlay_started_at: Instant,
+    /// Mc-2b — the HWND this renderer paints into. Stashed at `create` time so
+    /// `rebuild_after_device_loss` can re-run `WindowComp::create(hwnd, ..)`
+    /// against a freshly-recovered device chain without the shell threading the
+    /// handle back through.
+    hwnd: W_HWND,
+    /// Mc-2b — the device generation observed when this renderer's
+    /// device-derived COM was last built. The paint entry compares this against
+    /// `platform::device_generation()`; a mismatch means the chain was rebuilt
+    /// by another window's recovery, so this renderer self-heals before drawing.
+    device_gen: u64,
 }
 
 impl Renderer {
@@ -227,6 +250,8 @@ impl Renderer {
             image_file_failures: HashSet::new(),
             svg_cache: SvgCache::default(),
             debug_overlay_started_at: Instant::now(),
+            hwnd,
+            device_gen: bento_nano_platform::device_generation(),
         })
     }
 
@@ -280,6 +305,43 @@ impl Renderer {
         Ok(())
     }
 
+    /// Mc-2b — rebuild this window's device-derived COM after a device-lost
+    /// event. PRECONDITION: the shell (Impl C chokepoint) has ALREADY called
+    /// `platform::recover_device_chain()`, so the process-singleton D3D/D2D/
+    /// DComp devices are fresh; this method only rebuilds the per-window objects
+    /// that were bound to the dead device. If any step errors it propagates —
+    /// the shell's retry cap (Impl C) handles repeated failure.
+    pub fn rebuild_after_device_loss(&mut self) -> Result<(), RenderError> {
+        // Drop the old D2D context + bitmap target first; both are bound to the
+        // dead device and would keep it alive.
+        self.surface = None;
+        // Rebuild the composition (swap chain + DComp target + root visual) on
+        // the recovered device. Replacing `self.comp` drops every old object.
+        self.comp = WindowComp::create(self.hwnd, self.width, self.height)?;
+        // Mirror `create`: bind a fresh D2D surface to the new backbuffer.
+        let swap = self.comp.swap_chain.as_ref().ok_or(RenderError::Platform(
+            bento_nano_platform::PlatformError::Init(
+                "Renderer::rebuild_after_device_loss: swap_chain missing immediately after WindowComp::create",
+            ),
+        ))?;
+        self.surface = Some(WindowSurface::create(swap)?);
+        // Clear device-derived caches: these bitmaps/geometries were created on
+        // the now-dead D2D device/factory and must be re-decoded/re-built on the
+        // recovered ones. Failure entries also reset so previously-failing icons
+        // get one fresh attempt against the new device.
+        self.icon_bitmaps.clear();
+        self.icon_bitmap_failures.clear();
+        self.image_file_bitmaps.clear();
+        self.image_file_failures.clear();
+        self.svg_cache.clear();
+        // KEEP DWrite-derived state untouched: `text_format`,
+        // `text_format_cache`, `ellipsis_sign`, `monospace_format`,
+        // `monospace_ellipsis_sign`. DWrite is GPU-INDEPENDENT (design §B / A2),
+        // so these survive a device loss and never need rebuilding here.
+        self.device_gen = bento_nano_platform::device_generation();
+        Ok(())
+    }
+
     /// Whether this renderer currently owns a swap chain. Diagnostics +
     /// the wndproc paint guard read this to decide if a paint should
     /// trigger `ensure_swap_chain` first.
@@ -304,6 +366,16 @@ impl Renderer {
         win: &mut WindowState,
         kind: WindowKind,
     ) -> Result<(), RenderError> {
+        // Mc-2b — generation self-heal. When another window hit DeviceLost and
+        // the shell bumped the generation via `recover_device_chain`, this
+        // renderer's device-derived COM is stale; rebuild it on this paint
+        // before any draw call touches the dead device. One atomic load per
+        // paint entry (§10): `present()` is reached from this single function,
+        // so one check here covers both present sites below. The rebuild path
+        // is cold (only runs on the first paint after a device loss).
+        if renderer_is_stale(self.device_gen, bento_nano_platform::device_generation()) {
+            self.rebuild_after_device_loss()?;
+        }
         // §10 hot-path: read once, no allocation.
         let frame_started_at = Instant::now();
         let dpi = win.dpi.get();
@@ -6847,7 +6919,11 @@ impl Renderer {
             sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
             arcSize: D2D1_ARC_SIZE_SMALL,
         };
-        let factory = &d2d::factory()?.factory;
+        // Mc-2b: `d2d::factory()` now returns `Arc<D2dFactory>`; bind it to a
+        // local so the `&...factory` borrow outlives this statement (a
+        // `&...?.factory` temporary Arc would be dropped at the `;`).
+        let d2d_fac = d2d::factory()?;
+        let factory = &d2d_fac.factory;
         // SAFETY: factory valid; geometry + sink are freshly created and the
         // sink is closed before this fn returns (mirrors svg::to_d2d_geometry).
         let geom = ok("CreatePathGeometry", unsafe { factory.CreatePathGeometry() })?;
@@ -7242,7 +7318,9 @@ impl Renderer {
         rect: bento_nano_style::Rect,
         color: Color,
     ) -> Result<(), RenderError> {
-        let factory = &d2d::factory()?.factory;
+        // Mc-2b: bind the `Arc<D2dFactory>` to a local before borrowing `.factory`.
+        let d2d_fac = d2d::factory()?;
+        let factory = &d2d_fac.factory;
         let geom = svg::build(factory, path_d)?;
         let brush = self.solid_brush(color)?;
         let ctx = self.ctx()?;
@@ -7286,7 +7364,9 @@ impl Renderer {
         if view_size <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
         }
-        let factory = &d2d::factory()?.factory;
+        // Mc-2b: bind the `Arc<D2dFactory>` to a local before borrowing `.factory`.
+        let d2d_fac = d2d::factory()?;
+        let factory = &d2d_fac.factory;
         let geom = svg::build(factory, path_d)?;
         let brush = self.solid_brush(color)?;
         let ctx = self.ctx()?;
@@ -7353,7 +7433,9 @@ impl Renderer {
         if view_size <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
         }
-        let factory = &d2d::factory()?.factory;
+        // Mc-2b: bind the `Arc<D2dFactory>` to a local before borrowing `.factory`.
+        let d2d_fac = d2d::factory()?;
+        let factory = &d2d_fac.factory;
         let geom = {
             let cached = self
                 .svg_cache
@@ -7416,6 +7498,17 @@ fn base_scale_matrix(scale: f32) -> windows::Foundation::Numerics::Matrix3x2 {
         M31: 0.0,
         M32: 0.0,
     }
+}
+
+/// Mc-2b — pure staleness predicate for the paint-entry generation self-heal.
+/// Returns `true` when the renderer's cached device generation no longer
+/// matches the platform's current generation, i.e. the device chain was
+/// rebuilt (by this or another window's recovery) since this renderer last
+/// built its device-derived COM. Free function so the decision is unit-testable
+/// without a GPU-backed `Renderer`.
+#[inline]
+fn renderer_is_stale(cached_gen: u64, current_gen: u64) -> bool {
+    cached_gen != current_gen
 }
 
 fn active_item_drag_visual(app: &AppState) -> Option<ActiveItemDragVisual> {
@@ -7788,6 +7881,27 @@ fn run_mode_label(mode: RunModeChoice) -> &'static str {
         RunModeChoice::OnDemand => "on demand",
         RunModeChoice::OnFileChange => "on file change",
         RunModeChoice::Interval => "interval",
+    }
+}
+
+#[cfg(test)]
+mod device_loss_tests {
+    use super::renderer_is_stale;
+
+    #[test]
+    fn same_generation_is_not_stale() {
+        assert!(!renderer_is_stale(0, 0));
+        assert!(!renderer_is_stale(7, 7));
+        assert!(!renderer_is_stale(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn changed_generation_is_stale() {
+        // Generation only ever increases (one bump per recover_device_chain),
+        // but the predicate is a plain inequality so direction is irrelevant.
+        assert!(renderer_is_stale(0, 1));
+        assert!(renderer_is_stale(3, 4));
+        assert!(renderer_is_stale(1, 0));
     }
 }
 
