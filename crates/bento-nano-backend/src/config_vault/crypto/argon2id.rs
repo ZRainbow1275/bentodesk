@@ -413,6 +413,17 @@ impl Argon2Params {
         parallelism: 4,
         tag_len: 32,
     };
+
+    /// Low-cost params for the test cfg only (min-mem RSS knob, NOT a crash fix).
+    /// 1 MiB matrix / t=1 / p=1; invariant `m_kib >= 8*parallelism` holds (1024 >= 8).
+    /// Production keeps `DEFAULT`; this is a compile-time-only seam (see Task #8).
+    #[cfg(test)]
+    pub const TEST: Self = Self {
+        m_kib: 1024,
+        iterations: 1,
+        parallelism: 1,
+        tag_len: 32,
+    };
 }
 
 /// Argon2id KDF. Returns a `tag_len`-byte key derived from `password` and
