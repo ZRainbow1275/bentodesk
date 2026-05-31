@@ -14,6 +14,7 @@ use bento_nano_layout::Direction;
 use bento_nano_style::{BorderRadius, Color, Edges, Length};
 use bento_nano_theme::{PaletteTokens, RadiusTokens, radius};
 use bento_nano_widget::{ContainerNode, WidgetNode};
+use bento_nano_zone::{ZoneId, ZoneItemId};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -44,8 +45,14 @@ pub enum CardVariant {
 pub const CARD_HOVER_SCALE: f32 = 1.02;
 /// Press/active scale multiplier — Tauri `scale(0.97)` (-3%).
 pub const CARD_PRESS_SCALE: f32 = 0.97;
-/// Press transition duration — Tauri `...80ms` active transition.
+/// Press transition duration — Tauri `:active { transition-duration: 80ms }`
+/// (`ItemCard.css:30`).
 pub const CARD_PRESS_DURATION_MS: u32 = 80;
+/// Hover transition duration — Tauri `.item-card { transition: all
+/// var(--transition-fast) }` where `--transition-fast: 150ms ease-out`
+/// (`variables.css:68`). The `:hover` `scale(1.02)` rides this 150ms ease-out
+/// timeline; the SSoT's "80ms" applies only to the `:active` press override.
+pub const CARD_HOVER_DURATION_MS: u32 = 150;
 /// Hover-lift vertical offset — Tauri `translateY(-1px)`.
 pub const CARD_HOVER_LIFT_DY: f32 = -1.0;
 
@@ -63,6 +70,194 @@ pub fn card_scale_for(hover_t: f32, press_t: f32) -> f32 {
     let hover_scale = 1.0 + h * (CARD_HOVER_SCALE - 1.0);
     let press_scale = 1.0 + p * (CARD_PRESS_SCALE - 1.0);
     hover_scale * press_scale
+}
+
+/// Ease-out-cubic ramp progress over `duration_ms`, mirroring Tauri's
+/// `transition: ... ease-out`. `rising` true ramps 0→1 (hover/press enter);
+/// false ramps 1→0 (leave/release). `elapsed_ms` is `now - started` from the
+/// shell's `GetTickCount` cadence (wrap-safe at the caller). Pure / stack-only
+/// (spec §10) so it unit-tests without a clock or animator instance.
+#[inline]
+pub fn card_ramp_t(elapsed_ms: u32, duration_ms: u32, rising: bool) -> f32 {
+    let d = duration_ms.max(1) as f32;
+    let raw = (elapsed_ms as f32 / d).clamp(0.0, 1.0);
+    // Ease-out cubic — `1 - (1 - t)^3`, the decelerating curve CSS `ease-out`
+    // approximates. Matches `animator::ease_out_cubic` so item + pill feel
+    // identical.
+    let inv = 1.0 - raw;
+    let eased = 1.0 - inv * inv * inv;
+    if rising { eased } else { 1.0 - eased }
+}
+
+/// Per-item hover / press animation state — the live wiring of the
+/// `card_scale_for` SSoT (M3-A2, 2026-05-29). The CSS `.item-card:hover`
+/// transform is bidirectional: the entering card ramps up while the just-left
+/// card ramps down. nano's pointer is over at most one card at a time, so a
+/// fixed three-slot record (entering / leaving / pressed) covers every visible
+/// transition without a per-item map — O(1), `Copy`, zero-alloc (spec §10), and
+/// stored in a `Cell` on `AppState` exactly like `HoverScheduler`.
+///
+/// Timestamps are raw `GetTickCount` ms supplied by the shell's frame/move
+/// cadence; the struct never reads a clock itself, which keeps every ramp
+/// deterministically testable. The persisted card geometry is NEVER mutated —
+/// the renderer applies `card_scale_for` as a centred draw-time scale (V-8
+/// contract) and the V-13 hit-rect stays on the base, unscaled rect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ItemHoverState {
+    /// Card the pointer is currently over (hover ramping toward 1.0).
+    hovered: Option<(ZoneId, ZoneItemId)>,
+    hover_started_ms: u32,
+    /// Card the pointer just left (hover ramping back toward 0.0). Distinct
+    /// from `hovered` so the CSS leave-transition still animates the prior
+    /// card down while the new one animates up.
+    leaving: Option<(ZoneId, ZoneItemId)>,
+    leave_started_ms: u32,
+    /// Card under an active pointer-down (press ramping toward 1.0), or the
+    /// card whose press is releasing (ramping back toward 0.0) when
+    /// `press_down` is false.
+    pressed: Option<(ZoneId, ZoneItemId)>,
+    press_started_ms: u32,
+    press_down: bool,
+}
+
+impl ItemHoverState {
+    pub const fn new() -> Self {
+        Self {
+            hovered: None,
+            hover_started_ms: 0,
+            leaving: None,
+            leave_started_ms: 0,
+            pressed: None,
+            press_started_ms: 0,
+            press_down: false,
+        }
+    }
+
+    /// Pointer moved onto `card` (or off everything when `card` is `None`).
+    /// Returns `true` when the hovered target actually changed, so the shell
+    /// can request a redraw and keep the frame pump alive for the ramp.
+    pub fn on_hover(&mut self, card: Option<(ZoneId, ZoneItemId)>, now_ms: u32) -> bool {
+        if self.hovered == card {
+            return false;
+        }
+        // The previously-hovered card becomes the leaving (ramp-down) card so
+        // its hover-out still animates. A brand-new hover with no prior card
+        // simply clears the leaving slot.
+        if let Some(prev) = self.hovered {
+            self.leaving = Some(prev);
+            self.leave_started_ms = now_ms;
+        } else {
+            self.leaving = None;
+        }
+        self.hovered = card;
+        self.hover_started_ms = now_ms;
+        true
+    }
+
+    /// Pointer-down landed on `card`. Starts the press ramp toward 0.97.
+    pub fn on_press(&mut self, card: (ZoneId, ZoneItemId), now_ms: u32) {
+        self.pressed = Some(card);
+        self.press_started_ms = now_ms;
+        self.press_down = true;
+    }
+
+    /// Pointer-up anywhere. Starts the press release ramp back toward 1.0 for
+    /// whatever card was held. No-op when nothing was pressed.
+    pub fn on_release(&mut self, now_ms: u32) -> bool {
+        if self.pressed.is_none() || !self.press_down {
+            return false;
+        }
+        self.press_started_ms = now_ms;
+        self.press_down = false;
+        true
+    }
+
+    /// Per-frame retire pass. Drops the leaving card once its hover-out ramp
+    /// completes and drops a fully-released press, so a never-ending entry
+    /// can't pin the frame pump. Returns `true` while any ramp is still in
+    /// flight (the shell keeps requesting redraws until then).
+    pub fn tick(&mut self, now_ms: u32) -> bool {
+        let mut active = false;
+        if let Some(_card) = self.leaving {
+            if now_ms.wrapping_sub(self.leave_started_ms) >= CARD_HOVER_DURATION_MS {
+                self.leaving = None;
+            } else {
+                active = true;
+            }
+        }
+        if self.pressed.is_some() {
+            let elapsed = now_ms.wrapping_sub(self.press_started_ms);
+            if !self.press_down && elapsed >= CARD_PRESS_DURATION_MS {
+                self.pressed = None;
+            } else {
+                active = true;
+            }
+        }
+        // The held hover card keeps ramping until it reaches 1.0; after that it
+        // stays pinned (no redraw needed) but does not count as "active".
+        if self.hovered.is_some()
+            && now_ms.wrapping_sub(self.hover_started_ms) < CARD_HOVER_DURATION_MS
+        {
+            active = true;
+        }
+        active
+    }
+
+    /// Sample the `(hover_t, press_t)` 0..1 ramp pair for `card` at `now_ms`.
+    /// Returns `(0.0, 0.0)` for any card not currently animating, so the
+    /// renderer can call it per item and apply `card_scale_for` — identity
+    /// scale for idle cards.
+    #[inline]
+    pub fn sample(&self, card: (ZoneId, ZoneItemId), now_ms: u32) -> (f32, f32) {
+        let hover_t = if self.hovered == Some(card) {
+            card_ramp_t(
+                now_ms.wrapping_sub(self.hover_started_ms),
+                CARD_HOVER_DURATION_MS,
+                true,
+            )
+        } else if self.leaving == Some(card) {
+            card_ramp_t(
+                now_ms.wrapping_sub(self.leave_started_ms),
+                CARD_HOVER_DURATION_MS,
+                false,
+            )
+        } else {
+            0.0
+        };
+        let press_t = if self.pressed == Some(card) {
+            card_ramp_t(
+                now_ms.wrapping_sub(self.press_started_ms),
+                CARD_PRESS_DURATION_MS,
+                self.press_down,
+            )
+        } else {
+            0.0
+        };
+        (hover_t, press_t)
+    }
+
+    /// True when any ramp is in flight — lets the shell keep the frame pump
+    /// alive without mutating state (read-only companion to `tick`).
+    #[inline]
+    pub fn is_active(&self, now_ms: u32) -> bool {
+        if self.leaving.is_some()
+            && now_ms.wrapping_sub(self.leave_started_ms) < CARD_HOVER_DURATION_MS
+        {
+            return true;
+        }
+        if self.hovered.is_some()
+            && now_ms.wrapping_sub(self.hover_started_ms) < CARD_HOVER_DURATION_MS
+        {
+            return true;
+        }
+        if self.pressed.is_some() {
+            let elapsed = now_ms.wrapping_sub(self.press_started_ms);
+            if self.press_down || elapsed < CARD_PRESS_DURATION_MS {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// D2D ItemCard chrome derived from the active theme palette.
@@ -277,6 +472,114 @@ mod tests {
     #[test]
     fn card_press_duration_matches_tauri_80ms() {
         assert_eq!(CARD_PRESS_DURATION_MS, 80);
+    }
+
+    #[test]
+    fn card_hover_duration_matches_tauri_transition_fast_150ms() {
+        // Tauri `.item-card { transition: all var(--transition-fast) }`,
+        // `--transition-fast: 150ms ease-out`.
+        assert_eq!(CARD_HOVER_DURATION_MS, 150);
+    }
+
+    #[test]
+    fn card_ramp_endpoints_and_easeout_shape() {
+        // Rising: 0 at start, 1 at/after the full duration, decelerating
+        // (past linear at the midpoint).
+        assert!(card_ramp_t(0, 150, true).abs() < 1e-5);
+        assert!((card_ramp_t(150, 150, true) - 1.0).abs() < 1e-5);
+        assert!((card_ramp_t(300, 150, true) - 1.0).abs() < 1e-5); // clamps
+        let mid = card_ramp_t(75, 150, true);
+        assert!(mid > 0.5 && mid < 1.0); // ease-out is ahead of linear 0.5
+        // Falling is the mirror: 1 at start, 0 at the end.
+        assert!((card_ramp_t(0, 150, false) - 1.0).abs() < 1e-5);
+        assert!(card_ramp_t(150, 150, false).abs() < 1e-5);
+        // Rising + falling at the same elapsed sum to 1 (continuous reversal).
+        assert!((card_ramp_t(75, 150, true) + card_ramp_t(75, 150, false) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn card_ramp_zero_duration_does_not_div_by_zero() {
+        // `duration_ms.max(1)` guards the divide. With a 0ms duration the
+        // 1ms floor means any elapsed >= 1 reads as fully complete (rising →
+        // 1.0, falling → 0.0); the start sample at elapsed 0 is still the
+        // ramp origin. The key invariant is "no panic / no NaN".
+        assert!(card_ramp_t(0, 0, true).abs() < 1e-5);
+        assert!((card_ramp_t(1, 0, true) - 1.0).abs() < 1e-5);
+        assert!((card_ramp_t(1, 0, false)).abs() < 1e-5);
+        assert!(card_ramp_t(10, 0, true).is_finite());
+    }
+
+    fn card(z: u64, i: u64) -> (ZoneId, ZoneItemId) {
+        (ZoneId(z), ZoneItemId(i))
+    }
+
+    #[test]
+    fn item_hover_state_idle_samples_identity() {
+        let st = ItemHoverState::new();
+        let (h, p) = st.sample(card(1, 1), 1_000);
+        assert!(h.abs() < 1e-6 && p.abs() < 1e-6);
+        assert!((card_scale_for(h, p) - 1.0).abs() < 1e-6);
+        assert!(!st.is_active(1_000));
+    }
+
+    #[test]
+    fn item_hover_enter_ramps_up_and_changes_target() {
+        let mut st = ItemHoverState::new();
+        assert!(st.on_hover(Some(card(1, 7)), 1_000));
+        // Same target again is a no-op (no spurious redraw).
+        assert!(!st.on_hover(Some(card(1, 7)), 1_050));
+        // Mid-ramp the hovered card is between 0 and 1.
+        let (h, _) = st.sample(card(1, 7), 1_000 + 75);
+        assert!(h > 0.0 && h < 1.0);
+        // Fully ramped after the 150ms window.
+        let (h_full, _) = st.sample(card(1, 7), 1_000 + 150);
+        assert!((h_full - 1.0).abs() < 1e-5);
+        assert!(st.is_active(1_000 + 75));
+    }
+
+    #[test]
+    fn item_hover_handoff_ramps_prev_down_and_next_up() {
+        let mut st = ItemHoverState::new();
+        st.on_hover(Some(card(1, 1)), 0); // settle card A up
+        let _ = st.sample(card(1, 1), 200);
+        st.on_hover(Some(card(1, 2)), 200); // hand off to card B
+        // Card A (leaving) ramps down from 1.0; card B (entering) ramps up.
+        let (a_h, _) = st.sample(card(1, 1), 200 + 75);
+        let (b_h, _) = st.sample(card(1, 2), 200 + 75);
+        assert!(a_h > 0.0 && a_h < 1.0);
+        assert!(b_h > 0.0 && b_h < 1.0);
+        // After the leave window the prior card retires to identity.
+        let _ = st.tick(200 + CARD_HOVER_DURATION_MS);
+        let (a_done, _) = st.sample(card(1, 1), 200 + CARD_HOVER_DURATION_MS);
+        assert!(a_done.abs() < 1e-5);
+    }
+
+    #[test]
+    fn item_press_ramps_to_tauri_shrink_then_releases() {
+        let mut st = ItemHoverState::new();
+        st.on_hover(Some(card(2, 5)), 0);
+        st.on_press(card(2, 5), 0);
+        // Full press → press_t 1.0 → composed scale is the 1.02*0.97 shrink.
+        let (h, p) = st.sample(card(2, 5), CARD_HOVER_DURATION_MS.max(CARD_PRESS_DURATION_MS));
+        assert!((p - 1.0).abs() < 1e-5);
+        let scale = card_scale_for(h, p);
+        assert!(scale < 1.0);
+        assert!((scale - CARD_HOVER_SCALE * CARD_PRESS_SCALE).abs() < 1e-4);
+        // Release ramps press back toward 0; tick retires it after 80ms.
+        assert!(st.on_release(200));
+        assert!(st.is_active(200 + 10));
+        let _ = st.tick(200 + CARD_PRESS_DURATION_MS);
+        let (_h2, p2) = st.sample(card(2, 5), 200 + CARD_PRESS_DURATION_MS);
+        assert!(p2.abs() < 1e-5);
+    }
+
+    #[test]
+    fn item_press_only_on_pressed_card() {
+        let mut st = ItemHoverState::new();
+        st.on_press(card(3, 1), 0);
+        // A different card sees no press.
+        let (_h, p) = st.sample(card(3, 2), 0 + CARD_PRESS_DURATION_MS);
+        assert!(p.abs() < 1e-5);
     }
 
     #[test]

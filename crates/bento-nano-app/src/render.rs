@@ -1759,6 +1759,18 @@ impl Renderer {
                 } else {
                     item_chrome.normal_background
                 };
+                // M3-A2 — sample the live per-item hover/press ramp and compose
+                // the Tauri scale(1.02)/scale(0.97). The dragged source card
+                // never scales (it's the muted placeholder under the ghost),
+                // so it stays at identity. `item_hover` is `Copy` in a `Cell`,
+                // so this is a single read + a few muls per card (§10 hot path).
+                let item_scale = if is_dragged_source {
+                    1.0
+                } else {
+                    let (hover_t, press_t) =
+                        app.item_hover.get().sample((zone.id, item.id), anim_now_ms);
+                    item_card::card_scale_for(hover_t, press_t)
+                };
                 self.draw_item_card(
                     item,
                     card_rect,
@@ -1766,6 +1778,7 @@ impl Renderer {
                     item_chrome.card_radius,
                     item_chrome.text,
                     item_chrome.icon_text,
+                    item_scale,
                 )?;
             }
             // M2 E-01 (2026-05-29) — the 16×16 sub-zone footer thumbnail
@@ -1926,6 +1939,10 @@ impl Renderer {
                     item_chrome.card_radius,
                     item_chrome.text,
                     item_chrome.icon_text,
+                    // M3-A2 — the floating drag ghost is not a hover target;
+                    // it keeps identity scale (the ghost has its own lift/shadow
+                    // treatment) so hover/press scaling stays on the live grid.
+                    1.0,
                 )?;
             }
         }
@@ -2194,21 +2211,29 @@ impl Renderer {
     fn draw_item_card(
         &mut self,
         item: &ZoneItem,
-        card_rect: bento_nano_style::Rect,
+        base_rect: bento_nano_style::Rect,
         fill: Color,
         radius: BorderRadius,
         text: Color,
         icon_text: Color,
+        scale: f32,
     ) -> Result<(), RenderError> {
+        // M3-A2 (2026-05-29) — apply the `item_card::card_scale_for` hover/press
+        // multiplier as a Tauri-style centred `transform: scale()`. The card
+        // surface AND its inner icon/label inset offsets all inflate/deflate
+        // about the card's CENTRE so the glyph + label stay centred (a CSS
+        // transform scales the whole subtree, not just the box). `scale == 1.0`
+        // (idle / drag-ghost) collapses to the original geometry exactly.
+        let card_rect = animator::scale_rect_centered(base_rect, scale);
         self.fill_rounded_rect(card_rect, fill, radius)?;
         // Wave I2 — horizontally centre the icon glyph inside the card
         // (Tauri frame_010 reference). Vertical position keeps the existing
-        // 6-DIP top inset so the label still sits in the bottom band of the
-        // 80-DIP-tall card.
-        let icon_side = item_icon::IconSize::Standard.container_px();
+        // 6-DIP top inset (scaled with the card) so the label still sits in
+        // the bottom band of the 80-DIP-tall card.
+        let icon_side = item_icon::IconSize::Standard.container_px() * scale;
         let icon_rect = bento_nano_style::Rect {
             x: card_rect.x + ((card_rect.width - icon_side) * 0.5).max(0.0),
-            y: card_rect.y + 6.0,
+            y: card_rect.y + 6.0 * scale,
             width: icon_side,
             height: icon_side,
         };
@@ -2223,10 +2248,10 @@ impl Renderer {
             self.draw_icon_glyph(glyph.as_str(), icon_rect, icon_text)?;
         }
         let label_rect = bento_nano_style::Rect {
-            x: card_rect.x + 4.0,
-            y: card_rect.y + 44.0,
-            width: (card_rect.width - 8.0).max(0.0),
-            height: 28.0,
+            x: card_rect.x + 4.0 * scale,
+            y: card_rect.y + 44.0 * scale,
+            width: (card_rect.width - 8.0 * scale).max(0.0),
+            height: 28.0 * scale,
         };
         self.draw_text(item.name.as_ref(), label_rect, text)?;
         Ok(())

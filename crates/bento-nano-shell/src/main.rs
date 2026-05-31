@@ -2332,6 +2332,59 @@ fn update_pill_hover_animator(app: &AppState, hover_zone: Option<ZoneId>, now_ms
     true
 }
 
+/// M3-A2 (2026-05-29) — drive the per-item hover scale ramp from a pointer
+/// move over the Main overlay. Resolves the card under `(x, y)` via the SAME
+/// `hit_test_zone_item` the drag-out path uses (so the hover ramp tracks the
+/// base, unscaled V-13 hit-rect exactly), then re-targets `item_hover`. While
+/// an item drag is in flight the hovered card is cleared — a card being
+/// reordered shouldn't hover-pop under the floating ghost. Returns `true` when
+/// the hovered target changed so the caller requests a redraw; the 150ms ramp
+/// itself is then advanced by `tick_item_hover_animator` on the frame pump.
+fn update_item_hover_animator(app: &AppState, x: f32, y: f32) -> bool {
+    let card = if app.item_drag.borrow().is_some() {
+        None
+    } else {
+        ui::hit_test_zone_item(app, x, y).map(|(zone_id, item_id, _path)| (zone_id, item_id))
+    };
+    // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+    let now_ms = unsafe { GetTickCount() };
+    let mut state = app.item_hover.get();
+    let changed = state.on_hover(card, now_ms);
+    app.item_hover.set(state);
+    changed
+}
+
+/// M3-A2 — record a pointer-down on the item card at `(x, y)`, starting the
+/// 80ms press ramp toward Tauri's `:active` `scale(0.97)`. No-op when the down
+/// did not land on a card. Mirrors `start_pill_press_animator`.
+fn start_item_press_animator(app: &AppState, zone_id: ZoneId, item_id: ZoneItemId, now_ms: u32) {
+    let mut state = app.item_hover.get();
+    state.on_press((zone_id, item_id), now_ms);
+    app.item_hover.set(state);
+}
+
+/// M3-A2 — release any in-flight item press on `WM_LBUTTONUP`, regardless of
+/// where the up lands, so a drag-off still ramps the press back to rest.
+/// Mirrors `release_pill_press_animator`. Returns `true` when a press was
+/// actually releasing (caller requests a redraw to animate the ramp-back).
+fn release_item_press_animator(app: &AppState, now_ms: u32) -> bool {
+    let mut state = app.item_hover.get();
+    let changed = state.on_release(now_ms);
+    app.item_hover.set(state);
+    changed
+}
+
+/// M3-A2 — per-frame tick of the item hover/press ramps. Retires the leaving
+/// (hover-out) card and a fully-released press so a stale entry can't pin the
+/// pump. Returns `true` while any ramp is in flight so the shell keeps
+/// requesting redraws (the 150ms hover / 80ms press transitions then animate).
+fn tick_item_hover_animator(app: &AppState, now_ms: u32) -> bool {
+    let mut state = app.item_hover.get();
+    let active = state.tick(now_ms);
+    app.item_hover.set(state);
+    active
+}
+
 /// V-8 — start the press-down half of the pill press animation. Called on
 /// `WM_LBUTTONDOWN` after we've confirmed the click landed inside a pill
 /// rect. The release half lives in `release_pill_press_animator`.
@@ -13261,6 +13314,14 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
             drive_hover_scheduler(&app, hover_zone, now_ms);
             request_redraw(slot.hwnd);
         }
+        // M3-A2 (2026-05-29) — per-item hover scale. Runs on EVERY move (not
+        // gated on the zone change above) because moving between cards inside
+        // the same expanded zone must re-target the ramp. Suppressed while an
+        // item drag is in flight (the grid being reordered shouldn't hover-pop)
+        // — `update_item_hover_animator` clears the hovered card in that case.
+        if update_item_hover_animator(&app, x, y) {
+            request_redraw(slot.hwnd);
+        }
         let item_candidate = app.item_drag.borrow().clone();
         if let Some(mut candidate) = item_candidate {
             let dx = (x as i32 - candidate.start_x).abs();
@@ -13418,6 +13479,13 @@ fn clear_hover(root: &AppRoot) {
     // V-8 — release any in-flight hover micro-animation before we clobber
     // `hovered_zone`. Mirrors the mouse-move path.
     update_pill_hover_animator(&app, None, now_ms);
+    // M3-A2 — pointer left the overlay: clear the hovered card so its 150ms
+    // hover-out ramp runs (the just-left slot animates back to identity).
+    {
+        let mut state = app.item_hover.get();
+        let _ = state.on_hover(None, now_ms);
+        app.item_hover.set(state);
+    }
     app.hovered_zone.set(None);
     app.stack_bloom_anchor.set(None);
     app.stack_bloom_progress.set(1.0);
@@ -14023,6 +14091,13 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             last_y: y as i32,
             is_internal_dragging: false,
         });
+        // M3-A2 — fire the item press-down ramp toward Tauri's `:active`
+        // scale(0.97). The release half runs from the global mouse-up path
+        // (`release_item_press_animator`) so a drag-off still tidies the
+        // press. Mirrors the pill `start_pill_press_animator` contract.
+        // SAFETY: GetTickCount is total + thread-safe.
+        let now_ms = unsafe { GetTickCount() };
+        start_item_press_animator(&app, zone_id, item_id, now_ms);
         unsafe { SetCapture(hwnd) };
         return;
     }
@@ -14110,10 +14185,13 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         app.mark_dirty();
     }
     // V-8 — release any in-flight pill press regardless of release location.
+    // M3-A2 — and any in-flight item-card press, on the same up event.
     // SAFETY: GetTickCount is total + thread-safe.
     let press_released = {
         let now_ms = unsafe { GetTickCount() };
-        release_pill_press_animator(&app, now_ms)
+        let pill = release_pill_press_animator(&app, now_ms);
+        let item = release_item_press_animator(&app, now_ms);
+        pill || item
     };
     if press_released {
         app.mark_dirty();
@@ -22092,6 +22170,12 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
     // V-8 — hover / press / pulse animator. Keeps frame-pump alive while
     // entries are in flight OR while any zone has items (pulse is global).
     if tick_pill_animator(&app, now) {
+        any_active = true;
+    }
+    // M3-A2 — per-item hover/press ramp. Same frame cadence as the pill
+    // animator; retires leaving/released cards and keeps the pump alive while
+    // a 150ms hover / 80ms press transition is still in flight.
+    if tick_item_hover_animator(&app, now) {
         any_active = true;
     }
     if app.highlight_overlay.borrow_mut().tick(dt_ms) {

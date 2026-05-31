@@ -35,6 +35,7 @@ use crate::{
         capsule_picker::CapsulePickerState,
         debug_overlay::DebugOverlayState,
         highlight_overlay::HighlightOverlayState,
+        item_card::ItemHoverState,
         minibar::{MAX_MINIBARS, MiniBar},
         rules_wizard::RulesWizardState,
         search_bar::SearchBarState,
@@ -712,6 +713,16 @@ pub struct AppState {
     /// and defers collapse by `collapse_delay_ms` so a transient leave doesn't
     /// drop the zone. `Copy` so a `Cell` keeps the hot path lock-free (§10).
     pub hover_scheduler: Cell<HoverScheduler>,
+    /// M3-A2 (2026-05-29) — per-item hover / press scale animation state. The
+    /// `item_card::card_scale_for` SSoT (CARD_HOVER_SCALE 1.02 / CARD_PRESS_SCALE
+    /// 0.97) was authored + tested but never wired to live rendering; this is
+    /// the live channel. The shell feeds it `on_hover`/`on_press`/`on_release`
+    /// from the cursor stream (expanded-zone item grids only) and ticks it once
+    /// per frame on the SAME `tick_pill_animator` cadence; `draw_item_card`
+    /// samples `(hover_t, press_t)` per card at paint time and applies the
+    /// centred scale. `Copy` so a `Cell` keeps the hot path lock-free (§10) —
+    /// no per-item map, just the entering / leaving / pressed slots.
+    pub item_hover: Cell<ItemHoverState>,
     /// In-flight selected-stack ZoneEditor session. Set by
     /// `Command::OpenZoneEditor`, edited by the ZoneEditor aux HWND's
     /// keyboard path, rendered by the ZoneEditor window, and saved through
@@ -881,6 +892,7 @@ impl AppState {
             pill_animator: RefCell::new(Animator::new()),
             pill_pressed_zone: Cell::new(None),
             hover_scheduler: Cell::new(HoverScheduler::new()),
+            item_hover: Cell::new(ItemHoverState::new()),
             zone_editor: RefCell::new(None),
             item_file_rename: RefCell::new(None),
             item_operation_status: RefCell::new(None),
