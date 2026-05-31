@@ -52,6 +52,9 @@ pub mod theme_palettes;
 pub mod theme_radius;
 pub mod theme_shadow;
 pub mod theme_typography;
+// M6c — the per-theme `effect` token family (scanlines/neon/chromatic) lives
+// in its own submodule for the same §15 reason (`tokens.rs` is 782 lines).
+pub mod theme_effect;
 
 pub use theme_palettes::{
     PALETTE_BRUTALISM, PALETTE_CYBERPUNK, PALETTE_EDITORIAL, PALETTE_FLAT, PALETTE_FOREST,
@@ -68,6 +71,10 @@ pub use theme_shadow::{
 };
 pub use theme_typography::{
     TYPOGRAPHY_EDITORIAL, TYPOGRAPHY_TERMINAL, typography_tauri_for_theme,
+};
+pub use theme_effect::{
+    ChromaticEffect, EFFECT_CHROMATIC_EDITORIAL, EFFECT_NEON_CYBERPUNK, EFFECT_SCANLINES_TERMINAL,
+    EffectTauri, NeonEffect, ScanlineEffect, effect_tauri_for_theme,
 };
 
 // =============================================================================

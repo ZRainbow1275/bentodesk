@@ -540,6 +540,11 @@ impl Renderer {
             _ => false,
         };
         if rendered_aux_window {
+            // M6c — scanline post-pass over the aux surface (terminal theme
+            // only; no-op otherwise). Tauri's `data-theme-effect` `::after` is
+            // a per-document `position:fixed; inset:0` overlay, so each nano
+            // HWND paints it over its own client area just before EndDraw.
+            self.draw_effect_overlay(app)?;
             let end_ctx = self.ctx()?;
             // SAFETY: surface valid (guarded at the top of render); this
             // closes the auxiliary frame started by BeginDraw above.
@@ -597,6 +602,11 @@ impl Renderer {
         // fallback here.
         self.poll_debug_overlay_rss(app);
         self.draw_debug_overlay(app)?;
+
+        // M6c — scanline post-pass over the main desktop surface (terminal
+        // theme only; no-op otherwise), AFTER all zones / overlays / debug so
+        // the green bands ride on top of everything (`z-index:9999`).
+        self.draw_effect_overlay(app)?;
 
         // SAFETY: surface valid (guarded at the top of this fn); EndDraw
         //         signals the end of this frame's work.
@@ -1312,6 +1322,11 @@ impl Renderer {
         // their per-theme stack from here so e.g. `terminal`'s green glow and
         // the Angular `none` themes' empty stacks paint correctly.
         let shadow_tauri = app.active_theme_shadow_tauri();
+        // M6c — active theme's effect channel (Copy, bound once §10). Only
+        // `cyberpunk` (Neon) consumes it here, layering an ADDITIVE bloom on
+        // top of the M6b box-shadow; every other theme no-ops at the variant
+        // match.
+        let effect = app.active_theme_effect_tauri();
         let zone_chrome =
             zone_surface_geometry::ZoneSurfaceChrome::from_radius(app.active_theme_radius());
         let item_chrome = item_card::ItemCardChrome::from_tokens(
@@ -1430,6 +1445,7 @@ impl Renderer {
                     color_t,
                     theme_base_accent.as_deref(),
                     pal,
+                    effect,
                 )?;
                 continue;
             }
@@ -1454,6 +1470,7 @@ impl Renderer {
                     press_t,
                     anim_now_ms,
                     pal,
+                    effect,
                 )?;
                 continue;
             }
@@ -1479,6 +1496,12 @@ impl Renderer {
                 // grows the panel base rect per layer (the Angular `none` themes
                 // paint nothing here; tinted Rounded themes carry their L2 colour).
                 self.draw_shadow_stack(expanded_layout.panel, shadow_tauri.expanded, radius)?;
+                // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
+                // expanded panel (`.bento-zone-expanded`), ADDITIVE on top of
+                // the M6b box-shadow above and UNDER the surface fill below.
+                if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
+                    self.draw_neon_glow(expanded_layout.panel, n.expanded, radius)?;
+                }
             }
             if zone.is_stack_anchor() {
                 let member_count = stack_member_ids_for_anchor
@@ -1969,6 +1992,7 @@ impl Renderer {
     /// active theme. The paint inputs (zone / layout / anim channels / palette)
     /// are all genuinely distinct, so the arity is allowed rather than bundled.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn draw_zone_pill(
         &mut self,
         zone: &Zone,
@@ -1978,6 +2002,7 @@ impl Renderer {
         press_t: f32,
         anim_now_ms: u32,
         pal: bento_nano_style::tokens::PaletteTauri,
+        effect: bento_nano_style::tokens::EffectTauri,
     ) -> Result<(), RenderError> {
         // M6a — the live theme palette is passed in by `draw_zones` (bound
         // once per frame). Read `pal.X` instead of the static `PALETTE_DARK`
@@ -1997,6 +2022,13 @@ impl Renderer {
         // clean capsule against the desktop. Shadow layout fields are kept
         // in `ZonePillLayout` for the expanded morph path which still needs
         // the geometry, but the collapsed paint no longer fills them.
+        // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
+        // collapsed pill (`.bento-zone`), painted UNDER the glass+surface fill.
+        // No M6b shadow is drawn on the collapsed pill (V-9 removed it), so this
+        // is the only glow on the capsule — additive-by-design, no conflation.
+        if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
+            self.draw_neon_glow(scaled_rect, n.collapsed, scaled_radius)?;
+        }
         // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
         self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
         // Surface fill on top of the glass — `pal.surface_zen` (live theme).
@@ -2122,6 +2154,7 @@ impl Renderer {
         color_t: f32,
         theme_base_accent: Option<&str>,
         pal: bento_nano_style::tokens::PaletteTauri,
+        effect: bento_nano_style::tokens::EffectTauri,
     ) -> Result<(), RenderError> {
         // M6a — live theme palette passed in by `draw_zones` (§10).
         use bento_nano_style::tokens::{ACRYLIC_FALLBACK, RADIUS, SHADOW};
@@ -2163,6 +2196,19 @@ impl Renderer {
             width: rect.width,
             height: rect.height,
         };
+        // M6c — the `cyberpunk` neon bloom during the capsule<->panel morph,
+        // painted UNDER the shadow band + surface fill. The glow lerps from the
+        // collapsed (`.bento-zone`) layers to the expanded (`.bento-zone-expanded`)
+        // layers by the clamped morph fraction so the bloom grows in lockstep
+        // with the surface, with no pop at either endpoint (§10: stack-`f32`
+        // lerp, 2 grown fills).
+        if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
+            let morph_layers = [
+                lerp_neon_layer(n.collapsed[0], n.expanded[0], morph_clamped),
+                lerp_neon_layer(n.collapsed[1], n.expanded[1], morph_clamped),
+            ];
+            self.draw_neon_glow(rect, morph_layers, border_radius)?;
+        }
         // M6b — `SHADOW.zen` is now a 2-layer `ShadowStack`; `.outer()`/`.inner()`
         // recover the pre-M6b `zen`/`zen_inner` single layers byte-for-byte.
         self.fill_rounded_rect(shadow_outer, SHADOW.zen.outer().color, border_radius)?;
@@ -2555,10 +2601,13 @@ impl Renderer {
             width: header.width * 0.5,
             height: 20.0,
         };
-        self.draw_text(
+        // M6c — settings panel title is the `h1`/`h2` heading; route through the
+        // chromatic-aberration helper (editorial only; plain draw otherwise).
+        self.draw_text_chromatic_title(
             bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_TITLE),
             title_rect,
             title_color,
+            app.active_theme_effect_tauri(),
         )?;
         let close_rect = settings_close_button_rect_m1(viewport);
         self.draw_text_no_wrap("×", close_rect, title_color)?;
@@ -4584,10 +4633,12 @@ impl Renderer {
             width: modal.width - title_pad_x * 2.0,
             height: 24.0,
         };
-        self.draw_text(
+        // M6c — keybindings modal title (`h2` panel header).
+        self.draw_text_chromatic_title(
             bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::KEYBINDINGS_TITLE),
             title_rect,
             title_color,
+            app.active_theme_effect_tauri(),
         )?;
         let close_rect = settings_keybindings_close_rect(viewport);
         self.fill_rounded_rect(close_rect, btn_bg, control_radius)?;
@@ -4742,7 +4793,13 @@ impl Renderer {
             width: panel.width - about::CONTENT_PADDING * 2.0,
             height: 34.0,
         };
-        self.draw_text("BentoDesk", title_rect, title_color)?;
+        // M6c — About app-name is the `h1` heading.
+        self.draw_text_chromatic_title(
+            "BentoDesk",
+            title_rect,
+            title_color,
+            app.active_theme_effect_tauri(),
+        )?;
 
         let version_rect = bento_nano_style::Rect {
             x: title_rect.x,
@@ -4899,7 +4956,13 @@ impl Renderer {
             width: panel.width - 36.0,
             height: 28.0,
         };
-        self.draw_text("Edit zone", title_rect, chrome.title_color)?;
+        // M6c — zone editor panel title (`h2`).
+        self.draw_text_chromatic_title(
+            "Edit zone",
+            title_rect,
+            chrome.title_color,
+            app.active_theme_effect_tauri(),
+        )?;
 
         let label_rect = bento_nano_style::Rect {
             x: panel.x + 18.0,
@@ -5083,7 +5146,13 @@ impl Renderer {
             width: panel.width - 36.0,
             height: 26.0,
         };
-        self.draw_text("Rename file", title_rect, chrome.title_color)?;
+        // M6c — file rename panel title (`h2`).
+        self.draw_text_chromatic_title(
+            "Rename file",
+            title_rect,
+            chrome.title_color,
+            app.active_theme_effect_tauri(),
+        )?;
 
         let session = app.item_file_rename.borrow();
         let current_path = session
@@ -5148,7 +5217,13 @@ impl Renderer {
             width: panel.width - 36.0,
             height: 28.0,
         };
-        self.draw_text("Icon picker", title_rect, chrome.title_color)?;
+        // M6c — icon picker panel title (`h2`).
+        self.draw_text_chromatic_title(
+            "Icon picker",
+            title_rect,
+            chrome.title_color,
+            app.active_theme_effect_tauri(),
+        )?;
 
         let session = app.icon_picker.borrow();
         let selected_icon = session
@@ -5259,7 +5334,13 @@ impl Renderer {
             width: panel.width - 36.0,
             height: 28.0,
         };
-        self.draw_text("Palette picker", title_rect, chrome.title_color)?;
+        // M6c — palette picker panel title (`h2`).
+        self.draw_text_chromatic_title(
+            "Palette picker",
+            title_rect,
+            chrome.title_color,
+            app.active_theme_effect_tauri(),
+        )?;
 
         let session = app.palette_picker.borrow();
         let target_label = match session.as_ref().map(|s| s.target) {
@@ -5357,7 +5438,8 @@ impl Renderer {
             capsule_picker::capsule_picker_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — capsule picker panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Context Capsules",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -5366,6 +5448,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         self.draw_text(
             "C captures current zones. Enter/R restores. Del/D deletes. Up/Down selects.",
@@ -5442,7 +5525,8 @@ impl Renderer {
             bulk_manager_panel::bulk_manager_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — bulk manager panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Bulk Manager",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -5451,6 +5535,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         // RC-4 Gap 3 — split the long helper into two lines so it never
         // overpaints the status row below it. The original single-line
@@ -5706,7 +5791,8 @@ impl Renderer {
         let shadow_rect = timeline_panel::timeline_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — timeline panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Desktop Timeline",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -5715,6 +5801,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         self.draw_text(
             "Click rows to preview. Buttons save/pin/restore/delete. Ctrl+Z / Ctrl+Shift+Z undo-redo. Esc closes.",
@@ -5871,7 +5958,8 @@ impl Renderer {
             snapshot_picker::snapshot_picker_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — snapshot picker panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Layout Snapshots",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -5880,6 +5968,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         let helper_line_h = style_tokens::TYPOGRAPHY.sm.size_px
             * style_tokens::TYPOGRAPHY.sm.line_height;
@@ -6057,7 +6146,8 @@ impl Renderer {
         let shadow_rect = rules_wizard::rules_wizard_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — rules wizard panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Rules Wizard",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -6066,6 +6156,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         self.draw_text(
             "Type edits current step. Click buttons or use F2/F3/F4, Enter, E/R/D, Esc.",
@@ -6382,7 +6473,8 @@ impl Renderer {
         let shadow_rect = search_bar::search_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — search panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Search",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -6391,6 +6483,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         let close = search_bar::search_close_rect(viewport);
         self.fill_rounded_rect(close, chrome.danger_background, chrome.close_radius)?;
@@ -6541,7 +6634,8 @@ impl Renderer {
             smart_group_suggestor::suggestor_panel_shadow_rect(panel, chrome.panel_shadow);
         self.fill_rounded_rect(shadow_rect, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(panel, chrome.panel_background, chrome.panel_radius)?;
-        self.draw_text(
+        // M6c — smart-group suggestor panel title (`h2`).
+        self.draw_text_chromatic_title(
             "Smart grouping",
             bento_nano_style::Rect {
                 x: panel.x + 18.0,
@@ -6550,6 +6644,7 @@ impl Renderer {
                 height: 28.0,
             },
             chrome.title_color,
+            app.active_theme_effect_tauri(),
         )?;
         let close = smart_group_suggestor::suggestor_close_rect(viewport);
         self.fill_rounded_rect(close, chrome.danger_background, chrome.close_radius)?;
@@ -6934,6 +7029,137 @@ impl Renderer {
             self.fill_rounded_rect(rect, layer.color, radius)?;
         }
         Ok(())
+    }
+
+    // =========================================================================
+    // M6c — the 3 effect render primitives + the post-pass dispatcher.
+    //
+    // All read `app.active_theme_effect_tauri()` (`Copy`, §10) and no-op for
+    // `EffectTauri::None`, so the 14 non-effect themes pay nothing. The blur
+    // house-style is alpha-graded grow-and-fill (NOT `CLSID_D2D1Shadow`); no new
+    // crate / windows feature (§8). GPU draw itself is verified by the §6 visual
+    // smoke — no offscreen unit-test harness exists (§3.4); the pure geometry
+    // (`scanline_band_count` / `neon_glow_rect` / `chromatic_split_offsets`) is
+    // unit-tested instead.
+    // =========================================================================
+
+    /// M6c effect dispatcher — the post-pass effect overlay drawn just before
+    /// each `EndDraw` (both the aux-window and main-HWND exits) so it covers
+    /// every surface, matching Tauri's `<html>`-level `data-theme-effect`
+    /// `::after`. Only `Scanlines` is a full-viewport post-pass; `Neon` is
+    /// inline in `draw_zones` and `Chromatic` is inline in the title draws, so
+    /// this dispatcher handles ONLY the scanline arm (and no-ops otherwise).
+    fn draw_effect_overlay(&self, app: &AppState) -> Result<(), RenderError> {
+        if let bento_nano_style::tokens::EffectTauri::Scanlines(scan) =
+            app.active_theme_effect_tauri()
+        {
+            self.draw_scanline_overlay(scan, app.viewport)?;
+        }
+        Ok(())
+    }
+
+    /// M6c scanline (`terminal`) — full-viewport repeating horizontal bands: a
+    /// 1-DIP `#00FF9C`@.06 lit stripe every 3 DIP, over the whole `vp`
+    /// (`theme-effects.css:6-21`, Tauri `position:fixed; inset:0`). Drawn as a
+    /// post-pass overlay above all content (`z-index:9999`).
+    ///
+    /// **1:1-INTENT divergence (LOCK, §3.1.4)**: Tauri composites the bands with
+    /// `mix-blend-mode: overlay`; D2D's enabled-feature primary blend is
+    /// source-over, which `fill_rounded_rect` uses here. At α 0.06 over the
+    /// near-black terminal surface the two are visually indistinguishable
+    /// (overlay only diverges materially over mid-grey, which the terminal theme
+    /// has none of). Deliberate intent-parity, NOT byte-parity — same class as
+    /// M6b's font substitution. We do NOT enable a D2D blend-effect feature for a
+    /// sub-perceptual delta (§8 over-engineering avoidance).
+    ///
+    /// §10: a stack-`f32` `while` loop of square (`BorderRadius::ZERO`) fills —
+    /// no per-band heap alloc; the band count is `ceil(vh/period)`.
+    fn draw_scanline_overlay(
+        &self,
+        scan: bento_nano_style::tokens::ScanlineEffect,
+        vp: bento_nano_style::Size,
+    ) -> Result<(), RenderError> {
+        if scan.color.a <= 0.0
+            || vp.width <= 0.0
+            || vp.height <= 0.0
+            || scan.period_dip <= 0.0
+            || scan.band_dip <= 0.0
+        {
+            return Ok(());
+        }
+        // `count = ceil(vh / period)` bands at `y = k * period` (the pure helper
+        // is the unit-test surface). Indexing `0..count` instead of accumulating
+        // a `+= period` float avoids drift on tall viewports.
+        let count = scanline_band_count(vp.height, scan.period_dip);
+        for k in 0..count {
+            let band = bento_nano_style::Rect {
+                x: 0.0,
+                y: k as f32 * scan.period_dip,
+                width: vp.width,
+                height: scan.band_dip,
+            };
+            self.fill_rounded_rect(band, scan.color, BorderRadius::ZERO)?;
+        }
+        Ok(())
+    }
+
+    /// M6c neon (`cyberpunk`) — paint the two-layer `filter: drop-shadow` bloom
+    /// behind `base` (`theme-effects.css:23-32`). Reuses the `draw_shadow_stack`
+    /// grow-and-fill idiom: each layer grows the rect by its blur (0,0 offset →
+    /// symmetric bloom) and fills with the glow colour.
+    ///
+    /// **ADDITIVE to the M6b `SHADOW_CYBERPUNK` box-shadow** (§1.2 / §3.2.1):
+    /// the M6b shadow stack and this `filter` bloom both composite in Tauri with
+    /// DIFFERENT blur radii / alphas. Call this AFTER the M6b `draw_shadow_stack`
+    /// and BEFORE the surface fill so it layers correctly — do NOT conflate them.
+    ///
+    /// Draw order (LOCK, §3.2.2): the authored array is `[cyan_inner,
+    /// magenta_outer]`; iterating `.rev()` paints the wider magenta (index 1)
+    /// FIRST and the tighter brighter cyan (index 0) on TOP, so the bloom reads
+    /// cyan-cored with a magenta halo. §10: 2 grown fills, zero alloc; no-op when
+    /// a layer's alpha is 0.
+    fn draw_neon_glow(
+        &self,
+        base: bento_nano_style::Rect,
+        layers: [bento_nano_style::Shadow; 2],
+        radius: BorderRadius,
+    ) -> Result<(), RenderError> {
+        for layer in layers.iter().rev() {
+            if layer.color.a <= 0.0 {
+                continue;
+            }
+            let rect = neon_glow_rect(base, layer.blur);
+            self.fill_rounded_rect(rect, layer.color, radius)?;
+        }
+        Ok(())
+    }
+
+    /// M6c chromatic (`editorial`) — draw an `h1`/`h2` panel-title glyph run with
+    /// the RGB-split aberration (`theme-effects.css:34-40`): a red copy at `+dx`
+    /// and a cyan copy at `-dx` BEHIND the primary glyph fill, then the normal
+    /// title on top. No-op (a plain `draw_text` fall-through) unless the active
+    /// effect is `Chromatic`.
+    ///
+    /// HEADINGS-ONLY (§1.3 / §3.3): route ONLY panel-title draws through this —
+    /// never body text, item labels, or pill labels (Tauri scopes it to `h1,h2`).
+    /// §10: when `Chromatic`, 3 `draw_text` calls (the existing `utf16_scratch`
+    /// is reused, no new alloc); otherwise a single fall-through draw. The
+    /// `effect` is passed by value (`Copy`).
+    fn draw_text_chromatic_title(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        effect: bento_nano_style::tokens::EffectTauri,
+    ) -> Result<(), RenderError> {
+        if let bento_nano_style::tokens::EffectTauri::Chromatic(c) = effect {
+            let (red_x, cyan_x) = chromatic_split_offsets(rect.x, c.dx_dip);
+            let red_rect = bento_nano_style::Rect { x: red_x, ..rect };
+            let cyan_rect = bento_nano_style::Rect { x: cyan_x, ..rect };
+            self.draw_text(text, red_rect, c.red)?;
+            self.draw_text(text, cyan_rect, c.cyan)?;
+        }
+        self.draw_text(text, rect, color)
     }
 
     /// M1i fidelity (2026-05-29) — stroke a rounded-rect outline (no fill).
@@ -7725,6 +7951,69 @@ fn inset_rect(rect: bento_nano_style::Rect, inset: f32) -> bento_nano_style::Rec
     }
 }
 
+// =============================================================================
+// M6c — pure effect geometry (testable, no GPU). The 3 render primitives
+// (`draw_scanline_overlay` / `draw_neon_glow` / `draw_text_chromatic_title`)
+// delegate their math here so it can be unit-tested without a live D2D target
+// (§3.4: no offscreen render harness exists). Every helper is allocation-free
+// stack-`f32` math (§10) and panic-free (§11).
+// =============================================================================
+
+/// M6c scanline — the number of 1-DIP-tall lit bands a full-viewport overlay
+/// of height `vh` paints at period `period`. Bands sit at `y = k * period` for
+/// `k = 0..count`, so `count = ceil(vh / period)`. A non-positive period or
+/// height yields 0 (the overlay no-ops). Pure (§10), panic-free (§11).
+fn scanline_band_count(vh: f32, period: f32) -> usize {
+    if vh <= 0.0 || period <= 0.0 {
+        return 0;
+    }
+    (vh / period).ceil() as usize
+}
+
+/// M6c neon — grow a base rect by `blur` on all four sides (the `drop-shadow(0
+/// 0 Npx)` symmetric bloom: 0,0 offset, grown by the blur radius). Mirrors the
+/// `draw_shadow_stack` grow-and-fill idiom. Pure (§10).
+fn neon_glow_rect(base: bento_nano_style::Rect, blur: f32) -> bento_nano_style::Rect {
+    let grow = blur.max(0.0);
+    bento_nano_style::Rect {
+        x: base.x - grow,
+        y: base.y - grow,
+        width: base.width + grow * 2.0,
+        height: base.height + grow * 2.0,
+    }
+}
+
+/// M6c chromatic — the two channel-copy x-origins for an `h1`/`h2` glyph run:
+/// red at `base_x + dx`, cyan at `base_x - dx` (Tauri `text-shadow 1px 0` /
+/// `-1px 0`). Returns `(red_x, cyan_x)`. Pure (§10).
+fn chromatic_split_offsets(base_x: f32, dx: f32) -> (f32, f32) {
+    (base_x + dx, base_x - dx)
+}
+
+/// M6c neon (morph path) — lerp one neon glow `Shadow` layer from its collapsed
+/// endpoint `a` to its expanded endpoint `b` by `t` (clamped 0..=1). Blur and
+/// every colour channel interpolate so the capsule<->panel morph grows the
+/// bloom smoothly with no pop at either endpoint. Pure (§10).
+fn lerp_neon_layer(
+    a: bento_nano_style::Shadow,
+    b: bento_nano_style::Shadow,
+    t: f32,
+) -> bento_nano_style::Shadow {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    bento_nano_style::Shadow::drop(
+        0.0,
+        0.0,
+        lerp(a.blur, b.blur),
+        Color {
+            r: lerp(a.color.r, b.color.r),
+            g: lerp(a.color.g, b.color.g),
+            b: lerp(a.color.b, b.color.b),
+            a: lerp(a.color.a, b.color.a),
+        },
+    )
+}
+
 fn timeline_detail_thumbnail_rect(
     panel: bento_nano_style::Rect,
     detail_x: f32,
@@ -8022,6 +8311,102 @@ mod device_loss_tests {
         assert!(renderer_is_stale(0, 1));
         assert!(renderer_is_stale(3, 4));
         assert!(renderer_is_stale(1, 0));
+    }
+}
+
+#[cfg(test)]
+mod m6c_effect_geometry_tests {
+    use super::{chromatic_split_offsets, lerp_neon_layer, neon_glow_rect, scanline_band_count};
+    use bento_nano_style::{Color, Shadow};
+
+    #[test]
+    fn scanline_band_count_ceils_height_over_period() {
+        // vp height 100, period 3 → ceil(100/3) = 34 bands (y = 0,3,...,99).
+        assert_eq!(scanline_band_count(100.0, 3.0), 34);
+        // Exact multiple: height 99, period 3 → 33 bands (y = 0..96, last < 99).
+        assert_eq!(scanline_band_count(99.0, 3.0), 33);
+        // A tall 1080 surface at period 3 → 360 bands.
+        assert_eq!(scanline_band_count(1080.0, 3.0), 360);
+    }
+
+    #[test]
+    fn scanline_band_count_zero_guards() {
+        // Non-positive period / height → 0 bands (the overlay no-ops, panic-free).
+        assert_eq!(scanline_band_count(0.0, 3.0), 0);
+        assert_eq!(scanline_band_count(-5.0, 3.0), 0);
+        assert_eq!(scanline_band_count(100.0, 0.0), 0);
+        assert_eq!(scanline_band_count(100.0, -1.0), 0);
+    }
+
+    #[test]
+    fn scanline_loop_steps_match_band_count() {
+        // The `draw_scanline_overlay` `while y < height` loop emits exactly
+        // `scanline_band_count` fills; mirror its stepping here to pin the count.
+        let (height, period) = (100.0_f32, 3.0_f32);
+        let mut y = 0.0_f32;
+        let mut n = 0usize;
+        while y < height {
+            n += 1;
+            y += period;
+        }
+        assert_eq!(n, scanline_band_count(height, period));
+    }
+
+    #[test]
+    fn neon_glow_rect_grows_all_sides_by_blur() {
+        let base = bento_nano_style::Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 40.0,
+            height: 40.0,
+        };
+        // blur 6 → grown 6 on every side: {4,4,52,52}.
+        let g = neon_glow_rect(base, 6.0);
+        assert_eq!(g.x, 4.0);
+        assert_eq!(g.y, 4.0);
+        assert_eq!(g.width, 52.0);
+        assert_eq!(g.height, 52.0);
+        // blur 0 → identity (no growth).
+        let g0 = neon_glow_rect(base, 0.0);
+        assert_eq!(g0, base);
+        // negative blur clamps to 0.
+        assert_eq!(neon_glow_rect(base, -3.0), base);
+    }
+
+    #[test]
+    fn neon_draw_order_is_reversed_so_magenta_underlies_cyan() {
+        // The authored array is `[cyan_inner, magenta_outer]`; `draw_neon_glow`
+        // iterates `.iter().rev()` so the wider magenta (index 1) paints first
+        // and the tighter cyan (index 0) sits on top. Pin that order here.
+        let cyan = Shadow::drop(0.0, 0.0, 6.0, Color::from_u8(0x00, 0xF0, 0xFF, 0xFF));
+        let magenta = Shadow::drop(0.0, 0.0, 12.0, Color::from_u8(0xFF, 0x2E, 0x93, 0x66));
+        let layers = [cyan, magenta];
+        let drawn: Vec<f32> = layers.iter().rev().map(|l| l.blur).collect();
+        // Wider magenta (12) drawn first, tighter cyan (6) drawn last (on top).
+        assert_eq!(drawn, vec![12.0, 6.0]);
+    }
+
+    #[test]
+    fn chromatic_offsets_split_red_right_cyan_left() {
+        // base_x 50, dx 1 → red at 51 (+dx), cyan at 49 (-dx).
+        let (red_x, cyan_x) = chromatic_split_offsets(50.0, 1.0);
+        assert_eq!(red_x, 51.0);
+        assert_eq!(cyan_x, 49.0);
+    }
+
+    #[test]
+    fn lerp_neon_layer_endpoints_and_midpoint() {
+        let a = Shadow::drop(0.0, 0.0, 6.0, Color::from_u8(0x00, 0xF0, 0xFF, 0xFF));
+        let b = Shadow::drop(0.0, 0.0, 8.0, Color::from_u8(0x00, 0xF0, 0xFF, 0xFF));
+        // t=0 → collapsed blur 6.
+        assert_eq!(lerp_neon_layer(a, b, 0.0).blur, 6.0);
+        // t=1 → expanded blur 8.
+        assert_eq!(lerp_neon_layer(a, b, 1.0).blur, 8.0);
+        // t=0.5 → midpoint blur 7.
+        assert_eq!(lerp_neon_layer(a, b, 0.5).blur, 7.0);
+        // Out-of-range t clamps (easeOutBack overshoot never over-grows).
+        assert_eq!(lerp_neon_layer(a, b, 1.5).blur, 8.0);
+        assert_eq!(lerp_neon_layer(a, b, -0.2).blur, 6.0);
     }
 }
 

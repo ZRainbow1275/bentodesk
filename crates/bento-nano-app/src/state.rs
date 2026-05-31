@@ -18,7 +18,7 @@ use bento_nano_layout::{LayoutEngine, LayoutError};
 use bento_nano_platform::MonitorInfo;
 use bento_nano_style::Size;
 use bento_nano_style::tokens::{
-    PALETTE_DARK, PaletteTauri, RADIUS, RadiusTauri, SHADOW, ShadowTauri, TYPOGRAPHY,
+    EffectTauri, PALETTE_DARK, PaletteTauri, RADIUS, RadiusTauri, SHADOW, ShadowTauri, TYPOGRAPHY,
     TypographyTauri,
 };
 use bento_nano_theme::{
@@ -604,6 +604,15 @@ pub struct AppState {
     pub active_theme_radius_tauri: RefCell<RadiusTauri>,
     pub active_theme_shadow_tauri: RefCell<ShadowTauri>,
     pub active_theme_typography_tauri: RefCell<TypographyTauri>,
+    /// M6c — the active theme's Tauri-parity effect channel (the 4th per-theme
+    /// token family). 3 builtins set one (`terminal`→scanlines,
+    /// `cyberpunk`→neon, `editorial`→chromatic); the other 14 + custom JSON
+    /// themes resolve to `EffectTauri::None`. Repopulated at the same
+    /// `apply_active_theme` choke-point so boot-restore + live `SetActiveTheme`
+    /// stay in lockstep; read on the hot path via the `Copy`-returning
+    /// `active_theme_effect_tauri()` accessor. Drives the 3 M6c render
+    /// primitives (scanline overlay / neon glow / chromatic title split).
+    pub active_theme_effect_tauri: RefCell<EffectTauri>,
     /// Theme picker rows discovered from built-ins and `{app_data}/themes`.
     pub available_themes: RefCell<Vec<ThemeOption>>,
     /// Visible status for full-theme selection and display-mode settings.
@@ -891,6 +900,8 @@ impl AppState {
             active_theme_radius_tauri: RefCell::new(RADIUS),
             active_theme_shadow_tauri: RefCell::new(SHADOW),
             active_theme_typography_tauri: RefCell::new(TYPOGRAPHY),
+            // M6c — dark default has no effect; repopulated at the choke-point.
+            active_theme_effect_tauri: RefCell::new(EffectTauri::None),
             available_themes: RefCell::new(Vec::new()),
             settings_theme_status: RefCell::new(None),
             zone_display_mode: Cell::new(ZoneDisplayMode::default()),
@@ -1030,6 +1041,14 @@ impl AppState {
         *self.active_theme_typography_tauri.borrow()
     }
 
+    /// M6c — the active theme's Tauri-parity effect channel. `Copy`, bound once
+    /// per paint fn (§10). Returns `EffectTauri::None` for the 14 non-effect
+    /// builtins + custom JSON themes; the 3 effect themes return their authored
+    /// scanline/neon/chromatic descriptor.
+    pub fn active_theme_effect_tauri(&self) -> EffectTauri {
+        *self.active_theme_effect_tauri.borrow()
+    }
+
     pub fn active_theme_radius(&self) -> RadiusTokens {
         self.active_theme_tokens.borrow().radius
     }
@@ -1064,6 +1083,12 @@ impl AppState {
             bento_nano_style::tokens::shadow_tauri_for_theme(id.as_str()).unwrap_or(SHADOW);
         let typography_tauri = bento_nano_style::tokens::typography_tauri_for_theme(id.as_str())
             .unwrap_or(TYPOGRAPHY);
+        // M6c — resolve the per-theme effect (scanlines/neon/chromatic) while
+        // `id` is still borrowable. 3 builtins set one; everything else (incl.
+        // custom JSON) falls back to `EffectTauri::None`. Family-1 only — the
+        // effect does NOT fold into `ThemeTokens` (no Family-2 bridge).
+        let effect_tauri =
+            bento_nano_style::tokens::effect_tauri_for_theme(id.as_str()).unwrap_or(EffectTauri::None);
         {
             let mut current_id = self.active_theme_id.borrow_mut();
             if *current_id != id {
@@ -1103,6 +1128,13 @@ impl AppState {
             let mut current = self.active_theme_typography_tauri.borrow_mut();
             if *current != typography_tauri {
                 *current = typography_tauri;
+                changed = true;
+            }
+        }
+        {
+            let mut current = self.active_theme_effect_tauri.borrow_mut();
+            if *current != effect_tauri {
+                *current = effect_tauri;
                 changed = true;
             }
         }
@@ -1545,6 +1577,53 @@ mod tests {
                 "{id} active_theme_typography_tauri must equal its authored const",
             );
         }
+    }
+
+    #[test]
+    fn m6c_apply_repopulates_per_theme_effect() {
+        // M6c — the choke-point repopulate fills the new effect RefCell, and
+        // the accessor returns the per-theme const for all 17 builtins (3 set
+        // an effect; 14 resolve to `None`).
+        use bento_nano_style::tokens::EffectTauri;
+        let app = AppState::new();
+        for id in [
+            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
+            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
+            "editorial", "neo", "terminal", "cyberpunk",
+        ] {
+            assert!(app.apply_active_theme_by_id(id).is_some(), "{id} applied");
+            assert_eq!(
+                Some(app.active_theme_effect_tauri()),
+                bento_nano_style::tokens::effect_tauri_for_theme(id),
+                "{id} active_theme_effect_tauri must equal its authored const",
+            );
+        }
+        // The 3 effect themes resolve to their distinct variants.
+        assert_eq!(app.apply_active_theme_by_id("terminal"), Some(true));
+        assert!(matches!(
+            app.active_theme_effect_tauri(),
+            EffectTauri::Scanlines(_)
+        ));
+        assert_eq!(app.apply_active_theme_by_id("cyberpunk"), Some(true));
+        assert!(matches!(app.active_theme_effect_tauri(), EffectTauri::Neon(_)));
+        assert_eq!(app.apply_active_theme_by_id("editorial"), Some(true));
+        assert!(matches!(
+            app.active_theme_effect_tauri(),
+            EffectTauri::Chromatic(_)
+        ));
+        // A non-effect theme clears it back to `None`.
+        assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
+        assert_eq!(app.active_theme_effect_tauri(), EffectTauri::None);
+    }
+
+    #[test]
+    fn m6c_unknown_id_leaves_effect_none() {
+        // Applying an unknown (custom JSON) id is rejected and leaves the
+        // dark-default `None` effect untouched.
+        use bento_nano_style::tokens::EffectTauri;
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("shell-purple"), None);
+        assert_eq!(app.active_theme_effect_tauri(), EffectTauri::None);
     }
 
     #[test]
