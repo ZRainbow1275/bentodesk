@@ -1142,6 +1142,40 @@ mod phase21_tests {
         app
     }
 
+    /// M5 cleanup (2026-05-31) — compute the `scroll_offset_y` that brings a
+    /// section to the TOP of the visible body, given the scroll-space Y its
+    /// label lands at when unscrolled. After the Wave J1b/M6-UI §3 Appearance
+    /// grid was appended BELOW the Backup §9 / Plugins §11 sections, those two
+    /// sections are no longer the bottom of the scrollable content — so the old
+    /// `scroll_offset_y = max_scroll` no longer reveals them (it now reveals the
+    /// trailing Appearance grid). Instead, scroll precisely so the target
+    /// section's label sits at the body top, then clamp to the legal range. This
+    /// derives the offset from live geometry (no hardcoded magic numbers) so the
+    /// sampled button centres line up with production paint/hit (which share the
+    /// same `scroll + reserve_delta` fold).
+    ///
+    /// `label_at_unscrolled_y` is the section label's `.y` computed with
+    /// `scroll_offset_y == 0` (i.e. `scroll_y == reserve_delta(source_count)`).
+    /// Returns the `scroll_offset_y` to store in `app.scroll_offset_y` so the
+    /// section's label aligns with `body.y`.
+    fn scroll_offset_to_top_of_body(
+        viewport: bento_nano_style::Size,
+        flags: &bento_nano_app::settings_panel::SettingsBodyFlags,
+        label_at_unscrolled_y: f32,
+    ) -> f32 {
+        let body = bento_nano_app::settings_panel::settings_body_rect(viewport);
+        // At scroll_offset_y == 0 the label lands at `label_at_unscrolled_y`;
+        // every unit of scroll shifts it up by one. To move it to `body.y` we
+        // scroll by exactly the surplus distance below the body top.
+        let want = (label_at_unscrolled_y - body.y).max(0.0);
+        // Clamp to the legal scroll range so the stored offset is production-true.
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(viewport, flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, viewport);
+        want.min(max_scroll)
+    }
+
     fn app_and_window_with_minibar(zs: Vec<Zone>) -> (AppState, WindowState) {
         let mut app = app_with_zones(zs);
         let mut win = WindowState::new();
@@ -1660,24 +1694,27 @@ mod phase21_tests {
         .with_backup_rows(visible);
         drop(entries);
 
-        // The Backup card sits at the bottom of the scrollable content; scroll
-        // to the clamped max so its rows fall inside the visible body (the
-        // hit-tester early-returns `Body`/`Outside` for any y outside the body
-        // rect). Assert the whole backup section is in view so the geometry —
-        // not scroll bookkeeping — is what's under test.
-        let content_h =
-            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
-        let max_scroll =
-            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
-        app.scroll_offset_y.set(max_scroll);
+        // M5 cleanup — the Backup §9 card is no longer the bottom of the
+        // scrollable content (the M6-UI §3 Appearance grid was appended below
+        // §9/§11), so scrolling to `max_scroll` reveals the trailing Appearance
+        // grid, not Backup. Scroll precisely so the Backup label sits at the top
+        // of the visible body instead. `reserve_delta(0)` is the §2 source fold
+        // applied to scroll-space at `scroll_offset_y == 0`.
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_backup_label_rect(
+            app.viewport,
+            reserve_delta_0,
+            &flags,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
         // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
         // the scroll for all perf-and-below geometry; this test populates no
         // desktop sources (count 0), so apply the matching fold to the rects we
         // compare against, exactly as production paint/hit does.
-        let scroll_y = max_scroll
-            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
-                flags.source_row_count,
-            );
+        let scroll_y = scroll_off + reserve_delta_0;
         let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
         let label = bento_nano_app::settings_panel::settings_backup_label_rect(
             app.viewport,
@@ -1745,21 +1782,24 @@ mod phase21_tests {
             bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
         )
         .with_backup_rows(0);
-        // Scroll the bottom Backup card into the visible body (see the sibling
+        // M5 cleanup — scroll the Backup card to the top of the visible body
+        // (it is no longer the bottom of the content; see the sibling
         // reachability test for why).
-        let content_h =
-            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
-        let max_scroll =
-            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
-        app.scroll_offset_y.set(max_scroll);
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_backup_label_rect(
+            app.viewport,
+            reserve_delta_0,
+            &flags,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
         // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
         // the scroll for all perf-and-below geometry; this test populates no
         // desktop sources (count 0), so apply the matching fold to the rects we
         // compare against, exactly as production paint/hit does.
-        let scroll_y = max_scroll
-            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
-                flags.source_row_count,
-            );
+        let scroll_y = scroll_off + reserve_delta_0;
         let actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
             app.viewport,
             scroll_y,
@@ -1933,22 +1973,25 @@ mod phase21_tests {
         .with_plugin_rows(visible);
         drop(entries);
 
-        // Plugins sits LAST in the body; scroll to the clamped max so its rows
-        // fall inside the visible body (the hit-tester early-returns for any y
-        // outside the body rect).
-        let content_h =
-            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
-        let max_scroll =
-            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
-        app.scroll_offset_y.set(max_scroll);
+        // M5 cleanup — Plugins §11 is no longer LAST in the body (the M6-UI §3
+        // Appearance grid was appended below it), so scrolling to `max_scroll`
+        // reveals the trailing Appearance grid, not Plugins. Scroll precisely so
+        // the Plugins label sits at the top of the visible body instead.
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_plugins_label_rect(
+            app.viewport,
+            reserve_delta_0,
+            &flags,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
         // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
         // the scroll for all perf-and-below geometry; this test populates no
         // desktop sources (count 0), so apply the matching fold to the rects we
         // compare against, exactly as production paint/hit does.
-        let scroll_y = max_scroll
-            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
-                flags.source_row_count,
-            );
+        let scroll_y = scroll_off + reserve_delta_0;
         let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
         let label =
             bento_nano_app::settings_panel::settings_plugins_label_rect(app.viewport, scroll_y, &flags);
@@ -2016,19 +2059,24 @@ mod phase21_tests {
         )
         .with_backup_rows(0)
         .with_plugin_rows(0);
-        let content_h =
-            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
-        let max_scroll =
-            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
-        app.scroll_offset_y.set(max_scroll);
+        // M5 cleanup — scroll the Plugins card to the top of the visible body
+        // (it is no longer the bottom of the content; the §3 Appearance grid
+        // flows below it).
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_plugins_label_rect(
+            app.viewport,
+            reserve_delta_0,
+            &flags,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
         // M1i fidelity — `settings_hit` folds the §2 source reserve delta into
         // the scroll for all perf-and-below geometry; this test populates no
         // desktop sources (count 0), so apply the matching fold to the rects we
         // compare against, exactly as production paint/hit does.
-        let scroll_y = max_scroll
-            + bento_nano_app::settings_panel::settings_sources_reserve_delta(
-                flags.source_row_count,
-            );
+        let scroll_y = scroll_off + reserve_delta_0;
         let install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
             app.viewport,
             scroll_y,
