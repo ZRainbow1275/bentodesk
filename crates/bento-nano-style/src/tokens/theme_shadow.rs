@@ -38,6 +38,11 @@ use crate::{Color, Shadow, ShadowStack};
 /// Build a Rounded-group `ShadowTauri` from the theme's L2 tint colour and the
 /// `zen`/`expanded`/`item_hover` outer alpha bytes. Inner layers reuse the dark
 /// geometry (`0 2 8` / `0 4 16` / `0 2 8`) at the per-theme inner alpha.
+//
+// 9 params are independent shadow primitives (tint RGB + three inner/outer
+// alpha pairs); bundling them into a struct adds indirection for these
+// const table builders with no benefit — conventional token-table shape.
+#[allow(clippy::too_many_arguments)]
 const fn rounded(
     tint_r: u8,
     tint_g: u8,

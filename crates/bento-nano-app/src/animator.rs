@@ -163,6 +163,11 @@ impl Animator {
     /// in-flight entry so hover-in followed quickly by hover-out doesn't
     /// queue. The animator resumes from the **current sampled value** when
     /// the direction reverses — see `start_or_reverse`.
+    // Geometric/easing-parameter animator entry point: the 8 primitives
+    // (zone, channel, timing, from/to, easing) map 1:1 onto an `Entry` and
+    // bundling them into a wrapper struct only adds indirection at the hot
+    // call sites. Conventional render/animation-code shape — allow it.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         zone: ZoneId,
@@ -183,12 +188,10 @@ impl Animator {
             easing,
         };
         // Try to overwrite an existing slot first.
-        for slot in self.entries.iter_mut() {
-            if let Some(existing) = slot {
-                if existing.zone == zone && existing.channel == channel {
-                    *existing = entry;
-                    return;
-                }
+        for existing in self.entries.iter_mut().flatten() {
+            if existing.zone == zone && existing.channel == channel {
+                *existing = entry;
+                return;
             }
         }
         // Otherwise occupy the first free slot.
@@ -238,17 +241,15 @@ impl Animator {
         if matches!(channel, AnimChannel::StatusDotPulse) {
             return status_dot_pulse(now_ms);
         }
-        for slot in self.entries.iter() {
-            if let Some(entry) = slot {
-                if entry.zone == zone && entry.channel == channel {
-                    let elapsed = now_ms.wrapping_sub(entry.start_ms);
-                    if elapsed >= entry.duration_ms {
-                        return entry.to;
-                    }
-                    let raw = (elapsed as f32) / (entry.duration_ms as f32);
-                    let eased = apply_easing(entry.easing, raw);
-                    return entry.from + (entry.to - entry.from) * eased;
+        for entry in self.entries.iter().flatten() {
+            if entry.zone == zone && entry.channel == channel {
+                let elapsed = now_ms.wrapping_sub(entry.start_ms);
+                if elapsed >= entry.duration_ms {
+                    return entry.to;
                 }
+                let raw = (elapsed as f32) / (entry.duration_ms as f32);
+                let eased = apply_easing(entry.easing, raw);
+                return entry.from + (entry.to - entry.from) * eased;
             }
         }
         0.0
@@ -279,12 +280,10 @@ impl Animator {
     /// True if any non-terminal entry exists. Used by the render pump to
     /// keep requesting redraws while animations are mid-flight.
     pub fn is_active(&self, now_ms: u32) -> bool {
-        for slot in self.entries.iter() {
-            if let Some(entry) = slot {
-                let elapsed = now_ms.wrapping_sub(entry.start_ms);
-                if elapsed < entry.duration_ms {
-                    return true;
-                }
+        for entry in self.entries.iter().flatten() {
+            let elapsed = now_ms.wrapping_sub(entry.start_ms);
+            if elapsed < entry.duration_ms {
+                return true;
             }
         }
         false
@@ -586,6 +585,9 @@ mod tests {
     }
 
     #[test]
+    // Intentional compile-time-constant guard: asserts the const inline-capacity
+    // covers the seeded scene demand.
+    #[allow(clippy::assertions_on_constants)]
     fn capacity_above_seed_scene_demand() {
         // 16 seeded zones × 3 stateful channels (hover/press/expand) = 48.
         assert!(ANIMATOR_CAPACITY >= 48);

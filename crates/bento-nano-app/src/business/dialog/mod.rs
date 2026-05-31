@@ -292,6 +292,10 @@ mod tests {
     }
 
     #[test]
+    // The `surface_dialog.a > surface_expanded.a` assertion below compares
+    // const token alphas (Wave A chrome.md invariant), so clippy sees a
+    // constant value — that is the intended compile-time guard.
+    #[allow(clippy::assertions_on_constants)]
     fn dialog_from_tauri_tokens_consumes_wave_b_ssot() {
         use bento_nano_style::tokens as style_tokens;
         let d = Dialog::from_tauri_tokens(

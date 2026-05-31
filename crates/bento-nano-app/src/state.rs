@@ -1154,7 +1154,7 @@ impl AppState {
     /// Sets `active_theme_id` / `active_theme_name`, the renderer `ThemeTokens`
     /// (per-theme radius/shadow/font folded in via
     /// `theme_bridge::theme_tokens_for_theme`) and the byte-exact `PaletteTauri`
-    /// + per-theme Tauri radius/shadow/typography (resolved inside
+    /// together with per-theme Tauri radius/shadow/typography (resolved inside
     /// `apply_active_theme`).
     ///
     /// M6b — closes the former documented partial (the 15 non-registry themes

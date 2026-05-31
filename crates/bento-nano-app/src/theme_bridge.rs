@@ -236,7 +236,7 @@ mod tests {
     fn custom_theme_falls_back_to_derivation() {
         // An unknown id derives from the live tokens; accents stay brand id.
         let p = resolve_palette_tauri("shell-purple", &DARK_DEFAULT.palette);
-        assert_eq!(p.is_dark, true);
+        assert!(p.is_dark);
         assert_eq!(p.surface_zen, DARK_DEFAULT.palette.surface);
         assert_eq!(p.accent_blue, DARK_DEFAULT.palette.accent);
         assert_eq!(p.accent_green, PALETTE_DARK.accent_green);

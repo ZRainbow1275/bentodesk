@@ -150,7 +150,7 @@ pub fn family_is_available(family: &str) -> bool {
 /// family is installed, so the returned `&'static str` equals the caller's
 /// first literal — zero visual change (Q2 pixel-1:1).
 pub fn resolve_default_family(role: FontRole, preferred: &[&'static str]) -> &'static str {
-    *role.cache_slot().get_or_init(|| {
+    role.cache_slot().get_or_init(|| {
         for &candidate in preferred {
             if family_is_available(candidate) {
                 return candidate;

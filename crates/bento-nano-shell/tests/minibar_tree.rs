@@ -38,15 +38,23 @@ fn mount_main_tree_produces_well_formed_tree() {
         Err(_) => return,
     };
     assert_eq!(root_kind, WidgetKind::Container);
-    if let Ok(WidgetNode::Container(c)) = app.tree.get(root) {
-        assert!(
-            c.background.a <= 0.0,
-            "main root container must have transparent background (alpha=0), got {:?}",
-            c.background,
-        );
-    } else {
-        panic!("expected Container root, got {:?}", app.tree.get(root).map(|n| n.kind()));
-    }
+    let root_resolved = app.tree.get(root);
+    // Test failure path: `panic`/`unwrap` are workspace-denied (spec §11), so
+    // assert the kind on a real runtime condition before destructuring; the
+    // `else` arm is unreachable once the assertion passes and just bails.
+    assert!(
+        matches!(root_resolved, Ok(WidgetNode::Container(_))),
+        "expected Container root, got {:?}",
+        root_resolved.map(|n| n.kind())
+    );
+    let Ok(WidgetNode::Container(c)) = root_resolved else {
+        return;
+    };
+    assert!(
+        c.background.a <= 0.0,
+        "main root container must have transparent background (alpha=0), got {:?}",
+        c.background,
+    );
 
     // V-6 Round-2 (2026-05-21) — the legacy 5-IconButton Toolbar + "就绪"
     // status TextNode were removed from `mount_main_tree` because they

@@ -109,7 +109,7 @@ pub enum RenderError {
     /// Mc-2b — the GPU device was lost (TDR / driver reset / removal). Surfaced
     /// when `WindowComp::present`/`resize` return `PlatformError::DeviceLost`.
     /// The shell chokepoint (Impl C) matches this to drive `recover_device_chain`
-    /// + per-window rebuild; the renderer self-heals other windows via the
+    /// plus a per-window rebuild; the renderer self-heals other windows via the
     /// generation check at the top of `render`.
     DeviceLost,
 }
@@ -2257,6 +2257,11 @@ impl Renderer {
         Ok(())
     }
 
+    // Geometric draw helper: the 8 params are independent paint primitives
+    // (rect, fill, radius, text/icon colours, M3-A2 scale). Bundling them
+    // into a struct adds indirection at the hot per-item call sites for no
+    // real benefit — the conventional render-code shape, so allow it.
+    #[allow(clippy::too_many_arguments)]
     fn draw_item_card(
         &mut self,
         item: &ZoneItem,
@@ -8110,9 +8115,9 @@ fn grid_columns_label(columns: u32) -> &'static str {
 /// as "999+" so the result fits the 4-digit budget in
 /// `zone_pill_geometry::badge_width_for_count`.
 fn format_small_count(count: usize) -> smol_str::SmolStr {
-    if count < 100 {
-        smol_str::SmolStr::new(count.to_string())
-    } else if count < 1000 {
+    // <1000 renders the literal count; >=1000 caps at the 4-char "999+"
+    // budget (the <100 vs <1000 split produced identical text, so merged).
+    if count < 1000 {
         smol_str::SmolStr::new(count.to_string())
     } else {
         smol_str::SmolStr::new_static("999+")

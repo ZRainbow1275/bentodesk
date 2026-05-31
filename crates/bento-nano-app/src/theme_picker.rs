@@ -505,10 +505,10 @@ mod tests {
 
     #[test]
     fn preset_name_ids_are_distinct() {
-        for i in 0..PRESET_COUNT {
-            for j in (i + 1)..PRESET_COUNT {
+        for (i, theme) in BUILTIN_THEMES.iter().enumerate() {
+            for (j, other) in BUILTIN_THEMES.iter().enumerate().skip(i + 1) {
                 assert_ne!(
-                    BUILTIN_THEMES[i].name_id, BUILTIN_THEMES[j].name_id,
+                    theme.name_id, other.name_id,
                     "presets {i} and {j} must have distinct name ids",
                 );
             }
@@ -518,18 +518,17 @@ mod tests {
     #[test]
     fn preset_theme_ids_are_distinct_and_match_builtin_set() {
         // Every theme_id resolves through the M6a 17-id palette lookup.
-        for i in 0..PRESET_COUNT {
-            for j in (i + 1)..PRESET_COUNT {
+        for (i, theme) in BUILTIN_THEMES.iter().enumerate() {
+            for (j, other) in BUILTIN_THEMES.iter().enumerate().skip(i + 1) {
                 assert_ne!(
-                    BUILTIN_THEMES[i].theme_id, BUILTIN_THEMES[j].theme_id,
+                    theme.theme_id, other.theme_id,
                     "presets {i} and {j} must have distinct theme ids",
                 );
             }
             assert!(
-                bento_nano_style::tokens::palette_tauri_for_theme(BUILTIN_THEMES[i].theme_id)
-                    .is_some(),
+                bento_nano_style::tokens::palette_tauri_for_theme(theme.theme_id).is_some(),
                 "preset {i} theme_id {} must be a known builtin",
-                BUILTIN_THEMES[i].theme_id,
+                theme.theme_id,
             );
         }
     }

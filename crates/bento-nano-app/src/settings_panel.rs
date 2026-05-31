@@ -614,10 +614,11 @@ pub const SETTINGS_TOP_TOGGLE_COUNT: u8 = 5;
 /// α4 (Wave I-α, 2026-05-25) — zone-display-mode picker row geometry.
 /// Tauri 1.2.4 baseline (`SettingsPanel.tsx:555-595`) renders a 3-radio
 /// horizontal group (Hover / Always / Click) immediately below the language
-/// row. Each radio is a 12-DIP outer circle + 6-DIP inner dot when selected
-/// + an inline label. Three radios + 2 inter-radio gaps + leading/trailing
-/// padding pack into the right-anchored ~260-DIP cluster, matching the
-/// language-chip horizontal anchor for vertical alignment.
+/// row. Each radio is a 12-DIP outer circle plus a 6-DIP inner dot when
+/// selected, alongside an inline label. Three radios, two inter-radio gaps,
+/// and leading/trailing padding pack into the right-anchored ~260-DIP
+/// cluster, matching the language-chip horizontal anchor for vertical
+/// alignment.
 ///
 /// Picker row sits between the language row (M1) and the M2 sources
 /// section; `settings_m2_origin_y_offset` is bumped by one row to clear it.
@@ -2977,6 +2978,9 @@ mod m1_tests {
     }
 
     #[test]
+    // Intentional const guard: asserts the const shadow-alpha stays at 0.0,
+    // so clippy sees a constant value (that is the regression lock).
+    #[allow(clippy::assertions_on_constants)]
     fn v5_panel_shadow_alpha_locked_at_zero() {
         // V-5 (TL re-issue 2026-05-21) — the 8-DIP hard-edged drop-shadow
         // ring used to paint at 0.45 (v1) / 0.15 (v2). Both reading as a

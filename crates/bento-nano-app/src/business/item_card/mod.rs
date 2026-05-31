@@ -578,7 +578,7 @@ mod tests {
         let mut st = ItemHoverState::new();
         st.on_press(card(3, 1), 0);
         // A different card sees no press.
-        let (_h, p) = st.sample(card(3, 2), 0 + CARD_PRESS_DURATION_MS);
+        let (_h, p) = st.sample(card(3, 2), CARD_PRESS_DURATION_MS);
         assert!(p.abs() < 1e-5);
     }
 

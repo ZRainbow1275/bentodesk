@@ -509,6 +509,11 @@ pub const SPACING_STOPS: [f32; 6] = [
 
 #[cfg(test)]
 mod tests {
+    // These tests intentionally assert over `const` design-token values to
+    // guard compile-time invariants (monotonic radius/spacing scales, alpha
+    // orderings). Clippy's `assertions_on_constants` fires on every one; the
+    // assertions are deliberate regression guards, so allow it module-wide.
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     // --- Palette hex parity (dark) ---

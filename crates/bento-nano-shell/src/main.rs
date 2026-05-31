@@ -22070,7 +22070,7 @@ unsafe fn handle_device_lost(root: &AppRoot, hwnd: HWND) {
     let within_window = root
         .last_recovery_at
         .get()
-        .map_or(false, |t| now.duration_since(t) < RECOVERY_WINDOW);
+        .is_some_and(|t| now.duration_since(t) < RECOVERY_WINDOW);
     let state = root.recovery_state.get();
 
     match bento_nano_platform::decide_recovery(state, within_window, MAX_RECOVERY_ATTEMPTS) {
