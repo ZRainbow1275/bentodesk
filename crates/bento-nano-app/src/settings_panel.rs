@@ -3998,6 +3998,7 @@ mod tests {
             offset_x: 2.0,
             offset_y: 5.0,
             blur: 14.0,
+            spread: 0.0,
             color: bento_nano_style::Color::from_u8(0, 0, 0, 0x80),
         };
         let shadow_rect = settings_panel_shadow_rect(panel, shadow);

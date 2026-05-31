@@ -104,7 +104,8 @@ impl IconPickerChrome {
         shadow: ShadowTauri,
     ) -> Self {
         Self {
-            panel_shadow: shadow.expanded,
+            // M6b — `expanded` is a `ShadowStack`; consume the outer layer.
+            panel_shadow: shadow.expanded.outer(),
             panel_radius: BorderRadius::all(radius.expanded),
             chip_radius: BorderRadius::all(radius.card),
             chip_inner_radius: BorderRadius::all(radius.card),
@@ -177,7 +178,8 @@ mod tests {
         assert_eq!(chrome.warning_color, style_tokens::PALETTE_DARK.accent_orange);
         assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
         assert_eq!(chrome.chip_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded);
+        // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
+        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }
 
     #[test]
@@ -284,6 +286,7 @@ mod tests {
             offset_x: 2.0,
             offset_y: 5.0,
             blur: 13.0,
+            spread: 0.0,
             color: Color::from_u8(0x10, 0x20, 0x30, 0x99),
         };
 

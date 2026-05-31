@@ -359,18 +359,21 @@ mod tests {
                 offset_x: 1.0,
                 offset_y: 2.0,
                 blur: 3.0,
+                spread: 0.0,
                 color: Color::from_u8(0x01, 0x01, 0x01, 0x20),
             },
             md: Shadow {
                 offset_x: 4.0,
                 offset_y: 5.0,
                 blur: 6.0,
+                spread: 0.0,
                 color: Color::from_u8(0x02, 0x02, 0x02, 0x40),
             },
             lg: Shadow {
                 offset_x: 7.0,
                 offset_y: 8.0,
                 blur: 9.0,
+                spread: 0.0,
                 color: Color::from_u8(0x03, 0x03, 0x03, 0x60),
             },
         };
@@ -399,6 +402,7 @@ mod tests {
             offset_x: 3.0,
             offset_y: 7.0,
             blur: 11.0,
+            spread: 0.0,
             color: Color::BLACK,
         };
 

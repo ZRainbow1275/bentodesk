@@ -104,7 +104,12 @@ pub fn expanded_zone_layout(zone: &Zone) -> ExpandedZoneLayout {
 /// by tests and any caller that has already computed the zone rect.
 #[inline]
 pub fn expanded_zone_layout_for_rect(panel: Rect) -> ExpandedZoneLayout {
-    let shadow = SHADOW.expanded;
+    // M6b — `SHADOW.expanded` is a multi-layer `ShadowStack`; the band uses the
+    // dominant outer layer (== pre-M6b single `SHADOW.expanded`). The expanded
+    // zone panel is per-theme-keyed at the render call-site (`render.rs`) which
+    // passes the active theme's stack; this layout helper keeps the global
+    // baseline geometry for the (theme-agnostic) drop-band rect computation.
+    let shadow = SHADOW.expanded.outer();
     let spread = shadow.blur.max(0.0);
     let panel_shadow = Rect {
         x: panel.x + shadow.offset_x - spread,

@@ -213,7 +213,10 @@ impl BulkManagerChrome {
         shadow: ShadowTauri,
     ) -> Self {
         Self {
-            panel_shadow: shadow.expanded,
+            // M6b — `expanded` is now a `ShadowStack`; the single-`Shadow`
+            // `panel_shadow` consumes the dominant outer layer (== pre-M6b
+            // `SHADOW.expanded` for dark, the §5.3 byte-parity contract).
+            panel_shadow: shadow.expanded.outer(),
             panel_radius: BorderRadius::all(radius.expanded),
             search_radius: BorderRadius::all(radius.card),
             button_radius: BorderRadius::all(radius.card),

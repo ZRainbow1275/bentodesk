@@ -105,6 +105,7 @@ fn rules_wizard_chrome_accepts_explicit_radius_shadow_tokens() {
         offset_x: 2.0,
         offset_y: 5.0,
         blur: 13.0,
+        spread: 0.0,
         color: Color::from_u8(0x10, 0x20, 0x30, 0x99),
     };
 
@@ -128,6 +129,7 @@ fn rules_wizard_panel_shadow_rect_uses_token_shadow_geometry() {
         offset_x: 3.0,
         offset_y: 5.0,
         blur: 11.0,
+        spread: 0.0,
         color: Color::from_u8(0x10, 0x20, 0x30, 0x40),
     };
 

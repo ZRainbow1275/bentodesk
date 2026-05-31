@@ -17,7 +17,10 @@ use bento_nano_backend::{
 use bento_nano_layout::{LayoutEngine, LayoutError};
 use bento_nano_platform::MonitorInfo;
 use bento_nano_style::Size;
-use bento_nano_style::tokens::{PALETTE_DARK, PaletteTauri};
+use bento_nano_style::tokens::{
+    PALETTE_DARK, PaletteTauri, RADIUS, RadiusTauri, SHADOW, ShadowTauri, TYPOGRAPHY,
+    TypographyTauri,
+};
 use bento_nano_theme::{
     DARK_DEFAULT, LIGHT_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens,
     THEMES, ThemeTokens, TypoTokens,
@@ -588,6 +591,19 @@ pub struct AppState {
     /// restore and live `SetActiveTheme` both keep it in lockstep. Read by
     /// `active_theme_tauri()` (Copy, no per-frame alloc — §10).
     pub active_theme_tauri: RefCell<PaletteTauri>,
+    /// M6b — renderer-ready Tauri-parity radius / shadow / typography for the
+    /// active theme. Mirror of `active_theme_tauri`: the 17 builtins resolve to
+    /// a per-theme const (`radius_tauri_for_theme` etc.); custom JSON themes
+    /// fall back to the global `RADIUS`/`SHADOW`/`TYPOGRAPHY`. Repopulated at
+    /// the same `apply_active_theme` choke-point so boot-restore + live
+    /// `SetActiveTheme` keep them in lockstep. Read on the hot path via the
+    /// `Copy`-returning `active_theme_*_tauri()` accessors (no per-frame alloc,
+    /// §10). Drives per-theme corner sharpness (`order`/`flat`/`brutalism`),
+    /// per-theme shadow stacks (`neo` dual / `terminal` glow), and the
+    /// per-theme DirectWrite family (`terminal`→Consolas, `editorial`→Georgia).
+    pub active_theme_radius_tauri: RefCell<RadiusTauri>,
+    pub active_theme_shadow_tauri: RefCell<ShadowTauri>,
+    pub active_theme_typography_tauri: RefCell<TypographyTauri>,
     /// Theme picker rows discovered from built-ins and `{app_data}/themes`.
     pub available_themes: RefCell<Vec<ThemeOption>>,
     /// Visible status for full-theme selection and display-mode settings.
@@ -870,6 +886,11 @@ impl AppState {
             active_theme_name: RefCell::new(SmolStr::new_static("Dark")),
             active_theme_tokens: RefCell::new(DARK_DEFAULT.clone()),
             active_theme_tauri: RefCell::new(PALETTE_DARK),
+            // M6b — default to the global dark/Rounded baseline; repopulated at
+            // the `apply_active_theme` choke-point on boot-restore + live swap.
+            active_theme_radius_tauri: RefCell::new(RADIUS),
+            active_theme_shadow_tauri: RefCell::new(SHADOW),
+            active_theme_typography_tauri: RefCell::new(TYPOGRAPHY),
             available_themes: RefCell::new(Vec::new()),
             settings_theme_status: RefCell::new(None),
             zone_display_mode: Cell::new(ZoneDisplayMode::default()),
@@ -991,6 +1012,24 @@ impl AppState {
         *self.active_theme_tauri.borrow()
     }
 
+    /// M6b — the active theme's Tauri-parity radius. `Copy`, bound once per
+    /// paint fn (§10). The 17 builtins return their per-theme `RadiusTauri`;
+    /// custom JSON themes return the global `RADIUS`.
+    pub fn active_theme_radius_tauri(&self) -> RadiusTauri {
+        *self.active_theme_radius_tauri.borrow()
+    }
+
+    /// M6b — the active theme's Tauri-parity shadow stacks. `Copy`, §10.
+    pub fn active_theme_shadow_tauri(&self) -> ShadowTauri {
+        *self.active_theme_shadow_tauri.borrow()
+    }
+
+    /// M6b — the active theme's Tauri-parity typography (per-theme font family).
+    /// `Copy`, §10.
+    pub fn active_theme_typography_tauri(&self) -> TypographyTauri {
+        *self.active_theme_typography_tauri.borrow()
+    }
+
     pub fn active_theme_radius(&self) -> RadiusTokens {
         self.active_theme_tokens.borrow().radius
     }
@@ -1015,6 +1054,16 @@ impl AppState {
         // live tokens. This is the single choke-point both boot-restore and
         // live `SetActiveTheme` route through, so one resolve covers both.
         let tauri = crate::theme_bridge::resolve_palette_tauri(id.as_str(), &tokens.palette);
+        // M6b — resolve the per-theme Tauri-parity radius/shadow/typography too,
+        // while `id` is still borrowable. Builtins hit the per-theme const;
+        // custom JSON themes fall back to the global baseline. Same choke-point
+        // as the palette so boot-restore + live `SetActiveTheme` stay in sync.
+        let radius_tauri =
+            bento_nano_style::tokens::radius_tauri_for_theme(id.as_str()).unwrap_or(RADIUS);
+        let shadow_tauri =
+            bento_nano_style::tokens::shadow_tauri_for_theme(id.as_str()).unwrap_or(SHADOW);
+        let typography_tauri = bento_nano_style::tokens::typography_tauri_for_theme(id.as_str())
+            .unwrap_or(TYPOGRAPHY);
         {
             let mut current_id = self.active_theme_id.borrow_mut();
             if *current_id != id {
@@ -1037,6 +1086,27 @@ impl AppState {
             }
         }
         {
+            let mut current = self.active_theme_radius_tauri.borrow_mut();
+            if *current != radius_tauri {
+                *current = radius_tauri;
+                changed = true;
+            }
+        }
+        {
+            let mut current = self.active_theme_shadow_tauri.borrow_mut();
+            if *current != shadow_tauri {
+                *current = shadow_tauri;
+                changed = true;
+            }
+        }
+        {
+            let mut current = self.active_theme_typography_tauri.borrow_mut();
+            if *current != typography_tauri {
+                *current = typography_tauri;
+                changed = true;
+            }
+        }
+        {
             let mut current_tokens = self.active_theme_tokens.borrow_mut();
             if *current_tokens != tokens {
                 *current_tokens = tokens;
@@ -1050,10 +1120,17 @@ impl AppState {
     /// going through the shell's backend loader.
     ///
     /// Sets `active_theme_id` / `active_theme_name`, the renderer `ThemeTokens`
-    /// (registry lookup for `dark`/`light`; the other 15 fall back to
-    /// `DARK_DEFAULT` / `LIGHT_DEFAULT` by polarity — documented partial, the
-    /// widget-layer tokens are not yet per-theme authored) and the byte-exact
-    /// `PaletteTauri` (resolved inside `apply_active_theme`).
+    /// (per-theme radius/shadow/font folded in via
+    /// `theme_bridge::theme_tokens_for_theme`) and the byte-exact `PaletteTauri`
+    /// + per-theme Tauri radius/shadow/typography (resolved inside
+    /// `apply_active_theme`).
+    ///
+    /// M6b — closes the former documented partial (the 15 non-registry themes
+    /// no longer fall back to the matching-polarity DEFAULT verbatim): the
+    /// polarity default is now only the *base* (palette/spacing/line-heights),
+    /// onto which `theme_tokens_for_theme` folds the theme's real per-theme
+    /// radius (sharp `order`/`flat`/`brutalism`), shadow (Angular `none` flat),
+    /// and font family (`terminal`→Consolas, `editorial`→Georgia).
     ///
     /// Returns `Some(changed)` for a known builtin id, `None` for an unknown
     /// id (panic-free, §11 — caller decides whether to route to the custom
@@ -1062,10 +1139,11 @@ impl AppState {
         // Builtin-only entry point: the id must be one of the 17. The exact
         // `PaletteTauri` is re-resolved inside `apply_active_theme`.
         let tauri = bento_nano_style::tokens::palette_tauri_for_theme(id)?;
-        // Renderer ThemeTokens: registry lookup first (dark/light have
-        // authored token sets); the remaining 15 use the matching-polarity
-        // default so widgets stay legible until per-theme tokens land.
-        let tokens = THEMES
+        // Renderer ThemeTokens: registry lookup first (dark/light have authored
+        // token sets — byte-identical net); the remaining 15 start from the
+        // matching-polarity default as the *base* (palette/spacing) and then
+        // fold in per-theme radius/shadow/font via the Family-2 bridge.
+        let base = THEMES
             .iter()
             .find(|(theme_id, _)| *theme_id == id)
             .map(|(_, tokens)| (*tokens).clone())
@@ -1076,6 +1154,7 @@ impl AppState {
                     LIGHT_DEFAULT.clone()
                 }
             });
+        let tokens = crate::theme_bridge::theme_tokens_for_theme(id, &base);
         let name = builtin_theme_display_name(id);
         Some(self.apply_active_theme(SmolStr::new(id), name, tokens))
     }
@@ -1437,6 +1516,83 @@ mod tests {
                 "{id} active_theme_tauri must equal its authored const",
             );
         }
+    }
+
+    #[test]
+    fn m6b_apply_repopulates_per_theme_radius_shadow_typography() {
+        // M6b — the choke-point repopulate fills the three new RefCells, and
+        // the accessors return the per-theme const for all 17 builtins.
+        let app = AppState::new();
+        for id in [
+            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
+            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
+            "editorial", "neo", "terminal", "cyberpunk",
+        ] {
+            assert!(app.apply_active_theme_by_id(id).is_some(), "{id} applied");
+            assert_eq!(
+                Some(app.active_theme_radius_tauri()),
+                bento_nano_style::tokens::radius_tauri_for_theme(id),
+                "{id} active_theme_radius_tauri must equal its authored const",
+            );
+            assert_eq!(
+                Some(app.active_theme_shadow_tauri()),
+                bento_nano_style::tokens::shadow_tauri_for_theme(id),
+                "{id} active_theme_shadow_tauri must equal its authored const",
+            );
+            assert_eq!(
+                Some(app.active_theme_typography_tauri()),
+                bento_nano_style::tokens::typography_tauri_for_theme(id),
+                "{id} active_theme_typography_tauri must equal its authored const",
+            );
+        }
+    }
+
+    #[test]
+    fn m6b_order_yields_sharp_radius_via_accessor() {
+        // The former documented partial is gone: applying `order` (a non-
+        // registry theme) now yields its real per-theme card radius (6), not
+        // the dark/light default.
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("order"), Some(true));
+        assert_eq!(app.active_theme_radius_tauri().card, 6.0);
+        assert_eq!(app.active_theme_radius_tauri().capsule, 8.0);
+    }
+
+    #[test]
+    fn m6b_terminal_font_flows_into_family2_typo() {
+        // The font-swap path reads `active_theme_typography()` (Family-2). After
+        // M6b that returns Consolas for terminal (closing the partial).
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("terminal"), Some(true));
+        assert_eq!(app.active_theme_typography().font_family.as_str(), "Consolas");
+        assert_eq!(app.active_theme_typography_tauri().font_family, "Consolas");
+        // editorial → Georgia, and its widget radius collapses to sharp 0.
+        assert_eq!(app.apply_active_theme_by_id("editorial"), Some(true));
+        assert_eq!(app.active_theme_typography().font_family.as_str(), "Georgia");
+        assert_eq!(app.active_theme_radius().xl.top_left, 0.0);
+    }
+
+    #[test]
+    fn m6b_brutalism_flattens_family2_widget_shadow() {
+        // Angular `none` themes flatten the widget-chrome shadow.
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("brutalism"), Some(true));
+        assert_eq!(app.active_theme_shadow().md, bento_nano_style::Shadow::NONE);
+        assert!(app.active_theme_shadow_tauri().zen.is_empty());
+    }
+
+    #[test]
+    fn m6b_dark_family2_stays_byte_identical() {
+        // §5.3 net: dark's Family-2 tokens must equal DARK_DEFAULT exactly.
+        let app = AppState::new();
+        assert_eq!(app.apply_active_theme_by_id("ocean-blue"), Some(true));
+        assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
+        assert_eq!(app.active_theme_radius(), bento_nano_theme::DARK_DEFAULT.radius);
+        assert_eq!(app.active_theme_shadow(), bento_nano_theme::DARK_DEFAULT.shadow);
+        assert_eq!(
+            app.active_theme_typography().font_family,
+            bento_nano_theme::DARK_DEFAULT.typo.font_family,
+        );
     }
 
     #[test]

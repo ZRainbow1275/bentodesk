@@ -752,11 +752,11 @@ impl Renderer {
         }
         // Wave E: Tauri SSoT tokens for highlight overlay accents.
         // M6a — re-skin from the live theme palette (bound once per fn, §10).
-        use bento_nano_style::tokens as style_tokens;
         let pal = app.active_theme_tauri();
         let fill = highlight_overlay::fill_color_from_tauri_palette(pal);
         let outline = highlight_overlay::outline_color_from_tauri_palette(pal);
-        let radius = highlight_overlay::target_radius_from_tauri_tokens(style_tokens::RADIUS);
+        let radius =
+            highlight_overlay::target_radius_from_tauri_tokens(app.active_theme_radius_tauri());
         for target in overlay.targets().iter().copied() {
             let paint = highlight_overlay::paint_rect(target);
             if paint.width <= 0.0 || paint.height <= 0.0 {
@@ -1033,11 +1033,10 @@ impl Renderer {
         };
         // Wave D: consume Wave B Tauri-token SSoT for the tray panel chrome
         // instead of the legacy `bento-nano-theme` palette.
-        use bento_nano_style::tokens as style_tokens;
         let chrome = stack_tray::StackTrayChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let member_count = member_ids.len();
         let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
@@ -1308,6 +1307,11 @@ impl Renderer {
         // threaded into the pill / morph paint helpers so the whole zone
         // surface re-skins with the active theme (§10: Copy, no re-borrow).
         let pal = app.active_theme_tauri();
+        // M6b — active theme's Tauri-parity shadow stacks (Copy, bound once §10).
+        // The expanded-panel drop band + the collapsed-pill zen halo both read
+        // their per-theme stack from here so e.g. `terminal`'s green glow and
+        // the Angular `none` themes' empty stacks paint correctly.
+        let shadow_tauri = app.active_theme_shadow_tauri();
         let zone_chrome =
             zone_surface_geometry::ZoneSurfaceChrome::from_radius(app.active_theme_radius());
         let item_chrome = item_card::ItemCardChrome::from_tokens(
@@ -1470,14 +1474,11 @@ impl Renderer {
             let stack_member_ids_for_anchor = app.zones.stack_member_ids(zone.id);
             let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone);
             if !zone.is_stack_anchor() {
-                // SHADOW.expanded — single soft drop under the panel band so
-                // the expanded surface lifts off the desktop backdrop, mirror
-                // of the settings panel chrome (`SHADOW.expanded` SSoT).
-                self.fill_rounded_rect(
-                    expanded_layout.panel_shadow,
-                    bento_nano_style::tokens::SHADOW.expanded.color,
-                    radius,
-                )?;
+                // M6b — per-theme `expanded` stack under the panel band so the
+                // expanded surface lifts off the desktop backdrop. `draw_shadow_stack`
+                // grows the panel base rect per layer (the Angular `none` themes
+                // paint nothing here; tinted Rounded themes carry their L2 colour).
+                self.draw_shadow_stack(expanded_layout.panel, shadow_tauri.expanded, radius)?;
             }
             if zone.is_stack_anchor() {
                 let member_count = stack_member_ids_for_anchor
@@ -1600,7 +1601,7 @@ impl Renderer {
                         badge_rect,
                         badge_fill,
                         bento_nano_style::BorderRadius::all(
-                            bento_nano_style::tokens::RADIUS.badge,
+                            app.active_theme_radius_tauri().badge,
                         ),
                     )?;
                     let count_str = format_small_count(zone.items.len());
@@ -2162,8 +2163,10 @@ impl Renderer {
             width: rect.width,
             height: rect.height,
         };
-        self.fill_rounded_rect(shadow_outer, SHADOW.zen.color, border_radius)?;
-        self.fill_rounded_rect(shadow_inner, SHADOW.zen_inner.color, border_radius)?;
+        // M6b — `SHADOW.zen` is now a 2-layer `ShadowStack`; `.outer()`/`.inner()`
+        // recover the pre-M6b `zen`/`zen_inner` single layers byte-for-byte.
+        self.fill_rounded_rect(shadow_outer, SHADOW.zen.outer().color, border_radius)?;
+        self.fill_rounded_rect(shadow_inner, SHADOW.zen.inner().color, border_radius)?;
         self.fill_rounded_rect(rect, ACRYLIC_FALLBACK, border_radius)?;
         // B2 (2026-05-29): Tauri's 0.3s `background`/`border-color` transition
         // is a visual no-op here: the collapsed pill and the expanded panel
@@ -2457,7 +2460,6 @@ impl Renderer {
         // K1 modal-opener arms (keybindings/plugins/theme picker) remain alive
         // as orphan paint paths gated on their own `*_open` Cells. They never
         // fire from M1 hit-test but compile-clean per Ruling B.
-        use bento_nano_style::tokens as style_tokens;
         // M6a — read the live theme palette so the whole Settings paint (panel
         // / header / footer / labels / accent / track) re-skins with the
         // active theme. Bound once; `PaletteTauri: Copy` (§10).
@@ -2494,7 +2496,8 @@ impl Renderer {
         let knob_color = bento_nano_style::Color::WHITE;
         let divider_color = with_alpha(palette.text_primary, 0.08);
         let panel_radius = bento_nano_style::BorderRadius::all(SETTINGS_PANEL_RADIUS);
-        let chip_radius_tokens = style_tokens::RADIUS;
+        // M6b — per-theme card radius for the Settings chip surfaces.
+        let chip_radius_tokens = app.active_theme_radius_tauri();
         let chip_radius = bento_nano_style::BorderRadius::all(chip_radius_tokens.card);
         let header_radius = bento_nano_style::BorderRadius {
             top_left: SETTINGS_PANEL_RADIUS,
@@ -4786,7 +4789,9 @@ impl Renderer {
         let descriptor = tooltip::Tooltip::from_tauri_tokens(
             session.text,
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
+            // tooltip radius is global chrome (same for every theme, design §1.2)
+            // — the per-theme `RadiusTauri` carries the global tooltip/minibar.
+            app.active_theme_radius_tauri(),
             style_tokens::SPACING,
         );
         let pill = tooltip::tooltip_pill_rect(app.viewport);
@@ -4805,7 +4810,8 @@ impl Renderer {
         use bento_nano_style::tokens as style_tokens;
         let bar = bar.with_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
+            // minibar radius is global chrome (same for every theme, design §1.2).
+            app.active_theme_radius_tauri(),
             style_tokens::SPACING,
         );
         let viewport = app.viewport;
@@ -5126,11 +5132,10 @@ impl Renderer {
 
     fn draw_icon_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
         // Wave D: consume Wave B Tauri-token SSoT.
-        use bento_nano_style::tokens as style_tokens;
         let chrome = icon_picker::IconPickerChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = picker_geometry::picker_panel(viewport);
@@ -5238,11 +5243,10 @@ impl Renderer {
 
     fn draw_palette_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
         // Wave D: consume Wave B Tauri-token SSoT.
-        use bento_nano_style::tokens as style_tokens;
         let chrome = palette_picker::PalettePickerChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = picker_geometry::picker_panel(viewport);
@@ -5342,11 +5346,10 @@ impl Renderer {
 
     fn draw_capsule_picker_window(&mut self, app: &AppState) -> Result<(), RenderError> {
         // Wave D: consume Wave B Tauri-token SSoT.
-        use bento_nano_style::tokens as style_tokens;
         let chrome = capsule_picker::CapsulePickerChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = capsule_picker::capsule_picker_panel_rect(viewport);
@@ -5429,8 +5432,8 @@ impl Renderer {
         use bento_nano_style::tokens as style_tokens;
         let chrome = bulk_manager_panel::BulkManagerChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = bulk_manager_panel::bulk_manager_panel_rect(viewport);
@@ -5693,11 +5696,10 @@ impl Renderer {
 
     fn draw_timeline_window(&mut self, app: &AppState) -> Result<(), RenderError> {
         // Wave E: Tauri SSoT tokens for the Timeline panel.
-        use bento_nano_style::tokens as style_tokens;
         let chrome = timeline_panel::TimelinePanelChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = timeline_panel::timeline_panel_rect(viewport);
@@ -5846,10 +5848,9 @@ impl Renderer {
             )?;
             let thumbnail_rect = timeline_detail_thumbnail_rect(panel, detail_x, detail_w);
             // Wave E: Tauri SSoT tokens for the inline snapshot thumbnail.
-            use bento_nano_style::tokens as style_tokens;
             let thumbnail_chrome = snapshot_picker::SnapshotThumbnailChrome::from_tauri_tokens(
                 app.active_theme_tauri(),
-                style_tokens::RADIUS,
+                app.active_theme_radius_tauri(),
             );
             self.draw_snapshot_thumbnail(&active.snapshot, thumbnail_rect, thumbnail_chrome)?;
         }
@@ -5861,8 +5862,8 @@ impl Renderer {
         use bento_nano_style::tokens as style_tokens;
         let chrome = snapshot_picker::SnapshotPickerChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = snapshot_picker::snapshot_picker_panel_rect(viewport);
@@ -6371,11 +6372,10 @@ impl Renderer {
         // selected-stack runtime panels render against the same tokens the
         // Tauri 1.2.4 baseline used. Legacy `from_tokens` constructor is
         // retained for back-compat callers (theme palette mutation tests).
-        use bento_nano_style::tokens as style_tokens;
         let chrome = search_bar::SearchBarChrome::from_tauri_tokens(
             app.active_theme_tauri(),
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = search_bar::search_panel_rect(viewport);
@@ -6532,8 +6532,8 @@ impl Renderer {
         let palette = app.active_theme_tauri();
         let chrome = smart_group_suggestor::SmartGroupSuggestorChrome::from_tauri_tokens(
             palette,
-            style_tokens::RADIUS,
-            style_tokens::SHADOW,
+            app.active_theme_radius_tauri(),
+            app.active_theme_shadow_tauri(),
         );
         let viewport = app.viewport;
         let panel = smart_group_suggestor::suggestor_panel_rect(viewport);
@@ -6905,6 +6905,33 @@ impl Renderer {
         // SAFETY: rt valid; rr lives for the call; brush COM-ref-counted.
         unsafe {
             rt.FillRoundedRectangle(&rr, &brush);
+        }
+        Ok(())
+    }
+
+    /// M6b — paint a multi-layer [`ShadowStack`] under `base` as a simulated
+    /// soft fill (the existing grow-and-fill idiom, one fill per layer, no D2D
+    /// blur effect on the hot path). Layers draw back-to-front so the inner
+    /// surface lift sits under the dominant outer drop. Each layer grows the
+    /// rect by `blur + spread`, so `terminal`'s `0 0 0 1px` ring (spread=1,
+    /// blur=0) paints a 1-DIP outline and `neo`'s `-6 -6` light extrude shifts
+    /// up-left (negative offsets are honoured — the rect simply translates).
+    /// An empty stack (`flat`/`brutalism`/`editorial`) is a no-op.
+    fn draw_shadow_stack(
+        &self,
+        base: bento_nano_style::Rect,
+        stack: bento_nano_style::ShadowStack,
+        radius: BorderRadius,
+    ) -> Result<(), RenderError> {
+        for layer in stack.layers() {
+            let grow = layer.blur.max(0.0) + layer.spread.max(0.0);
+            let rect = bento_nano_style::Rect {
+                x: base.x + layer.offset_x - grow,
+                y: base.y + layer.offset_y - grow,
+                width: base.width + grow * 2.0,
+                height: base.height + grow * 2.0,
+            };
+            self.fill_rounded_rect(rect, layer.color, radius)?;
         }
         Ok(())
     }

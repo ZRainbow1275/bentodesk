@@ -162,11 +162,19 @@ impl BorderRadius {
 
 /// Drop shadow descriptor. Renderer wires this to D2D `CLSID_D2D1Shadow` when
 /// the `shadow` feature is enabled in `bento-nano-platform`.
+///
+/// M6b — gained a `spread` field (the CSS `box-shadow` 4th length). Most tokens
+/// use `spread == 0.0`; the `terminal` theme's `0 0 0 1px` ring is `spread == 1`,
+/// `blur == 0` — a hairline outline with no soft falloff. The simulated soft-fill
+/// render path grows the rect by `blur + spread` (see `render.rs::draw_shadow_stack`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shadow {
     pub offset_x: f32,
     pub offset_y: f32,
     pub blur: f32,
+    /// CSS `box-shadow` 4th length. 0 for every drop/glow token; `terminal`'s
+    /// ring uses `spread == 1.0` with `blur == 0.0`.
+    pub spread: f32,
     pub color: Color,
 }
 
@@ -175,8 +183,101 @@ impl Shadow {
         offset_x: 0.0,
         offset_y: 0.0,
         blur: 0.0,
+        spread: 0.0,
         color: Color::TRANSPARENT,
     };
+
+    /// Back-compat const ctor for the common `spread == 0.0` drop shadow, so a
+    /// call-site that wants the pre-M6b 4-field shape stays one line. Equivalent
+    /// to `Shadow { offset_x, offset_y, blur, spread: 0.0, color }`.
+    pub const fn drop(offset_x: f32, offset_y: f32, blur: f32, color: Color) -> Self {
+        Self {
+            offset_x,
+            offset_y,
+            blur,
+            spread: 0.0,
+            color,
+        }
+    }
+}
+
+/// Multi-layer shadow stack. A fixed `[Shadow; 2]` inline array + a `len`
+/// counter — covers every Tauri `presets.ts` shadow token (each has ≤2
+/// comma-separated CSS layers: the Rounded group's 2-layer drop, `neo`'s
+/// dual opposite-offset extrude, `cyberpunk`'s 2-colour glow, `order`'s single
+/// flat layer, and the Angular `none` themes' empty stack).
+///
+/// `Copy`, stack-only, zero-alloc (§10) — deliberately NOT a `SmallVec` so the
+/// leaf `style` crate stays free of the `smallvec` dep (§8). The 2-layer cap is
+/// sufficient for all 51 builtin tokens; a hypothetical 3-layer custom theme
+/// would have its 3rd layer dropped by the const builders.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowStack {
+    layers: [Shadow; 2],
+    /// 0 = none (flat/brutalism/editorial), 1 = single layer (order), 2 = dual.
+    len: u8,
+}
+
+impl ShadowStack {
+    /// Empty stack — paints no shadow (the Angular `none` themes).
+    pub const NONE: ShadowStack = ShadowStack {
+        layers: [Shadow::NONE, Shadow::NONE],
+        len: 0,
+    };
+
+    /// Single-layer stack (e.g. `order`'s `0 1px 3px`).
+    pub const fn one(a: Shadow) -> Self {
+        Self {
+            layers: [a, Shadow::NONE],
+            len: 1,
+        }
+    }
+
+    /// Two-layer stack. Drawn back-to-front: `a` (the inner / surface lift) is
+    /// painted first, `b` (the outer / dominant drop) on top.
+    pub const fn two(a: Shadow, b: Shadow) -> Self {
+        Self {
+            layers: [a, b],
+            len: 2,
+        }
+    }
+
+    /// The active layers in back-to-front draw order. Length is `0..=2`.
+    pub fn layers(&self) -> &[Shadow] {
+        let n = (self.len as usize).min(2);
+        &self.layers[..n]
+    }
+
+    /// `true` when the stack paints nothing (the Angular `none` themes).
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Number of active layers (`0..=2`).
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// The dominant (outermost) layer — `layers()[len-1]`. Empty stacks return
+    /// [`Shadow::NONE`]. Used by single-`Shadow` chrome consumers that paint one
+    /// soft drop; for `dark` this equals the pre-M6b `SHADOW.expanded` / `.zen`
+    /// outer layer byte-for-byte (the §5.3 byte-parity contract).
+    pub const fn outer(&self) -> Shadow {
+        match self.len {
+            0 => Shadow::NONE,
+            1 => self.layers[0],
+            _ => self.layers[1],
+        }
+    }
+
+    /// The innermost (first-drawn) layer — `layers()[0]`. Empty stacks return
+    /// [`Shadow::NONE`]. For `dark` this equals the pre-M6b `*_inner` layer.
+    pub const fn inner(&self) -> Shadow {
+        match self.len {
+            0 => Shadow::NONE,
+            _ => self.layers[0],
+        }
+    }
 }
 
 /// Logical 2D rectangle in DIPs.
@@ -325,5 +426,90 @@ pub mod dpi {
             assert!((logical.width - 480.0).abs() < 1e-6);
             assert!((logical.height - 320.0).abs() < 1e-6);
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// M6b — Shadow `spread` + `ShadowStack` pure tests (no GPU/HWND — run under
+// `cargo test -p bento-nano-style --lib`).
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod shadow_stack_tests {
+    use super::{Color, Shadow, ShadowStack};
+
+    #[test]
+    fn drop_ctor_sets_spread_zero() {
+        let s = Shadow::drop(0.0, 8.0, 32.0, Color::BLACK);
+        assert_eq!(s.spread, 0.0);
+        assert_eq!(s.offset_y, 8.0);
+        assert_eq!(s.blur, 32.0);
+        assert_eq!(s.color, Color::BLACK);
+    }
+
+    #[test]
+    fn none_shadow_has_spread_zero_and_transparent() {
+        assert_eq!(Shadow::NONE.spread, 0.0);
+        assert_eq!(Shadow::NONE.color, Color::TRANSPARENT);
+    }
+
+    #[test]
+    fn stack_none_is_empty() {
+        assert!(ShadowStack::NONE.is_empty());
+        assert_eq!(ShadowStack::NONE.len(), 0);
+        assert_eq!(ShadowStack::NONE.layers().len(), 0);
+        // Empty stack convenience accessors fall back to NONE.
+        assert_eq!(ShadowStack::NONE.outer(), Shadow::NONE);
+        assert_eq!(ShadowStack::NONE.inner(), Shadow::NONE);
+    }
+
+    #[test]
+    fn stack_one_has_single_layer() {
+        let a = Shadow::drop(0.0, 1.0, 3.0, Color::from_u8(0, 0, 0, 0x14));
+        let s = ShadowStack::one(a);
+        assert!(!s.is_empty());
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.layers().len(), 1);
+        // outer == inner == the only layer.
+        assert_eq!(s.outer(), a);
+        assert_eq!(s.inner(), a);
+    }
+
+    #[test]
+    fn stack_two_orders_back_to_front() {
+        // `a` is the inner (drawn first), `b` the outer (dominant drop).
+        let a = Shadow::drop(0.0, 2.0, 8.0, Color::from_u8(0, 0, 0, 0x26));
+        let b = Shadow::drop(0.0, 8.0, 32.0, Color::from_u8(0, 0, 0, 0x40));
+        let s = ShadowStack::two(a, b);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.layers(), &[a, b]); // back-to-front
+        assert_eq!(s.inner(), a);
+        assert_eq!(s.outer(), b);
+    }
+
+    #[test]
+    fn ring_layer_uses_spread_not_blur() {
+        // terminal's `0 0 0 1px` ring: spread=1, blur=0 — a hairline outline.
+        let ring = Shadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 0.0,
+            spread: 1.0,
+            color: Color::from_u8(0x00, 0xFF, 0x9C, 0x40),
+        };
+        assert_eq!(ring.blur, 0.0);
+        assert_eq!(ring.spread, 1.0);
+        // The render grow term is `blur + spread` = 1.0 — a 1-DIP outline.
+        assert_eq!(ring.blur.max(0.0) + ring.spread.max(0.0), 1.0);
+    }
+
+    #[test]
+    fn neo_dual_has_negative_offset_light_extrude() {
+        // neo: +offset dark + −offset light — the −6,−6 layer shifts up-left.
+        let dark = Shadow::drop(6.0, 6.0, 12.0, Color::from_u8(0xA3, 0xB1, 0xC6, 0x99));
+        let light = Shadow::drop(-6.0, -6.0, 12.0, Color::from_u8(0xFF, 0xFF, 0xFF, 0xCC));
+        let s = ShadowStack::two(dark, light);
+        assert_eq!(s.layers()[1].offset_x, -6.0);
+        assert_eq!(s.layers()[1].offset_y, -6.0);
     }
 }

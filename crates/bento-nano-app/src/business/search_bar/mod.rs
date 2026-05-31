@@ -118,7 +118,8 @@ impl SearchBarChrome {
         shadow: ShadowTauri,
     ) -> Self {
         Self {
-            panel_shadow: shadow.expanded,
+            // M6b — `expanded` is a `ShadowStack`; consume the outer layer.
+            panel_shadow: shadow.expanded.outer(),
             panel_radius: BorderRadius::all(radius.expanded),
             input_radius: BorderRadius::all(radius.card),
             row_radius: BorderRadius::all(radius.card),
@@ -469,6 +470,7 @@ mod tests {
             offset_x: 2.0,
             offset_y: 5.0,
             blur: 13.0,
+            spread: 0.0,
             color: Color::from_u8(0x10, 0x20, 0x30, 0x99),
         };
 
@@ -493,6 +495,7 @@ mod tests {
             offset_x: 3.0,
             offset_y: 5.0,
             blur: 11.0,
+            spread: 0.0,
             color: Color::from_u8(0x10, 0x20, 0x30, 0x40),
         };
 
@@ -659,6 +662,7 @@ mod tests {
         assert_eq!(chrome.input_radius, BorderRadius::all(style_tokens::RADIUS.card));
         assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
         assert_eq!(chrome.close_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded);
+        // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
+        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }
 }

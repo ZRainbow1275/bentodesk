@@ -643,6 +643,7 @@ fn bulk_manager_chrome_accepts_explicit_radius_shadow_tokens() {
         offset_x: 2.0,
         offset_y: 5.0,
         blur: 13.0,
+        spread: 0.0,
         color: Color::from_u8(0x10, 0x20, 0x30, 0x99),
     };
 
@@ -669,6 +670,7 @@ fn bulk_manager_panel_shadow_rect_uses_token_shadow_geometry() {
         offset_x: 3.0,
         offset_y: 5.0,
         blur: 11.0,
+        spread: 0.0,
         color: Color::from_u8(0x10, 0x20, 0x30, 0x40),
     };
 
@@ -742,5 +744,6 @@ fn bulk_manager_chrome_from_tauri_tokens_consumes_wave_b_ssot() {
     assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
     assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
     assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
-    assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded);
+    // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
+    assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
 }

@@ -14,24 +14,11 @@ pub struct ShadowTokens {
 }
 
 pub const DEFAULT: ShadowTokens = ShadowTokens {
-    sm: Shadow {
-        offset_x: 0.0,
-        offset_y: 1.0,
-        blur: 4.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x29),
-    },
-    md: Shadow {
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 12.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x40),
-    },
-    lg: Shadow {
-        offset_x: 0.0,
-        offset_y: 8.0,
-        blur: 24.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x66),
-    },
+    // M6b — `Shadow` gained a `spread` field; `Shadow::drop` is the spread=0
+    // const ctor, so these stay byte-identical (the §5.2 regression net).
+    sm: Shadow::drop(0.0, 1.0, 4.0, Color::from_u8(0x00, 0x00, 0x00, 0x29)),
+    md: Shadow::drop(0.0, 2.0, 12.0, Color::from_u8(0x00, 0x00, 0x00, 0x40)),
+    lg: Shadow::drop(0.0, 8.0, 24.0, Color::from_u8(0x00, 0x00, 0x00, 0x66)),
 };
 
 #[cfg(test)]

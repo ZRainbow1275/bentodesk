@@ -181,6 +181,7 @@ mod tests {
             offset_x: 3.0,
             offset_y: 5.0,
             blur: 11.0,
+            spread: 0.0,
             color: Color::from_u8(0x10, 0x20, 0x30, 0x40),
         };
 

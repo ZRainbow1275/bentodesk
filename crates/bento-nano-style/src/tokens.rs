@@ -37,17 +37,37 @@
 //! - Popover family aliases `SURFACE_EXPANDED` + `BLUR_EXPANDED` +
 //!   `SHADOW_EXPANDED` + `RADIUS.expanded`; documented as deliberate.
 
-use crate::{Color, Shadow};
+use crate::{Color, Shadow, ShadowStack};
 
 // M6a — the 15 remaining builtin theme palettes live in a submodule so this
 // file stays under the §15 800-line cap. Re-exported at the `tokens` root so
 // callers keep using `style::tokens::PALETTE_<ID>`.
 pub mod theme_palettes;
 
+// M6b — per-theme radius / shadow / font tables live in their own submodules
+// for the same §15 reason. `tokens.rs` was 784 lines pre-M6b (16 under the
+// 800 cap); the per-theme const tables would have blown it. Re-exported at
+// the `tokens` root so callers use `style::tokens::radius_tauri_for_theme(id)`
+// etc. the same way they use `palette_tauri_for_theme`.
+pub mod theme_radius;
+pub mod theme_shadow;
+pub mod theme_typography;
+
 pub use theme_palettes::{
     PALETTE_BRUTALISM, PALETTE_CYBERPUNK, PALETTE_EDITORIAL, PALETTE_FLAT, PALETTE_FOREST,
     PALETTE_FOREST_GREEN, PALETTE_FROSTED, PALETTE_MIDNIGHT, PALETTE_NEO, PALETTE_OCEAN_BLUE,
     PALETTE_ORDER, PALETTE_ROSE_GOLD, PALETTE_SOLID, PALETTE_SUNSET, PALETTE_TERMINAL,
+};
+pub use theme_radius::{
+    RADIUS_CYBERPUNK, RADIUS_FLAT, RADIUS_NEO, RADIUS_ORDER, RADIUS_SHARP, RADIUS_TERMINAL,
+    radius_tauri_for_theme,
+};
+pub use theme_shadow::{
+    SHADOW_CYBERPUNK, SHADOW_DARK, SHADOW_NEO, SHADOW_NONE, SHADOW_ORDER, SHADOW_TERMINAL,
+    shadow_tauri_for_theme,
+};
+pub use theme_typography::{
+    TYPOGRAPHY_EDITORIAL, TYPOGRAPHY_TERMINAL, typography_tauri_for_theme,
 };
 
 // =============================================================================
@@ -291,28 +311,28 @@ pub const SPACING: SpacingTauri = SpacingTauri {
 };
 
 // =============================================================================
-// Shadow — 4 presets (zen / expanded / item-hover / shadow-ink).
+// Shadow — 3 multi-layer stacks (zen / expanded / item-hover) + 3 ink presets.
 //
-// CSS uses two-layer shadows (e.g. shadow-zen = layer1 + layer2). The D2D
-// shadow effect renders one shadow per call; presets here are the dominant
-// (outer) layer of each Tauri token. The renderer composes the inner layer
-// via a second draw if needed (Wave C scope).
+// M6b — each of the three CSS box-shadow tokens (`--shadow-zen` etc.) is a
+// comma-separated multi-layer shadow; nano now expresses that as a
+// `ShadowStack`. Layer order is back-to-front: `layers()[0]` is the inner
+// surface lift, `layers()[len-1]` (`.outer()`) the dominant drop. The
+// per-theme variants live in `theme_shadow.rs`; this global `SHADOW` is the
+// `dark`/Rounded baseline (`shadow_tauri_for_theme("dark") == SHADOW`,
+// keeping every Wave-B byte-parity test green via `.outer()`).
+//
+// The `ink_*` widget-legacy tints stay single-layer `Shadow` (consumed by
+// `bento-nano-widget` card/popup/modal chrome — never stacked).
 // =============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShadowTauri {
-    /// `--shadow-zen` outer: `0 8px 32px rgba(0,0,0,0.25)`.
-    pub zen: Shadow,
-    /// `--shadow-zen` inner: `0 2px 8px rgba(0,0,0,0.15)`.
-    pub zen_inner: Shadow,
-    /// `--shadow-expanded` outer: `0 16px 48px rgba(0,0,0,0.40)`.
-    pub expanded: Shadow,
-    /// `--shadow-expanded` inner: `0 4px 16px rgba(0,0,0,0.20)`.
-    pub expanded_inner: Shadow,
-    /// `--shadow-item-hover` outer: `0 8px 24px rgba(0,0,0,0.08)`.
-    pub item_hover: Shadow,
-    /// `--shadow-item-hover` inner: `0 2px 8px rgba(0,0,0,0.12)`.
-    pub item_hover_inner: Shadow,
+    /// `--shadow-zen`: inner `0 2px 8px #000@.15` + outer `0 8px 32px #000@.25`.
+    pub zen: ShadowStack,
+    /// `--shadow-expanded`: inner `0 4px 16px #000@.20` + outer `0 16px 48px #000@.40`.
+    pub expanded: ShadowStack,
+    /// `--shadow-item-hover`: inner `0 2px 8px #000@.12` + outer `0 8px 24px #000@.08`.
+    pub item_hover: ShadowStack,
     /// Drop-shadow ink for the BentoCard chrome (legacy widget literal).
     pub ink_card: Shadow,
     /// Drop-shadow ink for the Popup primitive (legacy widget literal).
@@ -322,63 +342,26 @@ pub struct ShadowTauri {
 }
 
 pub const SHADOW: ShadowTauri = ShadowTauri {
-    zen: Shadow {
-        offset_x: 0.0,
-        offset_y: 8.0,
-        blur: 32.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x40),
-    },
-    zen_inner: Shadow {
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 8.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x26),
-    },
-    expanded: Shadow {
-        offset_x: 0.0,
-        offset_y: 16.0,
-        blur: 48.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x66),
-    },
-    expanded_inner: Shadow {
-        offset_x: 0.0,
-        offset_y: 4.0,
-        blur: 16.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x33),
-    },
-    item_hover: Shadow {
-        offset_x: 0.0,
-        offset_y: 8.0,
-        blur: 24.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x14),
-    },
-    item_hover_inner: Shadow {
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 8.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x1F),
-    },
+    // zen — inner (surface lift) then outer (dominant drop). `.outer()` == the
+    // pre-M6b single `SHADOW.zen`; `.inner()` == the pre-M6b `SHADOW.zen_inner`.
+    zen: ShadowStack::two(
+        Shadow::drop(0.0, 2.0, 8.0, Color::from_u8(0x00, 0x00, 0x00, 0x26)),
+        Shadow::drop(0.0, 8.0, 32.0, Color::from_u8(0x00, 0x00, 0x00, 0x40)),
+    ),
+    expanded: ShadowStack::two(
+        Shadow::drop(0.0, 4.0, 16.0, Color::from_u8(0x00, 0x00, 0x00, 0x33)),
+        Shadow::drop(0.0, 16.0, 48.0, Color::from_u8(0x00, 0x00, 0x00, 0x66)),
+    ),
+    item_hover: ShadowStack::two(
+        Shadow::drop(0.0, 2.0, 8.0, Color::from_u8(0x00, 0x00, 0x00, 0x1F)),
+        Shadow::drop(0.0, 8.0, 24.0, Color::from_u8(0x00, 0x00, 0x00, 0x14)),
+    ),
     // Widget-legacy ink tints — preserved byte-for-byte from the pre-Wave-B
     // hardcoded literals in `bento-nano-widget` so the migration is visually
     // neutral. See `research/token-mapping.md` for the call-site mapping.
-    ink_card: Shadow {
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 12.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x40),
-    },
-    ink_popup: Shadow {
-        offset_x: 0.0,
-        offset_y: 4.0,
-        blur: 16.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x66),
-    },
-    ink_modal: Shadow {
-        offset_x: 0.0,
-        offset_y: 8.0,
-        blur: 32.0,
-        color: Color::from_u8(0x00, 0x00, 0x00, 0x99),
-    },
+    ink_card: Shadow::drop(0.0, 2.0, 12.0, Color::from_u8(0x00, 0x00, 0x00, 0x40)),
+    ink_popup: Shadow::drop(0.0, 4.0, 16.0, Color::from_u8(0x00, 0x00, 0x00, 0x66)),
+    ink_modal: Shadow::drop(0.0, 8.0, 32.0, Color::from_u8(0x00, 0x00, 0x00, 0x99)),
 };
 
 // =============================================================================
@@ -634,14 +617,29 @@ mod tests {
     #[test]
     fn shadow_zen_outer_denser_than_inner() {
         // Outer layer carries the visible drop, inner is the surface lift.
-        assert!(SHADOW.zen.color.a > SHADOW.zen_inner.color.a);
+        // M6b — `zen` is now a 2-layer `ShadowStack`; `.outer()`/`.inner()`
+        // recover the pre-M6b single `zen`/`zen_inner` layers byte-for-byte.
+        assert!(SHADOW.zen.outer().color.a > SHADOW.zen.inner().color.a);
     }
 
     #[test]
     fn shadow_expanded_outer_denser_than_zen_outer() {
         // Expanded surfaces (popover/dialog) sit on a heavier shadow than
         // collapsed pills (Wave A: 0.40 vs 0.25 outer alpha).
-        assert!(SHADOW.expanded.color.a > SHADOW.zen.color.a);
+        assert!(SHADOW.expanded.outer().color.a > SHADOW.zen.outer().color.a);
+    }
+
+    #[test]
+    fn shadow_zen_outer_matches_pre_m6b_single_layer() {
+        // §5.3 byte-parity contract: the dark `zen` outer layer must equal the
+        // pre-M6b `0 8px 32px #000@.25` and the inner the `0 2px 8px #000@.15`.
+        assert_eq!(SHADOW.zen.outer().offset_y, 8.0);
+        assert_eq!(SHADOW.zen.outer().blur, 32.0);
+        assert_eq!(SHADOW.zen.outer().color, Color::from_u8(0x00, 0x00, 0x00, 0x40));
+        assert_eq!(SHADOW.zen.inner().offset_y, 2.0);
+        assert_eq!(SHADOW.zen.inner().blur, 8.0);
+        assert_eq!(SHADOW.zen.outer().spread, 0.0);
+        assert_eq!(SHADOW.zen.len(), 2);
     }
 
     #[test]

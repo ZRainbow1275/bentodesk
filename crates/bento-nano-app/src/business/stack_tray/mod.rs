@@ -127,7 +127,8 @@ impl StackTrayChrome {
         shadow: ShadowTauri,
     ) -> Self {
         Self {
-            panel_shadow: shadow.expanded,
+            // M6b — `expanded` is a `ShadowStack`; consume the outer layer.
+            panel_shadow: shadow.expanded.outer(),
             panel_radius: BorderRadius::all(radius.expanded),
             row_radius: BorderRadius::all(radius.card),
             button_radius: BorderRadius::all(radius.card),
@@ -603,7 +604,8 @@ mod tests {
         assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
         assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
         assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded);
+        // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
+        assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }
 
     fn anchor() -> Zone {
@@ -679,18 +681,21 @@ mod tests {
                 offset_x: 1.0,
                 offset_y: 2.0,
                 blur: 3.0,
+                spread: 0.0,
                 color: Color::from_u8(0x01, 0x01, 0x01, 0x20),
             },
             md: Shadow {
                 offset_x: 4.0,
                 offset_y: 5.0,
                 blur: 6.0,
+                spread: 0.0,
                 color: Color::from_u8(0x02, 0x02, 0x02, 0x40),
             },
             lg: Shadow {
                 offset_x: 7.0,
                 offset_y: 8.0,
                 blur: 9.0,
+                spread: 0.0,
                 color: Color::from_u8(0x03, 0x03, 0x03, 0x60),
             },
         };
@@ -716,6 +721,7 @@ mod tests {
             offset_x: 3.0,
             offset_y: 7.0,
             blur: 11.0,
+            spread: 0.0,
             color: Color::BLACK,
         };
 
