@@ -42,7 +42,7 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::core::Interface;
 
-use crate::d3d::device as d3d_device;
+use crate::d3d::{D3dDevice, device as d3d_device};
 use crate::errors::{PlatformError, ok};
 
 /// Process-wide D2D factory + device pair. Created once, never freed.
@@ -63,20 +63,27 @@ unsafe impl Sync for D2dFactory {}
 static FACTORY: RwLock<Option<Arc<D2dFactory>>> = RwLock::new(None);
 
 /// Lazy D2D factory accessor. Clones the cached `Arc` out of the read guard so
-/// no lock is held across the COM calls in `create_factory` (which itself calls
-/// the sibling `d3d::device()` — a different lock, cloned-out immediately, so no
-/// re-entrancy cycle).
+/// no lock is held across the COM calls in `create_factory`.
+///
+/// Mc-2b CRITICAL (design §A): the sibling `d3d::device()` is acquired (and its
+/// lock RELEASED, holding only the `Arc`) BEFORE the D2D write lock is taken —
+/// `create_factory` no longer reaches into `d3d::device()` while the D2D guard is
+/// live. Holding a singleton's guard across a sibling `device()` call is a latent
+/// re-entrancy / deadlock risk, so the d3d Arc is hoisted out first.
 pub fn factory() -> Result<Arc<D2dFactory>, PlatformError> {
     if let Some(f) = FACTORY.read().ok().and_then(|g| g.clone()) {
         return Ok(f);
     }
+    // Acquire the sibling D3D device FIRST — this takes and releases the D3D
+    // lock, leaving us holding only the `Arc`. NO D2D lock is held here.
+    let d3d = d3d_device()?;
     let mut w = FACTORY
         .write()
         .map_err(|_| PlatformError::Init("D2D factory RwLock poisoned"))?;
     if let Some(f) = w.as_ref() {
         return Ok(f.clone());
     }
-    let created = Arc::new(create_factory()?);
+    let created = Arc::new(create_factory(&d3d)?);
     *w = Some(created.clone());
     Ok(created)
 }
@@ -84,17 +91,28 @@ pub fn factory() -> Result<Arc<D2dFactory>, PlatformError> {
 /// Mc-2b — tear down the cached D2D factory and rebuild it over the (already
 /// recreated) D3D device. Called by `recover_device_chain` AFTER `d3d::rebuild`.
 /// Does not bump the shared device generation — the orchestrator does that once.
+///
+/// Mc-2b CRITICAL (design §A): same hoist as `factory()` — the d3d Arc is taken
+/// before the D2D write lock so no D2D guard is held across the sibling
+/// `d3d::device()` call.
 pub fn rebuild() -> Result<Arc<D2dFactory>, PlatformError> {
+    // Acquire the (already recreated) sibling D3D device FIRST; releases the D3D
+    // lock before we take the D2D write lock below.
+    let d3d = d3d_device()?;
     let mut w = FACTORY
         .write()
         .map_err(|_| PlatformError::Init("D2D factory RwLock poisoned"))?;
     *w = None;
-    let created = Arc::new(create_factory()?);
+    let created = Arc::new(create_factory(&d3d)?);
     *w = Some(created.clone());
     Ok(created)
 }
 
-fn create_factory() -> Result<D2dFactory, PlatformError> {
+/// Build a fresh `D2dFactory` over the supplied (already-acquired) D3D device.
+/// Takes the `D3dDevice` by reference rather than calling `d3d::device()` itself
+/// so the caller can hoist the sibling acquisition outside the D2D write lock
+/// (Mc-2b re-entrancy rule, design §A).
+fn create_factory(d3d: &D3dDevice) -> Result<D2dFactory, PlatformError> {
     let opts = D2D1_FACTORY_OPTIONS {
         debugLevel: Default::default(),
     };
@@ -103,7 +121,6 @@ fn create_factory() -> Result<D2dFactory, PlatformError> {
         D2D1CreateFactory::<ID2D1Factory1>(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&opts))
     })?;
 
-    let d3d = d3d_device()?;
     // Spec §15.1 — Interface::cast is the canonical COM cross-cast.
     let dxgi_dev: IDXGIDevice = ok("D3D::cast<IDXGIDevice>", d3d.device.cast())?;
     // SAFETY: factory + dxgi_dev valid; CreateDevice expects DXGI device.

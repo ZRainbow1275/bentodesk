@@ -222,10 +222,13 @@ impl Renderer {
         // #19-B (2026-05-31) — resolve the UI default against the installed
         // system fonts. On a normal Windows "Microsoft YaHei UI" is present so
         // this returns the same literal as before (Q2 pixel-1:1); on a stripped
-        // SKU it falls back through Segoe UI / Tahoma / MS Shell Dlg 2.
+        // SKU it falls back through Segoe UI / Tahoma. ("MS Shell Dlg 2" is a
+        // GDI alias DWrite's FindFamilyName cannot resolve — it would always
+        // probe-miss — and the resolver's universal tail is already Tahoma, so
+        // it is omitted as dead weight.)
         let ui_family: &'static str = dwrite::resolve_default_family(
             dwrite::FontRole::Ui,
-            &["Microsoft YaHei UI", "Segoe UI", "Tahoma", "MS Shell Dlg 2"],
+            &["Microsoft YaHei UI", "Segoe UI", "Tahoma"],
         );
         let text_format = dwrite::text_format_from_family_name_with_metrics(
             ui_family,

@@ -68,11 +68,87 @@ impl fmt::Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
+/// `DXGI_ERROR_DEVICE_REMOVED` — the GPU was physically removed, the driver was
+/// upgraded, or a TDR removed the device.
+const DXGI_ERROR_DEVICE_REMOVED: i32 = 0x887A_0005u32 as i32;
+/// `DXGI_ERROR_DEVICE_RESET` — the device failed because of a badly-formed
+/// command (effectively a device loss for our purposes).
+const DXGI_ERROR_DEVICE_RESET: i32 = 0x887A_0007u32 as i32;
+/// `DXGI_ERROR_DEVICE_HUNG` — the device hung (often the cause of a TDR).
+const DXGI_ERROR_DEVICE_HUNG: i32 = 0x887A_0006u32 as i32;
+/// `D2DERR_RECREATE_TARGET` — the canonical D2D device-loss surface returned by
+/// `ID2D1DeviceContext::EndDraw`; the render target (and its device) must be
+/// recreated.
+const D2DERR_RECREATE_TARGET: i32 = 0x8899_000Cu32 as i32;
+
 /// Convert a `windows::core::Result<T>` directly into `Result<T, PlatformError>`.
+///
+/// Mc-2b — device-loss centralisation: BEFORE the generic `Hresult` mapping we
+/// classify the four device-lost HRESULTs (DXGI removed / reset / hung, plus the
+/// D2D `D2DERR_RECREATE_TARGET` that `EndDraw` returns) into
+/// [`PlatformError::DeviceLost`]. This routes *every* COM call funnelled through
+/// `ok()` — `EndDraw`, DComp `Commit`, etc. — into `recover_device_chain` instead
+/// of burning a fatal generic HRESULT. `present()` / `resize()` already classify
+/// and return `DeviceLost` early, so they never reach here for those codes — this
+/// is purely additive, no double-handling.
+///
+/// §10 hot-path discipline: the classification is a handful of integer compares
+/// on the error path only — no allocation, no `format!`.
 #[inline]
 pub fn ok<T>(ctx: &'static str, r: windows::core::Result<T>) -> Result<T, PlatformError> {
-    r.map_err(|e| PlatformError::Hresult {
-        ctx,
-        hr: e.code().0,
+    r.map_err(|e| {
+        let hr = e.code().0;
+        if hr == DXGI_ERROR_DEVICE_REMOVED
+            || hr == DXGI_ERROR_DEVICE_RESET
+            || hr == DXGI_ERROR_DEVICE_HUNG
+            || hr == D2DERR_RECREATE_TARGET
+        {
+            PlatformError::DeviceLost
+        } else {
+            PlatformError::Hresult { ctx, hr }
+        }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `windows::core::Result<()>` carrying the given HRESULT as an error.
+    fn err_with(code: i32) -> windows::core::Result<()> {
+        Err(windows::core::Error::from_hresult(
+            windows::core::HRESULT(code),
+        ))
+    }
+
+    #[test]
+    fn ok_classifies_device_lost_hresults() {
+        // Mc-2b — the four device-lost codes (DXGI removed/reset/hung +
+        // D2DERR_RECREATE_TARGET from EndDraw) must surface as DeviceLost so the
+        // shell chokepoint can recreate the device chain.
+        for code in [
+            0x887A_0005u32 as i32, // DXGI_ERROR_DEVICE_REMOVED
+            0x887A_0007u32 as i32, // DXGI_ERROR_DEVICE_RESET
+            0x887A_0006u32 as i32, // DXGI_ERROR_DEVICE_HUNG
+            0x8899_000Cu32 as i32, // D2DERR_RECREATE_TARGET (EndDraw)
+        ] {
+            match ok("t", err_with(code)) {
+                Err(PlatformError::DeviceLost) => {}
+                other => panic!("0x{code:08X} should map to DeviceLost, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ok_keeps_non_device_lost_as_hresult() {
+        // E_FAIL is a genuine failure, not a device loss — it must still route
+        // through the generic Hresult arm unchanged.
+        match ok("ctx", err_with(0x8000_4005u32 as i32)) {
+            Err(PlatformError::Hresult { ctx, hr }) => {
+                assert_eq!(ctx, "ctx");
+                assert_eq!(hr, 0x8000_4005u32 as i32);
+            }
+            other => panic!("E_FAIL should map to Hresult, got {other:?}"),
+        }
+    }
 }

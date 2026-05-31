@@ -140,8 +140,9 @@ pub fn family_is_available(family: &str) -> bool {
 /// Resolve the installed font family for `role`, preferring the families in
 /// `preferred` (highest priority first). Returns the FIRST family that DWrite
 /// confirms is installed; if none are present, returns the role's universal
-/// tail (`MS Shell Dlg 2` for UI/Display, `Courier New` for Monospace — both
-/// present since XP).
+/// tail (`Tahoma` for UI/Display, `Courier New` for Monospace — both present
+/// since XP; `MS Shell Dlg 2` is a GDI alias DWrite's `FindFamilyName` cannot
+/// resolve, so it is deliberately NOT used as the tail).
 ///
 /// The result is cached per role in a [`OnceLock`], so the
 /// GetSystemFontCollection / FindFamilyName probe runs at most once per role
@@ -394,7 +395,7 @@ mod tests {
     #[test]
     fn display_role_universal_tail_is_proportional() {
         // Exercise the Display variant end-to-end with an absent preferred set
-        // so the universal tail (MS Shell Dlg 2) is returned.
+        // so the universal tail (Tahoma) is returned.
         let display = resolve_default_family(FontRole::Display, &["NoSuchFamily-zzz-Display"]);
         assert_ne!(display, "NoSuchFamily-zzz-Display");
         assert!(family_is_available(display));
