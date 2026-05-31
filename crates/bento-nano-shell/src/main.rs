@@ -23302,7 +23302,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "0x40000015 quarantine — real-FS stealth-hide abort, see receipts/M0 §2b; needs WinDbg (M5)"]
     fn add_item_accepts_real_file_under_custom_desktop_and_persists() {
         let root = test_app_root();
         let zones_path = scratch_zones_path("item-add");
@@ -23384,7 +23383,6 @@ mod tests {
     /// stealth path swallowed), this test fails — proving that what the
     /// programmatic R3 hand-test can't see is in fact functional.
     #[test]
-    #[ignore = "0x40000015 quarantine — real-FS stealth-hide abort, see receipts/M0 §2b; needs WinDbg (M5)"]
     fn alpha2_wm_dropfiles_chain_runs_stealth_hide_for_each_dropped_file() {
         let root = test_app_root();
         let zones_path = scratch_zones_path("alpha2-dropfiles-stealth");
@@ -23482,7 +23480,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "0x40000015 quarantine — real-FS stealth-hide abort, see receipts/M0 §2b; needs WinDbg (M5)"]
     fn add_item_rejects_missing_and_outside_desktop_with_visible_status() {
         let root = test_app_root();
         let zones_path = scratch_zones_path("item-add-reject");
@@ -24549,7 +24546,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires interactive desktop — ensure_aux_window→create_window/Renderer::create; lift on real-desktop E2E"]
+    #[ignore = "requires interactive desktop — creates a real D3D/DComp window via ensure_aux_window; passes on a real desktop (verified 2026-06-01), gated so headless `cargo test` stays green"]
     fn about_commands_toggle_runtime_state_without_settings_placeholder() {
         let root = test_app_root();
         {

@@ -641,7 +641,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "0x40000015 quarantine — BCrypt AES-GCM post-Argon2id abort, see receipts/M0 §2a; needs WinDbg (M5/#7)"]
     fn round_trip_passphrase_mode() {
         let dir = tempdir();
         let path = dir.join("settings.vault");
@@ -671,7 +670,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "0x40000015 quarantine — BCrypt AES-GCM post-Argon2id abort, see receipts/M0 §2a; needs WinDbg (M5/#7)"]
     fn open_passphrase_mode_without_passphrase_stays_locked_and_preserves_disk() {
         let dir = tempdir();
         let path = dir.join("settings.vault");
