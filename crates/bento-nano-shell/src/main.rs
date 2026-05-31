@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bento_nano_app::{
     AppState, BulkLayoutAlgorithm, BulkZoneUpdate, Command, EventDispatcher, IconPickerSession,
@@ -358,6 +358,15 @@ struct AppRoot {
     /// Frame counter — fed to `Tree::flush_dirty` for the once-per-frame
     /// debug guard (Phase 1.1 / commitment C2).
     frame_id: Cell<u64>,
+    /// Mc-2b — device-recovery policy state. The pure decision machine
+    /// (`decide_recovery`) lives in the platform crate; the shell owns the
+    /// state + the `Instant`-based retry window. `Healthy` until the first
+    /// `RenderError::DeviceLost`; a clean frame resets it back to `Healthy`.
+    recovery_state: Cell<bento_nano_platform::RecoveryState>,
+    /// Mc-2b — when the most recent recovery attempt was made. Drives the 60 s
+    /// retry window: attempts inside the window accumulate toward the cap,
+    /// attempts outside it restart the streak. `None` while `Healthy`.
+    last_recovery_at: Cell<Option<Instant>>,
     /// F2-01 — pinned-zone MiniBar cap enforcement, sourced from
     /// `bento_nano_app::business::minibar::MiniBarRoster`. The roster's
     /// `pin` / `unpin` are the §11 R7 user-space pre-check that prevents
@@ -696,6 +705,8 @@ fn main() {
         // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
         last_tick_ms: Cell::new(unsafe { GetTickCount() }),
         frame_id: Cell::new(0),
+        recovery_state: Cell::new(bento_nano_platform::RecoveryState::Healthy),
+        last_recovery_at: Cell::new(None),
         minibar_roster: RefCell::new(MiniBarRoster::new()),
         minibars: RefCell::new(smallvec::SmallVec::new()),
         zone_context_menu: RefCell::new(None),
@@ -997,6 +1008,29 @@ unsafe extern "system" fn wnd_proc(
                         // device is rebuilt, so a recoverable device-loss
                         // never reaches the fatal threshold below.
                         PAINT_FAIL_STREAK.store(0, Ordering::Relaxed);
+                        // Mc-2b — a clean frame means the device is stable
+                        // again, so drop the recovery state back to `Healthy`
+                        // and clear the retry window. A later, unrelated device
+                        // loss then starts with a fresh attempt budget.
+                        if let Some(root) = app_root() {
+                            if root.recovery_state.get()
+                                != bento_nano_platform::RecoveryState::Healthy
+                            {
+                                root.recovery_state
+                                    .set(bento_nano_platform::RecoveryState::Healthy);
+                                root.last_recovery_at.set(None);
+                            }
+                        }
+                    }
+                    // Mc-2b — a lost device routes to recovery instead of the
+                    // failure streak: `handle_device_lost` recreates the chain
+                    // + this renderer (and resets PAINT_FAIL_STREAK on success)
+                    // or escalates via the retry cap. Do NOT increment the
+                    // streak here — recovery owns that decision.
+                    Err(bento_nano_app::RenderError::DeviceLost) => {
+                        if let Some(root) = app_root() {
+                            handle_device_lost(root, hwnd);
+                        }
                     }
                     Err(e) => {
                         log_paint_err(e);
@@ -1028,7 +1062,17 @@ unsafe extern "system" fn wnd_proc(
                     let new_w = (lparam as u32) & 0xFFFF;
                     let new_h = ((lparam as u32) >> 16) & 0xFFFF;
                     let slot = &mut *p;
-                    let _ = slot.renderer.resize(new_w, new_h);
+                    // Mc-2b / #10 — stop swallowing device-loss on resize. The
+                    // `&mut slot` borrow ends at the `;`, so `handle_device_lost`
+                    // (which re-fetches the slot) does not alias it. Other
+                    // resize errors stay swallowed as before.
+                    if let Err(bento_nano_app::RenderError::DeviceLost) =
+                        slot.renderer.resize(new_w, new_h)
+                    {
+                        if let Some(root) = app_root() {
+                            handle_device_lost(root, hwnd);
+                        }
+                    }
                 }
             }
             0
@@ -1071,7 +1115,15 @@ unsafe extern "system" fn wnd_proc(
                         // density. `Renderer::resize` re-passes the swap
                         // chain flags so the FRAME_LATENCY_WAITABLE_OBJECT
                         // doesn't get demoted (Wave 12 contract).
-                        let _ = slot.renderer.resize(new_w, new_h);
+                        // Mc-2b / #10 — route a device loss on this resize into
+                        // recovery instead of discarding it.
+                        if let Err(bento_nano_app::RenderError::DeviceLost) =
+                            slot.renderer.resize(new_w, new_h)
+                        {
+                            if let Some(root) = app_root() {
+                                handle_device_lost(root, hwnd);
+                            }
+                        }
                     }
                 }
             }
@@ -1107,7 +1159,15 @@ unsafe extern "system" fn wnd_proc(
                             h.max(1),
                             SWP_NOZORDER | SWP_NOACTIVATE,
                         );
-                        let _ = slot.renderer.resize(w.max(1) as u32, h.max(1) as u32);
+                        // Mc-2b / #10 — route a device loss on this resize into
+                        // recovery instead of discarding it.
+                        if let Err(bento_nano_app::RenderError::DeviceLost) =
+                            slot.renderer.resize(w.max(1) as u32, h.max(1) as u32)
+                        {
+                            if let Some(root) = app_root() {
+                                handle_device_lost(root, hwnd);
+                            }
+                        }
                     }
                 }
             }
@@ -16067,8 +16127,17 @@ unsafe extern "system" fn aux_wnd_proc(
         WM_PAINT => {
             // SAFETY: paint handles its own slot lookup + null-guard.
             unsafe {
-                if let Err(e) = paint(hwnd) {
-                    log_paint_err(e);
+                match paint(hwnd) {
+                    Ok(()) => {}
+                    // Mc-2b — route an aux window's device loss into the same
+                    // recovery driver as Main (recreate the shared chain + this
+                    // window's renderer; other windows self-heal on next paint).
+                    Err(bento_nano_app::RenderError::DeviceLost) => {
+                        if let Some(root) = app_root() {
+                            handle_device_lost(root, hwnd);
+                        }
+                    }
+                    Err(e) => log_paint_err(e),
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -16081,7 +16150,15 @@ unsafe extern "system" fn aux_wnd_proc(
                     let new_w = (lparam as u32) & 0xFFFF;
                     let new_h = ((lparam as u32) >> 16) & 0xFFFF;
                     let slot = &mut *p;
-                    let _ = slot.renderer.resize(new_w, new_h);
+                    // Mc-2b / #10 — route a device loss on this resize into
+                    // recovery instead of discarding it.
+                    if let Err(bento_nano_app::RenderError::DeviceLost) =
+                        slot.renderer.resize(new_w, new_h)
+                    {
+                        if let Some(root) = app_root() {
+                            handle_device_lost(root, hwnd);
+                        }
+                    }
                 }
             }
             0
@@ -16111,7 +16188,15 @@ unsafe extern "system" fn aux_wnd_proc(
                         );
                         let new_w = (r.right - r.left).max(1) as u32;
                         let new_h = (r.bottom - r.top).max(1) as u32;
-                        let _ = slot.renderer.resize(new_w, new_h);
+                        // Mc-2b / #10 — route a device loss on this resize into
+                        // recovery instead of discarding it.
+                        if let Err(bento_nano_app::RenderError::DeviceLost) =
+                            slot.renderer.resize(new_w, new_h)
+                        {
+                            if let Some(root) = app_root() {
+                                handle_device_lost(root, hwnd);
+                            }
+                        }
                     }
                 }
             }
@@ -21742,6 +21827,130 @@ unsafe fn set_slot_ptr(hwnd: HWND, p: *mut WindowSlot) {
 }
 
 // -----------------------------------------------------------------------------
+// Mc-2b — device-recovery driver (shell side).
+// -----------------------------------------------------------------------------
+
+/// Maximum device-chain recreate attempts allowed inside one [`RECOVERY_WINDOW`]
+/// before the shell gives up and shows the fatal box. Tuned high enough to ride
+/// out a transient TDR/driver-reset burst but low enough to stop a recreate
+/// storm against a permanently-dead adapter.
+const MAX_RECOVERY_ATTEMPTS: u32 = 3;
+/// Rolling window over which [`MAX_RECOVERY_ATTEMPTS`] are counted. A loss after
+/// a clean stretch longer than this restarts the streak rather than escalating.
+const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
+
+/// Mc-2b — react to a `RenderError::DeviceLost` raised by `paint()` or a
+/// `resize()`. The pure decision (`decide_recovery`) lives in the platform
+/// crate; this routine owns the [`RecoveryState`](bento_nano_platform::RecoveryState)
+/// stored on `AppRoot` plus the `Instant`-based retry window, recreates the
+/// process-wide device chain, and rebuilds THIS window's renderer.
+///
+/// §11: never panics — a failed recreate is logged and counted, and the retry
+/// cap (or the next device-lost frame) decides whether to escalate. §10: cold —
+/// only reached on the rare device-lost event, never on a healthy frame.
+///
+/// SAFETY: `hwnd` must be the live HWND whose paint/resize raised the loss; the
+/// slot pointer is fetched the same way `paint()` does (`get_slot_ptr`).
+unsafe fn handle_device_lost(root: &AppRoot, hwnd: HWND) {
+    let now = Instant::now();
+    let within_window = root
+        .last_recovery_at
+        .get()
+        .map_or(false, |t| now.duration_since(t) < RECOVERY_WINDOW);
+    let state = root.recovery_state.get();
+
+    match bento_nano_platform::decide_recovery(state, within_window, MAX_RECOVERY_ATTEMPTS) {
+        bento_nano_platform::RecoveryAction::BeginRecreate => {
+            // Transition the attempt counter: a fresh streak (Healthy, or the
+            // window elapsed) starts at 1; an in-window retry increments.
+            let prev_attempts = match state {
+                bento_nano_platform::RecoveryState::Recovering { attempts } if within_window => {
+                    attempts
+                }
+                _ => 0,
+            };
+            let attempts = prev_attempts + 1;
+            root.recovery_state
+                .set(bento_nano_platform::RecoveryState::Recovering { attempts });
+            root.last_recovery_at.set(Some(now));
+
+            // The old swap chain's frame-latency waitable handle dies with the
+            // recreate. Deregister it (null) so the message loop falls back to
+            // its timed wait for the single synchronous beat until
+            // `WindowComp::create` (inside `rebuild_after_device_loss`)
+            // re-registers the fresh handle.
+            bento_nano_platform::message_loop::register_frame_handle(ptr::null_mut());
+
+            // Recreate the process-wide device chain ONCE, then rebuild this
+            // window's renderer on it. Other windows self-heal via the
+            // generation check at the top of their next paint (Impl B).
+            // SAFETY: slot pointer fetched + null-checked like `paint()`.
+            let recovered = bento_nano_platform::recover_device_chain().and_then(|()| {
+                let p = unsafe { get_slot_ptr(hwnd) };
+                if p.is_null() {
+                    // No slot yet (loss before first paint built one): the
+                    // chain is fresh, so the lazy paint path will create the
+                    // renderer on it. Nothing per-window to rebuild.
+                    return Ok(());
+                }
+                // SAFETY: non-null per the guard above; single-threaded pump.
+                let slot = unsafe { &mut *p };
+                slot.renderer
+                    .rebuild_after_device_loss()
+                    .map_err(|e| bento_nano_platform::PlatformError::Init(match e {
+                        bento_nano_app::RenderError::DeviceLost => {
+                            "renderer rebuild_after_device_loss: device still lost"
+                        }
+                        _ => "renderer rebuild_after_device_loss failed",
+                    }))
+            });
+
+            match recovered {
+                Ok(()) => {
+                    // The chain + this renderer are healthy again. Clear the
+                    // paint failure streak so the recoverable loss never trips
+                    // the fatal threshold, and repaint this window. (The state
+                    // stays `Recovering` until a clean frame in the chokepoint
+                    // resets it to `Healthy`.)
+                    PAINT_FAIL_STREAK.store(0, Ordering::Relaxed);
+                    // SAFETY: InvalidateRect with null rect = whole client area.
+                    unsafe {
+                        InvalidateRect(hwnd, ptr::null(), 0);
+                    }
+                    log_static("device-recovery: chain rebuilt + renderer recreated\n");
+                }
+                Err(e) => {
+                    // The attempt is counted; the next DeviceLost frame either
+                    // retries (still inside the window, under the cap) or gives
+                    // up. DO NOT crash here — log only.
+                    tracing::warn!(
+                        target: "bentodesk::recovery",
+                        error = %e,
+                        "device-recovery attempt failed"
+                    );
+                }
+            }
+        }
+        bento_nano_platform::RecoveryAction::GiveUp => {
+            root.recovery_state
+                .set(bento_nano_platform::RecoveryState::GaveUp);
+            show_fatal_box(
+                "Display device lost",
+                "BentoDesk could not recover the graphics device after repeated attempts. The application will now close.",
+            );
+            // SAFETY: PostQuitMessage just enqueues WM_QUIT. Match the nonzero
+            // exit code style the PAINT fatal path uses (`PostQuitMessage(2)`).
+            unsafe {
+                PostQuitMessage(2);
+            }
+        }
+        bento_nano_platform::RecoveryAction::Ignore => {
+            // Already gave up — avoid recreate storms. Nothing to do.
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Paint — lazy-init slot on first frame.
 // -----------------------------------------------------------------------------
 
@@ -23937,6 +24146,8 @@ mod tests {
             hovered: std::cell::RefCell::new(None),
             last_tick_ms: std::cell::Cell::new(0),
             frame_id: std::cell::Cell::new(0),
+            recovery_state: std::cell::Cell::new(bento_nano_platform::RecoveryState::Healthy),
+            last_recovery_at: std::cell::Cell::new(None),
             minibar_roster: std::cell::RefCell::new(MiniBarRoster::new()),
             minibars: std::cell::RefCell::new(smallvec::SmallVec::new()),
             zone_context_menu: std::cell::RefCell::new(None),
