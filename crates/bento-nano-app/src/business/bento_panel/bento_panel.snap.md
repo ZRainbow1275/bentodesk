@@ -12,7 +12,9 @@ PanelHeader (icon · title · search · close) → optional SearchBar → ItemGr
 | background       | `palette.surface_primary` (frosted)    |
 | border           | 1 px `palette.outline_subtle`          |
 | layout           | column / start / stretch               |
-| header-height    | 36 px (locked)                         |
+| header-height    | 48 px (Tauri `.panel-header`, M2③ 1:1) |
+| header-top-accent| 2 px solid `zone.accent_color` (else 0)|
+| header-divider   | 1 px `rgba(255,255,255,0.05)` (bottom)  |
 | header-gap-below | 8 px                                   |
 | search-row-h     | 32 px (when expanded)                  |
 | search-collapsed | 0 px (animated 200 ms ease-out)        |

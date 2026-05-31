@@ -22,7 +22,13 @@ pub const PANEL_DEFAULT_GRID_COLUMNS: u32 = 4;
 
 /// Locked panel-header height in logical px. The header row is non-resizable;
 /// see `bento_panel.snap.md`.
-pub const PANEL_HEADER_HEIGHT_PX: f32 = 36.0;
+///
+/// M2③ (05-31, ruling = A / 1:1): realigned to Tauri `.panel-header
+/// { height: 48px }` (PanelHeader.css:6). This is the same value the live
+/// renderer now uses via `item_grid::ITEM_GRID_TOP_OFFSET_PX` /
+/// `expanded_zone_grid::HEADER_BAND_HEIGHT`; kept in sync so this scaffold
+/// constant cannot document a stale header height.
+pub const PANEL_HEADER_HEIGHT_PX: f32 = 48.0;
 
 /// Build the expanded-panel subtree. Returns a typed Container today; the
 /// real composition (PanelHeader → SearchBar → ItemGrid) lands when the
@@ -52,7 +58,7 @@ mod tests {
     fn locked_constants_match_snap_md() {
         assert!((PANEL_ITEM_CARD_FONT_PX - 11.0).abs() < 0.01);
         assert_eq!(PANEL_DEFAULT_GRID_COLUMNS, 4);
-        assert!((PANEL_HEADER_HEIGHT_PX - 36.0).abs() < 0.01);
+        assert!((PANEL_HEADER_HEIGHT_PX - 48.0).abs() < 0.01);
     }
 
     #[test]

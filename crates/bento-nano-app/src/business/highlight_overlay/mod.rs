@@ -149,8 +149,11 @@ pub fn item_card_rect_for_grid(zone: &Zone, grid_x: i32, grid_y: i32, is_wide: b
     let cell_w = ((zone.w as f32 - 16.0) - gap * (columns - 1.0)).max(44.0) / columns;
     let span = item_grid::column_span_for(is_wide) as f32;
     let item_x = zone_left + 8.0 + grid_x.max(0) as f32 * (cell_w + gap);
+    // M2③ (05-31, 1:1): grid starts below the 48-DIP `PanelHeader` band via
+    // the shared SSoT offset — keeps the painted grid in lockstep with the
+    // shell hit-tests that read the same constant.
     let item_y = zone_top
-        + 30.0
+        + item_grid::ITEM_GRID_TOP_OFFSET_PX
         + grid_y.max(0) as f32
             * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX);
     Rect {
@@ -694,8 +697,9 @@ mod tests {
 
         let target = item_target_rect(&zone, item);
 
+        // M2③: grid-top is now the 48-DIP header offset (zone_top 20 + 48 = 68).
         assert!((target.x - 18.0).abs() < f32::EPSILON);
-        assert!((target.y - 50.0).abs() < f32::EPSILON);
+        assert!((target.y - (20.0 + item_grid::ITEM_GRID_TOP_OFFSET_PX)).abs() < f32::EPSILON);
         assert!(target.width > 0.0);
         assert!(target.height > 0.0);
     }

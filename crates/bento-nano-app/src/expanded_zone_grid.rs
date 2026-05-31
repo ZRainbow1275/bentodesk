@@ -26,11 +26,16 @@ use bento_nano_style::Rect;
 use bento_nano_style::tokens::SHADOW;
 use bento_nano_zone::Zone;
 
-/// Header band height in DIPs — matches the +30 vertical offset that
-/// `highlight_overlay::item_card_rect_for_grid` already uses to push the
-/// item grid below the title row. Keeping these in lockstep means the
-/// divider line lands exactly on the seam between header and items.
-pub const HEADER_BAND_HEIGHT: f32 = 30.0;
+/// Header band height in DIPs — bound to the single grid-top SSoT
+/// (`item_grid::ITEM_GRID_TOP_OFFSET_PX`) so the divider line lands exactly
+/// on the seam between the header band and the first item row.
+///
+/// M2③ (05-31, ruling = A / 1:1): realigned from the legacy 30 to Tauri's
+/// `.panel-header { height: 48px }` (PanelHeader.css:6). Because the band
+/// height and the grid-top offset are now the same constant, every
+/// header-derived offset (divider Y, badge centring, item-grid top, and the
+/// shell hit-rects) cascades from this one change automatically.
+pub const HEADER_BAND_HEIGHT: f32 = crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX;
 
 /// Horizontal inset applied to the header band + count badge. Same 8-DIP
 /// padding the existing zone chrome uses for the icon chip / accent stripe.
@@ -240,6 +245,29 @@ mod tests {
         // documents the contract.
         fn assert_copy<T: Copy>() {}
         assert_copy::<ExpandedZoneLayout>();
+    }
+
+    #[test]
+    fn header_band_height_is_tauri_48_and_bound_to_grid_top_ssot() {
+        // M2③ (1:1): Tauri `.panel-header { height: 48px }` (PanelHeader.css:6).
+        assert!((HEADER_BAND_HEIGHT - 48.0).abs() < 0.01);
+        // The band height MUST equal the single grid-top offset SSoT so the
+        // divider lands exactly on the seam where the first item row begins —
+        // and so the renderer + both shell hit-tests can never drift (V-13).
+        assert!(
+            (HEADER_BAND_HEIGHT
+                - crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX)
+                .abs()
+                < 0.01
+        );
+    }
+
+    #[test]
+    fn divider_sits_at_the_48_dip_header_seam() {
+        // The divider's bottom edge is the header/grid seam — at panel.y + 48.
+        let zone = fixture(0, 0, 240, 200);
+        let layout = expanded_zone_layout(&zone);
+        assert!((layout.divider.bottom() - (layout.panel.y + HEADER_BAND_HEIGHT)).abs() < 0.01);
     }
 
     #[test]

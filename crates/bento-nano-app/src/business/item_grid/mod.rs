@@ -31,6 +31,20 @@ pub const ITEM_GRID_COLUMN_GAP_PX: f32 = 8.0;
 /// Inter-row gap (logical px) — locked.
 pub const ITEM_GRID_ROW_GAP_PX: f32 = 8.0;
 
+/// Vertical offset (logical px) of the first item row below the panel's top
+/// edge — i.e. where the item grid starts, immediately under the expanded
+/// `PanelHeader` band. M2③ (05-31, 1:1): Tauri's `.panel-header` is
+/// `height: 48px` (PanelHeader.css:6) with `flex-shrink: 0`, and the grid
+/// host (`.bento-panel__content`) follows it in the column flex with a
+/// `--spacing-sm` (8px) top pad. nano folds the header band + that pad into a
+/// single grid-top offset == header-band height so the first card lands right
+/// below the header divider. This is the SSoT shared by the renderer
+/// (`highlight_overlay::item_card_rect_for_grid`), both shell hit-tests
+/// (`ui::hit_test_zone_item` / `ui::item_grid_position_for_point`) and the
+/// `expanded_zone_grid` header chrome — so the painted grid and its hit-rects
+/// can never drift (V-13 paint-hit parity).
+pub const ITEM_GRID_TOP_OFFSET_PX: f32 = 48.0;
+
 /// Default column count when the zone configuration supplies none.
 /// Mirrors 1.x `props.gridColumns ?? 4`.
 pub const ITEM_GRID_DEFAULT_COLUMNS: u32 = 4;
@@ -91,6 +105,8 @@ mod tests {
         assert!((ITEM_GRID_COLUMN_GAP_PX - 8.0).abs() < 0.01);
         assert!((ITEM_GRID_ROW_GAP_PX - 8.0).abs() < 0.01);
         assert_eq!(ITEM_GRID_DEFAULT_COLUMNS, 4);
+        // M2③ (1:1) — grid starts below the 48-DIP Tauri `.panel-header`.
+        assert!((ITEM_GRID_TOP_OFFSET_PX - 48.0).abs() < 0.01);
     }
 
     #[test]

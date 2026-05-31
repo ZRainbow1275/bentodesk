@@ -24298,7 +24298,9 @@ mod tests {
 
         let show = {
             let app = root.app.borrow();
-            tooltip_command_for_hover(&app, bento_nano_app::WindowHandle::NULL, 24.0, 48.0)
+            // M2③: grid row 0 starts below the 48-DIP header (zone_top 0 + 48);
+            // hover at y=70 lands on the first card, clear of the header band.
+            tooltip_command_for_hover(&app, bento_nano_app::WindowHandle::NULL, 24.0, 70.0)
         };
         match show {
             Some(Command::ShowTooltip { anchor, text }) => {

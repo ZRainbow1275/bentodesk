@@ -78,6 +78,12 @@ use crate::{
 const TEXT_FORMAT_CACHE_CAPACITY: usize = 8;
 const IMAGE_WIDGET_MAX_BYTES: usize = 32 * 1024 * 1024;
 
+/// M2③ (05-31, 1:1) — thickness of the expanded-panel top accent edge in
+/// logical px. Matches Tauri `.bento-zone--expanded { border-top: 2px solid
+/// var(--zone-accent, transparent) }` (BentoZone.css:114). Const-only so the
+/// per-frame zone draw stays allocation-free (§10).
+const PANEL_ACCENT_EDGE_THICKNESS_PX: f32 = 2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ActiveItemDragVisual {
     zone_id: ZoneId,
@@ -1513,20 +1519,41 @@ impl Renderer {
                 zone_fill_idle
             };
             self.fill_rounded_rect(rect, fill, radius)?;
-            // V-9 round 2 (2026-05-21) — accent stripe across the expanded
-            // zone's top edge was a Wave-era affordance. Tauri 1.2.4 baseline
-            // does NOT paint a stripe here; user flagged the thin blue line
-            // as a regression. Removed. The expanded status dot (Wave I2)
-            // is also removed in the same wave so `accent_hex` has no other
-            // consumer in this branch — kept only as a `_` binding for
-            // potential future item-chip accents.
-            let _ = (zone
-                .accent_color
-                .as_deref())
-                .or(theme_base_accent.as_deref());
+            // M2③ (05-31, ruling = A / 1:1) — re-add the 2px top accent edge
+            // that V-9 (2026-05-21) removed. Authoritative source is Tauri
+            // `.bento-zone--expanded { border-top: 2px solid var(--zone-accent,
+            // transparent) }` (BentoZone.css:113-114). `--zone-accent` is
+            // injected ONLY from `zone.accent_color` (BentoZone.tsx:1409-1410);
+            // when the zone has no accent the border resolves to `transparent`,
+            // i.e. nothing is painted. So we match 1:1: paint a full-alpha 2px
+            // bar in the zone's own accent colour, and skip it entirely (no
+            // theme-base fallback) when the zone defines no accent.
+            //
+            // The bar is inset horizontally by the panel corner radius so it
+            // runs across the flat top span between the two rounded corners,
+            // mirroring how CSS `border-top` follows `border-radius` without
+            // bleeding past the arcs. `fill_rounded_rect` short-circuits on
+            // `color.a <= 0.0`, so the `None`/transparent case is a true no-op.
+            if let Some(accent) = zone.accent_color.as_deref().and_then(parse_hex_color) {
+                let accent_inset = radius.top_left.min(rect.width * 0.5);
+                let accent_edge = bento_nano_style::Rect {
+                    x: rect.x + accent_inset,
+                    y: rect.y,
+                    width: (rect.width - accent_inset * 2.0).max(0.0),
+                    height: PANEL_ACCENT_EDGE_THICKNESS_PX,
+                };
+                self.fill_rounded_rect(
+                    accent_edge,
+                    with_alpha(accent, 1.0),
+                    bento_nano_style::BorderRadius::ZERO,
+                )?;
+            }
+            // M2③ (05-31, 1:1) — Tauri `.panel-header` is `height: 48px` with
+            // `align-items: center` (PanelHeader.css:6,5). The icon chip is
+            // vertically centred in the 48-DIP band: top = (48 - 18)/2 = 15.
             let icon_rect = bento_nano_style::Rect {
                 x: rect.x + 8.0,
-                y: rect.y + 14.0,
+                y: rect.y + 15.0,
                 width: 68.0,
                 height: 18.0,
             };
@@ -1540,9 +1567,11 @@ impl Renderer {
             // RC-4 Gap 1 — render the zone icon as a line-art glyph rather
             // than the raw wire-format name.
             self.draw_icon_glyph(zone.icon.as_ref(), icon_text_rect, zone_icon_text)?;
+            // M2③ — title vertically centred in the 48-DIP header band
+            // (Tauri `align-items: center`): top = (48 - 18)/2 = 15.
             let title_rect = bento_nano_style::Rect {
                 x: rect.x + 82.0,
-                y: rect.y + 12.0,
+                y: rect.y + 15.0,
                 width: (rect.width - 90.0).max(0.0),
                 height: 18.0,
             };
@@ -1601,9 +1630,14 @@ impl Renderer {
             if zone.is_stack_anchor() {
                 let member_ids = app.zones.stack_member_ids(zone.id);
                 let member_count = member_ids.as_ref().map(|ids| ids.len()).unwrap_or(1);
+                // M2③ cascade — the "Stack ×N" badge sits in the sub-row just
+                // below the header band; it tracks the header height so it
+                // stays clear of the taller 48-DIP header (was y+34 under the
+                // legacy 30-DIP band; now header bottom + 4 = 48 + 4 = 52).
+                let stack_subrow_y = item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0;
                 let badge_rect = bento_nano_style::Rect {
                     x: rect.right() - 76.0,
-                    y: rect.y + 34.0,
+                    y: rect.y + stack_subrow_y,
                     width: 68.0,
                     height: 18.0,
                 };
@@ -1630,9 +1664,11 @@ impl Renderer {
                         .find(|member_id| *member_id != zone.id)
                         .and_then(|member_id| app.zones.get(member_id))
                     {
+                        // M2③ cascade — peek row trails the Stack badge by the
+                        // same 20-DIP step it used under the legacy header.
                         let peek_rect = bento_nano_style::Rect {
                             x: rect.x + 8.0,
-                            y: rect.y + 54.0,
+                            y: rect.y + stack_subrow_y + 20.0,
                             width: (rect.width - 16.0).max(0.0),
                             height: 18.0,
                         };
@@ -1675,9 +1711,11 @@ impl Renderer {
             // baseline.
             if let Some(path) = zone.live_folder_path.as_deref() {
                 let live_text = live_folder_badge_text(path);
+                // M2③ cascade — live-folder badge sits just below the 48-DIP
+                // header band (was y+34 under the legacy 30-DIP header).
                 let live_rect = bento_nano_style::Rect {
                     x: rect.x + 8.0,
-                    y: rect.y + 34.0,
+                    y: rect.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0,
                     width: (rect.width - 16.0).max(0.0),
                     height: 16.0,
                 };

@@ -393,8 +393,12 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         for item in z.items.iter().rev() {
             let span = item_grid::column_span_for(item.is_wide) as f32;
             let ix = zx + 8.0 + item.x as f32 * (cell_w + gap);
+            // V-13 paint-hit parity: grid-top offset is the shared SSoT
+            // (`ITEM_GRID_TOP_OFFSET_PX` = 48) so this hit-rect tracks the
+            // renderer's `item_card_rect_for_grid` exactly after the M2③
+            // header-height change.
             let iy = zy
-                + 30.0
+                + item_grid::ITEM_GRID_TOP_OFFSET_PX
                 + item.y as f32
                     * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX);
             let iw = (cell_w * span + gap * (span - 1.0)).min((zr - 8.0 - ix).max(0.0));
@@ -425,7 +429,10 @@ pub fn item_grid_position_for_point(
     let col_stride = cell_w + gap;
     let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
     let raw_col = ((x - z.x as f32 - 8.0) / col_stride).floor() as i32;
-    let raw_row = ((y - z.y as f32 - 30.0) / row_stride).floor() as i32;
+    // V-13 paint-hit parity: same shared grid-top SSoT as the renderer +
+    // `hit_test_zone_item`, so drop-row math tracks the 48-DIP header.
+    let raw_row =
+        ((y - z.y as f32 - item_grid::ITEM_GRID_TOP_OFFSET_PX) / row_stride).floor() as i32;
     Some((raw_col.clamp(0, columns - 1), raw_row.max(0)))
 }
 
@@ -1245,7 +1252,9 @@ mod phase21_tests {
             .expect("item id");
         let app = app_with_zones(vec![hidden]);
 
-        assert_eq!(hit_test_zone_item(&app, 24.0, 48.0), None);
+        // M2③: grid row 0 starts at zone_top(10) + 48-DIP header = 58; click
+        // at y=70 lands inside it but the zone is hidden, so still None.
+        assert_eq!(hit_test_zone_item(&app, 24.0, 70.0), None);
     }
 
     #[test]
@@ -1261,7 +1270,9 @@ mod phase21_tests {
         // Wave C — items are reachable only when the zone is expanded.
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
 
-        let hit = hit_test_zone_item(&app, 24.0, 48.0).expect("item hit");
+        // M2③: grid row 0 now begins at zone_top(10) + 48-DIP header = 58;
+        // click at y=70 lands on the first card.
+        let hit = hit_test_zone_item(&app, 24.0, 70.0).expect("item hit");
         assert_eq!(hit.0, ZoneId(1));
         assert_eq!(hit.1, item_id);
         assert_eq!(hit.2, "C:/Users/HP/Desktop/App.lnk");
@@ -1287,7 +1298,8 @@ mod phase21_tests {
         let app = app_with_zones(vec![zone]);
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
 
-        let hit = hit_test_zone_item(&app, 150.0, 48.0).expect("right-column item hit");
+        // M2③: row 0 starts at zone_top(10) + 48-DIP header = 58; y=70 hits it.
+        let hit = hit_test_zone_item(&app, 150.0, 70.0).expect("right-column item hit");
         assert_eq!(hit.0, ZoneId(3));
         assert_eq!(hit.1, second);
         assert_eq!(hit.2, "C:/Users/HP/Desktop/Right.lnk");
