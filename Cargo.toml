@@ -100,6 +100,10 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # 0505 updater manifest slice — WinHTTP is the mandated Windows HTTP
     # surface for selected-stack update checks; no reqwest/hyper/tokio.
     "Win32_Networking_WinHttp",
+    # #19-B (2026-05-31) — `GetUserDefaultLocaleName` (kernel32, Vista+) for the
+    # OS-locale UI-language default (non-Chinese OS → English). Feature on the
+    # already-present windows-sys crate; no new external dependency (§8).
+    "Win32_Globalization",
 ] }
 
 # --- COM-typed graphics surfaces (spec §3.1.1) ---

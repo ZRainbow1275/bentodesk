@@ -126,6 +126,9 @@ use windows_sys::Win32::Foundation::{
     BOOL, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HWND, LPARAM, LRESULT,
     POINT, RECT, WPARAM,
 };
+// #19-B (2026-05-31) — OS UI-language default. kernel32 Vista+; static import
+// safe on our Win7+ target.
+use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 // Wave 15 — Tier 0 #29/#31. `EmptyWorkingSet(GetCurrentProcess())` is the
 // one-shot, post-first-paint working-set trim that pushes cold pages onto
@@ -537,6 +540,44 @@ const WIN_TITLE: &[u16] = &[
     0,
 ];
 
+/// #19-B (2026-05-31) — pick the startup UI language from the OS user locale.
+///
+/// ZRainbow Option B: a Chinese-OS user gets zh-CN; everyone else defaults to
+/// English (EN_US is verified complete — 231 entries, 42 empty slots in the
+/// SAME positions as ZH_CN). A runtime Settings toggle (`set_locale`) still
+/// lets the user flip languages afterwards.
+///
+/// `GetUserDefaultLocaleName` (kernel32) is Vista+; we target Win7+ per the
+/// Mc-1a manifest, so the STATIC import is safe — no `GetProcAddress`
+/// soft-load needed. It writes a NUL-terminated BCP-47 tag (e.g. "zh-CN",
+/// "en-US") into the caller's buffer and returns the character count incl. the
+/// NUL (0 on failure). A "zh" prefix (case-insensitive) → Simplified Chinese;
+/// anything else → English. On the (impossible-on-Win7+) failure path we
+/// preserve the historical behaviour and return zh-CN.
+fn detected_default_locale() -> &'static bento_nano_style::LookupTable {
+    // `LOCALE_NAME_MAX_LENGTH` is 85 wide chars (windows-sys 0.59 doesn't
+    // re-export the constant; the value is fixed by the Win32 contract).
+    let mut buf = [0u16; 85];
+    // SAFETY: `buf` is a valid writable [u16; 85]; we pass its length so the
+    // API never writes past the end. The returned count bounds the slice we
+    // read back.
+    let written =
+        unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+    if written <= 0 {
+        // Vista+ guarantees success; defend the impossible path by keeping the
+        // current zh-CN default.
+        return &bento_nano_style::ZH_CN;
+    }
+    // `written` includes the trailing NUL — trim it before decoding.
+    let len = (written as usize).saturating_sub(1).min(buf.len());
+    let tag: String = String::from_utf16_lossy(&buf[..len]).to_ascii_lowercase();
+    if tag.starts_with("zh") {
+        &bento_nano_style::ZH_CN
+    } else {
+        &bento_nano_style::EN_US
+    }
+}
+
 fn main() {
     // Mc-1b(a) — DELIBERATE behavioural change from the previous "minimal /
     // silent" hook. With `windows_subsystem="windows"` (no console) and
@@ -630,11 +671,17 @@ fn main() {
         let _ = MUTEX_HANDLE.set(mutex as isize);
     }
 
-    // Phase 1.3 — install the zh-CN locale BEFORE any widget asks for a
-    // localised string. Subsequent `set_locale` calls would hot-swap on
-    // the next frame.
-    bento_nano_style::init_locale(&bento_nano_style::ZH_CN);
-    log_static("startup: locale=zh-CN\n");
+    // Phase 1.3 — install the locale BEFORE any widget asks for a localised
+    // string. Subsequent `set_locale` calls hot-swap on the next frame.
+    // #19-B (2026-05-31) — default to the OS UI language (zh-CN on a Chinese
+    // OS, English otherwise) instead of unconditional zh-CN.
+    let default_locale = detected_default_locale();
+    bento_nano_style::init_locale(default_locale);
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        log_static("startup: locale=zh-CN\n");
+    } else {
+        log_static("startup: locale=en-US\n");
+    }
     log_static(if bento_nano_platform::dcomp::acrylic_feature_enabled() {
         "startup: acrylic_feature=on\n"
     } else {

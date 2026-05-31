@@ -33,6 +33,9 @@ pub mod window;
 pub use d3d::{
     RecoveryAction, RecoveryState, decide_recovery, device_generation, recover_device_chain,
 };
+// #19-B — font availability probe + per-role default resolution. The app
+// crate wires the UI / Monospace / Display anchors through these.
+pub use dwrite::{FontRole, family_is_available, resolve_default_family};
 pub use errors::{PlatformError, ok};
 pub use monitor::{
     MonitorInfo, RectI32, clamp_window_to_monitors, clamp_zone_to_monitors, enumerate_monitors,

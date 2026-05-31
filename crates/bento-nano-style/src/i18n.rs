@@ -161,6 +161,33 @@ mod tests {
         assert_eq!(zh_ids::TOOLBAR_SETTINGS, en_ids::TOOLBAR_SETTINGS);
     }
 
+    /// #19-B (2026-05-31) — ZH_CN/EN_US lockstep contract. Because #19-B
+    /// defaults non-Chinese-OS users to English, the two tables must stay in
+    /// perfect structural lockstep: identical length AND identical empty/non-
+    /// empty pattern at every index. A blank slot in one but not the other
+    /// would render an empty label for that locale only — this test catches
+    /// any future drift (a string added to one table but not the other) at
+    /// build time. `entries` is read directly (no process-global install) to
+    /// stay ordering-free, mirroring the other `lookup_table_*` tests.
+    #[test]
+    fn zh_cn_en_us_empty_slots_are_in_lockstep() {
+        assert_eq!(
+            ZH_CN.len(),
+            EN_US.len(),
+            "locale tables must enumerate identically"
+        );
+        for i in 0..ZH_CN.len() {
+            assert_eq!(
+                ZH_CN.entries[i].is_empty(),
+                EN_US.entries[i].is_empty(),
+                "ZH_CN/EN_US emptiness mismatch at index {i}: \
+                 zh={:?} en={:?}",
+                ZH_CN.entries[i],
+                EN_US.entries[i]
+            );
+        }
+    }
+
     #[test]
     fn lookup_table_reserved_slots_are_empty() {
         // Slot 5 is reserved (between APP_TAGLINE@1 and TOOLBAR_PIN@10).

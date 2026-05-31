@@ -219,8 +219,16 @@ impl Renderer {
             ),
         ))?;
         let surface = WindowSurface::create(swap)?;
+        // #19-B (2026-05-31) — resolve the UI default against the installed
+        // system fonts. On a normal Windows "Microsoft YaHei UI" is present so
+        // this returns the same literal as before (Q2 pixel-1:1); on a stripped
+        // SKU it falls back through Segoe UI / Tahoma / MS Shell Dlg 2.
+        let ui_family: &'static str = dwrite::resolve_default_family(
+            dwrite::FontRole::Ui,
+            &["Microsoft YaHei UI", "Segoe UI", "Tahoma", "MS Shell Dlg 2"],
+        );
         let text_format = dwrite::text_format_from_family_name_with_metrics(
-            "Microsoft YaHei UI",
+            ui_family,
             16.0,
             400,
             1.4,
@@ -230,7 +238,7 @@ impl Renderer {
             comp,
             surface: Some(surface),
             text_format,
-            text_format_family: SmolStr::new_static("Microsoft YaHei UI"),
+            text_format_family: SmolStr::new_static(ui_family),
             text_format_size_pt: 16.0,
             text_format_weight: 400,
             text_format_line_height: 1.4,
@@ -7135,7 +7143,21 @@ impl Renderer {
                 return Ok(cached.format.clone());
             }
         }
-        let family = SmolStr::new_static("Consolas");
+        // #19-B (2026-05-31) — resolve a MONOSPACE family that DWrite confirms
+        // is installed BEFORE creating the format, so a stripped SKU lacking
+        // Consolas never falls through `text_format_from_family_name`'s
+        // proportional fallback into a wrong-metric body face. Normal Windows
+        // has Consolas → identical to before (Q2 pixel-1:1).
+        let family = SmolStr::new_static(dwrite::resolve_default_family(
+            dwrite::FontRole::Monospace,
+            &[
+                "Consolas",
+                "Cascadia Mono",
+                "Cascadia Code",
+                "Lucida Console",
+                "Courier New",
+            ],
+        ));
         let format = dwrite::text_format_from_family_name_with_metrics(
             family.as_str(),
             size_pt,
