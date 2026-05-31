@@ -11,6 +11,15 @@ fn fixture(x: i32, y: i32) -> Zone {
     Zone::new(ZoneId(1), Cow::Borrowed("Docs"), x, y, 160, 120)
 }
 
+/// M2② — fixture with an explicit per-zone capsule appearance so the
+/// size/shape wiring in `pill_layout_for_zone` can be exercised.
+fn fixture_appearance(size: &'static str, shape: &'static str) -> Zone {
+    let mut z = fixture(0, 0);
+    z.set_capsule_size(size);
+    z.set_capsule_shape(shape);
+    z
+}
+
 #[test]
 fn pill_layout_uses_tauri_capsule_radius() {
     // Wave B SSoT — pill must consume RADIUS.capsule (24) and
@@ -26,6 +35,77 @@ fn pill_layout_anchors_at_zone_origin() {
     assert_eq!(layout.rect.x, 120.0);
     assert_eq!(layout.rect.y, 240.0);
     assert_eq!(layout.rect.height, PILL_HEIGHT);
+}
+
+#[test]
+fn pill_default_medium_height_is_tauri_48() {
+    // M2② — default zone (medium/pill) resolves to Tauri's 48px box height,
+    // which is also PILL_HEIGHT (the Medium fallback constant).
+    let layout = pill_layout_for_zone(&fixture(0, 0), 4);
+    assert!((layout.rect.height - 48.0).abs() < 0.01);
+    assert!((layout.rect.height - PILL_HEIGHT).abs() < 0.01);
+}
+
+#[test]
+fn pill_size_tier_drives_height_and_icon() {
+    // M2② — size token → Tauri height (36/48/56) + icon (14/18/22).
+    let small = pill_layout_for_zone(&fixture_appearance("small", "pill"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "pill"), 4);
+    assert!((small.rect.height - 36.0).abs() < 0.01);
+    assert!((medium.rect.height - 48.0).abs() < 0.01);
+    assert!((large.rect.height - 56.0).abs() < 0.01);
+    // Icon chip side length follows the tier.
+    assert!((small.icon.width - 14.0).abs() < 0.01);
+    assert!((medium.icon.width - 18.0).abs() < 0.01);
+    assert!((large.icon.width - 22.0).abs() < 0.01);
+    // Larger tier ⇒ taller pill grows ~33% (36 → 48 is +33.3%).
+    assert!(large.rect.height > medium.rect.height);
+    assert!(medium.rect.height > small.rect.height);
+}
+
+#[test]
+fn pill_shape_drives_corner_radius() {
+    // M2② — per-shape Tauri border-radius wired into layout.radius.
+    let pill = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let rounded = pill_layout_for_zone(&fixture_appearance("medium", "rounded"), 4);
+    let minimal = pill_layout_for_zone(&fixture_appearance("medium", "minimal"), 4);
+    let square = pill_layout_for_zone(&fixture_appearance("medium", "square"), 4);
+    assert_eq!(pill.radius, BorderRadius::all(24.0));
+    assert_eq!(rounded.radius, BorderRadius::all(12.0));
+    assert_eq!(minimal.radius, BorderRadius::all(8.0));
+    assert_eq!(square.radius, BorderRadius::all(4.0));
+}
+
+#[test]
+fn pill_circle_shape_is_square_disc() {
+    // M2② — Tauri circle pill is a 1:1 icon-only disc (aspect-ratio:1 +
+    // border-radius:50%). Box is square at the per-tier circle diameter
+    // (medium 52) and the radius is height/2 so it reads as a perfect circle.
+    let circle = pill_layout_for_zone(&fixture_appearance("medium", "circle"), 4);
+    assert!((circle.rect.width - 52.0).abs() < 0.01);
+    assert!((circle.rect.height - 52.0).abs() < 0.01);
+    assert_eq!(circle.rect.width, circle.rect.height);
+    assert_eq!(circle.radius, BorderRadius::all(26.0));
+    // Icon is centred inside the disc.
+    let icon_cx = circle.icon.x + circle.icon.width * 0.5;
+    let icon_cy = circle.icon.y + circle.icon.height * 0.5;
+    let disc_cx = circle.rect.x + circle.rect.width * 0.5;
+    let disc_cy = circle.rect.y + circle.rect.height * 0.5;
+    assert!((icon_cx - disc_cx).abs() < 0.01);
+    assert!((icon_cy - disc_cy).abs() < 0.01);
+    // Label + badge collapse to zero width (Tauri display:none).
+    assert_eq!(circle.label.width, 0.0);
+    assert_eq!(circle.badge.width, 0.0);
+}
+
+#[test]
+fn pill_unknown_appearance_tokens_fall_back_to_medium_pill() {
+    // Forward-compat: garbage tokens must not panic — they resolve to the
+    // medium/pill default (48px, radius 24).
+    let layout = pill_layout_for_zone(&fixture_appearance("xl", "hexagon"), 4);
+    assert!((layout.rect.height - 48.0).abs() < 0.01);
+    assert_eq!(layout.radius, BorderRadius::all(24.0));
 }
 
 #[test]

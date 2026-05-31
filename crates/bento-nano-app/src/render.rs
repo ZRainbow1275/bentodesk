@@ -2080,9 +2080,14 @@ impl Renderer {
         let pill_rect = pill_layout.rect;
         let rect = zone_pill_geometry::morph_pill_to_rect(pill_rect, expanded_rect, morph);
         // Capsule radius → expanded surface radius (RADIUS.expanded = 16 px,
-        // matches the legacy zone chrome rounding).
+        // matches the legacy zone chrome rounding). M2② — the morph START
+        // radius reads the pill layout's OWN per-shape radius
+        // (`pill_layout.radius`, resolved from `zone.capsule_shape`) instead of
+        // the hardcoded `RADIUS.capsule`, so a rounded/minimal/circle capsule
+        // uncurls from the radius it was actually painted at (no radius pop at
+        // morph t=0) and stays consistent with the collapsed pill.
         let radius_px = zone_pill_geometry::morph_pill_radius(
-            RADIUS.capsule,
+            pill_layout.radius.top_left,
             RADIUS.expanded,
             morph,
         );

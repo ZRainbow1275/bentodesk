@@ -12,6 +12,7 @@
 //! allocation hot-path: every helper here returns `Copy` rects, no `Vec`,
 //! no `String`.
 
+use crate::business::zen_capsule::{CapsuleShape, CapsuleSize};
 use bento_nano_style::tokens::{RADIUS, SPACING, TYPOGRAPHY};
 use bento_nano_style::{BorderRadius, Rect};
 use bento_nano_zone::{Zone, ZoneId};
@@ -44,9 +45,17 @@ pub struct ZonePillLayout {
     pub badge_radius: BorderRadius,
 }
 
-/// Default pill height in DIPs. Tauri reference: 36 DIPs (Wave A
-/// `zone-collapsed-pill.md`). Pinned constant — Wave A baseline.
-pub const PILL_HEIGHT: f32 = 36.0;
+/// Default pill height in DIPs — the **Medium** size tier.
+///
+/// M2② (2026-05-29) — re-centred on Tauri v1.3.0's `getCapsuleBoxPx` medium
+/// box height of **48** (`bentodesk/src/services/hitTest.ts:96`), the
+/// authoritative pixel source for the collapsed capsule. The pre-M2② value
+/// (36) was the Wave A baseline and is now the Small tier. This constant is
+/// the fallback used wherever a `Zone`'s `capsule_size` is not available; the
+/// live pill resolves height per-zone via [`CapsuleSize::height_px`] inside
+/// [`pill_layout_for_zone`]. Kept in sync with
+/// `CapsuleSize::Medium.height_px()` (= 48).
+pub const PILL_HEIGHT: f32 = 48.0;
 
 /// Minimum total width before the label is clipped.
 pub const PILL_MIN_WIDTH: f32 = 96.0;
@@ -55,7 +64,12 @@ pub const PILL_MIN_WIDTH: f32 = 96.0;
 /// TYPOGRAPHY.md). Keeps the pill horizontally compact next to the badge.
 pub const PILL_LABEL_DEFAULT_WIDTH: f32 = 108.0;
 
-/// Icon chip side length in DIPs.
+/// Icon chip side length in DIPs — legacy Large-tier fallback constant.
+///
+/// M2② (2026-05-29) — the live pill resolves the icon size per-zone from
+/// `zone.capsule_size` via [`CapsuleSize::icon_px`] (small 14 / medium 18 /
+/// large 22) inside [`pill_layout_for_zone`]; this constant is retained for
+/// API/back-compat callers and equals the Large tier.
 pub const PILL_ICON_SIZE: f32 = 22.0;
 
 /// Count badge minimum width (fits 3-digit count without truncation).
@@ -278,26 +292,115 @@ pub fn morph_pill_radius(pill_radius: f32, expanded_radius: f32, morph: f32) -> 
 /// number (item count for a regular zone or stack-member count for an
 /// anchor). The returned `rect` is the pill's outer hit-test region.
 ///
-/// Pure / allocation-free / `Copy` output. Safe to call every frame.
+/// M2② (2026-05-29) — the pill now honours the per-zone appearance
+/// (`zone.capsule_size` / `zone.capsule_shape`) so the live capsule renders at
+/// Tauri-1:1 size + shape (ruling A, Q2 pixel parity):
+///
+/// * **Size** ([`CapsuleSize`], from `zone.capsule_size`): drives the outer
+///   height (small 36 / medium 48 / large 56) and the icon chip size
+///   (14/18/22) per Tauri's size tiers (`hitTest.ts` + `ZenCapsule.css`).
+/// * **Shape** ([`CapsuleShape`], from `zone.capsule_shape`): drives the
+///   corner radius (`pill` 24 / `rounded` 12 / `minimal` 8 / `circle`
+///   height/2 / legacy `square` 4) per Tauri `BentoZone.css:80-99`. A `circle`
+///   shape collapses the box to a 1:1 icon-only disc (Tauri
+///   `aspect-ratio:1` + `border-radius:50%`), suppressing the label/badge run.
+///
+/// **V-13 paint–hit parity:** the shell's `effective_zone_hit_rect`
+/// (`ui.rs:81`) derives its hit-rect from `pill_layout_for_zone(..).rect`,
+/// the SAME call the renderer uses, so per-zone height/shape changes here keep
+/// the clickable region pixel-locked to the painted capsule with NO separate
+/// constant to bump.
+///
+/// Pure / allocation-free / `Copy` output. Safe to call every frame — the
+/// appearance resolution is two `match`es on `Copy` enums parsed from the
+/// already-resident `Cow<str>` tokens (spec §10: no alloc, no `format!`).
 pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
+    let size = CapsuleSize::parse(zone.capsule_size.as_ref());
+    let shape = CapsuleShape::parse(zone.capsule_shape.as_ref());
+    let height = size.height_px();
+    let icon_size = size.icon_px();
+
     let pad_horizontal = SPACING.md; // 12 DIPs left/right inset
     let pad_inner = SPACING.s6; // 6 DIPs between icon/label/badge
+    let x = zone.x as f32;
+    let y = zone.y as f32;
+
+    // Circle shape — Tauri renders an icon-only 1:1 disc (label + badge are
+    // `display:none`). The box is square (width == height == circle diameter)
+    // and the icon is centred; the label/badge rects collapse onto the icon
+    // slot so downstream paint of those bands is a visual no-op.
+    if shape.is_circle() {
+        let diameter = size.circle_diameter_px();
+        // True 50% disc — radius is half the ACTUAL (square) box, i.e. the
+        // circle diameter, not the non-circle tier height. Mirrors Tauri's
+        // `border-radius: 50%` on the 1:1 `aspect-ratio:1` circle box.
+        let radius_px = diameter * 0.5;
+        let rect = Rect {
+            x,
+            y,
+            width: diameter,
+            height: diameter,
+        };
+        let icon = Rect {
+            x: rect.x + (diameter - icon_size) * 0.5,
+            y: rect.y + (diameter - icon_size) * 0.5,
+            width: icon_size,
+            height: icon_size,
+        };
+        // Zero-width label/badge anchored at the centre so the renderer paints
+        // nothing visible for them (matches Tauri's `display:none`).
+        let centre = Rect {
+            x: rect.x + diameter * 0.5,
+            y: rect.y + diameter * 0.5,
+            width: 0.0,
+            height: 0.0,
+        };
+        let status_dot = Rect {
+            x: rect.right() - PILL_STATUS_DOT_INSET - PILL_STATUS_DOT_SIZE,
+            y: rect.y + PILL_STATUS_DOT_INSET,
+            width: PILL_STATUS_DOT_SIZE,
+            height: PILL_STATUS_DOT_SIZE,
+        };
+        return ZonePillLayout {
+            rect,
+            shadow_outer: Rect {
+                x: rect.x,
+                y: rect.y + PILL_SHADOW_OUTER_DY,
+                width: rect.width,
+                height: rect.height,
+            },
+            shadow_inner: Rect {
+                x: rect.x,
+                y: rect.y + PILL_SHADOW_INNER_DY,
+                width: rect.width,
+                height: rect.height,
+            },
+            icon,
+            label: centre,
+            badge: centre,
+            status_dot,
+            radius: BorderRadius::all(radius_px),
+            badge_radius: BorderRadius::all(RADIUS.badge),
+        };
+    }
+
+    // Non-circle corner radius from the per-shape Tauri token (resolved
+    // against the tier height; circle is handled above with its own radius).
+    let radius_px = shape.corner_radius_px(height);
     let badge_width = badge_width_for_count(count);
     let label_width = PILL_LABEL_DEFAULT_WIDTH;
     let total_width = (pad_horizontal * 2.0)
-        + PILL_ICON_SIZE
+        + icon_size
         + pad_inner
         + label_width
         + pad_inner
         + badge_width;
     let width = total_width.max(PILL_MIN_WIDTH);
-    let x = zone.x as f32;
-    let y = zone.y as f32;
     let rect = Rect {
         x,
         y,
         width,
-        height: PILL_HEIGHT,
+        height,
     };
     let shadow_outer = Rect {
         x: rect.x,
@@ -311,22 +414,22 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
         width: rect.width,
         height: rect.height,
     };
-    let icon_y = rect.y + (PILL_HEIGHT - PILL_ICON_SIZE) * 0.5;
+    let icon_y = rect.y + (height - icon_size) * 0.5;
     let icon = Rect {
         x: rect.x + pad_horizontal,
         y: icon_y,
-        width: PILL_ICON_SIZE,
-        height: PILL_ICON_SIZE,
+        width: icon_size,
+        height: icon_size,
     };
     let label_x = icon.x + icon.width + pad_inner;
     let label_h = TYPOGRAPHY.md.size_px * TYPOGRAPHY.md.line_height;
     let label = Rect {
         x: label_x,
-        y: rect.y + (PILL_HEIGHT - label_h) * 0.5,
+        y: rect.y + (height - label_h) * 0.5,
         width: label_width,
         height: label_h,
     };
-    let badge_y = rect.y + (PILL_HEIGHT - PILL_BADGE_HEIGHT) * 0.5;
+    let badge_y = rect.y + (height - PILL_BADGE_HEIGHT) * 0.5;
     let badge = Rect {
         x: label.x + label.width + pad_inner,
         y: badge_y,
@@ -349,7 +452,7 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
         label,
         badge,
         status_dot,
-        radius: BorderRadius::all(RADIUS.capsule),
+        radius: BorderRadius::all(radius_px),
         badge_radius: BorderRadius::all(RADIUS.badge),
     }
 }
