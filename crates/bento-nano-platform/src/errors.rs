@@ -19,6 +19,11 @@ pub enum PlatformError {
     /// Lazy-initialised global (`OnceLock`) lookup raced and lost; the inner
     /// message identifies which singleton (D3D / D2D / DWrite / DComp).
     Init(&'static str),
+    /// Mc-2b — the GPU device was lost (TDR / GPU reset / driver upgrade): a
+    /// `Present`/`ResizeBuffers` returned `DXGI_ERROR_DEVICE_REMOVED`/`_RESET`/
+    /// `_HUNG`. The caller routes this into `recover_device_chain` rather than
+    /// treating it as a fatal HRESULT.
+    DeviceLost,
     /// SVG path parser rejected an unsupported command or malformed number.
     Svg(&'static str),
     /// Storage codec rejected a file (bad magic, version mismatch, truncated
@@ -48,6 +53,9 @@ impl fmt::Display for PlatformError {
             }
             PlatformError::Init(msg) => {
                 write!(f, "Initialization order violated: {msg}")
+            }
+            PlatformError::DeviceLost => {
+                write!(f, "GPU device lost (DXGI device removed / reset / hung)")
             }
             PlatformError::Svg(msg) => write!(f, "Invalid SVG path: {msg}"),
             PlatformError::Storage(msg) => write!(f, "Invalid storage payload: {msg}"),

@@ -6,10 +6,15 @@
 //! ~13 MB while preserving D2D + DComp composition. Hardware D3D remains
 //! available through `BENTODESK_NANO_D3D_HARDWARE=1` for diagnostic runs.
 //!
-//! Spec §4: `OnceLock<ID3D11Device>` — one device per process.
+//! Spec §4: D3D device singleton — Mc-2b made it a rebuildable
+//! `RwLock<Option<Arc<D3dDevice>>>` holder (was `OnceLock`) so a lost device
+//! (TDR / GPU reset / driver upgrade) can be recreated in place without a
+//! restart. `device()` clones the `Arc` out of the guard; `rebuild()` swaps a
+//! fresh device in. The std `RwLock` + `Arc` keep this §8-clean (no new crate).
 //! Spec §11: every fallible call returns `Result`; `unsafe` blocks have SAFETY notes.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use windows::Win32::Foundation::E_INVALIDARG;
 use windows::Win32::Graphics::Direct3D::{
@@ -41,21 +46,78 @@ pub struct D3dDevice {
 
 // SAFETY: ID3D11Device is documented thread-safe for resource creation. The
 //         immediate ID3D11DeviceContext is NOT thread-safe; nano accesses it
-//         only from the single UI thread holding the message loop.
+//         only from the single UI thread holding the message loop. Mc-2b: the
+//         device is now handed out as `Arc<D3dDevice>`; because `D3dDevice: Sync`
+//         (asserted above), `Arc<D3dDevice>` is itself `Send + Sync`, so the
+//         holder change is sound. In practice every `Arc` clone flows on that
+//         single UI thread only.
 unsafe impl Send for D3dDevice {}
 unsafe impl Sync for D3dDevice {}
 
-static D3D: OnceLock<D3dDevice> = OnceLock::new();
+/// Rebuildable process-wide D3D device holder. `None` until first `device()`;
+/// `recover_device_chain` / `rebuild` swap a fresh `Arc` in after a device loss.
+static D3D: RwLock<Option<Arc<D3dDevice>>> = RwLock::new(None);
 
-/// Lazy D3D11 device accessor. Creates on first call.
-pub fn device() -> Result<&'static D3dDevice, PlatformError> {
-    if let Some(d) = D3D.get() {
+/// Shared device-generation counter (d3d / d2d / dcomp all observe this one
+/// value). Incremented exactly once per completed `recover_device_chain`, so its
+/// value equals the number of full device-chain recoveries the process has done.
+/// The renderer compares its cached generation against this to self-heal on the
+/// next paint. Lives here (rather than a separate module) so the holder + the
+/// counter sit together; re-exported from `lib.rs`.
+static DEVICE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Lazy D3D11 device accessor. Creates on first call, then clones the cached
+/// `Arc` out of the read guard so no lock is held across COM calls.
+pub fn device() -> Result<Arc<D3dDevice>, PlatformError> {
+    if let Some(d) = D3D.read().ok().and_then(|g| g.clone()) {
         return Ok(d);
     }
-    let created = create()?;
-    let _ = D3D.set(created);
-    D3D.get()
-        .ok_or(PlatformError::Init("D3D OnceLock empty after set"))
+    let mut w = D3D
+        .write()
+        .map_err(|_| PlatformError::Init("D3D RwLock poisoned"))?;
+    if let Some(d) = w.as_ref() {
+        return Ok(d.clone());
+    }
+    let created = Arc::new(create()?);
+    *w = Some(created.clone());
+    Ok(created)
+}
+
+/// Tear down the cached D3D device and create a fresh one. Used by
+/// `recover_device_chain` after a device-lost HRESULT. Does NOT bump
+/// `DEVICE_GEN` — only the orchestrator does, once, after the whole chain is
+/// rebuilt.
+pub fn rebuild() -> Result<Arc<D3dDevice>, PlatformError> {
+    let mut w = D3D
+        .write()
+        .map_err(|_| PlatformError::Init("D3D RwLock poisoned"))?;
+    *w = None;
+    let created = Arc::new(create()?);
+    *w = Some(created.clone());
+    Ok(created)
+}
+
+/// Current device generation — the number of completed device-chain recoveries.
+/// `Acquire` pairs with the `Release` bump in `recover_device_chain` so a reader
+/// that sees the new generation also sees the rebuilt devices.
+#[inline]
+pub fn device_generation() -> u64 {
+    DEVICE_GEN.load(Ordering::Acquire)
+}
+
+/// Recreate the entire GPU device chain after a device-lost event, in dependency
+/// order: D3D first (d2d + dcomp both consume its `IDXGIDevice`), then D2D, then
+/// DComp. Each `rebuild()` takes and releases only its own lock, so there is no
+/// cross-module lock held during the sibling `d3d::device()` calls the d2d/dcomp
+/// create paths make. The shared generation is bumped exactly once, at the end,
+/// with `Release` ordering so any thread that observes the new generation also
+/// observes the fully-rebuilt chain.
+pub fn recover_device_chain() -> Result<(), PlatformError> {
+    crate::d3d::rebuild()?;
+    crate::d2d::rebuild()?;
+    crate::dcomp::rebuild()?;
+    DEVICE_GEN.fetch_add(1, Ordering::Release);
+    Ok(())
 }
 
 /// Pick the minimum-power adapter (integrated GPU on dual-GPU laptops),
@@ -245,6 +307,71 @@ fn use_warp_driver() -> bool {
     std::env::var_os(D3D_WARP_ENV).is_some() || std::env::var_os(D3D_HARDWARE_ENV).is_none()
 }
 
+/// Mc-2b — recovery policy state, owned by the shell/app driver. Pure data; the
+/// `Instant`-based 60-second retry window lives in the shell (later dispatch),
+/// which passes the `within_window` flag in. Kept GPU-free so the whole policy
+/// is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryState {
+    /// No device loss outstanding — normal painting.
+    Healthy,
+    /// A device-lost event is being handled; `attempts` recreate tries so far
+    /// inside the current retry window (1 after the first BeginRecreate).
+    Recovering { attempts: u32 },
+    /// Exceeded the retry budget inside the window — recovery abandoned (the
+    /// shell shows a fatal box + quits). Further losses are ignored.
+    GaveUp,
+}
+
+/// Mc-2b — the action the caller should take for a device-lost event given the
+/// current `RecoveryState`. Returned by [`decide_recovery`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Do nothing (already given up — avoid recreate storms).
+    Ignore,
+    /// Recreate the device chain. The caller then transitions to
+    /// `Recovering { attempts: n }` where `n` is the new attempt count.
+    BeginRecreate,
+    /// Recreation budget exhausted inside the window — give up.
+    GiveUp,
+}
+
+/// Pure device-recovery decision. The caller owns the `RecoveryState` and the
+/// `Instant`-based window; this function just maps (state, window, budget) to an
+/// action. Intended transitions (caller applies them):
+///
+/// * `Healthy` + device-lost → `BeginRecreate`; caller → `Recovering { attempts: 1 }`.
+/// * `Recovering { n }` **within** the window:
+///     - `n >= max_attempts` → `GiveUp`; caller → `GaveUp`.
+///     - otherwise → `BeginRecreate`; caller → `Recovering { attempts: n + 1 }`.
+/// * `Recovering { .. }` **outside** the window (the 60 s budget elapsed since
+///   the first failure) → the streak resets: `BeginRecreate`; caller →
+///   `Recovering { attempts: 1 }`.
+/// * `GaveUp` → `Ignore` (stays `GaveUp`).
+///
+/// A successful frame is the caller's cue to drop back to `Healthy`; that
+/// success transition is not modelled here because no device-lost event drives it.
+pub fn decide_recovery(
+    state: RecoveryState,
+    within_window: bool,
+    max_attempts: u32,
+) -> RecoveryAction {
+    match state {
+        RecoveryState::Healthy => RecoveryAction::BeginRecreate,
+        RecoveryState::Recovering { attempts } => {
+            if !within_window {
+                // The retry window elapsed — the streak is stale; start fresh.
+                RecoveryAction::BeginRecreate
+            } else if attempts >= max_attempts {
+                RecoveryAction::GiveUp
+            } else {
+                RecoveryAction::BeginRecreate
+            }
+        }
+        RecoveryState::GaveUp => RecoveryAction::Ignore,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +402,89 @@ mod tests {
             return;
         }
         let dev = device().expect("WARP-default D3D11 device should create on this host");
-        // Touch both members so the binding is observably used.
+        // Touch both members so the binding is observably used. `dev` is an
+        // `Arc<D3dDevice>`; field access derefs through the Arc.
         let _ = (&dev.device, &dev.context);
+    }
+
+    // Mc-2b — pure recovery-policy coverage. Zero-GPU, runs everywhere.
+    #[test]
+    fn decide_recovery_first_loss_begins_recreate() {
+        // Healthy + device-lost → BeginRecreate (caller → Recovering{1}).
+        assert_eq!(
+            decide_recovery(RecoveryState::Healthy, true, 3),
+            RecoveryAction::BeginRecreate
+        );
+    }
+
+    #[test]
+    fn decide_recovery_within_budget_retries() {
+        // Recovering below the cap, inside the window → keep recreating.
+        assert_eq!(
+            decide_recovery(RecoveryState::Recovering { attempts: 1 }, true, 3),
+            RecoveryAction::BeginRecreate
+        );
+        assert_eq!(
+            decide_recovery(RecoveryState::Recovering { attempts: 2 }, true, 3),
+            RecoveryAction::BeginRecreate
+        );
+    }
+
+    #[test]
+    fn decide_recovery_exhausted_gives_up() {
+        // Recovering{max} inside the window → GiveUp.
+        assert_eq!(
+            decide_recovery(RecoveryState::Recovering { attempts: 3 }, true, 3),
+            RecoveryAction::GiveUp
+        );
+        assert_eq!(
+            decide_recovery(RecoveryState::Recovering { attempts: 4 }, true, 3),
+            RecoveryAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn decide_recovery_gave_up_ignores() {
+        assert_eq!(
+            decide_recovery(RecoveryState::GaveUp, true, 3),
+            RecoveryAction::Ignore
+        );
+        // Even out of window, GaveUp stays terminal.
+        assert_eq!(
+            decide_recovery(RecoveryState::GaveUp, false, 3),
+            RecoveryAction::Ignore
+        );
+    }
+
+    #[test]
+    fn decide_recovery_out_of_window_resets_streak() {
+        // The window elapsed: even a maxed-out streak restarts recreation
+        // (caller will reset attempts to 1) rather than giving up.
+        assert_eq!(
+            decide_recovery(RecoveryState::Recovering { attempts: 9 }, false, 3),
+            RecoveryAction::BeginRecreate
+        );
+    }
+
+    // Mc-2b — real-WARP device-recreate smoke. Exercises the actual
+    // `rebuild()` recreate path three times in a row; each must yield a fresh,
+    // valid device. Ignored by default (needs a working WARP/GPU stack); run
+    // via `cargo test -p bento-nano-platform --lib -- --ignored device_lost_smoke`.
+    // Skips silently under the env-gated hardware path, mirroring the WARP
+    // smoke test above.
+    #[test]
+    #[ignore = "real-device recreate smoke; run with -- --ignored"]
+    fn device_lost_smoke() {
+        if std::env::var_os(D3D_HARDWARE_ENV).is_some() {
+            eprintln!("skipped: BENTODESK_NANO_D3D_HARDWARE set, hardware path not asserted");
+            return;
+        }
+        for attempt in 0..3 {
+            let dev = rebuild().unwrap_or_else(|e| {
+                panic!("d3d::rebuild() attempt {attempt} should recreate a WARP device: {e}")
+            });
+            // Touch the members so the recreated device is observably valid.
+            let _ = (&dev.device, &dev.context);
+        }
     }
 }

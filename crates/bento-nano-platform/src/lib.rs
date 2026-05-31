@@ -30,6 +30,9 @@ pub mod svg;
 pub mod svg_cache;
 pub mod window;
 
+pub use d3d::{
+    RecoveryAction, RecoveryState, decide_recovery, device_generation, recover_device_chain,
+};
 pub use errors::{PlatformError, ok};
 pub use monitor::{
     MonitorInfo, RectI32, clamp_window_to_monitors, clamp_zone_to_monitors, enumerate_monitors,

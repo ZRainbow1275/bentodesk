@@ -7,8 +7,13 @@
 //!
 //! Hot-path discipline (spec §10): no `String::new`, no `Vec::new`, no
 //! `format!` per frame. All resources created once and reused.
+//!
+//! Mc-2b: the factory singleton is a rebuildable `RwLock<Option<Arc<D2dFactory>>>`
+//! (was `OnceLock`) so `recover_device_chain` can swap in a factory built over
+//! the recreated D3D device after a device loss. `factory()` clones the `Arc`
+//! out of the guard — no lock held across COM calls.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 
@@ -47,20 +52,46 @@ pub struct D2dFactory {
 }
 
 // SAFETY: D2D factory + device are documented free-threaded for creation calls.
+//         Mc-2b: handed out as `Arc<D2dFactory>`; `D2dFactory: Sync` (asserted
+//         here) makes `Arc<D2dFactory>: Send + Sync`. Arc clones flow only on
+//         the single UI thread.
 unsafe impl Send for D2dFactory {}
 unsafe impl Sync for D2dFactory {}
 
-static FACTORY: OnceLock<D2dFactory> = OnceLock::new();
+/// Rebuildable process-wide D2D factory holder. `recover_device_chain` rebuilds
+/// the whole `D2dFactory` (factory + device) over the recreated D3D device.
+static FACTORY: RwLock<Option<Arc<D2dFactory>>> = RwLock::new(None);
 
-pub fn factory() -> Result<&'static D2dFactory, PlatformError> {
-    if let Some(f) = FACTORY.get() {
+/// Lazy D2D factory accessor. Clones the cached `Arc` out of the read guard so
+/// no lock is held across the COM calls in `create_factory` (which itself calls
+/// the sibling `d3d::device()` — a different lock, cloned-out immediately, so no
+/// re-entrancy cycle).
+pub fn factory() -> Result<Arc<D2dFactory>, PlatformError> {
+    if let Some(f) = FACTORY.read().ok().and_then(|g| g.clone()) {
         return Ok(f);
     }
-    let created = create_factory()?;
-    let _ = FACTORY.set(created);
-    FACTORY
-        .get()
-        .ok_or(PlatformError::Init("D2D factory OnceLock empty"))
+    let mut w = FACTORY
+        .write()
+        .map_err(|_| PlatformError::Init("D2D factory RwLock poisoned"))?;
+    if let Some(f) = w.as_ref() {
+        return Ok(f.clone());
+    }
+    let created = Arc::new(create_factory()?);
+    *w = Some(created.clone());
+    Ok(created)
+}
+
+/// Mc-2b — tear down the cached D2D factory and rebuild it over the (already
+/// recreated) D3D device. Called by `recover_device_chain` AFTER `d3d::rebuild`.
+/// Does not bump the shared device generation — the orchestrator does that once.
+pub fn rebuild() -> Result<Arc<D2dFactory>, PlatformError> {
+    let mut w = FACTORY
+        .write()
+        .map_err(|_| PlatformError::Init("D2D factory RwLock poisoned"))?;
+    *w = None;
+    let created = Arc::new(create_factory()?);
+    *w = Some(created.clone());
+    Ok(created)
 }
 
 fn create_factory() -> Result<D2dFactory, PlatformError> {

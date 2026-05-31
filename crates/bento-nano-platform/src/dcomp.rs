@@ -9,8 +9,10 @@
 //!     -> IDCompositionVisual2 (root) -> SetEffect(blur)
 //!     -> SetContent(swap chain)
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicI32;
+use std::sync::{Arc, RwLock};
 
 use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HWND};
 use windows::Win32::Graphics::DirectComposition::{
@@ -85,11 +87,15 @@ pub struct DCompState {
 }
 
 // SAFETY: DComp device is documented thread-safe; we only mutate the visual
-//         tree from the UI thread.
+//         tree from the UI thread. Mc-2b: handed out as `Arc<DCompState>`;
+//         `DCompState: Sync` (asserted here) makes `Arc<DCompState>: Send + Sync`.
+//         Arc clones flow only on the single UI thread.
 unsafe impl Send for DCompState {}
 unsafe impl Sync for DCompState {}
 
-static DCOMP: OnceLock<DCompState> = OnceLock::new();
+/// Rebuildable process-wide DComp device holder. `recover_device_chain` swaps in
+/// a fresh device built over the recreated D3D `IDXGIDevice` after a device loss.
+static DCOMP: RwLock<Option<Arc<DCompState>>> = RwLock::new(None);
 
 pub fn acrylic_feature_enabled() -> bool {
     cfg!(feature = "acrylic")
@@ -98,7 +104,10 @@ pub fn acrylic_feature_enabled() -> bool {
 pub fn acrylic_runtime_available() -> Option<bool> {
     #[cfg(feature = "acrylic")]
     {
-        DCOMP.get().map(|state| state.device3.is_some())
+        DCOMP
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|state| state.device3.is_some()))
     }
     #[cfg(not(feature = "acrylic"))]
     {
@@ -106,10 +115,39 @@ pub fn acrylic_runtime_available() -> Option<bool> {
     }
 }
 
-pub fn device() -> Result<&'static DCompState, PlatformError> {
-    if let Some(d) = DCOMP.get() {
+pub fn device() -> Result<Arc<DCompState>, PlatformError> {
+    if let Some(d) = DCOMP.read().ok().and_then(|g| g.clone()) {
         return Ok(d);
     }
+    let created = Arc::new(create()?);
+    let mut w = DCOMP
+        .write()
+        .map_err(|_| PlatformError::Init("DComp RwLock poisoned"))?;
+    if let Some(d) = w.as_ref() {
+        return Ok(d.clone());
+    }
+    *w = Some(created.clone());
+    Ok(created)
+}
+
+/// Mc-2b — tear down the cached DComp device and rebuild it over the (already
+/// recreated) D3D device. Called by `recover_device_chain` AFTER `d3d::rebuild`
+/// and `d2d::rebuild`. Does not bump the shared device generation.
+pub fn rebuild() -> Result<Arc<DCompState>, PlatformError> {
+    let created = Arc::new(create()?);
+    let mut w = DCOMP
+        .write()
+        .map_err(|_| PlatformError::Init("DComp RwLock poisoned"))?;
+    *w = Some(created.clone());
+    Ok(created)
+}
+
+/// Create a fresh `DCompState` over the current D3D device. Extracted from the
+/// former inline `device()` body so both `device()` and `rebuild()` share one
+/// construction path. Calls the sibling `d3d::device()` WITHOUT holding the
+/// DComp lock (the caller acquires the DComp write lock only after this returns),
+/// so there is no re-entrancy cycle.
+fn create() -> Result<DCompState, PlatformError> {
     let d3d = d3d_device()?;
     // Spec §15.1 — Interface::cast canonical for COM cross-cast. The v2/v3
     // create-path takes an `IUnknown`, so we hand it the IDXGIDevice view
@@ -154,15 +192,16 @@ pub fn device() -> Result<&'static DCompState, PlatformError> {
         res.ok()
     };
     #[cfg(feature = "acrylic")]
-    let _ = DCOMP.set(DCompState {
-        device: dcomp,
-        device3,
-    });
+    {
+        Ok(DCompState {
+            device: dcomp,
+            device3,
+        })
+    }
     #[cfg(not(feature = "acrylic"))]
-    let _ = DCOMP.set(DCompState { device: dcomp });
-    DCOMP
-        .get()
-        .ok_or(PlatformError::Init("DComp OnceLock empty"))
+    {
+        Ok(DCompState { device: dcomp })
+    }
 }
 
 /// Per-window DComp / DXGI artefacts.
@@ -268,7 +307,11 @@ fn create_swap_chain(
     height: u32,
 ) -> Result<IDXGISwapChain1, PlatformError> {
     let _ = hwnd; // composition swap chain is HWND-independent (DComp owns binding).
-    let d3d = &d3d_device()?.device;
+    // Mc-2b: `d3d_device()` now returns an `Arc<D3dDevice>`; bind it to a local
+    // so the borrow of `.device` below outlives this statement (a `&...?.device`
+    // temporary Arc would be dropped at the `;`).
+    let d3d_dev = d3d_device()?;
+    let d3d = &d3d_dev.device;
 
     // SAFETY: standard CreateDXGIFactory2 entry.
     let factory: IDXGIFactory2 = ok("CreateDXGIFactory2", unsafe {
@@ -358,7 +401,10 @@ fn create_visual_tree(
     hwnd: HWND,
     swap: &IDXGISwapChain1,
 ) -> Result<(IDCompositionTarget, IDCompositionVisual), PlatformError> {
-    let dcomp = &device()?.device;
+    // Mc-2b: `device()` now returns an `Arc<DCompState>`; bind it so both the
+    // `.device` borrow and the `.device3` acrylic probe below share one live Arc.
+    let dcomp_state = device()?;
+    let dcomp = &dcomp_state.device;
     // SAFETY: dcomp valid; topmost=true places visual above other DComp
     //         content. CreateTargetForHwnd lives on
     //         IDCompositionDesktopDevice — same call signature as the
@@ -381,7 +427,7 @@ fn create_visual_tree(
     // window. Spec §11 init-path discipline: blur is visual polish,
     // not a correctness requirement.
     #[cfg(feature = "acrylic")]
-    if let Some(dcomp3) = device()?.device3.as_ref() {
+    if let Some(dcomp3) = dcomp_state.device3.as_ref() {
         attach_acrylic(dcomp3, &root)?;
     }
 
@@ -407,22 +453,71 @@ enum PresentOutcome {
     Occluded,
     /// `S_OK` — presented (or, in TEST mode, the window is visible again).
     Ok,
+    /// Mc-2b — the device was lost: `DXGI_ERROR_DEVICE_REMOVED` (0x887A0005),
+    /// `_DEVICE_RESET` (0x887A0007), or `_DEVICE_HUNG` (0x887A0006). The caller
+    /// returns `PlatformError::DeviceLost` so the shell can recreate the chain
+    /// instead of treating it as a fatal generic HRESULT.
+    DeviceLost,
     /// Any other HRESULT — route through the existing `ok()` helper so genuine
     /// failures still map to `PlatformError` exactly as before.
     Other,
 }
 
+/// `DXGI_ERROR_DEVICE_REMOVED` — the GPU was physically removed, the driver was
+/// upgraded, or a TDR removed the device. (windows-rs does not expose these as
+/// constants in the imported modules, so we spell the documented HRESULTs.)
+const DXGI_ERROR_DEVICE_REMOVED: i32 = 0x887A_0005u32 as i32;
+/// `DXGI_ERROR_DEVICE_RESET` — the device failed because of a badly-formed
+/// command (effectively a device loss for our purposes).
+const DXGI_ERROR_DEVICE_RESET: i32 = 0x887A_0007u32 as i32;
+/// `DXGI_ERROR_DEVICE_HUNG` — the device hung (often the cause of a TDR).
+const DXGI_ERROR_DEVICE_HUNG: i32 = 0x887A_0006u32 as i32;
+
 /// Classify a raw `Present` HRESULT integer (`HRESULT.0`). `S_OK` is `0`;
-/// `DXGI_STATUS_OCCLUDED` is `0x087A_0001`.
+/// `DXGI_STATUS_OCCLUDED` is `0x087A_0001`; the three device-lost HRESULTs map
+/// to `DeviceLost` (Mc-2b — these used to fall through to `Other`).
 #[inline]
 fn classify_present(hr: i32) -> PresentOutcome {
     if hr == DXGI_STATUS_OCCLUDED.0 {
         PresentOutcome::Occluded
     } else if hr == 0 {
         PresentOutcome::Ok
+    } else if hr == DXGI_ERROR_DEVICE_REMOVED
+        || hr == DXGI_ERROR_DEVICE_RESET
+        || hr == DXGI_ERROR_DEVICE_HUNG
+    {
+        PresentOutcome::DeviceLost
     } else {
         PresentOutcome::Other
     }
+}
+
+/// Mc-2b test-injection seam (§10-clean). In a release build `effective_present_hr`
+/// is the identity (`#[inline]` → zero cost on the present hot path). Under
+/// `#[cfg(test)]` it first consults `FORCED_PRESENT_HR` (a one-shot synthetic
+/// HRESULT a test can `store`), so a test can drive `present()` →
+/// `PresentOutcome::DeviceLost` without a real TDR. There is NO atomic touched on
+/// the release path.
+#[cfg(not(test))]
+#[inline]
+fn effective_present_hr(hr: i32) -> i32 {
+    hr
+}
+
+#[cfg(test)]
+static FORCED_PRESENT_HR: AtomicI32 = AtomicI32::new(0);
+
+/// Inject a one-shot synthetic `Present` HRESULT for the NEXT `present()` call
+/// (test-only). The value is consumed (swapped back to 0) on read.
+#[cfg(test)]
+pub(crate) fn force_present_hr(hr: i32) {
+    FORCED_PRESENT_HR.store(hr, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn effective_present_hr(hr: i32) -> i32 {
+    let inj = FORCED_PRESENT_HR.swap(0, Ordering::Relaxed);
+    if inj != 0 { inj } else { hr }
 }
 
 impl WindowComp {
@@ -456,12 +551,15 @@ impl WindowComp {
             // Cheap occlusion poll — PRESENT_TEST renders nothing.
             // SAFETY: swap valid; sync interval 0 + TEST flag = no render.
             let hr = unsafe { swap.Present(0, DXGI_PRESENT_TEST) };
-            match classify_present(hr.0) {
+            match classify_present(effective_present_hr(hr.0)) {
                 // Still occluded — cheap no-op, no render this frame.
                 PresentOutcome::Occluded => return Ok(()),
                 // Visible again — clear the latch and fall through to do a
                 // real present so the newly-exposed region isn't stale.
                 PresentOutcome::Ok => self.occluded.store(false, Ordering::Relaxed),
+                // Mc-2b — device lost even on the cheap poll: bubble up so the
+                // shell can recreate the chain.
+                PresentOutcome::DeviceLost => return Err(PlatformError::DeviceLost),
                 // Genuine failure during the poll — surface it via `ok()`.
                 PresentOutcome::Other => return ok("IDXGISwapChain1::Present(TEST)", hr.ok()),
             }
@@ -469,13 +567,16 @@ impl WindowComp {
 
         // Normal real present (vsync). SAFETY: swap valid; sync interval 1.
         let hr = unsafe { swap.Present(1, DXGI_PRESENT(0)) };
-        match classify_present(hr.0) {
+        match classify_present(effective_present_hr(hr.0)) {
             // Just learned we're occluded — latch so the next frames poll
             // cheaply instead of presenting into the void.
             PresentOutcome::Occluded => {
                 self.occluded.store(true, Ordering::Relaxed);
                 Ok(())
             }
+            // Mc-2b — device lost (TDR / reset / hung): bubble up so the shell
+            // routes it into `recover_device_chain` instead of a fatal HRESULT.
+            PresentOutcome::DeviceLost => Err(PlatformError::DeviceLost),
             // S_OK or any other HRESULT routes through `ok()` exactly as
             // before — preserving both success and error-mapping behaviour.
             PresentOutcome::Ok | PresentOutcome::Other => ok("IDXGISwapChain1::Present", hr.ok()),
@@ -486,12 +587,17 @@ impl WindowComp {
     /// will allocate at the requested size directly. Wave 12: must re-pass
     /// the FRAME_LATENCY_WAITABLE_OBJECT flag so DXGI doesn't silently
     /// demote back to the 3-frame default queue.
+    ///
+    /// Mc-2b — `ResizeBuffers` can itself report a device loss (the GPU may have
+    /// been reset between frames). We classify the HRESULT and surface
+    /// `PlatformError::DeviceLost` on device-lost so the shell recreates the
+    /// chain instead of the failure being swallowed by the caller's `let _ =`.
     pub fn resize(&self, w: u32, h: u32) -> Result<(), PlatformError> {
         let Some(swap) = self.swap_chain.as_ref() else {
             return Ok(());
         };
         // SAFETY: swap valid; ResizeBuffers preserves format.
-        ok("ResizeBuffers", unsafe {
+        let res = unsafe {
             swap.ResizeBuffers(
                 0,
                 w.max(1),
@@ -499,7 +605,13 @@ impl WindowComp {
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 DXGI_SWAP_CHAIN_FLAG(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0),
             )
-        })
+        };
+        if let Err(ref e) = res {
+            if classify_present(e.code().0) == PresentOutcome::DeviceLost {
+                return Err(PlatformError::DeviceLost);
+            }
+        }
+        ok("ResizeBuffers", res)
     }
 }
 
@@ -550,9 +662,56 @@ mod tests {
         assert_eq!(classify_present(DXGI_STATUS_OCCLUDED.0), PresentOutcome::Occluded);
         // S_OK.
         assert_eq!(classify_present(0), PresentOutcome::Ok);
-        // A genuine failure (DXGI_ERROR_DEVICE_REMOVED) and an unrelated
-        // success both route through the `ok()` helper as `Other`.
-        assert_eq!(classify_present(0x887A_0005u32 as i32), PresentOutcome::Other);
+        // An unrelated success / arbitrary other HRESULT routes through the
+        // `ok()` helper as `Other`.
+        assert_eq!(classify_present(0x887A_0001u32 as i32), PresentOutcome::Other);
         assert_eq!(classify_present(1), PresentOutcome::Other);
+    }
+
+    // Mc-2b — the three device-lost HRESULTs now classify as `DeviceLost`
+    // (DEVICE_REMOVED flipped from the old `Other` mapping), while occluded /
+    // S_OK / arbitrary-other are unchanged.
+    #[test]
+    fn classify_present_maps_device_lost() {
+        // DEVICE_REMOVED — used to be `Other`, now `DeviceLost`.
+        assert_eq!(
+            classify_present(0x887A_0005u32 as i32),
+            PresentOutcome::DeviceLost
+        );
+        // DEVICE_RESET.
+        assert_eq!(
+            classify_present(0x887A_0007u32 as i32),
+            PresentOutcome::DeviceLost
+        );
+        // DEVICE_HUNG.
+        assert_eq!(
+            classify_present(0x887A_0006u32 as i32),
+            PresentOutcome::DeviceLost
+        );
+        // Non-device-lost cases stay as they were.
+        assert_eq!(classify_present(0), PresentOutcome::Ok);
+        assert_eq!(classify_present(0x087A_0001), PresentOutcome::Occluded);
+        // An arbitrary other failure is still `Other`.
+        assert_eq!(
+            classify_present(0x887A_0001u32 as i32),
+            PresentOutcome::Other
+        );
+    }
+
+    // Mc-2b — the test-only injection seam: a stored synthetic HRESULT is
+    // consumed exactly once, and otherwise `effective_present_hr` is the
+    // identity. This is what lets a future test drive `present()` →
+    // `DeviceLost` without a real TDR.
+    #[test]
+    fn force_present_hr_injects_once_then_passes_through() {
+        // No injection → identity.
+        assert_eq!(effective_present_hr(0), 0);
+        assert_eq!(effective_present_hr(42), 42);
+        // Inject DEVICE_REMOVED; first read returns it, regardless of the
+        // real HRESULT passed in.
+        force_present_hr(0x887A_0005u32 as i32);
+        assert_eq!(effective_present_hr(0), 0x887A_0005u32 as i32);
+        // One-shot: the next read passes the real value through.
+        assert_eq!(effective_present_hr(7), 7);
     }
 }
