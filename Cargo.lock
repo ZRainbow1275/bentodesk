@@ -14,6 +14,7 @@ version = "0.0.1"
 dependencies = [
  "bento-nano-style",
  "bento-nano-tree",
+ "serde",
 ]
 
 [[package]]
@@ -117,6 +118,7 @@ version = "0.0.1"
 dependencies = [
  "bento-nano-style",
  "bento-nano-tree",
+ "serde",
  "smallvec",
  "smol_str",
 ]
@@ -126,6 +128,7 @@ name = "bento-nano-tree"
 version = "0.0.1"
 dependencies = [
  "bento-nano-style",
+ "serde",
  "smallvec",
  "smol_str",
 ]

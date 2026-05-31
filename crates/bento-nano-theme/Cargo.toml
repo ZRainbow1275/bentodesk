@@ -13,6 +13,12 @@ bento-nano-style = { path = "../bento-nano-style" }
 bento-nano-tree  = { path = "../bento-nano-tree" }
 smol_str         = { workspace = true }
 smallvec         = { workspace = true }
+# Forces `serde`'s `alloc` feature on for isolated `cargo test -p bento-nano-theme`
+# builds. `smol_str` (pulled directly) activates `smol_str/serde`, but
+# `serde_core::de::Visitor`'s `visit_string`/`visit_byte_buf` are alloc-gated;
+# without serde/alloc unified in, smol_str 0.3.6's serde impl fails to compile
+# (E0407). Identical fix already applied to bento-nano-layout / bento-nano-widget.
+serde            = { workspace = true }
 
 [lints]
 workspace = true
