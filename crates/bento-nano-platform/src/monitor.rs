@@ -312,6 +312,80 @@ pub fn clamp_window_to_monitors(x: i32, y: i32, w: i32, h: i32, monitors: &[Moni
     (clamp_i32(x, min_x, max_x), clamp_i32(y, min_y, max_y))
 }
 
+/// Strictly pin a raw rect `(x, y, w, h)` fully inside the UNION bounding
+/// rectangle of every non-degenerate monitor work area, returning the
+/// clamped top-left. Width / height are never touched.
+///
+/// This is the LIVE-DRAG clamp (M4 zone gestures, ZRainbow ruling Option A —
+/// STRICT INSET, UNION BOUNDS). Unlike `clamp_window_to_monitors` /
+/// `clamp_zone_to_monitors` — which are rescue-only (they no-op while ≥1 px
+/// still overlaps a monitor and only translate a fully-offscreen rect back) —
+/// this helper pins the rect so it can NEVER overhang the OUTER desktop edge,
+/// even by a single pixel. On a single monitor that is pixel-identical to
+/// Tauri's `x_percent ∈ [0, 100 − capWidthPct]` clamp (`BentoZone.tsx`): the
+/// dragged zone is held fully inside that monitor. On multi-monitor the zone
+/// roams freely inside the combined outer rect and may straddle the seam
+/// between adjacent monitors, but never exits the outer boundary.
+///
+/// Semantics (half-open convention `[x, x+w) ⊆ [union.left, union.right)`,
+/// likewise Y):
+/// - Empty `monitors` slice → no-op (returns `(x, y)`).
+/// - All monitors degenerate (`width <= 0 || height <= 0`, e.g. the
+///   `FALLBACK_NO_MONITOR` sentinel) → no-op (returns `(x, y)`). Degenerate
+///   monitors are skipped when forming the union, mirroring the existing
+///   clamps.
+/// - Clamp range `x ∈ [union.left, union.right − w]`, `y ∈ [union.top,
+///   union.bottom − h]`.
+/// - Oversized rect (`w > union.width`) → pin to `union.left` (and likewise
+///   Y to `union.top` when `h > union.height`). Achieved naturally by
+///   `clamp_i32`'s `min > max` fold (`union.right − w < union.left`).
+///
+/// Pure + allocation-free + panic-free (uses `clamp_i32`, never
+/// `Ord::clamp`). Safe to call every `WM_MOUSEMOVE` on the drag hot path
+/// (§10).
+pub fn clamp_rect_into_union_bounds(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    monitors: &[MonitorInfo],
+) -> (i32, i32) {
+    let Some(union) = union_work_bounds(monitors) else {
+        return (x, y);
+    };
+    // Clamp range: x ∈ [union.left, union.right - w]. When w > union.width,
+    // `union.right - w < union.left` so `clamp_i32`'s min>max fold pins to
+    // `union.left` (the lower bound), exactly the oversized-rect contract.
+    let nx = clamp_i32(x, union.left, union.right - w);
+    let ny = clamp_i32(y, union.top, union.bottom - h);
+    (nx, ny)
+}
+
+/// Union bounding rectangle of every NON-DEGENERATE monitor `rect_work`.
+/// Returns `None` when `monitors` is empty or all entries are degenerate
+/// (`width <= 0 || height <= 0`, e.g. the `FALLBACK_NO_MONITOR` sentinel),
+/// so callers can no-op without synthesizing a zero-area target — matching
+/// the degenerate-skip convention of `clamp_window_to_monitors`.
+fn union_work_bounds(monitors: &[MonitorInfo]) -> Option<RectI32> {
+    let mut acc: Option<RectI32> = None;
+    for m in monitors {
+        let r = &m.rect_work;
+        if r.width() <= 0 || r.height() <= 0 {
+            continue;
+        }
+        acc = Some(match acc {
+            None => *r,
+            Some(u) => RectI32 {
+                left: u.left.min(r.left),
+                top: u.top.min(r.top),
+                right: u.right.max(r.right),
+                bottom: u.bottom.max(r.bottom),
+            },
+        });
+    }
+    acc
+}
+
 /// `[x, x+w) × [y, y+h)` ∩ `r` non-empty? Half-open on all four sides to
 /// match `RectI32::contains_point`. Screen-rect twin of `zone_overlaps_rect`.
 #[inline]
@@ -454,5 +528,108 @@ mod tests {
         // Zero-area window → no-op even when offscreen.
         let monitors = [fake(0, 0, 1920, 1080, true)];
         assert_eq!(clamp_window_to_monitors(99999, 99999, 0, 0, &monitors), (99999, 99999));
+    }
+
+    // ── clamp_rect_into_union_bounds (M4 live-drag strict inset) ──────────
+
+    #[test]
+    fn union_bounds_single_monitor_is_tauri_strict_pin() {
+        // Single monitor [0,1920)x[0,1080); zone 400x300. STRICT: the zone
+        // must be held FULLY inside — never overhanging the right/bottom
+        // inset. This is the Tauri-parity case (x_percent ∈ [0, 100-cap]).
+        let monitors = [fake(0, 0, 1920, 1080, true)];
+        // Already fully inside → unchanged.
+        assert_eq!(
+            clamp_rect_into_union_bounds(100, 100, 400, 300, &monitors),
+            (100, 100)
+        );
+        // Pushed past the right edge → pinned so right edge == 1920.
+        assert_eq!(
+            clamp_rect_into_union_bounds(1800, 100, 400, 300, &monitors),
+            (1920 - 400, 100)
+        );
+        // Pushed past the bottom edge → pinned so bottom edge == 1080.
+        assert_eq!(
+            clamp_rect_into_union_bounds(100, 1000, 400, 300, &monitors),
+            (100, 1080 - 300)
+        );
+        // Pushed past the top-left → pinned to (0, 0).
+        assert_eq!(
+            clamp_rect_into_union_bounds(-50, -50, 400, 300, &monitors),
+            (0, 0)
+        );
+        // Max legal top-left: right/bottom edges flush with the work area.
+        assert_eq!(
+            clamp_rect_into_union_bounds(1520, 780, 400, 300, &monitors),
+            (1520, 780)
+        );
+        // Just past max → pinned back to max (no overhang).
+        assert_eq!(
+            clamp_rect_into_union_bounds(1521, 781, 400, 300, &monitors),
+            (1520, 780)
+        );
+    }
+
+    #[test]
+    fn union_bounds_two_side_by_side_monitors_roam_the_full_union() {
+        // Two 1920x1080 monitors side by side → union [0,3840)x[0,1080).
+        let monitors = [
+            fake(0, 0, 1920, 1080, true),
+            fake(1920, 0, 3840, 1080, false),
+        ];
+        // A zone can straddle the seam between the two monitors (x spanning
+        // 1920) and stay legal — it never exits the outer edge.
+        assert_eq!(
+            clamp_rect_into_union_bounds(1800, 400, 400, 300, &monitors),
+            (1800, 400)
+        );
+        // Roams to the far right: pinned so right edge == 3840 (outer edge).
+        assert_eq!(
+            clamp_rect_into_union_bounds(3700, 400, 400, 300, &monitors),
+            (3840 - 400, 400)
+        );
+        // Roams off the left edge: pinned to union.left (0).
+        assert_eq!(
+            clamp_rect_into_union_bounds(-100, 400, 400, 300, &monitors),
+            (0, 400)
+        );
+        // Vertical is still bounded by the single shared height.
+        assert_eq!(
+            clamp_rect_into_union_bounds(2000, 2000, 400, 300, &monitors),
+            (2000, 1080 - 300)
+        );
+    }
+
+    #[test]
+    fn union_bounds_oversized_zone_pins_to_top_left() {
+        // Zone WIDER (and taller) than the whole desktop → pin to (left, top).
+        let monitors = [fake(0, 0, 1920, 1080, true)];
+        assert_eq!(
+            clamp_rect_into_union_bounds(500, 500, 4000, 2000, &monitors),
+            (0, 0)
+        );
+        // Negative-origin monitor: union.left/top are negative, so the
+        // oversized pin lands on the negative origin, not (0,0).
+        let neg = [fake(-2000, -500, 1920, 1080, true)];
+        assert_eq!(
+            clamp_rect_into_union_bounds(0, 0, 9000, 9000, &neg),
+            (-2000, -500)
+        );
+    }
+
+    #[test]
+    fn union_bounds_empty_or_degenerate_is_noop() {
+        // Empty slice → no-op.
+        assert_eq!(
+            clamp_rect_into_union_bounds(5000, 5000, 400, 300, &[]),
+            (5000, 5000)
+        );
+        // All-degenerate (zero-area work areas, e.g. FALLBACK sentinel) →
+        // no-op: nothing safe to clamp into.
+        let degenerate = [fake(0, 0, 0, 0, true), fake(10, 10, 10, 10, false)];
+        assert_eq!(
+            clamp_rect_into_union_bounds(5000, 5000, 400, 300, &degenerate),
+            (5000, 5000)
+        );
     }
 }

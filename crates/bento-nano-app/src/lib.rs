@@ -24,6 +24,7 @@ pub mod theme_picker;
 pub mod widgets;
 pub mod window_registry;
 pub mod zone_editor_geometry;
+pub mod zone_gesture_geometry;
 pub mod zone_pill_geometry;
 pub mod zone_surface_geometry;
 

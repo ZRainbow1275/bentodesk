@@ -13367,14 +13367,51 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
             }
         }
         if let Some((id, dx, dy)) = app.zone_drag.get() {
+            // M4 — gate MoveZone behind the 4-DIP drag threshold (Tauri
+            // parity ZONE_DRAG_THRESHOLD_PX = 4). Measure travel against the
+            // mouse-down ORIGIN, not the grab offset; latch `moved` so a drag
+            // stays a drag once it crosses the threshold (one-way, matching
+            // Tauri's `moved = true`). A sub-threshold release stays a pure
+            // click (no MoveZone pushed). Integer-only, alloc-free (§10).
+            let (sx, sy, already_moved) = app
+                .zone_drag_origin
+                .get()
+                .unwrap_or((x as i32, y as i32, true));
+            if !already_moved
+                && !bento_nano_app::zone_gesture_geometry::exceeds_drag_threshold(
+                    x as i32 - sx,
+                    y as i32 - sy,
+                )
+            {
+                // Sub-threshold: still a pending click — no move yet.
+                return;
+            }
+            if !already_moved {
+                app.zone_drag_origin.set(Some((sx, sy, true)));
+            }
             let nx = x as i32 - dx;
             let ny = y as i32 - dy;
+            // M4 strict live-drag clamp (ZRainbow ruling Option A — STRICT
+            // INSET, UNION BOUNDS): hold the dragged zone fully inside the
+            // union of all monitor work areas; it may never overhang the
+            // outer desktop edge. On a single monitor this is pixel-identical
+            // to Tauri's [0, 100-cap] clamp. `slot.state.monitors` is the live
+            // cache; the MoveZone reducer has no monitor list in scope, so the
+            // clamp lives here.
+            let (cx, cy) = if let Some(z) = app.zones.get(id) {
+                bento_nano_platform::clamp_rect_into_union_bounds(
+                    nx,
+                    ny,
+                    z.w,
+                    z.h,
+                    &slot.state.monitors,
+                )
+            } else {
+                (nx, ny)
+            };
             drop(app);
             root.dispatcher
-                .push(Command::MoveZone(id, DispatchPoint::new(nx, ny)));
-            // Slot kept in the signature so the future Phase 2.5 scripted
-            // monitor cache stays reachable from this site.
-            let _ = slot;
+                .push(Command::MoveZone(id, DispatchPoint::new(cx, cy)));
             return;
         }
         if let Some((id, w0, h0)) = app.zone_resize.get() {
@@ -14107,6 +14144,12 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
 
     if let Some(id) = ui::hit_test_zone_resize_corner(&app, x, y) {
         if let Some(z) = app.zones.get(id) {
+            // M4 locked gate — a locked zone cannot resize (Tauri parity:
+            // BentoZone.tsx:1198 `if (zoneLocked()) return;`). Selection on
+            // mouse-down (above) still applies; we just don't arm zone_resize.
+            if z.locked {
+                return;
+            }
             app.zone_resize.set(Some((id, z.w, z.h)));
             // SAFETY: SetCapture canonical.
             unsafe { SetCapture(hwnd) };
@@ -14115,9 +14158,23 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
     }
     if let Some(id) = ui::hit_test_zone(&app, x, y) {
         if let Some(z) = app.zones.get(id) {
+            // M4 locked gate — a locked zone cannot drag, move, or become a
+            // stack member via drag (Tauri parity: BentoZone.tsx:852
+            // `if (zoneLocked()) return;`). Because zone_drag is never armed,
+            // the move handler pushes no MoveZone and the mouse-up F2 stack
+            // search short-circuits (was_drag == false). One gate covers move
+            // AND stack. Selection (set above) is unaffected.
+            if z.locked {
+                return;
+            }
             let dx = x as i32 - z.x;
             let dy = y as i32 - z.y;
             app.zone_drag.set(Some((id, dx, dy)));
+            // M4 — capture the mouse-down origin so the move handler can gate
+            // MoveZone behind the 4-DIP drag threshold (moved = false until
+            // the pointer travels past it). Tuple = (start_x, start_y, moved).
+            app.zone_drag_origin
+                .set(Some((x as i32, y as i32, false)));
             // V-8 — fire press-down animator unless this is a stack anchor
             // (which paints via its own chrome and doesn't run the V-8 path).
             if !z.is_stack_anchor() {
@@ -14176,8 +14233,34 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     let app = root.app.borrow();
     let was_drag = app.zone_drag.get().is_some();
     let was_resize = app.zone_resize.get().is_some();
+    // M4 F2 — a drop that overlaps another zone forms a stack. Only when an
+    // actual drag latched (moved past the 4-DIP threshold), never a
+    // sub-threshold click-release. Compute the target BEFORE clearing
+    // zone_drag; the dragged zone's live rect is already written into
+    // app.zones by the synchronous MoveZone reducer. Anchor = the overlapped
+    // zone, member = the dragged zone ⇒ Command::StackZone(anchor, dragged)
+    // (matches the (parent, child) reducer contract and the context-menu push
+    // at the StackWith arm).
+    let stack_command = if was_drag {
+        let moved = app
+            .zone_drag_origin
+            .get()
+            .map(|(_, _, m)| m)
+            .unwrap_or(false);
+        if moved {
+            app.zone_drag.get().and_then(|(dragged, _, _)| {
+                bento_nano_app::zone_gesture_geometry::stack_target_for_drop(&app.zones, dragged)
+                    .map(|anchor| Command::StackZone(anchor, dragged))
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if was_drag {
         app.zone_drag.set(None);
+        app.zone_drag_origin.set(None);
         app.mark_dirty();
     }
     if was_resize {
@@ -14218,6 +14301,12 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         ))
     });
     drop(app);
+    // M4 F2 — push the drop-overlap stack (computed above before the borrow
+    // was dropped). Fires only when a real drag latched and a valid target
+    // was found.
+    if let Some(command) = stack_command {
+        root.dispatcher.push(command);
+    }
     if let Some(command) = item_command {
         root.dispatcher.push(command);
     }

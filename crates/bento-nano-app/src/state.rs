@@ -654,6 +654,15 @@ pub struct AppState {
     /// mouse-down point's offset from the zone's top-left in DIPs. None
     /// when no drag is active.
     pub zone_drag: Cell<Option<(ZoneId, i32, i32)>>,
+    /// Mouse-down origin (logical DIP) for the in-flight zone drag, used to
+    /// gate `MoveZone` behind the 4-DIP drag threshold (M4 — Tauri parity
+    /// `ZONE_DRAG_THRESHOLD_PX = 4`). `Some((start_x, start_y, moved))` where
+    /// `moved` latches `true` once the pointer travels past 4 DIP this
+    /// gesture (one-way, mirroring Tauri's `moved` flag). `None` when no drag
+    /// is armed. Set alongside `zone_drag` in `handle_lbutton_down`, cleared
+    /// in `handle_lbutton_up`. `Copy`, alloc-free — matches the `zone_drag`
+    /// idiom.
+    pub zone_drag_origin: Cell<Option<(i32, i32, bool)>>,
     /// In-flight resize — `Some((zone, w0, h0))` where (w0, h0) is the
     /// zone's size at mouse-down (delta added each MOUSEMOVE).
     pub zone_resize: Cell<Option<(ZoneId, i32, i32)>>,
@@ -878,6 +887,7 @@ impl AppState {
             zones_path: PathBuf::new(),
             dirty: Cell::new(false),
             zone_drag: Cell::new(None),
+            zone_drag_origin: Cell::new(None),
             zone_resize: Cell::new(None),
             item_drag: RefCell::new(None),
             stack_tray: RefCell::new(None),
