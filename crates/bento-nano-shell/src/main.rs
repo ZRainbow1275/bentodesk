@@ -184,7 +184,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CHAR,
     WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN,
+    WM_TIMER,
 };
 
 use bento_nano_shell::{hotkey, ui};
@@ -1206,6 +1207,12 @@ unsafe extern "system" fn wnd_proc(
                             h.max(1),
                             SWP_NOZORDER | SWP_NOACTIVATE,
                         );
+                        // Frosted-backdrop — the resolution / monitor topology
+                        // changed, so the captured work-area snapshot is stale
+                        // (wrong size / wrong wallpaper region). Mark it dirty so
+                        // the next Main paint re-captures the new primary work
+                        // area; cheap flag flip, the capture is deferred.
+                        slot.renderer.mark_backdrop_dirty();
                         // Mc-2b / #10 — route a device loss on this resize into
                         // recovery instead of discarding it.
                         if let Err(bento_nano_app::RenderError::DeviceLost) =
@@ -1219,6 +1226,28 @@ unsafe extern "system" fn wnd_proc(
                 }
             }
             0
+        }
+        WM_SETTINGCHANGE => {
+            // Frosted-backdrop — the user changed a system setting; the desktop
+            // wallpaper change arrives here as `SPI_SETDESKWALLPAPER`. We don't
+            // bother decoding `wparam` (marking on ANY settingchange is cheap —
+            // it only flips a flag; the actual re-capture is deferred to the
+            // next Main paint), so any settingchange refreshes the captured
+            // work-area snapshot for the Main overlay. Non-Main slots have no
+            // backdrop, so this is a no-op for them.
+            // SAFETY: slot pointer fetched from window data — null-checked.
+            unsafe {
+                let p = get_slot_ptr(hwnd);
+                if !p.is_null() {
+                    let slot = &mut *p;
+                    if slot.kind == WindowKind::Main {
+                        slot.renderer.mark_backdrop_dirty();
+                    }
+                }
+            }
+            // Pass through to the default proc so other settingchange handling
+            // (e.g. system font / theme propagation) is not swallowed.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_SHOWWINDOW => {
             // T-099 — hibernation entry point. Track visibility state per
@@ -17268,6 +17297,21 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
             Command::ShowWindow(kind) => {
                 match kind {
                     WindowKind::Main => {
+                        // Frosted-backdrop — the Main overlay is transitioning to
+                        // visible (tray click / hotkey ToggleMain). The desktop
+                        // behind it may have changed while it was hidden (the
+                        // user switched apps / wallpaper / virtual desktop), so
+                        // mark the captured snapshot stale; the next Main paint
+                        // re-captures. Reach the Main renderer via the registry
+                        // by kind (robust to whichever HWND is pumping).
+                        if let Some(slot) = root
+                            .registry
+                            .borrow_mut()
+                            .iter_mut()
+                            .find(|slot| slot.kind == WindowKind::Main)
+                        {
+                            slot.renderer.mark_backdrop_dirty();
+                        }
                         // SAFETY: canonical sequence — show then bring to front.
                         unsafe {
                             ShowWindow(hwnd, SW_SHOW);

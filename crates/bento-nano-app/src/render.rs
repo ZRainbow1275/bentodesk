@@ -37,7 +37,8 @@ use bento_nano_backend::{
 };
 use bento_nano_layout::LayoutError;
 use bento_nano_platform::{
-    PlatformError, WindowKind,
+    Backdrop, PlatformError, WindowKind, backdrop_brush_scale,
+    capture_primary_workarea_blurred,
     d2d::{self, WindowSurface},
     dcomp::WindowComp,
     dwrite, ok, svg,
@@ -51,8 +52,10 @@ use smol_str::SmolStr;
 use windows::Win32::Foundation::HWND as W_HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
-    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_BRUSH_PROPERTIES,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1BitmapBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat};
 use windows::core::Interface;
@@ -83,6 +86,25 @@ const IMAGE_WIDGET_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// var(--zone-accent, transparent) }` (BentoZone.css:114). Const-only so the
 /// per-frame zone draw stays allocation-free (§10).
 const PANEL_ACCENT_EDGE_THICKNESS_PX: f32 = 2.0;
+
+/// Frosted-backdrop rollback switch (`receipts/FROSTED-BACKDROP-SPEC.md` §
+/// "Degrade ladder" #3, Wave G Mica-leak precedent). When `false` the entire
+/// desktop capture + blur path is skipped — no `screencap` call, no bitmap
+/// brush — and `fill_frosted_rect` collapses to a plain `fill_rounded_rect`
+/// (the single flat tint, never the old double layer). Flip to `false` during
+/// live verify if the real-acrylic frost misbehaves.
+const FROSTED_BACKDROP: bool = true;
+
+/// Frosted-backdrop downsample factor (`screencap::capture_primary_workarea_blurred`).
+/// `2` = half-res source + baked bitmap (bounds RSS to ~2×workarea/4×4 bytes;
+/// see spec § "Memory"). Bump to `3` if the debug-overlay RSS pushes past ~95 MB.
+const FROSTED_BACKDROP_DOWNSAMPLE: u32 = 2;
+
+/// Frosted-backdrop gaussian standard deviation in DOWNSAMPLED px. Tauri is
+/// `backdrop-filter: blur(20px)` at full res; at downsample 2 the half-res
+/// starting point is ~10 (spec § "New platform module" step 5 — TUNE by eye in
+/// live verify: too low reads as a sharp wallpaper, too high as a flat grey).
+const FROSTED_BACKDROP_STDDEV: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ActiveItemDragVisual {
@@ -230,6 +252,21 @@ pub struct Renderer {
     /// `platform::device_generation()`; a mismatch means the chain was rebuilt
     /// by another window's recovery, so this renderer self-heals before drawing.
     device_gen: u64,
+    /// Frosted-backdrop (real-acrylic) cached snapshot — the baked, blurred
+    /// primary work-area bitmap behind every Main-overlay zone surface. `None`
+    /// = no frost (not yet captured, capture failed → degrade to flat tint, or
+    /// `FROSTED_BACKDROP` disabled). Rebuilt only on `backdrop_dirty` (spec §10:
+    /// no per-frame capture); Main-overlay-only (other windows never touch it).
+    backdrop: Option<Backdrop>,
+    /// Frosted-backdrop refresh flag. Set `true` at `create` (first-paint
+    /// capture), and by `mark_backdrop_dirty` on display / wallpaper / show
+    /// events. The next Main-overlay `render()` re-captures, then clears it.
+    backdrop_dirty: bool,
+    /// Frosted-backdrop per-frame bitmap brush built ONCE from `backdrop`
+    /// (spec §10 hot path). Cleared to `None` at the START of every frame so a
+    /// non-Main frame or a `None` backdrop never reuses a stale brush; rebuilt
+    /// for the Main overlay after `BeginDraw`. `fill_frosted_rect` reads it.
+    backdrop_brush: Option<ID2D1BitmapBrush>,
 }
 
 impl Renderer {
@@ -291,7 +328,24 @@ impl Renderer {
             debug_overlay_started_at: Instant::now(),
             hwnd,
             device_gen: bento_nano_platform::device_generation(),
+            // Frosted-backdrop — no snapshot yet; `backdrop_dirty = true` so the
+            // first Main-overlay paint captures the desktop. Brush is per-frame.
+            backdrop: None,
+            backdrop_dirty: true,
+            backdrop_brush: None,
         })
+    }
+
+    /// Frosted-backdrop — mark the cached desktop snapshot stale so the next
+    /// Main-overlay `render()` re-captures + re-blurs the primary work area.
+    /// The shell calls this on `WM_DISPLAYCHANGE` (resolution / monitor
+    /// topology), `WM_SETTINGCHANGE` (wallpaper arrives as SPI_SETDESKWALLPAPER),
+    /// and the ToggleMain show transition (the desktop behind the overlay may
+    /// have changed while it was hidden). Cheap flag flip — the actual capture
+    /// is deferred to the paint hot path (spec §10: no capture off the frame).
+    #[inline]
+    pub fn mark_backdrop_dirty(&mut self) {
+        self.backdrop_dirty = true;
     }
 
     /// Re-create the swap chain backbuffer surface after a resize.
@@ -470,6 +524,56 @@ impl Renderer {
         // Phase 2.3.1b — record `base_scale` for the frame so SVG draw paths
         // can compose against it instead of resetting to identity.
         self.base_scale = scale;
+
+        // Frosted-backdrop — clear the per-frame brush FIRST so a non-Main
+        // frame, a hibernated surface, or a `None` backdrop can never reuse a
+        // stale brush from a previous frame (spec §10 / degrade ladder).
+        self.backdrop_brush = None;
+
+        // Frosted-backdrop capture (real acrylic) — Main overlay only, and
+        // only when `backdrop_dirty`. This MUST run before the frame's
+        // `ctx.BeginDraw()` below: `capture_primary_workarea_blurred` does its
+        // OWN BeginDraw/EndDraw internally to bake the blur, and BeginDraw
+        // cannot be nested on one device context. The capture is on-demand —
+        // steady-state frames reuse the cached bitmap (zero per-frame capture).
+        // Degrade-not-panic (spec § "Degrade ladder"): on `Err` we drop the
+        // backdrop to `None` (→ flat tint) and STILL clear the dirty flag so we
+        // don't re-attempt a failing capture every frame; the next dirty event
+        // (display / wallpaper / show) retries.
+        if FROSTED_BACKDROP && kind == WindowKind::Main && self.backdrop_dirty {
+            let captured = match self.surface.as_ref() {
+                Some(surface) => Some(capture_primary_workarea_blurred(
+                    &surface.ctx,
+                    self.hwnd,
+                    FROSTED_BACKDROP_DOWNSAMPLE,
+                    FROSTED_BACKDROP_STDDEV,
+                )),
+                // Hibernated surface — leave dirty set so the next resident
+                // paint captures; nothing to do this frame.
+                None => None,
+            };
+            if let Some(result) = captured {
+                // `.ok()` IS the degrade: capture `Err` → `None` backdrop →
+                // `fill_frosted_rect` falls back to the single flat tint.
+                self.backdrop = result.ok();
+                self.backdrop_dirty = false;
+            }
+        }
+
+        // Frosted-backdrop — build the per-frame bitmap brush ONCE (Main overlay
+        // only) from the cached `backdrop` (spec §10: one cheap brush build per
+        // frame, no capture). Done here, before the long-lived `surface` borrow
+        // below, so the `&mut self.backdrop_brush` write does not race the
+        // immutable `surface`/`ctx` borrow that the rest of the frame holds.
+        // `CreateBitmapBrush` does not need an active `BeginDraw`. A `None`
+        // backdrop / build failure leaves `backdrop_brush = None` → flat tint.
+        if FROSTED_BACKDROP && kind == WindowKind::Main {
+            let brush = match self.surface.as_ref() {
+                Some(surface) => self.build_backdrop_brush(&surface.ctx),
+                None => None,
+            };
+            self.backdrop_brush = brush;
+        }
 
         // T-099 — paint guard. When the swap chain is hibernated, return
         // `Ok(())`. The wndproc's WM_PAINT arm calls `ensure_swap_chain`
@@ -1570,7 +1674,14 @@ impl Renderer {
             } else {
                 zone_fill_idle
             };
-            self.fill_rounded_rect(rect, fill, radius)?;
+            // Frosted-backdrop (2026-06-01) — the settled expanded panel surface
+            // is now real acrylic: [blurred desktop clipped to the panel rect] +
+            // [ONE tint] (`surface_dialog` 92% idle / `accent@0.92` active),
+            // matching Tauri's panel chrome over `backdrop-filter: blur(20px)`.
+            // Frosting under the active-drag accent tint is intentional (Tauri's
+            // accent panels also sit over the blur). Degrades to the flat tint
+            // when no backdrop. The M6b shadow stack + accent edge are unchanged.
+            self.fill_frosted_rect(rect, fill, radius)?;
             // M2③ (05-31, ruling = A / 1:1) — re-add the 2px top accent edge
             // that V-9 (2026-05-21) removed. Authoritative source is Tauri
             // `.bento-zone--expanded { border-top: 2px solid var(--zone-accent,
@@ -2079,9 +2190,11 @@ impl Renderer {
     /// Tauri 1.2.4 shows each zone as a rounded capsule (icon + name + count
     /// badge with `SHADOW.zen` outer / inner two-layer drop) by default; this
     /// method consumes the Wave B token SSoT (`PALETTE_DARK`, `RADIUS`,
-    /// `SHADOW`, `ACRYLIC_FALLBACK`) and `zone_pill_geometry::ZonePillLayout`
-    /// to paint that surface in our D2D pump. Per parent PRD D5, acrylic is
-    /// the solid `ACRYLIC_FALLBACK` tint only.
+    /// `SHADOW`) and `zone_pill_geometry::ZonePillLayout` to paint that surface
+    /// in our D2D pump. Frosted-backdrop (2026-06-01): the capsule surface is
+    /// now real acrylic — `fill_frosted_rect` paints the blurred desktop clipped
+    /// to the capsule + one `surface_zen` tint (degrading to a single flat tint
+    /// when no backdrop), replacing the old `ACRYLIC_FALLBACK` double layer.
     ///
     /// M6a — the live `pal: PaletteTauri` is the 8th arg, threaded in from
     /// `draw_zones` (bound once per frame, §10) so the pill re-skins with the
@@ -2103,7 +2216,10 @@ impl Renderer {
         // M6a — the live theme palette is passed in by `draw_zones` (bound
         // once per frame). Read `pal.X` instead of the static `PALETTE_DARK`
         // so the collapsed pill re-skins with the active theme.
-        use bento_nano_style::tokens::ACRYLIC_FALLBACK;
+        // Frosted-backdrop (2026-06-01) — `ACRYLIC_FALLBACK` is no longer used
+        // here: the collapsed pill's old `ACRYLIC_FALLBACK` + `surface_zen`
+        // double layer is replaced by one `fill_frosted_rect` (blur + single
+        // tint), so the import is dropped to stay warning-clean.
         use crate::business::zen_capsule::{CapsuleShape, CapsuleSize};
         // G5 (2026-06-01) — resolve the per-zone capsule size + shape once so the
         // chrome / label / badge below can branch on them (Tauri ZenCapsule).
@@ -2152,10 +2268,13 @@ impl Renderer {
             if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
                 self.draw_neon_glow(scaled_rect, n.collapsed, scaled_radius)?;
             }
-            // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
-            self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
-            // Surface fill on top of the glass — `pal.surface_zen` (live theme).
-            // V-8 — hover brightens the surface tone subtly (+8% on hover).
+            // Frosted-backdrop (2026-06-01, real acrylic) — the collapsed pill
+            // surface is now [blurred-desktop backdrop clipped to the capsule] +
+            // [ONE `surface_zen` tint]. The old double layer (`ACRYLIC_FALLBACK`
+            // + `surface_color`) over the SHARP wallpaper read as murk; Tauri
+            // paints this same `surface_zen` 55% alpha OVER `blur(20px)`.
+            // `fill_frosted_rect` degrades to the single tint when no backdrop.
+            // V-8 — hover still brightens the surface tone subtly (+8% on hover).
             let surface_brighten = 1.0 + hover_t * 0.08;
             let surface_color = Color {
                 r: (pal.surface_zen.r * surface_brighten).min(1.0),
@@ -2163,7 +2282,7 @@ impl Renderer {
                 b: (pal.surface_zen.b * surface_brighten).min(1.0),
                 a: pal.surface_zen.a,
             };
-            self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
+            self.fill_frosted_rect(scaled_rect, surface_color, scaled_radius)?;
             // M2 S2a (2026-05-29) — Tauri's `.zen-capsule` carries a 1px solid
             // `var(--border-zen)` = `rgba(255,255,255,0.1)` outline. nano drew
             // no stroke at all; added here so the capsule reads as glass with a
@@ -2269,7 +2388,11 @@ impl Renderer {
         effect: bento_nano_style::tokens::EffectTauri,
     ) -> Result<(), RenderError> {
         // M6a — live theme palette passed in by `draw_zones` (§10).
-        use bento_nano_style::tokens::{ACRYLIC_FALLBACK, RADIUS, SHADOW};
+        // Frosted-backdrop (2026-06-01) — `ACRYLIC_FALLBACK` dropped from the
+        // import: the morph's old `ACRYLIC_FALLBACK` + flat `surface_zen` double
+        // layer is replaced by one `fill_frosted_rect` (blur + a single tint
+        // lerped zen→dialog), so the token is no longer referenced here.
+        use bento_nano_style::tokens::{RADIUS, SHADOW};
         // M3 — `morph` may exceed 1.0 (easeOutBack ~10% overshoot). Geometry
         // (rect + radius) consumes the RAW value so the bulge is visible; the
         // shadow / fade interpolations use the [0,1] clamped value so the
@@ -2325,15 +2448,22 @@ impl Renderer {
         // recover the pre-M6b `zen`/`zen_inner` single layers byte-for-byte.
         self.fill_rounded_rect(shadow_outer, SHADOW.zen.outer().color, border_radius)?;
         self.fill_rounded_rect(shadow_inner, SHADOW.zen.inner().color, border_radius)?;
-        self.fill_rounded_rect(rect, ACRYLIC_FALLBACK, border_radius)?;
-        // B2 (2026-05-29): Tauri's 0.3s `background`/`border-color` transition
-        // is a visual no-op here: the collapsed pill and the expanded panel
-        // share `surface_zen` (see `draw_zone_pill` line ~1848 and the expanded
-        // chrome), and the morph path paints no border stroke — there is no
-        // pill-vs-panel COLOR delta to crossfade, so the fill stays flat. The
-        // 300ms `ease` channel (`color_t`) is therefore expressed only through
-        // the title-alpha below, where it is genuinely visible.
-        self.fill_rounded_rect(rect, pal.surface_zen, border_radius)?;
+        // Frosted-backdrop (2026-06-01) — real-acrylic morph surface: [blurred
+        // desktop clipped to the morphing rect] + [ONE tint], replacing the old
+        // `ACRYLIC_FALLBACK` + flat `surface_zen` double layer.
+        //
+        // The B2 comment that USED to live here claimed the collapsed pill and
+        // the settled panel "share `surface_zen`" so the 0.3s background
+        // transition was a no-op — that was STALE/WRONG: the settled expanded
+        // panel fills with `surface_dialog` (92%, #0C0C12), NOT `surface_zen`
+        // (55%, #121218) — both an alpha AND a hue delta. So the morph now
+        // CROSS-FADES `surface_zen → surface_dialog` along `color_t` (the
+        // direction-resolved 0.3s CSS-`ease` channel), 1:1 with Tauri's
+        // `background` transition, killing the snap that the flat fill produced
+        // at the morph→settled-panel hand-off. `fill_frosted_rect` degrades to
+        // the single lerped tint when there is no backdrop.
+        let morph_tint = lerp_color(pal.surface_zen, pal.surface_dialog, color_t);
+        self.fill_frosted_rect(rect, morph_tint, border_radius)?;
         // Accent stripe (matches expanded chrome accent dot above the icon
         // band — drawn at the top of the morph so the eye picks up the zone
         // identity even during the transition).
@@ -7540,6 +7670,93 @@ impl Renderer {
         Ok(())
     }
 
+    /// Frosted-backdrop — build the per-frame `ID2D1BitmapBrush` from the cached
+    /// blurred desktop snapshot. Returns `None` (→ flat-tint degrade) when there
+    /// is no backdrop or any COM step fails; NEVER panics (spec § "Degrade
+    /// ladder"). Called once per Main-overlay frame by `render()` (spec §10).
+    ///
+    /// Brush transform: the backdrop bitmap is captured at `region.top_left ==
+    /// client logical (0,0)` (the Main overlay IS the primary work area), so the
+    /// translation is `(0,0)`; the per-axis scale is
+    /// `backdrop_brush_scale(downsample, base_scale) = downsample / base_scale`
+    /// — see that helper's derivation. ExtendMode CLAMP both axes so the brush
+    /// never tiles past the captured region; LINEAR interpolation for a smooth
+    /// upscale of the downsampled source.
+    fn build_backdrop_brush(
+        &self,
+        ctx: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext,
+    ) -> Option<ID2D1BitmapBrush> {
+        let backdrop = self.backdrop.as_ref()?;
+        // Spec §15.1 — Interface::cast canonical for COM cross-cast; degrade on
+        // failure rather than `?`-propagating a hard error out of the hot path.
+        let rt: ID2D1RenderTarget = ctx.cast().ok()?;
+        let props = D2D1_BITMAP_BRUSH_PROPERTIES {
+            extendModeX: D2D1_EXTEND_MODE_CLAMP,
+            extendModeY: D2D1_EXTEND_MODE_CLAMP,
+            interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+        };
+        // SAFETY: rt valid for the call; `backdrop.bitmap` (`ID2D1Bitmap1`)
+        //         derefs to the `ID2D1Bitmap` the brush wants; `props` lives on
+        //         the stack for the call. `None` brush-properties = identity
+        //         opacity + identity transform (we set the transform below).
+        let brush = unsafe { rt.CreateBitmapBrush(&backdrop.bitmap, Some(&props), None) }.ok()?;
+        let s = backdrop_brush_scale(FROSTED_BACKDROP_DOWNSAMPLE, self.base_scale);
+        let transform = windows::Foundation::Numerics::Matrix3x2 {
+            M11: s,
+            M12: 0.0,
+            M21: 0.0,
+            M22: s,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        // SAFETY: brush valid; `SetTransform` lives on the `ID2D1Brush` base
+        //         (the bitmap brush derefs to it); `transform` lives for the
+        //         call. Maps bitmap-px → pre-world DIP so the frost lands 1:1
+        //         on the wallpaper after the world transform applies base_scale.
+        unsafe {
+            brush.SetTransform(&transform);
+        }
+        Some(brush)
+    }
+
+    /// Frosted-backdrop unified surface fill (spec § "Renderer plumbing"). When
+    /// a per-frame backdrop brush exists, paint the blurred desktop CLIPPED to
+    /// the rounded shape, then lay a SINGLE `tint` at the Tauri alpha on top —
+    /// real frosted glass. With no brush (degrade / `FROSTED_BACKDROP` off) this
+    /// is exactly `fill_rounded_rect(rect, tint, radius)`: one clean flat tint,
+    /// NEVER the old double translucent layer (so the murk can never return).
+    fn fill_frosted_rect(
+        &self,
+        rect: bento_nano_style::Rect,
+        tint: Color,
+        radius: BorderRadius,
+    ) -> Result<(), RenderError> {
+        if let Some(brush) = self.backdrop_brush.as_ref() {
+            if rect.width > 0.0 && rect.height > 0.0 {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: rect.x,
+                        top: rect.y,
+                        right: rect.right(),
+                        bottom: rect.bottom(),
+                    },
+                    radiusX: radius.top_left,
+                    radiusY: radius.top_left,
+                };
+                let ctx = self.ctx()?;
+                // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+                let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+                // SAFETY: rt valid; `rr` lives for the call; the bitmap brush is
+                //         COM-ref-counted and was built for this frame's ctx.
+                unsafe {
+                    rt.FillRoundedRectangle(&rr, brush);
+                }
+            }
+        }
+        // Single tint on top (or the only fill when degraded).
+        self.fill_rounded_rect(rect, tint, radius)
+    }
+
     fn fill_rounded_rect(
         &self,
         rect: bento_nano_style::Rect,
@@ -8717,6 +8934,29 @@ fn renderer_is_stale(cached_gen: u64, current_gen: u64) -> bool {
     cached_gen != current_gen
 }
 
+/// Frosted-backdrop (2026-06-01) — straight per-channel colour lerp used by the
+/// capsule↔panel morph to cross-fade `surface_zen → surface_dialog` along the
+/// 0.3s `color_t` channel (spec § "Target end-state"). `t` is clamped to
+/// `[0, 1]`; every channel — including alpha — is interpolated linearly.
+///
+/// Deliberately a STRAIGHT lerp (not the premultiplied `Lerp for Color` in
+/// `bento-nano-style`): both endpoints here are visible translucent surface
+/// tints with similar hue, so the simple per-channel blend matches the CSS
+/// `background` transition Tauri runs (which interpolates the rgba components
+/// directly) and keeps the helper trivially testable. Free function so the
+/// math is unit-tested without a GPU-backed `Renderer`.
+#[inline]
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    Color {
+        r: a.r * inv + b.r * t,
+        g: a.g * inv + b.g * t,
+        b: a.b * inv + b.b * t,
+        a: a.a * inv + b.a * t,
+    }
+}
+
 fn active_item_drag_visual(app: &AppState) -> Option<ActiveItemDragVisual> {
     let drag = app.item_drag.borrow();
     let candidate = drag.as_ref()?;
@@ -9407,6 +9647,54 @@ mod m6c_effect_geometry_tests {
         // Out-of-range t clamps (easeOutBack overshoot never over-grows).
         assert_eq!(lerp_neon_layer(a, b, 1.5).blur, 8.0);
         assert_eq!(lerp_neon_layer(a, b, -0.2).blur, 6.0);
+    }
+}
+
+#[cfg(test)]
+mod frosted_backdrop_tests {
+    use super::lerp_color;
+    use bento_nano_style::Color;
+
+    /// Frosted-backdrop — the capsule↔panel morph cross-fades
+    /// `surface_zen → surface_dialog` along `color_t`. Pin the endpoints and the
+    /// midpoint, INCLUDING the alpha channel (the zen 0x8C → dialog 0xEB alpha
+    /// delta is the whole point of the lerp — it kills the snap).
+    #[test]
+    fn lerp_color_endpoints_and_midpoint() {
+        // surface_zen (#121218 @ 0x8C) → surface_dialog (#0C0C12 @ 0xEB), the
+        // exact Tauri dark tokens the morph blends between.
+        let zen = Color::from_u8(0x12, 0x12, 0x18, 0x8C);
+        let dialog = Color::from_u8(0x0C, 0x0C, 0x12, 0xEB);
+
+        // t = 0 → exactly the start colour.
+        let at0 = lerp_color(zen, dialog, 0.0);
+        assert_eq!(at0, zen);
+        // t = 1 → exactly the end colour.
+        let at1 = lerp_color(zen, dialog, 1.0);
+        assert_eq!(at1, dialog);
+
+        // t = 0.5 → per-channel midpoint, alpha included.
+        let mid = lerp_color(zen, dialog, 0.5);
+        let eps = 1e-6_f32;
+        assert!((mid.r - (zen.r + dialog.r) * 0.5).abs() < eps);
+        assert!((mid.g - (zen.g + dialog.g) * 0.5).abs() < eps);
+        assert!((mid.b - (zen.b + dialog.b) * 0.5).abs() < eps);
+        assert!((mid.a - (zen.a + dialog.a) * 0.5).abs() < eps);
+        // The alpha genuinely moves (0x8C/255 .. 0xEB/255 midpoint).
+        let expected_a = (0x8C as f32 / 255.0 + 0xEB as f32 / 255.0) * 0.5;
+        assert!((mid.a - expected_a).abs() < eps);
+    }
+
+    /// Out-of-range `t` clamps to `[0, 1]` so an easeOutBack overshoot in
+    /// `color_t` can never over/under-saturate the morph tint.
+    #[test]
+    fn lerp_color_clamps_t() {
+        let a = Color::rgba(0.0, 0.0, 0.0, 0.0);
+        let b = Color::rgba(1.0, 1.0, 1.0, 1.0);
+        // t < 0 → clamp to start.
+        assert_eq!(lerp_color(a, b, -0.5), a);
+        // t > 1 → clamp to end.
+        assert_eq!(lerp_color(a, b, 1.5), b);
     }
 }
 

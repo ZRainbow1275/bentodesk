@@ -25,6 +25,7 @@ pub mod dwrite;
 pub mod errors;
 pub mod message_loop;
 pub mod monitor;
+pub mod screencap;
 pub mod storage;
 pub mod svg;
 pub mod svg_cache;
@@ -42,6 +43,10 @@ pub use monitor::{
     clamp_zone_to_monitors, enumerate_monitors, monitor_from_point, monitor_from_window,
     primary_monitor, zone_active_monitor_index,
 };
+// Frosted-backdrop (real-acrylic) capture+blur module. Pass 2 (render.rs)
+// imports `Backdrop` / `capture_primary_workarea_blurred` for the per-frame
+// bitmap brush and `backdrop_brush_scale` for the brush transform.
+pub use screencap::{Backdrop, backdrop_brush_scale, capture_primary_workarea_blurred};
 pub use window::{
     WindowDesc, WindowKind, create_transparent_window, create_window, default_size, ex_style_for,
     main_window_rect, to_windows_hwnd,
