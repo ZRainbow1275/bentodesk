@@ -744,8 +744,113 @@ impl Renderer {
         let end = unsafe { end_ctx.EndDraw(None, None) };
         ok("EndDraw", end)?;
         self.comp.present()?;
+
+        // P0 click-through (CLICKTHROUGH-FIX-VALIDATED.md, 2026-06-02) — clip
+        // the Main HWND's window region to the UNION of every painted
+        // interactive surface. `WS_EX_TRANSPARENT` is INERT under
+        // `WS_EX_NOREDIRECTIONBITMAP` (window.rs:254-256) and `HTTRANSPARENT`
+        // alone does NOT reach the bare desktop, so blank pixels of the
+        // full-work-area overlay otherwise eat every click. Region clipping
+        // keeps DComp / `NoRedirectionBitmap` (spec §4.1) untouched: blank
+        // areas fall OUTSIDE the window so clicks land on the desktop
+        // natively. Main HWND only — aux dialogs are real windows that own
+        // their whole client rect. Done after present (input clipping is
+        // independent of the D2D frame); degrades silently (no panic) on the
+        // Win32 path. The shadow margin keeps soft shadows from being clipped.
+        if kind == WindowKind::Main {
+            self.apply_main_click_through_region(app);
+        }
         self.record_debug_overlay_frame(app, kind, frame_started_at);
         Ok(())
+    }
+
+    /// P0 click-through — set the Main HWND window region to the painted-chrome
+    /// union so blank desktop pixels pass clicks through natively.
+    ///
+    /// The region rects come from [`chrome_region_rects`] (the single source of
+    /// truth, mirroring `bento-nano-shell::ui::main_nchittest_kind`), are
+    /// expressed in logical DIP, and are converted to PHYSICAL device px here by
+    /// multiplying by `base_scale` (= dpi/96; the user runs 150% → ×1.5).
+    /// `SetWindowRgn` wants device px, so this conversion MUST happen or the
+    /// region misaligns at non-100% DPI.
+    ///
+    /// GDI lifecycle: each rect becomes a temporary `HRGN` that is OR-combined
+    /// into one accumulator; the temporaries are `DeleteObject`-freed after the
+    /// combine, and the FINAL accumulator is handed to `SetWindowRgn`, which
+    /// TAKES OWNERSHIP (we never `DeleteObject` it; the system frees the prior
+    /// region). When NOTHING is painted, an EMPTY 0×0 region is set so the WHOLE
+    /// desktop is click-through — the region is NEVER left NULL (NULL = whole
+    /// window catches = the original bug).
+    ///
+    /// Spec §10 hot path: the rect set is a stack-inlined `SmallVec<[_; 16]>`
+    /// (no heap unless a process pins >16 zones), N small GDI regions (which
+    /// `SetWindowRgn` requires), one `SetWindowRgn`. No `unwrap`/`expect`/`panic`
+    /// — every Win32 failure degrades to leaving the previous region (the
+    /// ghost-layer passthrough toggle is the belt-and-suspenders fallback).
+    fn apply_main_click_through_region(&mut self, app: &AppState) {
+        // windows-sys 0.59 places ALL of these — including `SetWindowRgn`
+        // (which the docs file under user32) — in `Graphics::Gdi`. Verified by
+        // compile: `SetWindowRgn` is NOT in `UI::WindowsAndMessaging` here.
+        use windows_sys::Win32::Graphics::Gdi::{
+            CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+        };
+
+        // DIP → physical device px. `base_scale` is `dpi/96` (set once per
+        // frame at the top of `render`); guard against a degenerate <=0 scale.
+        let scale = self.base_scale.max(0.01);
+        let rects = chrome_region_rects(app);
+
+        // Accumulator region. Start EMPTY (0×0) so the "no painted surface"
+        // case leaves the whole desktop click-through. `CreateRectRgn` returns
+        // a null handle on GDI failure — treat that as "skip region surgery
+        // this frame" rather than panic / NULL-region (which would re-arm the
+        // whole-window-catches bug).
+        // SAFETY: GDI region creation is always callable; null is checked.
+        let combined = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        if combined.is_null() {
+            return;
+        }
+
+        for r in rects.iter() {
+            // Convert DIP rect → physical px, rounding outward so a painted
+            // surface is never under-covered (left/top floor, right/bottom
+            // ceil). Clamp non-positive extents away (skip empty rects).
+            let left = (r.x * scale).floor() as i32;
+            let top = (r.y * scale).floor() as i32;
+            let right = (r.right() * scale).ceil() as i32;
+            let bottom = (r.bottom() * scale).ceil() as i32;
+            if right <= left || bottom <= top {
+                continue;
+            }
+            // SAFETY: GDI region creation is always callable; null is checked
+            // so a single allocation failure just drops that one rect.
+            let part = unsafe { CreateRectRgn(left, top, right, bottom) };
+            if part.is_null() {
+                continue;
+            }
+            // SAFETY: `combined` and `part` are both live, non-null HRGNs;
+            // RGN_OR (an `i32` = `RGN_COMBINE_MODE`) unions `part` into
+            // `combined` in place.
+            unsafe {
+                CombineRgn(combined, combined, part, RGN_OR);
+                // `part` was copied into `combined`; free the temporary HRGN.
+                DeleteObject(part);
+            }
+        }
+
+        // Hand the final region to the system. `SetWindowRgn` TAKES OWNERSHIP
+        // of `combined` (do NOT DeleteObject it) and frees the window's prior
+        // region. bRedraw = FALSE: DComp composites independently, so no
+        // invalidate is needed and we avoid a redundant repaint (spec §10).
+        // `self.hwnd` is a `windows` 0.58 `HWND(*mut c_void)`; `.0` is the raw
+        // pointer that windows-sys 0.59 `SetWindowRgn` expects (same ABI — see
+        // `bento-nano-platform::window::to_windows_hwnd`, the inverse bridge).
+        // SAFETY: `self.hwnd` is the live Main HWND stashed at `create`;
+        // `combined` is a valid HRGN whose ownership transfers to the system.
+        // bredraw = 0 (FALSE).
+        unsafe {
+            SetWindowRgn(self.hwnd.0, combined, 0);
+        }
     }
 
     fn debug_overlay_elapsed_ms(&self) -> u32 {
@@ -8934,6 +9039,185 @@ fn renderer_is_stale(cached_gen: u64, current_gen: u64) -> bool {
     cached_gen != current_gen
 }
 
+/// P0 click-through shadow/glow margin in logical DIP.
+///
+/// Each chrome rect is inflated by this amount before the window region is
+/// built so soft drop-shadows / hover glows are NOT hard-clipped by the OS at
+/// the region edge (which would read as a sharp rectangular cut through the
+/// shadow). Derived from the dominant painted pill shadow
+/// (`SHADOW.zen.outer()`: `offset_y 8 + blur 32`): the visible falloff reaches
+/// roughly `offset + blur/2 = 8 + 16 = 24` DIP past the surface. The expanded
+/// panel's larger shadow (`offset 16 + blur 48`) extends further but is purely
+/// decorative — a faint clip there is acceptable, whereas widening the region
+/// to its full 64-DIP reach would re-arm the desktop to catch clicks well
+/// outside the visible panel. 24 DIP is the balance: covers the common pill
+/// shadow fully, keeps the click-through margin tight.
+const CHROME_REGION_SHADOW_MARGIN_DIP: f32 = 24.0;
+
+/// P0 click-through (CLICKTHROUGH-FIX-VALIDATED.md, 2026-06-02) — the union of
+/// every currently-PAINTED interactive surface on the Main overlay, in logical
+/// DIP. This is the single source of truth for the Main HWND window region (see
+/// [`Renderer::apply_main_click_through_region`]): blank areas fall OUTSIDE the
+/// region so clicks reach the desktop natively, painted chrome stays
+/// interactive.
+///
+/// The set MUST mirror `bento-nano-shell::ui::main_nchittest_kind` (which
+/// classifies each client point `Client`/`Caption` vs `Transparent`): every
+/// rect here corresponds to a case where that fn returns NON-`Transparent`.
+/// Item cards, resize corners, and `PanelHeader` buttons are all geometric
+/// SUBSETS of their owning zone's body/pill rect, so unioning the zone rects
+/// already covers them — no need to enumerate the sub-rects.
+///
+/// Each rect is inflated by [`CHROME_REGION_SHADOW_MARGIN_DIP`]. Pure /
+/// allocation-lean: one stack `SmallVec`, no heap beyond a spill on a very
+/// large zone count. Returns rects in DIP; the caller converts to physical px.
+fn chrome_region_rects(app: &AppState) -> SmallVec<[bento_nano_style::Rect; 16]> {
+    use bento_nano_style::Rect;
+    let mut out: SmallVec<[Rect; 16]> = SmallVec::new();
+    let vp = app.viewport;
+    let full = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: vp.width.max(0.0),
+        height: vp.height.max(0.0),
+    };
+
+    // main_nchittest_kind fast path 1 — Settings / About own a dedicated aux
+    // HWND, but while either is open the Main overlay treats its WHOLE client
+    // area as `Client` (modal scrim). Mirror that: cover the full viewport.
+    if app.settings_open.get() || app.about_open.get() {
+        push_inflated(&mut out, full, 0.0);
+        return out;
+    }
+
+    // main_nchittest_kind fast path 2 — any in-flight drag/resize routes EVERY
+    // point to `Client` so the gesture keeps receiving moves even over blank
+    // desktop. Cover the full viewport for the duration of the drag.
+    if app.zone_drag.get().is_some()
+        || app.zone_resize.get().is_some()
+        || app.item_drag.borrow().is_some()
+        || app.stack_tray_drag.get().is_some()
+    {
+        push_inflated(&mut out, full, 0.0);
+        return out;
+    }
+
+    // Stack overlay (open tray + focused preview, or a hovered-anchor bloom).
+    // Mirrors `ui::stack_overlay_contains`.
+    push_stack_overlay_rects(app, &mut out);
+
+    // Per-zone painted surface — pill / in-flight morph / expanded body.
+    // Mirrors `ui::effective_zone_hit_rect` + the `hit_test_zone` visibility
+    // filter (skip hidden zones + stacked children).
+    for zone in app.zones.iter() {
+        if !zone.is_visible() || zone.is_stacked_child() {
+            continue;
+        }
+        let rect = effective_zone_chrome_rect(app, zone);
+        push_inflated(&mut out, rect, CHROME_REGION_SHADOW_MARGIN_DIP);
+    }
+
+    out
+}
+
+/// Painted chrome rect for one zone — the DIP rectangle the renderer is
+/// currently drawing. Re-implements `bento-nano-shell::ui::effective_zone_hit_rect`
+/// in the `bento-nano-app` layer (the shell depends on app, not the reverse, so
+/// the helper can't be imported; both sides consume the same `zone_pill_geometry`
+/// SSoT so they stay in lockstep). Three cases: pill-morph in flight, collapsed
+/// pill, expanded body. Pure / allocation-free.
+fn effective_zone_chrome_rect(app: &AppState, zone: &Zone) -> bento_nano_style::Rect {
+    use bento_nano_style::Rect;
+    let body_visible = app.zone_body_visible_for_mode(zone);
+    let count = zone.items.len();
+    let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
+    let expanded_rect = Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+
+    // Case 1 — pill morph in flight (mirrors effective_zone_hit_rect case 1).
+    if app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() {
+        let raw = app.zone_pill_anim_progress.get();
+        if raw > 0.0 && raw < 1.0 {
+            let eased = zone_pill_geometry::ease_out_back_progress(raw);
+            let morph = if app.zone_pill_anim_expanding.get() {
+                eased
+            } else {
+                1.0 - eased
+            };
+            return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
+        }
+    }
+
+    // Case 2 — collapsed pill (body hidden, not a stack anchor).
+    if !body_visible && !zone.is_stack_anchor() {
+        return pill_layout.rect;
+    }
+
+    // Case 3 — expanded body (or stack-anchor chrome).
+    expanded_rect
+}
+
+/// Push the stack-overlay chrome rects (open tray + focused preview, or a
+/// hovered-anchor bloom) into `out`. Mirrors `ui::stack_overlay_contains` so
+/// the region covers exactly the points that function returns `Client` for.
+fn push_stack_overlay_rects(app: &AppState, out: &mut SmallVec<[bento_nano_style::Rect; 16]>) {
+    let vp = app.viewport;
+    // Open tray — tray body + (always) the focused preview pane beside it.
+    if let Some(state) = app.stack_tray.borrow().clone() {
+        if let Some(anchor) = app.zones.get(state.anchor_zone_id) {
+            if let Some(members) = app.zones.stack_member_ids(anchor.id) {
+                let member_count = members.len();
+                let tray = stack_tray::stack_tray_rect(vp, anchor, member_count);
+                push_inflated(out, tray, CHROME_REGION_SHADOW_MARGIN_DIP);
+                push_inflated(
+                    out,
+                    stack_tray::focused_preview_rect(vp, tray),
+                    CHROME_REGION_SHADOW_MARGIN_DIP,
+                );
+            }
+        }
+    }
+
+    // Hovered-anchor bloom — the fan of petal rects shown while the cursor is
+    // over a (non-expanded) stack anchor.
+    if let Some(anchor_id) = app
+        .hovered_zone
+        .get()
+        .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
+    {
+        if let Some(anchor) = app.zones.get(anchor_id) {
+            if let Some(members) = app.zones.stack_member_ids(anchor.id) {
+                for petal in stack_tray::stack_bloom_petal_rects(vp, anchor, members.len()) {
+                    push_inflated(out, petal, CHROME_REGION_SHADOW_MARGIN_DIP);
+                }
+            }
+        }
+    }
+}
+
+/// Inflate `rect` by `margin` DIP on every side and push it onto `out`, skipping
+/// degenerate (non-positive area) rects so the region never gains an empty part.
+#[inline]
+fn push_inflated(
+    out: &mut SmallVec<[bento_nano_style::Rect; 16]>,
+    rect: bento_nano_style::Rect,
+    margin: f32,
+) {
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    out.push(bento_nano_style::Rect {
+        x: rect.x - margin,
+        y: rect.y - margin,
+        width: rect.width + margin * 2.0,
+        height: rect.height + margin * 2.0,
+    });
+}
+
 /// Frosted-backdrop (2026-06-01) — straight per-channel colour lerp used by the
 /// capsule↔panel morph to cross-fade `surface_zen → surface_dialog` along the
 /// 0.3s `color_t` channel (spec § "Target end-state"). `t` is clamped to
@@ -9851,5 +10135,146 @@ mod item_drag_visual_tests {
         assert!(rect.right() <= row.right());
         assert!(rect.bottom() <= row.bottom());
         assert!((rect.width / rect.height - timeline_panel::THUMBNAIL_ASPECT_RATIO).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod p0_click_through_region_tests {
+    //! P0 desktop click-through (CLICKTHROUGH-FIX-VALIDATED.md) — pure-CPU
+    //! geometry tests for [`chrome_region_rects`]. The GDI `SetWindowRgn`
+    //! application is not headless-testable (needs a live HWND), same exemption
+    //! as the GPU/window draw paths; these tests pin the DIP rect set the region
+    //! is built from. No GPU / window / Argon2 → runs under the min-RSS suite.
+    use super::{chrome_region_rects, CHROME_REGION_SHADOW_MARGIN_DIP};
+    use crate::state::ZoneDisplayMode;
+    use crate::AppState;
+    use bento_nano_style::{Rect, Size};
+    use bento_nano_zone::{Zone, ZoneId};
+
+    fn covered(rects: &[Rect], x: f32, y: f32) -> bool {
+        rects
+            .iter()
+            .any(|r| x >= r.x && x < r.right() && y >= r.y && y < r.bottom())
+    }
+
+    fn pill_zone(id: u64, x: i32, y: i32) -> Zone {
+        Zone::new(ZoneId(id), "Docs", x, y, 160, 120)
+    }
+
+    fn app_with_viewport() -> AppState {
+        let mut app = AppState::new();
+        app.viewport = Size {
+            width: 1920.0,
+            height: 1080.0,
+        };
+        // Hover is the default mode — a fresh zone is therefore a collapsed
+        // pill (no hover / selection set), exercising the pill case by default.
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        app
+    }
+
+    #[test]
+    fn blank_state_with_no_zones_is_empty() {
+        // No zones, nothing open, no drag → no painted surface → empty region
+        // → the WHOLE desktop is click-through.
+        let app = app_with_viewport();
+        let rects = chrome_region_rects(&app);
+        assert!(rects.is_empty(), "blank state must yield no chrome rects");
+        // A representative blank coord is therefore not covered.
+        assert!(!covered(&rects, 800.0, 500.0));
+    }
+
+    #[test]
+    fn one_collapsed_pill_yields_one_rect_about_pill_size_plus_margin() {
+        let mut app = app_with_viewport();
+        app.zones.add(pill_zone(1, 300, 200));
+        let rects = chrome_region_rects(&app);
+        assert_eq!(rects.len(), 1, "one collapsed pill → exactly one rect");
+
+        // The rect is the pill geometry inflated by the shadow margin on each
+        // side. Compare against the SSoT `pill_layout_for_zone`.
+        let zone = app.zones.iter().next().expect("zone present");
+        let pill = crate::zone_pill_geometry::pill_layout_for_zone(zone, zone.items.len()).rect;
+        let m = CHROME_REGION_SHADOW_MARGIN_DIP;
+        let got = rects[0];
+        assert!((got.x - (pill.x - m)).abs() < 0.5, "x inflated by margin");
+        assert!((got.y - (pill.y - m)).abs() < 0.5, "y inflated by margin");
+        assert!(
+            (got.width - (pill.width + m * 2.0)).abs() < 0.5,
+            "width inflated by 2×margin"
+        );
+        assert!(
+            (got.height - (pill.height + m * 2.0)).abs() < 0.5,
+            "height inflated by 2×margin"
+        );
+
+        // A coord at the pill CENTRE is inside the region (interactive).
+        let cx = pill.x + pill.width / 2.0;
+        let cy = pill.y + pill.height / 2.0;
+        assert!(covered(&rects, cx, cy), "pill centre must be in region");
+
+        // A coord far from any chrome is NOT covered → reaches the desktop.
+        assert!(
+            !covered(&rects, 1700.0, 950.0),
+            "blank far corner must be click-through"
+        );
+    }
+
+    #[test]
+    fn expanded_selected_zone_yields_its_full_body_rect() {
+        let mut app = app_with_viewport();
+        app.zones.add(pill_zone(7, 400, 300));
+        // Selecting the zone makes its body visible under any display mode →
+        // the expanded (full x/y/w/h) body rect is the painted surface.
+        app.selected_zone.set(Some(ZoneId(7)));
+        let rects = chrome_region_rects(&app);
+        assert_eq!(rects.len(), 1, "one expanded zone → one rect");
+
+        let m = CHROME_REGION_SHADOW_MARGIN_DIP;
+        let got = rects[0];
+        // Body rect is (400, 300, 160, 120) inflated by the margin.
+        assert!((got.x - (400.0 - m)).abs() < 0.5);
+        assert!((got.y - (300.0 - m)).abs() < 0.5);
+        assert!((got.width - (160.0 + m * 2.0)).abs() < 0.5);
+        assert!((got.height - (120.0 + m * 2.0)).abs() < 0.5);
+
+        // A point inside the expanded body is interactive; a point outside the
+        // (inflated) body is click-through.
+        assert!(covered(&rects, 480.0, 360.0), "body interior in region");
+        assert!(
+            !covered(&rects, 800.0, 800.0),
+            "point well outside the body is click-through"
+        );
+    }
+
+    #[test]
+    fn settings_open_covers_full_viewport() {
+        let app = app_with_viewport();
+        app.settings_open.set(true);
+        let rects = chrome_region_rects(&app);
+        // While Settings is open the whole overlay is a modal scrim → every
+        // point (including blank desktop) is `Client`.
+        assert!(covered(&rects, 5.0, 5.0));
+        assert!(covered(&rects, 1900.0, 1070.0));
+    }
+
+    #[test]
+    fn blank_coord_between_two_pills_is_click_through() {
+        let mut app = app_with_viewport();
+        // Two well-separated collapsed pills with a wide blank gap between.
+        app.zones.add(pill_zone(1, 100, 100));
+        app.zones.add(pill_zone(2, 1000, 800));
+        let rects = chrome_region_rects(&app);
+        assert_eq!(rects.len(), 2, "two collapsed pills → two rects");
+
+        // Each pill centre is interactive…
+        let z1 = app.zones.get(ZoneId(1)).expect("z1");
+        let p1 = crate::zone_pill_geometry::pill_layout_for_zone(z1, z1.items.len()).rect;
+        assert!(covered(&rects, p1.x + p1.width / 2.0, p1.y + p1.height / 2.0));
+        // …and the empty space between the two pills is click-through.
+        assert!(
+            !covered(&rects, 600.0, 450.0),
+            "gap between pills must reach the desktop"
+        );
     }
 }
