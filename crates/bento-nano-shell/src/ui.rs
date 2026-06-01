@@ -46,7 +46,7 @@
 //! literals in user-visible text positions.
 
 use bento_nano_app::{
-    AppState, WindowState, zone_pill_geometry,
+    AppState, WindowState, expanded_zone_grid, zone_pill_geometry,
     business::{item_grid, stack_tray},
 };
 use bento_nano_layout::Direction;
@@ -461,6 +461,45 @@ pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<Zon
     None
 }
 
+/// GROUP-4 (2026-06-01) — the two action buttons in an expanded zone's
+/// `PanelHeader`. Mirrors Tauri's `.panel-header__btn` (search) and
+/// `.panel-header__btn--close`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderButton {
+    /// Magnifier button → opens search for the zone.
+    Search,
+    /// X button → collapses the expanded panel back to its pill.
+    Close,
+}
+
+/// Topmost expanded-zone header action button under `(x, y)`. The button
+/// rects come from the paint==hit SSoT (`expanded_zone_grid::ExpandedZoneLayout`)
+/// so a click lands exactly on the painted 28×28 glyph. Only surfaced when the
+/// zone body is visible (collapsed pills have no header buttons). Stack anchors
+/// are excluded — their bespoke chrome paints no `PanelHeader`.
+pub fn hit_test_zone_header_button(
+    app: &AppState,
+    x: f32,
+    y: f32,
+) -> Option<(ZoneId, HeaderButton)> {
+    for z in app.zones.iter().rev() {
+        if !z.is_visible() || z.is_stacked_child() {
+            continue;
+        }
+        if !app.zone_body_visible_for_mode(z) || z.is_stack_anchor() {
+            continue;
+        }
+        let layout = expanded_zone_grid::expanded_zone_layout(z);
+        if rect_contains(layout.header_close_btn, x, y) {
+            return Some((z.id, HeaderButton::Close));
+        }
+        if rect_contains(layout.header_search_btn, x, y) {
+            return Some((z.id, HeaderButton::Search));
+        }
+    }
+    None
+}
+
 // -----------------------------------------------------------------------------
 // Phase 2.1 Ruling C — settings panel hit-tester.
 //
@@ -524,8 +563,6 @@ pub enum SettingsHit {
     SkipCurrentUpdate,
     /// Stealth storage master switch row.
     ToggleStealthEnabled,
-    /// Config-vault encryption mode row.
-    CycleEncryptionMode,
     /// Theme base accent picker row.
     OpenThemeBasePalette,
     /// Native JSON theme import row.
@@ -614,12 +651,34 @@ pub enum SettingsHit {
     /// change — the Tauri `desktop-source-card` has no toggle, only a 已监视
     /// badge.
     RefreshDesktopSources,
-    /// Round-2 M2 — 桌面路径 input click. M2 logs + redraws; live keyboard
-    /// editing lands in a later wave.
+    /// Round-2 M2 / M7 — 桌面路径 input click → focus it for live keyboard
+    /// editing (sets `settings_focused_field = DesktopPath`).
     EditDesktopPath,
-    /// Round-2 M2 — 监控值 textarea click. Same M2-stub story as
-    /// `EditDesktopPath`; keyboard binding wires in a later wave.
+    /// Round-2 M2 / M7 — 监控值 textarea click → focus it for live keyboard
+    /// editing (sets `settings_focused_field = WatchValues`).
     EditWatchValues,
+
+    // ------------------------------------------------------------------
+    // M7 2026-06-01 — Encryption §10 card (`EncryptionCard.tsx`). The
+    // 3-button mode grid + passphrase-field focus replace the orphan
+    // `CycleEncryptionMode` 2-cycle (removed with its dispatch arm +
+    // `queue_encryption_mode_cycle` / `next_encryption_mode`).
+    // ------------------------------------------------------------------
+    /// M7 — §10 mode grid: select the "None" mode button. Dispatches
+    /// `SetSetting{ "encryption.mode", "None" }` direct.
+    SelectEncryptionModeNone,
+    /// M7 — §10 mode grid: select the "DPAPI" mode button. Dispatches
+    /// `SetSetting{ "encryption.mode", "Dpapi" }` direct.
+    SelectEncryptionModeDpapi,
+    /// M7 — §10 mode grid: select the "Passphrase" mode button. Activates
+    /// passphrase capture (sets `passphrase_entry_active` + purpose = Set +
+    /// `settings_focused_field = Passphrase`); the actual
+    /// `SetEncryptionPassphrase` fires on Enter after the user types.
+    SelectEncryptionModePassphrase,
+    /// M7 — §10 passphrase input click → focus it for live keyboard editing
+    /// (activate passphrase capture, purpose = Set, same as the Passphrase
+    /// mode button).
+    FocusPassphraseField,
 
     // ------------------------------------------------------------------
     // M1d 2026-05-29 — Performance §5 + Startup management §6. These
@@ -757,24 +816,11 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     if x >= lang_chip.x && x < lang_chip.right() && y >= lang_chip.y && y < lang_chip.bottom() {
         return SettingsHit::OpenLocaleMenu;
     }
-    // α4 (Wave I-α, 2026-05-25) — zone-display-mode picker radios. Three
-    // right-anchored radio hit-boxes sit on the row directly below the
-    // language chip; each radio dispatches `SetZoneDisplayMode(mode)`.
-    // Index → mode mapping mirrors the renderer's `modes` array.
-    for index in 0..bento_nano_app::settings_panel::SETTINGS_ZONE_DISPLAY_MODE_COUNT {
-        let hit = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
-            vp, scroll_y, index,
-        );
-        if x >= hit.x && x < hit.right() && y >= hit.y && y < hit.bottom() {
-            let mode = match index {
-                0 => bento_nano_app::ZoneDisplayMode::Hover,
-                1 => bento_nano_app::ZoneDisplayMode::Always,
-                2 => bento_nano_app::ZoneDisplayMode::Click,
-                _ => return SettingsHit::Body,
-            };
-            return SettingsHit::SetZoneDisplayMode(mode);
-        }
-    }
+    // G3 parity (2026-06-01) — the zone-display-mode picker radios moved OUT of
+    // the General band into the §4 DisplayMode group (between §3 Appearance and
+    // §5 Performance). Their hit-test therefore now lives below the reserve-delta
+    // fold, alongside the perf-and-below sections (see the §4 block after the
+    // fold). The radios no longer sit directly under the Language chip.
     // M1i fidelity — the §2 source list reflows to the LIVE source count;
     // the hit geometry must read the same count the renderer paints.
     let source_count = app.desktop_sources.borrow().len();
@@ -807,6 +853,26 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // source cards in lockstep with what is painted.
     let scroll_y =
         scroll_y + bento_nano_app::settings_panel::settings_sources_reserve_delta(source_count);
+    // §4 DisplayMode group (G3 parity 2026-06-01) — zone-display-mode picker
+    // radios. Promoted out of the General band into a standalone §4 group
+    // between §3 Appearance and §5 Performance, so the hit-test now uses the
+    // reserve-FOLDED `scroll_y` (the radios root at the same fixed source-reserve
+    // baseline as Performance §5). Three right-anchored radio hit-boxes; each
+    // dispatches `SetZoneDisplayMode(mode)`. Index → mode mirrors the renderer.
+    for index in 0..bento_nano_app::settings_panel::SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+        let hit = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
+            vp, scroll_y, index,
+        );
+        if x >= hit.x && x < hit.right() && y >= hit.y && y < hit.bottom() {
+            let mode = match index {
+                0 => bento_nano_app::ZoneDisplayMode::Hover,
+                1 => bento_nano_app::ZoneDisplayMode::Always,
+                2 => bento_nano_app::ZoneDisplayMode::Click,
+                _ => return SettingsHit::Body,
+            };
+            return SettingsHit::SetZoneDisplayMode(mode);
+        }
+    }
     // M1d — Performance §5: 3 SliderRows (no conditionals). The slider track
     // band sits on the lower line of each row; a click anywhere on it starts
     // a drag carrying the quantized client x for the dispatcher's
@@ -1038,10 +1104,41 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         }
     }
 
+    // M7 — Encryption §10 inline card. Slots between Backup §9 and Plugins §11
+    // (Tauri `<BackupCard/><EncryptionCard/>` adjacency). Fixed-height, so it
+    // reuses the `backup_flags` (no variable rows of its own). Interactive: the
+    // 3 mode buttons (None / DPAPI / Passphrase) + the masked passphrase input
+    // box. The label/desc/current-mode/hint/status rows are non-interactive.
+    // Uses the identical `settings_encryption_*_rect` helpers the renderer
+    // paints from (paint geometry == hit geometry).
+    for index in 0..bento_nano_app::settings_panel::SETTINGS_ENCRYPTION_MODE_COUNT {
+        let btn = bento_nano_app::settings_panel::settings_encryption_mode_button_rect(
+            vp,
+            scroll_y,
+            &backup_flags,
+            index,
+        );
+        if x >= btn.x && x < btn.right() && y >= btn.y && y < btn.bottom() {
+            return match index {
+                0 => SettingsHit::SelectEncryptionModeNone,
+                1 => SettingsHit::SelectEncryptionModeDpapi,
+                _ => SettingsHit::SelectEncryptionModePassphrase,
+            };
+        }
+    }
+    let enc_input = bento_nano_app::settings_panel::settings_encryption_passphrase_input_rect(
+        vp,
+        scroll_y,
+        &backup_flags,
+    );
+    if x >= enc_input.x && x < enc_input.right() && y >= enc_input.y && y < enc_input.bottom() {
+        return SettingsHit::FocusPassphraseField;
+    }
+
     // M1h — Plugins §11 inline section. The card Ys depend on the same
-    // Startup+Stealth+Updater+Backup flags as the renderer PLUS the variable
-    // plugin row count (capped), so build the same `SettingsBodyFlags` the
-    // renderer paints from via `with_plugin_rows` (paint geometry == hit
+    // Startup+Stealth+Updater+Backup+Encryption flags as the renderer PLUS the
+    // variable plugin row count (capped), so build the same `SettingsBodyFlags`
+    // the renderer paints from via `with_plugin_rows` (paint geometry == hit
     // geometry). Interactive: 安装插件... (always) + per-card enable toggle +
     // per-card 卸载. The title/author/desc/empty rows are non-interactive. The
     // per-card toggle/uninstall carry the list index; the dispatch arms map
@@ -1360,6 +1457,53 @@ mod phase21_tests {
         );
         // Edge boundary excluded (`<` not `<=`).
         assert_eq!(hit_test_zone_resize_corner(&app, 300.0, 200.0), None);
+    }
+
+    #[test]
+    fn hit_test_zone_header_button_search_and_close_when_expanded() {
+        // GROUP-4 (2026-06-01) — the expanded PanelHeader search + close
+        // buttons. Geometry is the paint==hit SSoT, so click the centre of
+        // each layout rect and assert the right button.
+        let zone = Zone::new(ZoneId(9), Cow::Borrowed("z"), 100, 100, 400, 200);
+        let app = app_with_zones(vec![zone]);
+        // Header buttons only exist on an expanded (body-visible) zone.
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
+
+        let layout = expanded_zone_grid::expanded_zone_layout(
+            app.zones.get(ZoneId(9)).expect("zone"),
+        );
+        let centre = |r: Rect| (r.x + r.width * 0.5, r.y + r.height * 0.5);
+
+        let (cx, cy) = centre(layout.header_close_btn);
+        assert_eq!(
+            hit_test_zone_header_button(&app, cx, cy),
+            Some((ZoneId(9), HeaderButton::Close))
+        );
+
+        let (sx, sy) = centre(layout.header_search_btn);
+        assert_eq!(
+            hit_test_zone_header_button(&app, sx, sy),
+            Some((ZoneId(9), HeaderButton::Search))
+        );
+
+        // The title region (left of the badge) is not a button.
+        assert_eq!(hit_test_zone_header_button(&app, 130.0, 124.0), None);
+        // Below the 48-DIP header band is not a button.
+        assert_eq!(hit_test_zone_header_button(&app, cx, 180.0), None);
+    }
+
+    #[test]
+    fn hit_test_zone_header_button_absent_when_collapsed() {
+        // A collapsed pill (default Hover mode, no hover) paints no
+        // PanelHeader, so the action buttons must not be hit-testable.
+        let zone = Zone::new(ZoneId(11), Cow::Borrowed("z"), 100, 100, 400, 200);
+        let app = app_with_zones(vec![zone]);
+        let layout = expanded_zone_grid::expanded_zone_layout(
+            app.zones.get(ZoneId(11)).expect("zone"),
+        );
+        let cx = layout.header_close_btn.x + layout.header_close_btn.width * 0.5;
+        let cy = layout.header_close_btn.y + layout.header_close_btn.height * 0.5;
+        assert_eq!(hit_test_zone_header_button(&app, cx, cy), None);
     }
 
     // Wave C (05-20 visual parity) — pill hit-test + DPI-rect tests.
@@ -1826,15 +1970,57 @@ mod phase21_tests {
         assert_ne!(hit, SettingsHit::RestoreSettingsBackup(0));
     }
 
-    /// α4 (Wave I-α, 2026-05-25) — clicking each of the three zone-display
-    /// radio hit-boxes routes to the matching `SetZoneDisplayMode(mode)`
-    /// variant. Each hit-box centre is sampled so the test exercises the
-    /// hit-tester (not the geometry, which has its own settings_panel.rs
-    /// tests).
+    /// α4 (Wave I-α, 2026-05-25) / G3 parity (2026-06-01) — clicking each of the
+    /// three zone-display radio hit-boxes routes to the matching
+    /// `SetZoneDisplayMode(mode)` variant. Each hit-box centre is sampled so the
+    /// test exercises the hit-tester (not the geometry, which has its own
+    /// settings_panel.rs tests).
+    ///
+    /// G3 reorder: the §4 DisplayMode picker was promoted out of the General
+    /// band to sit between §3 Appearance and §5 Performance, so at scroll 0 it
+    /// is below the visible body fold. Scroll the §4 group title to the body top
+    /// first (same scaffold the backup/plugins reachability tests use), then
+    /// sample the radio centres at the production-folded scroll_y.
     #[test]
     fn alpha4_three_radio_hit_boxes_route_to_set_zone_display_mode() {
         let app = app_with_zones(vec![]);
-        let scroll_y = 0.0;
+        // Default flag set (no desktop sources populated → source_row_count 0).
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        );
+        // Scroll the §4 DisplayMode group title to the top of the visible body.
+        // The picker geometry roots at the FIXED source reserve baseline (like
+        // Appearance/Performance), so fold the §2 reserve delta into scroll the
+        // same way production paint/hit does.
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_display_mode_label_rect(
+            app.viewport,
+            reserve_delta_0,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
+        let scroll_y = scroll_off + reserve_delta_0;
+
+        // Sanity: the §4 picker row must now be inside the visible body.
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let picker = bento_nano_app::settings_panel::settings_zone_display_mode_picker_row_rect(
+            app.viewport,
+            scroll_y,
+        );
+        assert!(
+            picker.y >= body.y && picker.y < body.bottom(),
+            "§4 DisplayMode picker must scroll into the visible body \
+             (picker.y={}, body=[{}, {}])",
+            picker.y,
+            body.y,
+            body.bottom(),
+        );
 
         let r_hover = bento_nano_app::settings_panel::settings_zone_display_mode_radio_rect(
             app.viewport,
@@ -2100,5 +2286,163 @@ mod phase21_tests {
         );
         assert_ne!(empty_hit, SettingsHit::TogglePlugin(0));
         assert_ne!(empty_hit, SettingsHit::UninstallPlugin(0));
+    }
+
+    // ── M7 — Encryption §10 inline card hit tests ──────────────────────────
+
+    /// Helper: scroll the §10 Encryption section to the top of the visible body
+    /// and return the (viewport-folded) scroll_y the hit-tester sees, plus the
+    /// `backup_flags`-equivalent flag set the encryption card uses (no variable
+    /// rows of its own). Mirrors the backup/plugins reachability-test scaffold.
+    fn scroll_encryption_into_body(app: &AppState) -> (bento_nano_app::settings_panel::SettingsBodyFlags, f32) {
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_backup_rows(0);
+        let reserve_delta_0 =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(flags.source_row_count);
+        let label_unscrolled = bento_nano_app::settings_panel::settings_encryption_label_rect(
+            app.viewport,
+            reserve_delta_0,
+            &flags,
+        )
+        .y;
+        let scroll_off = scroll_offset_to_top_of_body(app.viewport, &flags, label_unscrolled);
+        app.scroll_offset_y.set(scroll_off);
+        (flags, scroll_off + reserve_delta_0)
+    }
+
+    /// M7 — reachability: clicking the three §10 mode buttons resolves to
+    /// `SelectEncryptionModeNone` / `SelectEncryptionModeDpapi` /
+    /// `SelectEncryptionModePassphrase`. Proves the paint→hit chain is wired
+    /// after the deferred-card landed — no mode button is painted-but-unwired.
+    #[test]
+    fn m7_settings_hit_resolves_three_mode_buttons() {
+        let app = app_with_zones(vec![]);
+        let (flags, scroll_y) = scroll_encryption_into_body(&app);
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let label = bento_nano_app::settings_panel::settings_encryption_label_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        assert!(
+            label.y >= body.y && label.y < body.bottom(),
+            "encryption section must scroll into the visible body (label.y={}, body=[{}, {}])",
+            label.y,
+            body.y,
+            body.bottom(),
+        );
+        let expected = [
+            SettingsHit::SelectEncryptionModeNone,
+            SettingsHit::SelectEncryptionModeDpapi,
+            SettingsHit::SelectEncryptionModePassphrase,
+        ];
+        for (index, want) in expected.iter().enumerate() {
+            let btn = bento_nano_app::settings_panel::settings_encryption_mode_button_rect(
+                app.viewport,
+                scroll_y,
+                &flags,
+                index as u8,
+            );
+            assert_eq!(
+                settings_hit(&app, btn.x + btn.width * 0.5, btn.y + btn.height * 0.5),
+                *want,
+                "mode button {index} must resolve to its own SettingsHit",
+            );
+        }
+    }
+
+    /// M7 — reachability: clicking the masked passphrase input box resolves to
+    /// `FocusPassphraseField`.
+    #[test]
+    fn m7_settings_hit_resolves_passphrase_field_focus() {
+        let app = app_with_zones(vec![]);
+        let (flags, scroll_y) = scroll_encryption_into_body(&app);
+        let input = bento_nano_app::settings_panel::settings_encryption_passphrase_input_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
+        assert_eq!(
+            settings_hit(&app, input.x + input.width * 0.5, input.y + input.height * 0.5),
+            SettingsHit::FocusPassphraseField,
+        );
+    }
+
+    /// M7 — regression: the §2 桌面路径 / 监控值 input rects still resolve to
+    /// `EditDesktopPath` / `EditWatchValues` after the §10 card shifted the
+    /// section offsets below §9 (the §2 fields sit ABOVE the encryption card,
+    /// so their geometry is unchanged, but pin it so the reflow never breaks
+    /// the upper sections).
+    #[test]
+    fn m7_settings_hit_desktop_path_and_watch_still_resolve() {
+        let app = app_with_zones(vec![]);
+        let source_count = app.desktop_sources.borrow().len();
+        // The §2 path/watch boxes reserve space for the full source-card stack,
+        // so at scroll 0 they sit below the visible body. Scroll the path input
+        // to the body top exactly like the backup/plugins reachability tests do
+        // (the §2 hit uses raw `scroll_offset_y`, no reserve fold), then sample
+        // its centre. `settings_hit` reads `app.scroll_offset_y` directly.
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        );
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let path_unscrolled = bento_nano_app::settings_panel::settings_desktop_path_input_rect(
+            app.viewport,
+            0.0,
+            source_count,
+        )
+        .y;
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        let scroll_off = (path_unscrolled - body.y).max(0.0).min(max_scroll);
+        app.scroll_offset_y.set(scroll_off);
+
+        let path_input = bento_nano_app::settings_panel::settings_desktop_path_input_rect(
+            app.viewport,
+            scroll_off,
+            source_count,
+        );
+        assert!(
+            path_input.y >= body.y && path_input.y < body.bottom(),
+            "path input must scroll into the visible body (y={}, body=[{}, {}])",
+            path_input.y,
+            body.y,
+            body.bottom(),
+        );
+        assert_eq!(
+            settings_hit(
+                &app,
+                path_input.x + path_input.width * 0.5,
+                path_input.y + path_input.height * 0.5,
+            ),
+            SettingsHit::EditDesktopPath,
+        );
+        let watch = bento_nano_app::settings_panel::settings_watch_textarea_rect(
+            app.viewport,
+            scroll_off,
+            source_count,
+        );
+        // The watch textarea sits just below the path input; if it scrolled into
+        // view, assert it resolves too (it may partially clip on a short body —
+        // only assert when its centre is inside the body).
+        let wy = watch.y + watch.height * 0.5;
+        if wy >= body.y && wy < body.bottom() {
+            assert_eq!(
+                settings_hit(&app, watch.x + watch.width * 0.5, wy),
+                SettingsHit::EditWatchValues,
+            );
+        }
     }
 }

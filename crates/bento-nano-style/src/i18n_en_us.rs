@@ -262,6 +262,24 @@ pub mod ids {
     pub const SETTINGS_GROUP_APPEARANCE: StringId = StringId(228);
     pub const THEME_PICKER_LABEL: StringId = StringId(229);
     pub const SETTINGS_ACCENT_COLOR: StringId = StringId(230);
+
+    // 231..244 M7 (2026-06-01) — §10 Encryption card (`EncryptionCard.tsx`).
+    // Mirror of the zh-CN ids at the SAME index (positional-array contract;
+    // `lookup_tables_have_matching_length` + `zh_cn_en_us_empty_slots_are_in_
+    // lockstep` enforce parity). Tauri keys at `src/i18n/locales/en.ts:349-363`.
+    pub const ENCRYPTION_CARD_TITLE: StringId = StringId(231);
+    pub const ENCRYPTION_CARD_DESC: StringId = StringId(232);
+    pub const ENCRYPTION_CURRENT_MODE: StringId = StringId(233);
+    pub const ENCRYPTION_MODE_NONE_SUB: StringId = StringId(234);
+    pub const ENCRYPTION_MODE_DPAPI_SUB: StringId = StringId(235);
+    pub const ENCRYPTION_MODE_PASSPHRASE_FULL: StringId = StringId(236);
+    pub const ENCRYPTION_MODE_PASSPHRASE_SUB: StringId = StringId(237);
+    pub const ENCRYPTION_PASSPHRASE_LABEL: StringId = StringId(238);
+    pub const ENCRYPTION_PASSPHRASE_PLACEHOLDER: StringId = StringId(239);
+    pub const ENCRYPTION_PASSPHRASE_HINT: StringId = StringId(240);
+    pub const ENCRYPTION_REQUIRED: StringId = StringId(241);
+    pub const ENCRYPTION_PROBE_FAILED: StringId = StringId(242);
+    pub const ENCRYPTION_MODE_APPLIED: StringId = StringId(243);
 }
 
 pub static EN_US: LookupTable = LookupTable {
@@ -540,5 +558,20 @@ pub static EN_US: LookupTable = LookupTable {
         "Appearance",                 // SETTINGS_GROUP_APPEARANCE (228)
         "Choose Theme",               // THEME_PICKER_LABEL (229)
         "Accent Color",               // SETTINGS_ACCENT_COLOR (230)
+        // 231..244 M7 — §10 Encryption card (`EncryptionCard.tsx`,
+        // en.ts:349-363). Mirror of the zh-CN ids at the SAME index.
+        "Settings Encryption",        // ENCRYPTION_CARD_TITLE (231)
+        "Encryption prevents sensitive settings from leaking when OneDrive / Google Drive sync the AppData folder.", // ENCRYPTION_CARD_DESC (232)
+        "Current mode",               // ENCRYPTION_CURRENT_MODE (233)
+        "Default; maximum compatibility", // ENCRYPTION_MODE_NONE_SUB (234)
+        "Transparent per-user encryption, no passphrase", // ENCRYPTION_MODE_DPAPI_SUB (235)
+        "Passphrase",                 // ENCRYPTION_MODE_PASSPHRASE_FULL (236)
+        "AES-256-GCM; survives cross-machine moves", // ENCRYPTION_MODE_PASSPHRASE_SUB (237)
+        "Passphrase",                 // ENCRYPTION_PASSPHRASE_LABEL (238)
+        "At least 8 characters",      // ENCRYPTION_PASSPHRASE_PLACEHOLDER (239)
+        "The passphrase is never stored in plaintext. If you lose it, the encrypted data cannot be recovered.", // ENCRYPTION_PASSPHRASE_HINT (240)
+        "Enter a passphrase before switching to passphrase mode", // ENCRYPTION_REQUIRED (241)
+        "Passphrase probe failed",    // ENCRYPTION_PROBE_FAILED (242)
+        "Encryption mode switched to", // ENCRYPTION_MODE_APPLIED (243)
     ],
 };

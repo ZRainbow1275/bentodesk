@@ -43,7 +43,7 @@ use bento_nano_platform::{
     dwrite, ok, svg,
     svg_cache::SvgCache,
 };
-use bento_nano_style::{BorderRadius, Color, Rect};
+use bento_nano_style::{BorderRadius, Color, Lerp, Rect};
 use bento_nano_widget::{ImageSource, WidgetNode};
 use bento_nano_zone::{Zone, ZoneId, ZoneItem, ZoneItemId};
 use smallvec::SmallVec;
@@ -52,7 +52,7 @@ use windows::Win32::Foundation::HWND as W_HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
-    ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat};
 use windows::core::Interface;
@@ -175,10 +175,29 @@ pub struct Renderer {
     monospace_format: Option<CachedTextFormat>,
     /// M1i fidelity — `…` trimming sign tied to [`Self::monospace_format`].
     monospace_ellipsis_sign: Option<IDWriteInlineObject>,
+    /// G5 (2026-06-01) — cached DASHED stroke style for the collapsed
+    /// `minimal`-shape capsule border (`BentoZone.css:92-99` `1px dashed`).
+    /// Built from the device-INDEPENDENT D2D factory so it survives device
+    /// rebuilds; one COM allocation per process, zero per frame (§10).
+    dashed_stroke_style: Option<ID2D1StrokeStyle>,
+    /// G5 (2026-06-01) — single-slot memo for the collapsed-pill title
+    /// font-shrink (`useTextAbbr` parity). Keyed by a cheap signature of
+    /// `(label bytes, available width, tier base font)`; the value is the
+    /// resolved font size in px. The DWrite measure-and-shrink loop runs only
+    /// on a cache MISS (label changed / overflowed / tier changed); the common
+    /// per-frame case (same label, same width) is a single u64 compare and
+    /// reuses the resolved size with NO DWrite measure and NO allocation
+    /// (spec §10). `None` = not yet measured.
+    pill_title_shrink: Option<(u64, f32)>,
     pub width: u32,
     pub height: u32,
     /// Reusable UTF-16 scratch buffer (spec §10).
     utf16_scratch: SmallVec<[u16; 256]>,
+    /// M7 (2026-06-01) — reusable scratch for the §10 Encryption card's masked
+    /// passphrase string ('•' × draft-char-count, + an optional caret glyph).
+    /// Cleared (never freed) each paint so the mask render allocates nothing
+    /// per frame (spec §10). NEVER holds the literal passphrase.
+    mask_scratch: String,
     /// Phase 2.3.1b — scale factor applied to D2D's world transform for the
     /// current frame. Equal to `dpi / 96` (1.0 at 96 DPI). Stashed on the
     /// renderer so per-glyph SVG transforms can compose against it instead
@@ -255,9 +274,12 @@ impl Renderer {
             ellipsis_sign: None,
             monospace_format: None,
             monospace_ellipsis_sign: None,
+            dashed_stroke_style: None,
+            pill_title_shrink: None,
             width,
             height,
             utf16_scratch: SmallVec::new(),
+            mask_scratch: String::new(),
             // 1.0 = 96 DPI baseline. `render()` overwrites this each frame
             // from `WindowState.dpi` before any draw call observes it.
             base_scale: 1.0,
@@ -351,6 +373,10 @@ impl Renderer {
         self.image_file_bitmaps.clear();
         self.image_file_failures.clear();
         self.svg_cache.clear();
+        // G5 — the dashed stroke style was created from the (now-rebuilt) D2D
+        // factory; drop it so the next minimal-capsule paint re-creates it
+        // against the recovered factory. Cheap one-off rebuild, not per-frame.
+        self.dashed_stroke_style = None;
         // KEEP DWrite-derived state untouched: `text_format`,
         // `text_format_cache`, `ellipsis_sign`, `monospace_format`,
         // `monospace_ellipsis_sign`. DWrite is GPU-INDEPENDENT (design §B / A2),
@@ -1334,6 +1360,8 @@ impl Renderer {
             app.active_theme_radius(),
             pal.surface_subtle,
             pal.text_secondary,
+            pal.surface_hover,
+            pal.border_hover,
         );
         // V-9 round 4 (2026-05-21) — Tauri 1.2.4 reference (frame_010 / 015
         // of resource/屏幕录制 2026-05-20 161936.mp4) paints the expanded
@@ -1572,43 +1600,52 @@ impl Renderer {
                     bento_nano_style::BorderRadius::ZERO,
                 )?;
             }
-            // M2③ (05-31, 1:1) — Tauri `.panel-header` is `height: 48px` with
-            // `align-items: center` (PanelHeader.css:6,5). The icon chip is
-            // vertically centred in the 48-DIP band: top = (48 - 18)/2 = 15.
-            let icon_rect = bento_nano_style::Rect {
-                x: rect.x + 8.0,
-                y: rect.y + 15.0,
-                width: 68.0,
-                height: 18.0,
-            };
-            self.fill_rounded_rect(icon_rect, zone_icon_chip, zone_chrome.icon_chip_radius)?;
-            let icon_text_rect = bento_nano_style::Rect {
-                x: icon_rect.x + 6.0,
-                y: icon_rect.y + 2.0,
-                width: icon_rect.width - 12.0,
-                height: icon_rect.height - 4.0,
-            };
+            // GROUP-4 (2026-06-01, 1:1) fix #1 — the zone icon is a bare 18×18
+            // glyph (Tauri `.panel-header__icon { font-size: 18px }`,
+            // PanelHeader.css:18-22). The bogus 68×18 background chip that
+            // M2③ painted here does not exist in Tauri and was REMOVED. The
+            // glyph slot is sourced from the layout SSoT so paint == future
+            // hit geometry, vertically centred in the 48-DIP band.
+            let icon_rect = expanded_layout.header_icon;
             // RC-4 Gap 1 — render the zone icon as a line-art glyph rather
             // than the raw wire-format name.
-            self.draw_icon_glyph(zone.icon.as_ref(), icon_text_rect, zone_icon_text)?;
-            // M2③ — title vertically centred in the 48-DIP header band
-            // (Tauri `align-items: center`): top = (48 - 18)/2 = 15.
+            self.draw_icon_glyph(zone.icon.as_ref(), icon_rect, zone_icon_text)?;
+            // GROUP-4 fix #1 + #3 — title starts at `icon.right() + 8` (Tauri
+            // `gap: var(--spacing-sm)`), no longer the legacy `+82` chip
+            // compensation, and runs up to the badge/actions group. Painted at
+            // 14px / weight 500 (Tauri `.panel-header__title { font-size:
+            // var(--font-size-md); font-weight: var(--font-weight-medium) }`).
+            // Tauri's `letter-spacing: 0.3px` is NOT applied: nano's DWrite
+            // text path has no per-run character-spacing seam wired here, and
+            // at 14px the 0.3px tracking is sub-pixel — approximated without
+            // it (documented limitation, snap.md notes the deviation).
+            let title_x = icon_rect.right() + expanded_zone_grid::HEADER_GAP;
+            // The title slot stops 8px before the badge's left edge (Tauri
+            // `flex: 1` shrinks against the badge + actions group).
+            let title_right = (expanded_layout.header_badge.x
+                - expanded_zone_grid::HEADER_GAP)
+                .max(title_x);
+            // 14px line at 1.4 line-height, vertically centred in the 48 band.
+            let title_line_h = 14.0 * 1.4;
             let title_rect = bento_nano_style::Rect {
-                x: rect.x + 82.0,
-                y: rect.y + 15.0,
-                width: (rect.width - 90.0).max(0.0),
-                height: 18.0,
+                x: title_x,
+                y: rect.y + ((expanded_zone_grid::HEADER_BAND_HEIGHT - title_line_h) * 0.5).max(0.0),
+                width: (title_right - title_x).max(0.0),
+                height: title_line_h,
             };
-            self.draw_text(&zone.title, title_rect, zone_title)?;
+            self.draw_text_no_wrap_with_style(&zone.title, title_rect, zone_title, 14.0, 500, 1.4)?;
             let body_visible = app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
             // M2 E-02 (2026-05-29) — Tauri's `PanelHeader` carries an item
             // COUNT BADGE (`.panel-header__badge`), NOT a status dot. The
             // V-14 green status dot was DELETED here (Tauri's expanded header
             // has no dot). The badge mirrors the ZenCapsule badge style:
-            // radius 10 (`RADIUS.badge`), bg `var(--zone-accent, --badge-bg)`,
-            // 11px count text in `--text-primary`. Right-aligned in the
-            // header band. Skipped for stack anchors — the "Stack ×N" badge
-            // below claims the same top-right slot (avoids overlap).
+            // radius `--radius-badge`, bg `var(--zone-accent, --badge-bg)`.
+            // GROUP-4 fix #4 — INTRINSIC width (sizes to the count text + 9px
+            // L/R padding) and placed BEFORE the search/close action group
+            // (8px gap), not flush-right. Count text painted at 11px / weight
+            // 600 (Tauri `.panel-header__badge { font-size: var(--font-size-xs);
+            // font-weight: var(--font-weight-semibold) }`). Skipped for stack
+            // anchors — the "Stack ×N" badge below claims the top-right slot.
             if !zone.is_stack_anchor() {
                 let badge_rect = expanded_layout.header_badge;
                 if badge_rect.width > 0.0 && badge_rect.height > 0.0 {
@@ -1628,18 +1665,56 @@ impl Renderer {
                         ),
                     )?;
                     let count_str = format_small_count(zone.items.len());
+                    // 9px L/R padding (Tauri `2px 9px`), text vertically
+                    // centred in the badge.
+                    let count_line_h = 11.0 * 1.4;
                     let count_rect = bento_nano_style::Rect {
-                        x: badge_rect.x + 4.0,
-                        y: badge_rect.y + 2.0,
-                        width: (badge_rect.width - 8.0).max(0.0),
-                        height: (badge_rect.height - 4.0).max(0.0),
+                        x: badge_rect.x + expanded_zone_grid::HEADER_BADGE_PAD_X,
+                        y: badge_rect.y + ((badge_rect.height - count_line_h) * 0.5).max(0.0),
+                        width: (badge_rect.width
+                            - expanded_zone_grid::HEADER_BADGE_PAD_X * 2.0)
+                            .max(0.0),
+                        height: count_line_h.min(badge_rect.height),
                     };
-                    self.draw_text(
+                    self.draw_text_no_wrap_with_style(
                         count_str.as_str(),
                         count_rect,
                         pal.text_primary,
+                        11.0,
+                        600,
+                        1.4,
                     )?;
                 }
+                // GROUP-4 fix #2 — the search + close action buttons (Tauri
+                // `.panel-header__actions`). Previously MISSING entirely. Each
+                // is a 28×28 rounded-rect (radius 6) with a 14×14 line-art
+                // glyph: search = magnifier (`IconKind::Search`), close = X
+                // (`IconKind::X`) — the exact glyphs nano already uses for the
+                // search bar + settings/dialog close. Hover bg (`--surface-hover`
+                // / close-red) is DEFERRED: no per-button hover signal exists
+                // for the panel header yet, so only the base (transparent)
+                // state is painted — the glyph reads at the muted colour. (When
+                // a header-button hover channel lands, lerp the fill + glyph
+                // colour here.)
+                let search_btn = expanded_layout.header_search_btn;
+                let close_btn = expanded_layout.header_close_btn;
+                let btn_glyph = expanded_zone_grid::HEADER_BTN_GLYPH_SIZE;
+                let glyph_inset = |btn: bento_nano_style::Rect| bento_nano_style::Rect {
+                    x: btn.x + (btn.width - btn_glyph) * 0.5,
+                    y: btn.y + (btn.height - btn_glyph) * 0.5,
+                    width: btn_glyph,
+                    height: btn_glyph,
+                };
+                self.draw_icon_glyph(
+                    IconKind::Search.as_str(),
+                    glyph_inset(search_btn),
+                    pal.text_muted,
+                )?;
+                self.draw_icon_glyph(
+                    IconKind::X.as_str(),
+                    glyph_inset(close_btn),
+                    pal.text_muted,
+                )?;
             }
             // V-11 (2026-05-21, round 2): the expanded-zone right-bottom
             // display-mode chip ("Hover"/"Always"/"Click") was deleted.
@@ -1788,20 +1863,40 @@ impl Renderer {
                 // never scales (it's the muted placeholder under the ghost),
                 // so it stays at identity. `item_hover` is `Copy` in a `Cell`,
                 // so this is a single read + a few muls per card (§10 hot path).
+                //
+                // M3-A3 — Tauri removes the entire `:hover` rule on a
+                // `aria-disabled` (missing-file) card, and a drag-source card
+                // shows its muted placeholder bg, never the hover chrome. So we
+                // zero `hover_t` for both: only a present, non-dragged card
+                // lifts / lerps its bg-border-shadow.
+                let card_key = (zone.id, item.id);
+                let item_hover = app.item_hover.get();
+                let (hover_raw, press_t) = if is_dragged_source {
+                    (0.0, 0.0)
+                } else {
+                    item_hover.sample(card_key, anim_now_ms)
+                };
+                let hover_t = if is_dragged_source || item.file_missing {
+                    0.0
+                } else {
+                    hover_raw
+                };
                 let item_scale = if is_dragged_source {
                     1.0
                 } else {
-                    let (hover_t, press_t) =
-                        app.item_hover.get().sample((zone.id, item.id), anim_now_ms);
-                    item_card::card_scale_for(hover_t, press_t)
+                    item_card::card_scale_for(hover_raw, press_t)
                 };
+                // FIX 1 — drop the translateY lift only while the pointer is
+                // actively held (Tauri `:active` scale-only override). On
+                // release the lift returns while the press scale ramps out.
+                let press_held = !is_dragged_source && item_hover.press_held(card_key);
                 self.draw_item_card(
                     item,
                     card_rect,
                     item_fill,
-                    item_chrome.card_radius,
-                    item_chrome.text,
-                    item_chrome.icon_text,
+                    &item_chrome,
+                    hover_t,
+                    press_held,
                     item_scale,
                 )?;
             }
@@ -1960,12 +2055,13 @@ impl Renderer {
                     } else {
                         item_chrome.ghost_background
                     },
-                    item_chrome.card_radius,
-                    item_chrome.text,
-                    item_chrome.icon_text,
-                    // M3-A2 — the floating drag ghost is not a hover target;
-                    // it keeps identity scale (the ghost has its own lift/shadow
-                    // treatment) so hover/press scaling stays on the live grid.
+                    &item_chrome,
+                    // M3-A2/A3 — the floating drag ghost is not a hover target;
+                    // it keeps identity scale + zero hover_t (no lift / bg-border
+                    // -shadow lerp; the ghost has its own lift/shadow treatment)
+                    // so hover/press chrome stays on the live grid.
+                    0.0,
+                    false,
                     1.0,
                 )?;
             }
@@ -2008,10 +2104,22 @@ impl Renderer {
         // once per frame). Read `pal.X` instead of the static `PALETTE_DARK`
         // so the collapsed pill re-skins with the active theme.
         use bento_nano_style::tokens::ACRYLIC_FALLBACK;
+        use crate::business::zen_capsule::{CapsuleShape, CapsuleSize};
+        // G5 (2026-06-01) — resolve the per-zone capsule size + shape once so the
+        // chrome / label / badge below can branch on them (Tauri ZenCapsule).
+        let size = CapsuleSize::parse(zone.capsule_size.as_ref());
+        let shape = CapsuleShape::parse(zone.capsule_shape.as_ref());
+        let is_minimal = matches!(shape, CapsuleShape::Minimal);
         // V-8 — compose hover + press into the final scale multiplier and
         // expand the pill rect about its center. Persisted geometry tokens
         // are NEVER mutated (hard constraint) — `scale_rect_centered`
         // returns a fresh `Rect` for paint only.
+        //
+        // Fix 8 (G5, VERIFIED) — `pill_scale_for` is a no-op: `HOVER_SCALE_DELTA`
+        // and `PRESS_SCALE_DELTA` are both 0.0 (V-12 disabled pill scale), so
+        // this returns EXACTLY 1.0 for any hover/press and `scaled_rect` ==
+        // `layout.rect`. Tauri's ZenCapsule has no scale transform, so this
+        // matches; left in place per V-12 (no scale re-enable).
         let scale = animator::pill_scale_for(hover_t, press_t);
         let scaled_rect = animator::scale_rect_centered(layout.rect, scale);
         let scaled_radius = layout.radius;
@@ -2022,35 +2130,46 @@ impl Renderer {
         // clean capsule against the desktop. Shadow layout fields are kept
         // in `ZonePillLayout` for the expanded morph path which still needs
         // the geometry, but the collapsed paint no longer fills them.
-        // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
-        // collapsed pill (`.bento-zone`), painted UNDER the glass+surface fill.
-        // No M6b shadow is drawn on the collapsed pill (V-9 removed it), so this
-        // is the only glow on the capsule — additive-by-design, no conflation.
-        if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
-            self.draw_neon_glow(scaled_rect, n.collapsed, scaled_radius)?;
+        if is_minimal {
+            // G5 (2026-06-01) — `minimal` shape (Tauri BentoZone.css:92-99
+            // `.bento-zone--shape-minimal`): TRANSPARENT background, NO
+            // backdrop blur, NO shadow/glow, just a 1px DASHED border at
+            // rgba(255,255,255,0.2). Skip the acrylic + surface fills + neon
+            // glow entirely and stroke a dashed outline instead of the solid
+            // `border-zen` hairline. Corner radius is the resolved 8px.
+            let dashed_border = Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.2,
+            };
+            self.stroke_rounded_rect_dashed(scaled_rect, dashed_border, scaled_radius, 1.0)?;
+        } else {
+            // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
+            // collapsed pill (`.bento-zone`), painted UNDER the glass+surface
+            // fill. No M6b shadow is drawn on the collapsed pill (V-9 removed
+            // it), so this is the only glow on the capsule.
+            if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
+                self.draw_neon_glow(scaled_rect, n.collapsed, scaled_radius)?;
+            }
+            // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
+            self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
+            // Surface fill on top of the glass — `pal.surface_zen` (live theme).
+            // V-8 — hover brightens the surface tone subtly (+8% on hover).
+            let surface_brighten = 1.0 + hover_t * 0.08;
+            let surface_color = Color {
+                r: (pal.surface_zen.r * surface_brighten).min(1.0),
+                g: (pal.surface_zen.g * surface_brighten).min(1.0),
+                b: (pal.surface_zen.b * surface_brighten).min(1.0),
+                a: pal.surface_zen.a,
+            };
+            self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
+            // M2 S2a (2026-05-29) — Tauri's `.zen-capsule` carries a 1px solid
+            // `var(--border-zen)` = `rgba(255,255,255,0.1)` outline. nano drew
+            // no stroke at all; added here so the capsule reads as glass with a
+            // hairline edge. Pure-paint via the existing `stroke_rounded_rect`.
+            self.stroke_rounded_rect(scaled_rect, pal.border_zen, scaled_radius, 1.0)?;
         }
-        // Acrylic glass tint per parent PRD D5 — solid fallback, never Mica.
-        self.fill_rounded_rect(scaled_rect, ACRYLIC_FALLBACK, scaled_radius)?;
-        // Surface fill on top of the glass — `pal.surface_zen` (live theme).
-        // V-8 — hover brightens the surface tone subtly (+8% on hover).
-        let surface_brighten = 1.0 + hover_t * 0.08;
-        let surface_color = Color {
-            r: (pal.surface_zen.r * surface_brighten).min(1.0),
-            g: (pal.surface_zen.g * surface_brighten).min(1.0),
-            b: (pal.surface_zen.b * surface_brighten).min(1.0),
-            a: pal.surface_zen.a,
-        };
-        self.fill_rounded_rect(scaled_rect, surface_color, scaled_radius)?;
-        // M2 S2a (2026-05-29) — Tauri's `.zen-capsule` carries a 1px solid
-        // `var(--border-zen)` = `rgba(255,255,255,0.1)` outline. nano drew no
-        // stroke at all; added here so the capsule reads as glass with a
-        // hairline edge. Pure-paint via the existing `stroke_rounded_rect`.
-        self.stroke_rounded_rect(
-            scaled_rect,
-            pal.border_zen,
-            scaled_radius,
-            1.0,
-        )?;
         // M2 S2b (2026-05-29) — the under-icon accent stripe was REMOVED.
         // Tauri's collapsed ZenCapsule has no such stripe (the 2px accent
         // border-top belongs to the EXPANDED body only). The zone accent is
@@ -2063,13 +2182,20 @@ impl Renderer {
         // `draw_icon_glyph`, which looks up the built-in `IconKind` and
         // renders the cached source SVG. Unknown names fall back to text.
         self.draw_icon_glyph(zone.icon.as_ref(), layout.icon, pal.text_primary)?;
-        // Label — zone.title in TEXT_PRIMARY. M2 R3 (2026-05-29) — Tauri's
-        // `.zen-capsule__title` is single-line `white-space:nowrap`; the
-        // proportional `draw_text` wrapped long names onto a second row.
-        // Switched to `draw_text_no_wrap`, which disables DWrite word-wrap
-        // and `…`-trims when the glyph run overflows — matching Tauri's
-        // shrink-then-clip behaviour without the wrap regression.
-        self.draw_text_no_wrap(zone.title.as_ref(), layout.label, pal.text_primary)?;
+        // Label — zone.title in TEXT_PRIMARY. G5 (2026-06-01) — Tauri's
+        // `.zen-capsule__title` (ZenCapsule.tsx:26,37 + css:19-32) uses
+        // `useTextAbbr` to SHRINK the font-size to fit (no ellipsis until the
+        // MIN_FONT_SIZE_PX floor), at a PER-TIER font-size (small 11 / medium
+        // 14 / large 16) with weight 500 + letter-spacing 0.3px. The pre-G5
+        // path drew the label at the global default 16px with an `…` trim.
+        // `draw_pill_title_shrink_to_fit` resolves the fit size (cached, §10)
+        // and applies the 0.3px tracking via SetCharacterSpacing.
+        self.draw_pill_title_shrink_to_fit(
+            zone.title.as_ref(),
+            layout.label,
+            pal.text_primary,
+            size.title_font_px(),
+        )?;
         // Count badge — M2 B3 (2026-05-29): bg follows Tauri
         // `var(--zone-accent, --badge-bg)` (zone accent tint when set, else
         // the neutral `--badge-bg`), and the count text is `--text-primary`
@@ -2084,50 +2210,36 @@ impl Renderer {
             layout.badge_radius,
         )?;
         let count_str = format_small_count(count);
+        // G5 (2026-06-01) — badge text at the PER-TIER font-size (small 10 /
+        // medium 11 / large 13) and SEMIBOLD weight (600), Tauri
+        // `.zen-capsule__badge { font-weight: 600 }`. The pre-G5 path drew it
+        // with the default 16px/500 format. Pad the text rect by the tier's
+        // badge padding; line-height 1.4 (Tauri css:42).
+        let (badge_pad_x, badge_pad_y) = size.badge_padding_xy();
         let badge_text_rect = bento_nano_style::Rect {
-            x: layout.badge.x + 4.0,
-            y: layout.badge.y + 2.0,
-            width: (layout.badge.width - 8.0).max(0.0),
-            height: (layout.badge.height - 4.0).max(0.0),
+            x: layout.badge.x + badge_pad_x,
+            y: layout.badge.y + badge_pad_y,
+            width: (layout.badge.width - badge_pad_x * 2.0).max(0.0),
+            height: (layout.badge.height - badge_pad_y * 2.0).max(0.0),
         };
-        self.draw_text(
+        self.draw_text_no_wrap_with_style(
             count_str.as_str(),
             badge_text_rect,
             pal.text_primary,
+            size.badge_font_px(),
+            size.badge_font_weight(),
+            1.4,
         )?;
-        // V-9 round 3 (2026-05-21) — Wave H2 status dot removed. User
-        // flagged the blue dot at the top of every collapsed pill as a
-        // regression vs Tauri 1.2.4 baseline (Tauri pills have no such
-        // indicator — `count > 0` is communicated entirely through the
-        // numeric badge on the right).
+        // V-9 round 3 (2026-05-21) — Wave H2 top-right status dot removed.
         //
-        // V-14 (2026-05-21) — Tauri 1.2.4 reference frames 005/006/007/008
-        // paint a bright green status dot OVER the badge slot on the hovered
-        // / active / expanded zone. The dot fades in with hover_t and
-        // covers the numeric count while the cursor is parked on the pill.
-        // Position: centered on badge rect, diameter ~ badge height. Color:
-        // `pal.accent_green` (dark theme #22C55E). The fill rounded-rect uses
-        // half-height radius to render a perfect circle. The count text is
-        // still painted underneath; the dot just overlays it on hover.
-        if hover_t > 0.0 {
-            let dot_size = layout.badge.height.min(layout.badge.width);
-            let dot_rect = bento_nano_style::Rect {
-                x: layout.badge.x + (layout.badge.width - dot_size) * 0.5,
-                y: layout.badge.y + (layout.badge.height - dot_size) * 0.5,
-                width: dot_size,
-                height: dot_size,
-            };
-            let dot_color = Color {
-                a: pal.accent_green.a * hover_t.clamp(0.0, 1.0),
-                ..pal.accent_green
-            };
-            self.fill_rounded_rect(
-                dot_rect,
-                dot_color,
-                BorderRadius::all(dot_size * 0.5),
-            )?;
-        }
-        let _ = (anim_now_ms, press_t);
+        // G5 (2026-06-01), fix 7 — the V-14 HOVER-gated green dot that painted
+        // over the badge on hover has ALSO been removed. Tauri's ZenCapsule has
+        // NO hover badge change (ZenCapsule.css:10 only transitions
+        // `background`); the count badge stays visible on hover. The v1.2.4
+        // "reference frames 005-008" the old comment cited do not reproduce in
+        // the live v1.3.0 source. No separate always-on status dot is painted
+        // here (the geometry `status_dot` field is unused by this paint path).
+        let _ = (anim_now_ms, press_t, hover_t);
         Ok(())
     }
 
@@ -2257,29 +2369,94 @@ impl Renderer {
         Ok(())
     }
 
-    // Geometric draw helper: the 8 params are independent paint primitives
-    // (rect, fill, radius, text/icon colours, M3-A2 scale). Bundling them
-    // into a struct adds indirection at the hot per-item call sites for no
-    // real benefit — the conventional render-code shape, so allow it.
+    // Geometric draw helper: the params are independent paint primitives
+    // (rect, fill, chrome bundle, M3-A2 scale + M3-A3 hover ramp/press flag).
+    // Bundling them into a struct adds indirection at the hot per-item call
+    // sites for no real benefit — the conventional render-code shape, so allow it.
     #[allow(clippy::too_many_arguments)]
     fn draw_item_card(
         &mut self,
         item: &ZoneItem,
         base_rect: bento_nano_style::Rect,
         fill: Color,
-        radius: BorderRadius,
-        text: Color,
-        icon_text: Color,
+        chrome: &item_card::ItemCardChrome,
+        hover_t: f32,
+        press_held: bool,
         scale: f32,
     ) -> Result<(), RenderError> {
+        let radius = chrome.card_radius;
+        let text = chrome.text;
+        let icon_text = chrome.icon_text;
         // M3-A2 (2026-05-29) — apply the `item_card::card_scale_for` hover/press
         // multiplier as a Tauri-style centred `transform: scale()`. The card
         // surface AND its inner icon/label inset offsets all inflate/deflate
         // about the card's CENTRE so the glyph + label stay centred (a CSS
         // transform scales the whole subtree, not just the box). `scale == 1.0`
         // (idle / drag-ghost) collapses to the original geometry exactly.
-        let card_rect = animator::scale_rect_centered(base_rect, scale);
-        self.fill_rounded_rect(card_rect, fill, radius)?;
+        let mut card_rect = animator::scale_rect_centered(base_rect, scale);
+        // FIX 1 (M3-A3) — Tauri `.item-card:hover { transform: translateY(-1px)
+        // scale(1.02) }`: the lift rides the same 150ms ease-out ramp as the
+        // scale. We offset the scaled rect's `y` by `CARD_HOVER_LIFT_DY *
+        // hover_t` (0 at idle → -1px at full hover). Per CSS specificity the
+        // `:active` rule respecifies `transform: scale(0.97)` (scale-only), so
+        // the inherited lift is DROPPED while the pointer is actively held —
+        // `press_held` mirrors that exactly. On release the lift returns.
+        if !press_held {
+            card_rect.y += item_card::CARD_HOVER_LIFT_DY * hover_t.clamp(0.0, 1.0);
+        }
+        // FIX 2 (M3-A3) — `:hover { box-shadow: var(--shadow-item-hover) }`: a
+        // two-layer drop shadow (0 2 8 / 0 8 24 black) faded in by hover_t.
+        // Painted BEHIND the card via the grow-and-fill idiom (one fill per
+        // layer, back-to-front: the wider ambient layer first, the tighter
+        // contact layer on top), §10 allocation-free — no per-frame heap, no
+        // D2D blur effect. Skipped entirely at hover_t ≈ 0 (fill alpha guard).
+        let hover_clamped = hover_t.clamp(0.0, 1.0);
+        if hover_clamped > 0.0 {
+            // Ambient: offset_y 8, blur 24.
+            let ambient = bento_nano_style::Rect {
+                x: card_rect.x - 24.0,
+                y: card_rect.y + 8.0 - 24.0,
+                width: card_rect.width + 48.0,
+                height: card_rect.height + 48.0,
+            };
+            self.fill_rounded_rect(
+                ambient,
+                with_alpha(chrome.hover_shadow_inner, chrome.hover_shadow_inner.a * hover_clamped),
+                radius,
+            )?;
+            // Contact: offset_y 2, blur 8.
+            let contact = bento_nano_style::Rect {
+                x: card_rect.x - 8.0,
+                y: card_rect.y + 2.0 - 8.0,
+                width: card_rect.width + 16.0,
+                height: card_rect.height + 16.0,
+            };
+            self.fill_rounded_rect(
+                contact,
+                with_alpha(chrome.hover_shadow_outer, chrome.hover_shadow_outer.a * hover_clamped),
+                radius,
+            )?;
+        }
+        // FIX 2 (M3-A3) — `:hover { background: var(--surface-hover) }`: lerp the
+        // base fill toward the hover surface by hover_t (premultiplied-alpha
+        // lerp, §10 stack-only). At hover_t 0 this is `fill` exactly (idle /
+        // missing / drag bg preserved); at 1.0 it is `--surface-hover`.
+        let card_fill = fill.lerp(chrome.hover_background, hover_clamped);
+        self.fill_rounded_rect(card_rect, card_fill, radius)?;
+        // FIX 2 (M3-A3) — `:hover { border-color: var(--border-hover) }`: a 1px
+        // stroke whose alpha lerps transparent → `--border-hover` by hover_t.
+        // The normal card strokes no border, so this only appears on hover.
+        if hover_clamped > 0.0 {
+            let border = with_alpha(chrome.hover_border, chrome.hover_border.a * hover_clamped);
+            self.stroke_rounded_rect(card_rect, border, radius, 1.0)?;
+        }
+        // FIX 3 (M3-A3, DEFERRED) — Tauri `:focus-visible { outline: 2px solid
+        // var(--accent-blue); outline-offset: 2px; border-color: transparent }`.
+        // nano tracks NO per-item KEYBOARD focus signal distinct from selection
+        // (`ZoneItem` has no `selected`/`focused` field; `AppState` only tracks
+        // `settings_focused_field` for the Settings text inputs). Building
+        // focus-tracking plumbing is out of scope for this parity pass — paint
+        // the ring once an item keyboard-focus channel lands.
         // Wave I2 — horizontally centre the icon glyph inside the card
         // (Tauri frame_010 reference). Vertical position keeps the existing
         // 6-DIP top inset (scaled with the card) so the label still sits in
@@ -2515,6 +2692,18 @@ impl Renderer {
         // / header / footer / labels / accent / track) re-skins with the
         // active theme. Bound once; `PaletteTauri: Copy` (§10).
         let palette = app.active_theme_tauri();
+        // P1 (#7 fix wave 2026-06-01) — wall-clock sampled ONCE per Settings
+        // paint (same `GetTickCount` pattern `draw_zones` uses for the pill
+        // animator, allocation-free §10). Threaded into the §2/§10 text-field
+        // caret blink so a focused caret toggles at the Windows ~530ms cadence.
+        // The frame-pump keeps redrawing while a field is focused (the shell
+        // ORs `settings_focused_field != None` into `any_active`), so this value
+        // advances frame to frame.
+        // SAFETY: `GetTickCount` is total + thread-safe.
+        let settings_now_ms =
+            unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        // P1 — caret is ON for the first half of each ~1060ms blink period.
+        let caret_on = settings_caret_on(settings_now_ms);
         // A-path + V-3 (TL Ruling 2026-05-21): no fullscreen scrim — Tauri
         // 1.2.4 baseline (frame_060) leaves the desktop wallpaper visible
         // around the floating 420×580 modal. Panel/header/footer surfaces
@@ -2742,102 +2931,13 @@ impl Renderer {
             )?;
         }
 
-        // α4 (Wave I-α, 2026-05-25) — zone-display-mode 3-radio picker.
-        //
-        // Tauri 1.2.4 baseline (`SettingsPanel.tsx:555-595`) paints a 3-radio
-        // horizontal group (Hover / Always / Click) for the default zone
-        // display mode. Wave H shipped the data path (enum + get/set +
-        // SettingsHit::CycleZoneDisplayMode dispatch) but no UI — the row
-        // index lived as orphan `#[allow(dead_code)]` per evidence row R2.
-        // This block paints the row + 3 radios; the hit-tester in
-        // `bento-nano-shell/src/ui.rs::settings_hit` and the dispatch arm in
-        // `bento-nano-shell/src/main.rs` route clicks back into the same
-        // `Command::SetSetting` path the cycle button used.
-        let picker_row = settings_zone_display_mode_picker_row_rect(viewport, scroll);
-        if row_visible(picker_row, body) {
-            // Row label on the left half — matches the language row layout.
-            let label_rect = bento_nano_style::Rect {
-                x: picker_row.x,
-                y: picker_row.y + (picker_row.height - 16.0) * 0.5,
-                width: picker_row.width * 0.4,
-                height: 16.0,
-            };
-            // R14 fix (2026-05-25) — caption uses dedicated picker-row label
-            // StringId 140 ("默认显示模式" / "Default display mode"), bilingual
-            // and unrelated to the per-radio mode names (77/78/79).
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
-                ),
-                label_rect,
-                label_color,
-            )?;
-            let modes = [
-                ZoneDisplayMode::Hover,
-                ZoneDisplayMode::Always,
-                ZoneDisplayMode::Click,
-            ];
-            let current = app.zone_display_mode.get();
-            let radius_outer = BorderRadius::all(SETTINGS_RADIO_OUTER_D * 0.5);
-            let radius_inner = BorderRadius::all(SETTINGS_RADIO_INNER_D * 0.5);
-            for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
-                let mode = modes[index as usize];
-                let outer = settings_zone_display_mode_radio_outer_rect(
-                    viewport, scroll, index,
-                );
-                // Selected radios use the accent hue; unselected keep the
-                // chip_border tone. v1.3.0 SettingsPanel.tsx ring pattern:
-                // fill the outer disc with ring_color, then carve out the
-                // interior with the panel surface — leaves a 1-DIP ring on
-                // ALL four edges (top/bottom/left/right) at once, no
-                // per-edge band stitching (R14 fix — prior 2-band version
-                // read as `(== ==)` not `○`).
-                let ring_color = if mode == current {
-                    accent_on
-                } else {
-                    chip_border
-                };
-                self.fill_rounded_rect(outer, ring_color, radius_outer)?;
-                let ring_hairline: f32 = 1.0;
-                let interior = bento_nano_style::Rect {
-                    x: outer.x + ring_hairline,
-                    y: outer.y + ring_hairline,
-                    width: (outer.width - 2.0 * ring_hairline).max(0.0),
-                    height: (outer.height - 2.0 * ring_hairline).max(0.0),
-                };
-                let radius_interior = BorderRadius::all(
-                    (SETTINGS_RADIO_OUTER_D * 0.5 - ring_hairline).max(0.0),
-                );
-                self.fill_rounded_rect(interior, chip_bg, radius_interior)?;
-                if mode == current {
-                    let inner = settings_zone_display_mode_radio_inner_rect(
-                        viewport, scroll, index,
-                    );
-                    self.fill_rounded_rect(inner, accent_on, radius_inner)?;
-                }
-                // Radio label — bilingual via StringId 77/78/79 (R14 fix —
-                // prior `mode.label()` returned English-only literals).
-                let label_id = match mode {
-                    ZoneDisplayMode::Hover => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_HOVER
-                    }
-                    ZoneDisplayMode::Always => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_ALWAYS
-                    }
-                    ZoneDisplayMode::Click => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_CLICK
-                    }
-                };
-                let label = settings_zone_display_mode_radio_label_rect(
-                    viewport, scroll, index,
-                );
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(label_id),
-                    label,
-                    title_color,
-                )?;
-            }
-        }
+        // §4 DisplayMode group (G3 parity 2026-06-01) — promoted out of the
+        // General band into its own `settings-group` between §3 Appearance and
+        // §5 Performance. Because §4 roots at the FIXED source-reserve baseline
+        // (it anchors off §3 Appearance, like Performance §5), it must paint with
+        // the reserve-FOLDED `scroll` — so the paint block lives AFTER the fold,
+        // adjacent to the §3 Appearance block near the end of this closure (paint
+        // ==hit SSoT; see the `§4 DisplayMode` block below the Appearance grid).
 
         // ── Round-2 M2 sections ──────────────────────────────────────────
 
@@ -4152,11 +4252,371 @@ impl Renderer {
             }
         }
 
+        // ── M7 — Encryption §10 card (`EncryptionCard.tsx`) ─────────────
+        //
+        // Slots BETWEEN Backup §9 and Plugins §11, matching the Tauri
+        // `<BackupCard/><EncryptionCard/>` adjacency. Fixed-height card (no
+        // variable rows) painted on top of the already-wired passphrase backend.
+        // Controls (top→bottom): section label / OneDrive description / current-
+        // mode row / 3-button mode grid (active button accent-highlighted) /
+        // passphrase row (LEFT label cell + RIGHT masked input box — P4) / hint
+        // line / status banner (error red / success green). The mode-button
+        // geometry + the passphrase label/input rects come from the
+        // `settings_encryption_*_rect` helpers (paint==hit SSoT).
+        //
+        // #7 fix wave 2026-06-01 — Tauri `EncryptionCard.tsx`/`.css` 1:1 parity:
+        //   P1  caret BLINKS at ~530ms (`settings_now_ms` threaded in; the prior
+        //       "no per-frame clock" claim was false — the shell pump keeps
+        //       redrawing while a field is focused), still allocation-free (§10);
+        //   P2  current-mode VALUE uses the SAME label source as the mode-button
+        //       TITLES (`encryption_mode_button_title_id` → Passphrase = id 236);
+        //   P3  literal ':' after the current-mode label;
+        //   P4  passphrase LABEL painted left of the input;
+        //   P5  inactive buttons ALWAYS stroke rgba(255,255,255,0.08) + fill
+        //       rgba(255,255,255,0.04); active fill rgba(96,165,250,0.18) + #60a5fa;
+        //   P6  unfocused input ALWAYS strokes rgba(255,255,255,0.12) + fills
+        //       rgba(255,255,255,0.06);
+        //   P7  active button TITLE stays text_primary (NOT recolored blue);
+        //   P8  current-mode VALUE is bold (weight 700, `<strong>`);
+        //   P11 description = text_secondary (not text_muted);
+        //   P16 placeholder = text_primary @ 0.45 alpha.
+        // The mask string is built once per paint into the reusable `mask_scratch`
+        // buffer + the caret glyph is appended only when `caret_on` (no per-frame
+        // heap alloc — §10). NEVER paints the literal passphrase.
+        use crate::settings_panel::{
+            settings_encryption_current_mode_rect, settings_encryption_desc_rect,
+            settings_encryption_hint_rect, settings_encryption_label_rect,
+            settings_encryption_mode_button_rect, settings_encryption_passphrase_input_rect,
+            settings_encryption_passphrase_label_rect, settings_encryption_status_rect,
+            SETTINGS_ENCRYPTION_MODE_COUNT,
+        };
+        use crate::state::SettingsTextField;
+        // Live encryption state, read once (Copy / cheap clones) so no RefCell
+        // borrow spans the fallible paint calls below (mirrors the Backup/Stealth
+        // snapshot pattern).
+        let enc_mode = app.encryption_mode.get();
+        let enc_status_snapshot = app.settings_encryption_status.borrow().clone();
+        let enc_passphrase_focused = app.passphrase_entry_active.get()
+            && matches!(app.settings_focused_field.get(), SettingsTextField::Passphrase);
+        // Masked passphrase: number of dots = scalar count of the draft. Built
+        // into a reusable scratch String (cleared, never freed) so the paint
+        // path stays allocation-light (§10). NEVER the literal passphrase.
+        let enc_pass_len = app.passphrase_draft.borrow().chars().count().min(128);
+        // P5/P6 — Tauri base surface tokens (white-overlay rgba). These are
+        // theme-independent literals straight from `EncryptionCard.css` so the
+        // card reads identically to the reference regardless of active palette.
+        // Active button: fill rgba(96,165,250,0.18) + border #60a5fa (CSS:44-46).
+        let enc_active_border = bento_nano_style::Color::from_u8(0x60, 0xA5, 0xFA, 0xFF);
+        let enc_active_fill = with_alpha(enc_active_border, 0.18);
+        // Inactive button base: fill rgba(255,255,255,0.04) + border 0.08 (CSS:31-32).
+        let enc_btn_base_fill = with_alpha(bento_nano_style::Color::WHITE, 0.04);
+        let enc_btn_base_border = with_alpha(bento_nano_style::Color::WHITE, 0.08);
+        // Input base: fill rgba(255,255,255,0.06) + border 0.12 (CSS:74-76).
+        let enc_input_fill = with_alpha(bento_nano_style::Color::WHITE, 0.06);
+        let enc_input_border = with_alpha(bento_nano_style::Color::WHITE, 0.12);
+        // P11 — `.encryption-card-description` is text_secondary (#a0a0b0), 12px;
+        // the 11px `.encryption-mode-sub` / `.encryption-hint` stay text_muted.
+        let enc_desc_color = palette.text_secondary;
+        // #7 §10 item 8 (2026-06-01) — Tauri renders `var(--color-text-muted)`
+        // at FULL opacity (EncryptionCard.css:60,83); pass `text_muted` directly.
+        // The prior `with_alpha(.., 0.95)` faded the mode-sub + hint ~5% extra.
+        let enc_muted = palette.text_muted;
+
+        // Section label — 设置加密 / Settings Encryption.
+        let enc_label = settings_encryption_label_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_label, body) {
+            self.draw_text(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_TITLE),
+                enc_label,
+                label_color,
+            )?;
+        }
+        // Description line (OneDrive sentence) — P11: 12px text_secondary.
+        let enc_desc = settings_encryption_desc_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_desc, body) {
+            self.draw_text_with_style(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_DESC),
+                enc_desc,
+                enc_desc_color,
+                12.0,
+                400,
+                1.0,
+            )?;
+        }
+        // Current-mode row — 当前模式: <mode label>. Two draws (label + value).
+        // P3 — literal ':' after the label (Tauri JSX `{...}:`); built into the
+        // reusable `mask_scratch` (cleared before the passphrase mask reuses it)
+        // so the colon append stays allocation-free (§10). P8 — the VALUE is bold
+        // (weight 700, Tauri `<strong>`). P2 — the value uses the button-title
+        // label source so it equals the active button TITLE (e.g. 自定义口令).
+        let enc_current = settings_encryption_current_mode_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_current, body) {
+            let label_w = (enc_current.width * 0.42).max(0.0);
+            let label_part = bento_nano_style::Rect {
+                x: enc_current.x,
+                y: enc_current.y,
+                width: label_w,
+                height: enc_current.height,
+            };
+            // P3 — append ':' to the localized label without a per-frame heap
+            // alloc by composing into the reusable scratch buffer.
+            self.mask_scratch.clear();
+            self.mask_scratch.push_str(bento_nano_style::t(
+                bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CURRENT_MODE,
+            ));
+            self.mask_scratch.push(':');
+            let label_buf = core::mem::take(&mut self.mask_scratch);
+            // #7 §10 item 3 (2026-06-01) — `.encryption-current` is 13px/400
+            // (EncryptionCard.css:14); the colon-suffixed label half previously
+            // inherited the default 16px no-wrap format. The VALUE half below
+            // already paints at 13/700.
+            let label_result = self.draw_text_no_wrap_with_style(
+                label_buf.as_str(),
+                label_part,
+                label_color,
+                13.0,
+                400,
+                1.0,
+            );
+            self.mask_scratch = label_buf;
+            label_result?;
+            let value_part = bento_nano_style::Rect {
+                x: label_part.right() + 6.0,
+                y: enc_current.y,
+                width: (enc_current.right() - label_part.right() - 6.0).max(0.0),
+                height: enc_current.height,
+            };
+            // P8 — bold value (weight 700, 13px). Uses the button-title source
+            // (P2) so it matches the active mode button's title exactly.
+            self.draw_text_with_style(
+                localized_encryption_mode_button_label(enc_mode),
+                value_part,
+                title_color,
+                13.0,
+                700,
+                1.0,
+            )?;
+        }
+        // 3-button mode grid — None / DPAPI / Passphrase. Active button gets the
+        // accent fill + border; inactive buttons get the neutral chip fill. Each
+        // button paints a bold title + an 11px muted sub-label.
+        for index in 0..SETTINGS_ENCRYPTION_MODE_COUNT {
+            let btn = settings_encryption_mode_button_rect(viewport, scroll, &backup_flags, index);
+            if !row_visible(btn, body) {
+                continue;
+            }
+            let this_mode = match index {
+                0 => crate::state::SettingsEncryptionMode::None,
+                1 => crate::state::SettingsEncryptionMode::Dpapi,
+                _ => crate::state::SettingsEncryptionMode::Passphrase,
+            };
+            let is_active = this_mode == enc_mode;
+            // #7 §10 item 9 (2026-06-01) DEFERRED — Tauri `.encryption-mode-btn:
+            // hover:not(:disabled)` paints `rgba(96,165,250,0.12)` (CSS:39-41).
+            // No settings button in `draw_settings_panel` receives a hovered-
+            // widget signal today (Cancel/Save/mode buttons all paint state from
+            // `app`, never hover), so this would require building new hover-
+            // tracking. Per the task brief ("don't over-build"), deferred until a
+            // settings-wide hover-id is threaded through the paint path.
+            // P5 — ALWAYS fill (base rgba(255,255,255,0.04) / active 96,165,250,0.18)
+            // and ALWAYS stroke a 1px border (base rgba(255,255,255,0.08) / active
+            // #60a5fa). #7 §10 item 6 (2026-06-01) — Tauri `.encryption-mode-btn
+            // .active` only changes the border COLOR (#60a5fa); the WIDTH stays the
+            // base 1px (EncryptionCard.css:32,44-46). The prior 1.5px active stroke
+            // read ~50% heavier than the inactive chips — the visible delta this fixes.
+            self.fill_rounded_rect(
+                btn,
+                if is_active { enc_active_fill } else { enc_btn_base_fill },
+                btn_radius,
+            )?;
+            if is_active {
+                self.stroke_rounded_rect(btn, enc_active_border, btn_radius, 1.0)?;
+            } else {
+                self.stroke_rounded_rect(btn, enc_btn_base_border, btn_radius, 1.0)?;
+            }
+            // Title (top line) + sub-label (bottom line) stacked inside the btn.
+            let (title_id, sub_id) = match index {
+                0 => (
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE,
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE_SUB,
+                ),
+                1 => (
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI,
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI_SUB,
+                ),
+                _ => (
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_FULL,
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_SUB,
+                ),
+            };
+            // #7 §10 item 7 (2026-06-01) — Tauri `.encryption-mode-btn` is
+            // `padding: 10px 12px` with `gap: 4px` (EncryptionCard.css:29,36).
+            // Title sits 12px from the left / 10px from the top; the sub-label
+            // follows 4px below the title. The prior btn.x+6 / btn.y+4 packed the
+            // text too tight to the chip edges. `SETTINGS_ENCRYPTION_BTN_ROW_H`
+            // was bumped 44→52 to fit (10 + 13 + 4 + 11 + 10 ≈ 48 with rounding).
+            let title_rect = bento_nano_style::Rect {
+                x: btn.x + 12.0,
+                y: btn.y + 10.0,
+                width: (btn.width - 24.0).max(0.0),
+                height: 16.0,
+            };
+            // P7 — the title is ALWAYS text_primary (Tauri `.encryption-mode-title`
+            // has `color: inherit`, no active recolor). Activation is conveyed by
+            // the fill + border only. The prior accent-blue active title was the
+            // visible delta this fixes. #7 §10 item 1 — `.encryption-mode-title`
+            // is `font-weight: 600; font-size: 13px` (EncryptionCard.css:53-56);
+            // no explicit line-height on the title (1.0).
+            self.draw_text_no_wrap_with_style(
+                bento_nano_style::t(title_id),
+                title_rect,
+                title_color,
+                13.0,
+                600,
+                1.0,
+            )?;
+            let sub_rect = bento_nano_style::Rect {
+                x: btn.x + 12.0,
+                y: title_rect.bottom() + 4.0,
+                width: (btn.width - 24.0).max(0.0),
+                height: 16.0,
+            };
+            // #7 §10 item 2 — `.encryption-mode-sub` is `font-size: 11px;
+            // line-height: 1.3` at text_muted (EncryptionCard.css:58-62).
+            self.draw_text_no_wrap_with_style(
+                bento_nano_style::t(sub_id),
+                sub_rect,
+                enc_muted,
+                11.0,
+                400,
+                1.3,
+            )?;
+        }
+        // P4 — passphrase ROW left label cell (口令 / Passphrase). Tauri puts a
+        // `<span>` to the LEFT of the input (`justify-content: space-between`);
+        // the token (id 238) existed but was never painted. 13px title color.
+        let enc_pass_label = settings_encryption_passphrase_label_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_pass_label, body) {
+            let label_text_rect = bento_nano_style::Rect {
+                x: enc_pass_label.x,
+                y: enc_pass_label.y + (enc_pass_label.height - 16.0) * 0.5,
+                width: enc_pass_label.width,
+                height: 16.0,
+            };
+            // #7 §10 item 4 (2026-06-01) — `.encryption-passphrase-row` is
+            // `font-size: 13px` (EncryptionCard.css:64-70); the `<span>` label
+            // inherits it. Previously drawn at the default 16px no-wrap format.
+            self.draw_text_no_wrap_with_style(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_LABEL),
+                label_text_rect,
+                title_color,
+                13.0,
+                400,
+                1.0,
+            )?;
+        }
+        // Masked passphrase input box (RIGHT sub-rect of the row — P4). Paints
+        // '•' × draft-char-count (or the placeholder when empty + not focused),
+        // plus a BLINKING caret bar (P1) at the text end when focused. Never the
+        // literal draft. P6 — ALWAYS stroke a 1px base border + fill; focus
+        // re-strokes the accent on top.
+        let enc_input = settings_encryption_passphrase_input_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_input, body) {
+            self.fill_rounded_rect(enc_input, enc_input_fill, input_box_radius)?;
+            // P6 — base 1px border always; P1/focus — accent re-stroke on top.
+            self.stroke_rounded_rect(enc_input, enc_input_border, input_box_radius, 1.0)?;
+            if enc_passphrase_focused {
+                self.stroke_rounded_rect(enc_input, enc_active_border, input_box_radius, 1.0)?;
+            }
+            // #7 §10 item 5 (2026-06-01) — Tauri input `padding: 6px 10px`
+            // (EncryptionCard.css:78); the L/R inset is 10px (was 12px here).
+            let text_rect = bento_nano_style::Rect {
+                x: enc_input.x + 10.0,
+                y: enc_input.y + (enc_input.height - 16.0) * 0.5,
+                width: (enc_input.width - 20.0).max(0.0),
+                height: 16.0,
+            };
+            if enc_pass_len == 0 && !enc_passphrase_focused {
+                // P16 — placeholder at ~45% of the primary text color (Tauri
+                // ::placeholder default), distinct from the live-text color.
+                // #7 §10 item 5 — input text is `font-size: 12px`
+                // (EncryptionCard.css:79); placeholder shares it.
+                self.draw_text_no_wrap_with_style(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_PLACEHOLDER,
+                    ),
+                    text_rect,
+                    with_alpha(palette.text_primary, 0.45),
+                    12.0,
+                    400,
+                    1.0,
+                )?;
+            } else {
+                // Build the mask once into the reusable scratch buffer (cleared,
+                // not freed → allocation-light per §10). U+2022 BULLET.
+                self.mask_scratch.clear();
+                for _ in 0..enc_pass_len {
+                    self.mask_scratch.push('\u{2022}');
+                }
+                // P1 — append the caret glyph ONLY on the ON half of the blink
+                // (gated by `caret_on`); on the OFF half it's omitted so the caret
+                // visibly blinks at the Windows ~530ms cadence.
+                if enc_passphrase_focused && caret_on {
+                    self.mask_scratch.push('\u{2502}'); // U+2502 BOX DRAWINGS LIGHT VERTICAL
+                }
+                // Clone-free: pass a &str slice of the scratch buffer. The draw
+                // call copies into its own utf16 scratch, so the borrow is short.
+                // #7 §10 item 5 — masked text is the input's 12px/400 (CSS:79).
+                let masked = core::mem::take(&mut self.mask_scratch);
+                let draw_result = self.draw_text_no_wrap_with_style(
+                    masked.as_str(),
+                    text_rect,
+                    title_color,
+                    12.0,
+                    400,
+                    1.0,
+                );
+                self.mask_scratch = masked;
+                draw_result?;
+            }
+        }
+        // Hint line — never-stored sentence, 11px muted.
+        let enc_hint = settings_encryption_hint_rect(viewport, scroll, &backup_flags);
+        if row_visible(enc_hint, body) {
+            self.draw_text_with_style(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_HINT),
+                enc_hint,
+                enc_muted,
+                11.0,
+                400,
+                1.0,
+            )?;
+        }
+        // Status banner — painted only when a status is set. Error → red,
+        // Success → green (Tauri `#f87171` / `#34d399`).
+        if let Some(status) = enc_status_snapshot.as_ref() {
+            let enc_status_row = settings_encryption_status_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_status_row, body) {
+                let (text, color) = match status {
+                    crate::state::SettingsBackupStatus::Error(msg) => (
+                        msg.as_str(),
+                        with_alpha(bento_nano_style::Color::from_u8(0xF8, 0x71, 0x71, 0xFF), 0.95),
+                    ),
+                    crate::state::SettingsBackupStatus::Success(msg) => (
+                        msg.as_str(),
+                        with_alpha(bento_nano_style::Color::from_u8(0x34, 0xD3, 0x99, 0xFF), 0.95),
+                    ),
+                };
+                self.draw_text(text, enc_status_row, color)?;
+            }
+        }
+
         // ── M1h — Plugins §11 section (`SettingsPanel.tsx:709-781`) ──────
         //
-        // Sits LAST in the (currently shipped) Tauri body order
-        // (…→Backup→**Plugins**→footer); Encryption §10 is deferred so Plugins
-        // anchors directly after the Backup card. Reads the live
+        // Sits after the Encryption §10 card in the Tauri body order
+        // (…→Backup→**Encryption**→Plugins→footer). M7 (2026-06-01) re-anchored
+        // `settings_plugins_label_rect` off the encryption card's status row, so
+        // this paint follows the encryption block automatically. Reads the live
         // `app.settings_plugin_entries` snapshot (populated on Settings open +
         // after every install/toggle/uninstall by the shell). The list is
         // variable-length, capped at SETTINGS_PLUGINS_ROW_VISIBLE_MAX; the
@@ -4297,12 +4757,17 @@ impl Renderer {
             }
         }
 
-        // ── M6-UI — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
+        // ── M6-UI / G3 parity — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
         //
-        // Flows LAST in the nano body order (…→Plugins→**Appearance**). The
-        // grid geometry (group headings + 17 ThemeCards + accent swatch row) is
-        // owned by `theme_picker::appearance_layout`; the section anchor +
-        // content width come from `settings_panel`. Selecting a card re-skins
+        // G3 parity (2026-06-01): §3 Appearance now flows between §2 Paths and
+        // §4 DisplayMode (Tauri body order General → Paths → **Appearance** →
+        // DisplayMode → Performance), no longer LAST after Plugins. The geometry
+        // helpers (`settings_appearance_label_rect` et al.) re-anchor off the §2
+        // 监控值 textarea bottom, so this paint block lands at its new position
+        // automatically (paint==hit SSoT) even though it stays here in source
+        // order. The grid geometry (group headings + 17 ThemeCards + accent
+        // swatch row) is owned by `theme_picker::appearance_layout`; the section
+        // anchor + content width come from `settings_panel`. Selecting a card re-skins
         // the app live (the active card draws a 2-DIP accent-blue border + a
         // 10%-blue fill tint, compared against `app.active_theme_id`). The
         // accent swatch row is the editable accent picker (Control B MVP).
@@ -4503,6 +4968,102 @@ impl Renderer {
                     palette.text_primary,
                     bento_nano_style::BorderRadius::all(ring.height * 0.5),
                     2.0,
+                )?;
+            }
+        }
+
+        // ── §4 DisplayMode group (G3 parity 2026-06-01) — zone-display-mode
+        //    3-radio picker, now a standalone `settings-group` between §3
+        //    Appearance and §5 Performance (Tauri `SettingsPanel.tsx:538-598`).
+        //
+        // Pre-G3 this picker lived inside the General band (right under the
+        // Language row) with an in-row "默认显示模式" caption on the left. G3
+        // promotes it to its own §4 group: a group TITLE on top (reusing the
+        // same bilingual StringId 140) and the 3 radios below — matching Tauri's
+        // `<section class="settings-group"><h3>显示模式</h3>…`. Painted here,
+        // after the §3 Appearance grid and AFTER the reserve-delta fold of
+        // `scroll`, because §4 roots at the same fixed source-reserve baseline as
+        // §3/§5 (it anchors off the §3 Appearance bottom). paint==hit SSoT: the
+        // hit-tester (`ui::settings_hit`) routes the same radios automatically.
+        let display_mode_label = crate::settings_panel::settings_display_mode_label_rect(
+            viewport, scroll,
+        );
+        if row_visible(display_mode_label, body) {
+            // Group title — reuses StringId 140 ("默认显示模式" / "Default
+            // display mode") as the §4 group heading (no new StringId per §8).
+            self.draw_text(
+                bento_nano_style::t(
+                    bento_nano_style::i18n_zh_cn::ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
+                ),
+                display_mode_label,
+                label_color,
+            )?;
+        }
+        let picker_row = settings_zone_display_mode_picker_row_rect(viewport, scroll);
+        if row_visible(picker_row, body) {
+            let modes = [
+                ZoneDisplayMode::Hover,
+                ZoneDisplayMode::Always,
+                ZoneDisplayMode::Click,
+            ];
+            let current = app.zone_display_mode.get();
+            let radius_outer = BorderRadius::all(SETTINGS_RADIO_OUTER_D * 0.5);
+            let radius_inner = BorderRadius::all(SETTINGS_RADIO_INNER_D * 0.5);
+            for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+                let mode = modes[index as usize];
+                let outer = settings_zone_display_mode_radio_outer_rect(
+                    viewport, scroll, index,
+                );
+                // Selected radios use the accent hue; unselected keep the
+                // chip_border tone. v1.3.0 SettingsPanel.tsx ring pattern:
+                // fill the outer disc with ring_color, then carve out the
+                // interior with the panel surface — leaves a 1-DIP ring on
+                // ALL four edges (top/bottom/left/right) at once, no
+                // per-edge band stitching (R14 fix — prior 2-band version
+                // read as `(== ==)` not `○`).
+                let ring_color = if mode == current {
+                    accent_on
+                } else {
+                    chip_border
+                };
+                self.fill_rounded_rect(outer, ring_color, radius_outer)?;
+                let ring_hairline: f32 = 1.0;
+                let interior = bento_nano_style::Rect {
+                    x: outer.x + ring_hairline,
+                    y: outer.y + ring_hairline,
+                    width: (outer.width - 2.0 * ring_hairline).max(0.0),
+                    height: (outer.height - 2.0 * ring_hairline).max(0.0),
+                };
+                let radius_interior = BorderRadius::all(
+                    (SETTINGS_RADIO_OUTER_D * 0.5 - ring_hairline).max(0.0),
+                );
+                self.fill_rounded_rect(interior, chip_bg, radius_interior)?;
+                if mode == current {
+                    let inner = settings_zone_display_mode_radio_inner_rect(
+                        viewport, scroll, index,
+                    );
+                    self.fill_rounded_rect(inner, accent_on, radius_inner)?;
+                }
+                // Radio label — bilingual via StringId 77/78/79 (R14 fix —
+                // prior `mode.label()` returned English-only literals).
+                let label_id = match mode {
+                    ZoneDisplayMode::Hover => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_HOVER
+                    }
+                    ZoneDisplayMode::Always => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_ALWAYS
+                    }
+                    ZoneDisplayMode::Click => {
+                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_CLICK
+                    }
+                };
+                let label = settings_zone_display_mode_radio_label_rect(
+                    viewport, scroll, index,
+                );
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(label_id),
+                    label,
+                    title_color,
                 )?;
             }
         }
@@ -7203,6 +7764,83 @@ impl Renderer {
         Ok(())
     }
 
+    /// G5 (2026-06-01) — stroke a rounded-rect outline with a DASHED hairline.
+    /// Used for the collapsed `minimal`-shape capsule, whose Tauri chrome is
+    /// `border: 1px dashed rgba(255,255,255,0.2)` over a transparent body
+    /// (`BentoZone.css:92-99 .bento-zone--shape-minimal`). The dash cadence is
+    /// the predefined `D2D1_DASH_STYLE_DASH` (2 on / 2 off in stroke-width
+    /// units), which reads as a clean CSS-style dashed edge at the 1-DIP width.
+    ///
+    /// §10: the `ID2D1StrokeStyle` is built ONCE per process and cached in a
+    /// `OnceLock` (it is created from the device-INDEPENDENT D2D factory, so it
+    /// survives device-loss rebuilds and never re-allocates per frame). §11: no
+    /// panic/unwrap — the build is `?`-propagated, the cache uses `get_or_init`
+    /// with a fallible inner that falls back to a solid stroke on any error.
+    fn stroke_rounded_rect_dashed(
+        &mut self,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        radius: BorderRadius,
+        stroke_width: f32,
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_CAP_STYLE_FLAT, D2D1_DASH_STYLE_DASH, D2D1_LINE_JOIN_MITER,
+            D2D1_STROKE_STYLE_PROPERTIES, ID2D1Factory,
+        };
+        if color.a <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 || stroke_width <= 0.0 {
+            return Ok(());
+        }
+        // Lazily build + cache the dashed stroke style on the renderer. It is
+        // created from the device-INDEPENDENT D2D factory, so the cached handle
+        // stays valid across device-loss rebuilds and re-skins; one COM
+        // allocation per process, ZERO per frame (§10). Single-threaded UI
+        // renderer, so a plain `Option` field is the right cache, not a global
+        // (`ID2D1StrokeStyle` is not `Sync`).
+        if self.dashed_stroke_style.is_none() {
+            let d2d = d2d::factory()?;
+            // Cross-cast `ID2D1Factory1` → base `ID2D1Factory` (§15.1 canonical)
+            // so `CreateStrokeStyle` resolves to the base overload that takes
+            // `D2D1_STROKE_STYLE_PROPERTIES` and returns `ID2D1StrokeStyle`
+            // (the `Factory1` overload wants `..._PROPERTIES1`/`...Style1`).
+            let factory: ID2D1Factory =
+                ok("Factory1::cast<Factory>", d2d.factory.cast())?;
+            let props = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_FLAT,
+                endCap: D2D1_CAP_STYLE_FLAT,
+                dashCap: D2D1_CAP_STYLE_FLAT,
+                lineJoin: D2D1_LINE_JOIN_MITER,
+                miterLimit: 10.0,
+                dashStyle: D2D1_DASH_STYLE_DASH,
+                dashOffset: 0.0,
+            };
+            // SAFETY: `props` lives for the call; `dashes: None` selects the
+            // predefined DASH cadence; the returned style is COM-ref-counted.
+            let style = ok("CreateStrokeStyle", unsafe {
+                factory.CreateStrokeStyle(&props, None)
+            })?;
+            self.dashed_stroke_style = Some(style);
+        }
+        let dash_style = self.dashed_stroke_style.as_ref();
+        let brush = self.solid_brush(color)?;
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.x,
+                top: rect.y,
+                right: rect.right(),
+                bottom: rect.bottom(),
+            },
+            radiusX: radius.top_left,
+            radiusY: radius.top_left,
+        };
+        let ctx = self.ctx()?;
+        let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+        // SAFETY: rt valid; rr + dash_style live for the call; brush COM-ref-counted.
+        unsafe {
+            rt.DrawRoundedRectangle(&rr, &brush, stroke_width, dash_style);
+        }
+        Ok(())
+    }
+
     /// M6-UI fidelity (2026-05-29) — fill a rectangle rounding ONLY the corners
     /// flagged in `corners` (`[top_left, top_right, bottom_right, bottom_left]`)
     /// to `radius`; flagged-off corners stay square. D2D's `FillRoundedRectangle`
@@ -7357,6 +7995,223 @@ impl Renderer {
         // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
         unsafe {
             ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    /// #7 §10 parity (2026-06-01) — no-wrap variant of [`draw_text_with_style`].
+    ///
+    /// `draw_text_with_style` routes through `create_layout`, which leaves
+    /// DWrite's default word-wrapping ON: a styled single-line label whose run
+    /// exceeds `rect.width` would wrap onto a 2nd line and shift the baseline.
+    /// The §10 EncryptionCard labels (mode-title 13/600, mode-sub 11/400,
+    /// current-mode label 13/400, passphrase label 13/400, input mask 12/400)
+    /// must stay single-line at the Tauri sizes — exactly why the prior code
+    /// used [`draw_text_no_wrap`]. This helper combines the two: the cached
+    /// per-style `IDWriteTextFormat` from the LRU (`text_format_for_style`,
+    /// zero per-frame COM alloc once warm) + `create_layout_no_wrap`
+    /// (NO_WRAP + character trimming). The draw origin is the rect's top-left,
+    /// identical to `draw_text_no_wrap`, so the vertical placement matches the
+    /// 16px no-wrap path 1:1 (only the glyph size/weight changes).
+    ///
+    /// Trimming uses `sign: None` (silent character trim). The cached
+    /// `self.ellipsis_sign` is built against the DEFAULT 16px format, so reusing
+    /// it here would paint a wrong-size `…`; and building a per-style sign would
+    /// add a per-frame COM alloc, violating §10. These labels are sized to fit
+    /// at the smaller Tauri sizes, so the trim is only a safety net.
+    ///
+    /// §10: reuses `utf16_scratch` (cleared, never freed) and the format LRU —
+    /// no per-frame heap allocation. §11: no panic/unwrap (`?`-propagated).
+    fn draw_text_no_wrap_with_style(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+        weight: u16,
+        line_height: f32,
+    ) -> Result<(), RenderError> {
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.text_format_for_style(size_pt, weight, line_height)?;
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            None,
+        )?;
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+        Ok(())
+    }
+
+    /// G5 (2026-06-01) — measure the laid-out width of `text` at the given style
+    /// (no-wrap, single line) via `IDWriteTextLayout::GetMetrics`. Returns the
+    /// `widthIncludingTrailingWhitespace` in DIPs. Used by the pill-title
+    /// font-shrink loop ([`draw_pill_title_shrink_to_fit`]). Reuses the cached
+    /// per-style format from the LRU + the `utf16_scratch` buffer, so a measure
+    /// allocates nothing on the heap (§10). A measure layout is built with a
+    /// generous `max_w` so the metric reflects the natural (unclamped) run width.
+    fn measure_label_width(
+        &mut self,
+        text: &str,
+        size_pt: f32,
+        weight: u16,
+    ) -> Result<f32, RenderError> {
+        use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS;
+        let format = self.text_format_for_style(size_pt, weight, 1.0)?;
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        // Large max_w so NO_WRAP measurement returns the intrinsic run width.
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            f32::MAX,
+            64.0,
+            None,
+        )?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: layout is a freshly-created COM interface; GetMetrics writes
+        // the out-struct and returns HRESULT only on catastrophic error.
+        ok("TextLayout::GetMetrics", unsafe {
+            layout.GetMetrics(&mut metrics)
+        })?;
+        Ok(metrics.widthIncludingTrailingWhitespace)
+    }
+
+    /// G5 (2026-06-01) — draw the collapsed-pill title with Tauri's
+    /// `useTextAbbr` FONT-SHRINK behaviour (no ellipsis until the floor).
+    ///
+    /// Tauri's `.zen-capsule__title` (ZenCapsule.tsx:26,37 + css:19-32) removed
+    /// `overflow:hidden`/`text-overflow:ellipsis` so `useTextAbbr` shrinks the
+    /// title font-size to fit the capsule, only ellipsis-ing at its
+    /// `MIN_FONT_SIZE_PX`. nano previously trimmed with `…` at the tier font.
+    /// This helper measures the label (`measure_label_width`) at `base_px`; if it
+    /// overflows `rect.width` it steps the font down to [`PILL_TITLE_MIN_FONT_PX`]
+    /// and draws at the largest fitting size with NO ellipsis. Only at the floor
+    /// (still overflowing) does it fall back to a silent character trim.
+    ///
+    /// Letter-spacing 0.3px (Tauri css:27) is applied via the existing
+    /// `IDWriteTextLayout1::SetCharacterSpacing` seam (same mechanism as
+    /// `draw_text_tracked`), as a trailing advance over the whole run.
+    ///
+    /// §10: the measure-and-shrink loop runs ONLY on a cache miss (label /
+    /// width / tier changed) — the resolved size is memoised in
+    /// `self.pill_title_shrink`; the common per-frame case (unchanged label)
+    /// is a u64 compare + a single cached-format draw, NO measure, NO heap
+    /// allocation. §11: no panic/unwrap, all `?`-propagated.
+    fn draw_pill_title_shrink_to_fit(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        base_px: f32,
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::DirectWrite::{
+            IDWriteTextLayout1, DWRITE_TEXT_RANGE,
+        };
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        const PILL_TITLE_WEIGHT: u16 = 500; // Tauri --font-weight-medium
+        const PILL_TITLE_TRACKING: f32 = 0.3; // Tauri letter-spacing: 0.3px
+        let avail_w = rect.width;
+        let sig = pill_title_shrink_signature(text, avail_w, base_px);
+        // --- Resolve the fit font size (cache → measure-and-shrink) ---------
+        let resolved_px = match self.pill_title_shrink {
+            Some((cached_sig, px)) if cached_sig == sig => px,
+            _ => {
+                // Miss: step the font down until it fits (or hit the floor) via
+                // the shared pure `shrink_font_to_fit` stepper. The `measure`
+                // closure threads any DWrite error out through `measure_err` so
+                // the loop stays panic-free (§11); a measure failure short-
+                // circuits the stepper to the floor and is surfaced below.
+                let mut measure_err: Option<RenderError> = None;
+                let resolved = shrink_font_to_fit(base_px, avail_w, |size| {
+                    if measure_err.is_some() {
+                        // Already failed — report "fits" so the stepper stops
+                        // immediately at the current size; the error wins below.
+                        return 0.0;
+                    }
+                    match self.measure_label_width(text, size, PILL_TITLE_WEIGHT) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            measure_err = Some(e);
+                            0.0
+                        }
+                    }
+                });
+                if let Some(e) = measure_err {
+                    return Err(e);
+                }
+                self.pill_title_shrink = Some((sig, resolved));
+                resolved
+            }
+        };
+        // Ellipsis only when we bottomed out at the floor AND the run still
+        // overflows (mirrors Tauri's floor-only ellipsis). Otherwise draw the
+        // full label with no trimming sign. Clone the (COM-ref-counted) sign
+        // into an owned local so the `self.ellipsis_sign` borrow is released
+        // before the `&mut self` `text_format_for_style` call below.
+        let at_floor = (resolved_px - PILL_TITLE_MIN_FONT_PX).abs() < f32::EPSILON;
+        let trim_sign: Option<IDWriteInlineObject> = if at_floor {
+            if self.ellipsis_sign.is_none() {
+                let fmt = self.text_format.clone();
+                self.ellipsis_sign = Some(dwrite::create_ellipsis_sign(&fmt)?);
+            }
+            self.ellipsis_sign.clone()
+        } else {
+            None
+        };
+        let format = self.text_format_for_style(resolved_px, PILL_TITLE_WEIGHT, 1.0)?;
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            trim_sign.as_ref(),
+        )?;
+        // Letter-spacing 0.3px via IDWriteTextLayout1 (§15.1 canonical cast).
+        let layout1: IDWriteTextLayout1 =
+            ok("TextLayout::cast<TextLayout1>", layout.cast())?;
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: self.utf16_scratch.len() as u32,
+        };
+        // SAFETY: layout1 is freshly created; SetCharacterSpacing only mutates
+        // per-instance spacing over the canonical full range.
+        unsafe {
+            let _ = layout1.SetCharacterSpacing(0.0, PILL_TITLE_TRACKING, 0.0, range);
+        }
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout1, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
         Ok(())
     }
@@ -8114,6 +8969,51 @@ fn grid_columns_label(columns: u32) -> &'static str {
 /// `PILL_BADGE_MIN_WIDTH` for typical zones; >999 items is still rendered
 /// as "999+" so the result fits the 4-digit budget in
 /// `zone_pill_geometry::badge_width_for_count`.
+/// G5 (2026-06-01) — floor for the collapsed-pill title font-shrink
+/// (`useTextAbbr` parity). Tauri's `useTextAbbr` shrinks the title font-size to
+/// fit and only falls back to an ellipsis at its `MIN_FONT_SIZE_PX`; nano uses
+/// the same 8px floor.
+const PILL_TITLE_MIN_FONT_PX: f32 = 8.0;
+
+/// G5 (2026-06-01) — quantised cache signature for the pill title shrink memo.
+/// Folds the label bytes, the available width (rounded to whole DIPs) and the
+/// tier base font (×4, rounded) into one `u64`. A per-frame re-paint of the
+/// SAME label at the SAME width/tier hashes identically → cache hit → no DWrite
+/// measure, no allocation (§10). Collisions only over-trigger a (correct)
+/// re-measure, never a wrong size.
+fn pill_title_shrink_signature(label: &str, avail_w: f32, base_px: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    label.hash(&mut h);
+    (avail_w.max(0.0).round() as u32).hash(&mut h);
+    ((base_px.max(0.0) * 4.0).round() as u32).hash(&mut h);
+    h.finish()
+}
+
+/// G5 (2026-06-01) — pure font-shrink stepper for the pill title (`useTextAbbr`
+/// parity), factored out for unit testing without DWrite. Walks the font size
+/// down from `base_px` in 1px steps to `PILL_TITLE_MIN_FONT_PX`, calling
+/// `measure(size)` (the rendered text width at that size) at each step, and
+/// returns the FIRST (largest) size whose measured width fits `avail_w`. If
+/// nothing fits down to the floor, returns the floor (the caller then applies
+/// ellipsis trimming, exactly as Tauri does at `MIN_FONT_SIZE_PX`).
+///
+/// `measure` is assumed monotonic in size (smaller font ⇒ narrower run), so the
+/// first fit found while stepping down is the largest fitting size.
+fn shrink_font_to_fit(base_px: f32, avail_w: f32, mut measure: impl FnMut(f32) -> f32) -> f32 {
+    let base = base_px.max(PILL_TITLE_MIN_FONT_PX);
+    let mut size = base;
+    // Step down in whole-px increments; the loop is bounded by the base→floor
+    // span (≤ ~8 iterations for the 11/14/16px tiers), so it is cheap and total.
+    while size >= PILL_TITLE_MIN_FONT_PX {
+        if measure(size) <= avail_w {
+            return size;
+        }
+        size -= 1.0;
+    }
+    PILL_TITLE_MIN_FONT_PX
+}
+
 fn format_small_count(count: usize) -> smol_str::SmolStr {
     // <1000 renders the literal count; >=1000 caps at the 4-char "999+"
     // budget (the <100 vs <1000 split produced identical text, so merged).
@@ -8153,27 +9053,32 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
     }
 }
 
-/// G3 — locale-aware mapping for `SettingsEncryptionMode::as_wire()`. The wire
-/// variant returns the SmolStr/SerDe token; this returns the user-visible
-/// translation while preserving the same set of distinct states.
-//
-// β carry-over (Wave I-α / R14 2026-05-25): function landed in the Wave H baseline
-// (commit 1562751, 2026-05-20) ahead of the encryption settings UI integration
-// and has no current call site. Annotated `#[allow(dead_code)]` so clippy
-// `dead_code` lint passes; deletion deferred to β1 when the encryption status
-// row is wired up.
-#[allow(dead_code)]
-fn localized_encryption_mode(mode: crate::state::SettingsEncryptionMode) -> &'static str {
+/// P1 (#7 fix wave 2026-06-01) — pure caret-blink phase. Given a wall-clock
+/// `now_ms` (e.g. `GetTickCount`), returns whether the text-field caret should
+/// be PAINTED this frame. Windows blinks the caret at ≈530ms (the default
+/// `GetCaretBlinkTime`): ON for one 530ms half-period, OFF for the next. Pure
+/// (no state, no allocation) so it's unit-testable and §10-safe.
+pub fn settings_caret_on(now_ms: u32) -> bool {
+    (now_ms / 530) % 2 == 0
+}
+
+/// P2 (#7 fix wave 2026-06-01) — the user-visible mode label that MATCHES the
+/// mode-button TITLES (Tauri uses one `modeLabel()` for the current-mode value,
+/// the buttons, AND the applied banner). Passphrase maps to the FULL token
+/// (`ENCRYPTION_MODE_PASSPHRASE_FULL`, id 236 = 自定义口令), NOT the short id 86
+/// (密码, `ENCRYPTION_MODE_PASSPHRASE`) the prior current-mode paint used.
+/// None/DPAPI reuse the shared button ids — so the current-mode VALUE, the
+/// active button TITLE, and the P9 applied banner all read identically (the
+/// parity invariant). Replaces the old `localized_encryption_mode` short-label
+/// helper, which had no remaining call site after this fix.
+fn localized_encryption_mode_button_label(mode: crate::state::SettingsEncryptionMode) -> &'static str {
     use crate::state::SettingsEncryptionMode;
+    use bento_nano_style::i18n_zh_cn::ids;
     match mode {
-        SettingsEncryptionMode::None => {
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE)
-        }
-        SettingsEncryptionMode::Dpapi => {
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI)
-        }
+        SettingsEncryptionMode::None => bento_nano_style::t(ids::ENCRYPTION_MODE_NONE),
+        SettingsEncryptionMode::Dpapi => bento_nano_style::t(ids::ENCRYPTION_MODE_DPAPI),
         SettingsEncryptionMode::Passphrase => {
-            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE)
+            bento_nano_style::t(ids::ENCRYPTION_MODE_PASSPHRASE_FULL)
         }
     }
 }
@@ -8184,9 +9089,9 @@ fn localized_encryption_mode(mode: crate::state::SettingsEncryptionMode) -> &'st
 /// "Available 2.1.0" / "Downloading 4096/8192 B" inline-test expectations in
 /// `bento-nano-shell` still hold for the en-US locale.
 //
-// β carry-over (Wave I-α / R14 2026-05-25): Wave H baseline leftover (see
-// `localized_encryption_mode` note above). Updater summary row not yet wired
-// into the Settings panel; β1 owner of updater UI will either delete or call.
+// β carry-over (Wave I-α / R14 2026-05-25): Wave H baseline leftover. Updater
+// summary row not yet wired into the Settings panel; β1 owner of updater UI
+// will either delete or call.
 #[allow(dead_code)]
 fn localized_updater_summary(status: &crate::state::SettingsUpdaterStatus) -> smol_str::SmolStr {
     use crate::state::SettingsUpdaterStatus;
@@ -8316,6 +9221,96 @@ mod device_loss_tests {
         assert!(renderer_is_stale(0, 1));
         assert!(renderer_is_stale(3, 4));
         assert!(renderer_is_stale(1, 0));
+    }
+}
+
+#[cfg(test)]
+mod g5_pill_title_shrink_tests {
+    use super::{
+        pill_title_shrink_signature, shrink_font_to_fit, PILL_TITLE_MIN_FONT_PX,
+    };
+
+    /// Linear width model: each glyph is `0.6 * font_px` wide, `len` glyphs.
+    /// Monotone in font size, matching the `shrink_font_to_fit` contract.
+    fn measure(len: f32) -> impl FnMut(f32) -> f32 {
+        move |size: f32| len * size * 0.6
+    }
+
+    #[test]
+    fn returns_base_when_label_already_fits() {
+        // 5 glyphs at 14px → 42 DIPs wide; avail 100 ⇒ no shrink, keep base.
+        let got = shrink_font_to_fit(14.0, 100.0, measure(5.0));
+        assert!((got - 14.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn shrinks_to_largest_fitting_size_no_floor() {
+        // 20 glyphs; base 16px → 192 wide; avail 130. The stepper returns the
+        // largest whole-px size whose run fits, well above the floor.
+        let avail = 130.0_f32;
+        let len = 20.0_f32;
+        let mut m = measure(len);
+        let got = shrink_font_to_fit(16.0, avail, measure(len));
+        assert!(got < 16.0, "must have shrunk from base, got {got}");
+        assert!(got > PILL_TITLE_MIN_FONT_PX, "must not bottom out, got {got}");
+        // The resolved size genuinely fits and 1px larger would not (the
+        // stepper's contract: largest fitting whole-px size).
+        assert!(m(got) <= avail, "resolved must fit: {} > {avail}", m(got));
+        assert!(m(got + 1.0) > avail, "one px larger must overflow");
+    }
+
+    #[test]
+    fn bottoms_out_at_floor_when_nothing_fits() {
+        // A pathologically long label in a tiny width never fits ⇒ floor (8px),
+        // at which point the caller applies the ellipsis (Tauri floor-only).
+        let got = shrink_font_to_fit(16.0, 4.0, measure(50.0));
+        assert!((got - PILL_TITLE_MIN_FONT_PX).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn base_below_floor_is_clamped_up() {
+        // A base smaller than the floor never returns below the floor.
+        let got = shrink_font_to_fit(4.0, 1000.0, measure(1.0));
+        assert!(got >= PILL_TITLE_MIN_FONT_PX);
+    }
+
+    #[test]
+    fn signature_is_stable_and_discriminates() {
+        let a = pill_title_shrink_signature("Documents", 120.0, 14.0);
+        let b = pill_title_shrink_signature("Documents", 120.0, 14.0);
+        assert_eq!(a, b, "same inputs must hash identically (cache hit)");
+        // Any of the three inputs changing should (almost always) change it.
+        assert_ne!(a, pill_title_shrink_signature("Downloads", 120.0, 14.0));
+        assert_ne!(a, pill_title_shrink_signature("Documents", 90.0, 14.0));
+        assert_ne!(a, pill_title_shrink_signature("Documents", 120.0, 11.0));
+    }
+}
+
+#[cfg(test)]
+mod p1_caret_blink_tests {
+    use super::settings_caret_on;
+
+    /// P1 (#7 fix wave 2026-06-01) — the caret is ON for the first ~530ms
+    /// half-period and OFF for the next, toggling at the Windows blink cadence.
+    /// Pure function of `now_ms` (no state) so it's directly unit-testable.
+    #[test]
+    fn caret_blinks_on_530ms_half_period() {
+        // First half-period (0..530) → ON.
+        assert!(settings_caret_on(0));
+        assert!(settings_caret_on(265));
+        assert!(settings_caret_on(529));
+        // Second half-period (530..1060) → OFF.
+        assert!(!settings_caret_on(530));
+        assert!(!settings_caret_on(800));
+        assert!(!settings_caret_on(1059));
+        // Third half-period (1060..1590) → ON again (period wraps).
+        assert!(settings_caret_on(1060));
+        assert!(settings_caret_on(1500));
+        // The phase alternates every 530ms with no gaps.
+        for k in 0..16u32 {
+            let mid = k * 530 + 100;
+            assert_eq!(settings_caret_on(mid), k % 2 == 0, "half-period {k} phase");
+        }
     }
 }
 

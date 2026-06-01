@@ -155,6 +155,120 @@ impl CapsuleSize {
         }
     }
 
+    /// G5 (2026-06-01) — asymmetric horizontal padding `(pad_left, pad_right)`
+    /// in logical pixels, matching Tauri's `.zen-capsule` per-tier padding
+    /// (`ZenCapsule.css:8` base `0 var(--spacing-lg) 0 var(--spacing-xl)` =
+    /// right 16 / left 20 at medium; `:81` small `0 12 0 12`; `:101` large
+    /// `0 20 0 28`). The pre-G5 geometry used a single symmetric `SPACING.md`
+    /// (12) on every tier, so medium/large read tighter and not left-weighted.
+    ///
+    /// * Small → `(12, 12)` (`--spacing-md` both sides).
+    /// * Medium → `(20, 16)` (`--spacing-xl` left / `--spacing-lg` right).
+    /// * Large → `(28, 20)` (`--spacing-2xl` left / `--spacing-xl` right).
+    ///
+    /// Stack-only `match` on a `Copy` enum (spec §10) — no alloc, no panic.
+    #[inline]
+    pub const fn pad_lr_px(self) -> (f32, f32) {
+        match self {
+            Self::Small => (12.0, 12.0),
+            Self::Medium => (20.0, 16.0),
+            Self::Large => (28.0, 20.0),
+        }
+    }
+
+    /// G5 (2026-06-01) — inner gap between icon / title / badge in logical
+    /// pixels, matching Tauri's single `.zen-capsule { gap }` per-tier
+    /// (`ZenCapsule.css:9` base `var(--spacing-md)`=12; `:82` small
+    /// `--spacing-sm`=8; `:102` large `--spacing-lg`=16). The pre-G5 geometry
+    /// used a flat `SPACING.s6` (6) for all tiers (medium read at half the
+    /// Tauri gap). Tauri uses the SAME gap both icon→title and title→badge.
+    #[inline]
+    pub const fn inner_gap_px(self) -> f32 {
+        match self {
+            Self::Small => 8.0,
+            Self::Medium => 12.0,
+            Self::Large => 16.0,
+        }
+    }
+
+    /// G5 (2026-06-01) — title font size in logical pixels per tier, matching
+    /// Tauri's `.zen-capsule__title` font-size (`ZenCapsule.css:25` medium
+    /// `--font-size-md`=14; `:90` small `--font-size-xs`=11; `:110` large
+    /// `--font-size-lg`=16). The pre-G5 renderer drew the label with the global
+    /// default 16px format on every tier (small over-sized, large under-sized).
+    #[inline]
+    pub const fn title_font_px(self) -> f32 {
+        match self {
+            Self::Small => 11.0,
+            Self::Medium => 14.0,
+            Self::Large => 16.0,
+        }
+    }
+
+    /// G5 (2026-06-01) — count-badge font size in logical pixels per tier,
+    /// matching Tauri's `.zen-capsule__badge` font-size (`ZenCapsule.css:35`
+    /// medium `--font-size-xs`=11; `:94` small `10`; `:114` large
+    /// `--font-size-sm`=13). Drawn at `--font-weight-semibold`=600
+    /// ([`badge_font_weight`]).
+    #[inline]
+    pub const fn badge_font_px(self) -> f32 {
+        match self {
+            Self::Small => 10.0,
+            Self::Medium => 11.0,
+            Self::Large => 13.0,
+        }
+    }
+
+    /// G5 (2026-06-01) — count-badge weight. Tauri `.zen-capsule__badge` is
+    /// `--font-weight-semibold`=600 on every tier (`ZenCapsule.css:36`); the
+    /// pre-G5 renderer drew it at the default medium (500) body weight.
+    #[inline]
+    pub const fn badge_font_weight(self) -> u16 {
+        600
+    }
+
+    /// G5 (2026-06-01) — count-badge inner padding `(pad_x, pad_y)` in logical
+    /// pixels per tier, matching Tauri's `.zen-capsule__badge { padding }`
+    /// (`ZenCapsule.css:40` medium `2px 9px`; `:95` small `1px 6px`; `:115`
+    /// large `3px 12px`). Order is `(horizontal, vertical)` to mirror the CSS
+    /// `padding: <v> <h>` shorthand split.
+    #[inline]
+    pub const fn badge_padding_xy(self) -> (f32, f32) {
+        match self {
+            Self::Small => (6.0, 1.0),
+            Self::Medium => (9.0, 2.0),
+            Self::Large => (12.0, 3.0),
+        }
+    }
+
+    /// G5 (2026-06-01) — count-badge box height in logical pixels per tier,
+    /// derived from Tauri's `font-size * line-height(1.4) + 2*pad_y`
+    /// (`ZenCapsule.css:35-42`): small `10*1.4 + 2`≈16→**14**, medium
+    /// `11*1.4 + 4`≈19→**16**, large `13*1.4 + 6`≈24→**20**. Rounded to the
+    /// nearest readable even DIP per tier (small 14 / medium 16 / large 20).
+    /// Replaces the flat `PILL_BADGE_HEIGHT`=20 used on every tier.
+    #[inline]
+    pub const fn badge_height_px(self) -> f32 {
+        match self {
+            Self::Small => 14.0,
+            Self::Medium => 16.0,
+            Self::Large => 20.0,
+        }
+    }
+
+    /// G5 (2026-06-01) — icon glyph size in logical pixels when the shape is
+    /// `Circle`, matching Tauri's `.zen-capsule--circle .zen-capsule__icon`
+    /// override (`ZenCapsule.css:68-70` = 22 for small+medium; `:127-129`
+    /// large = 28). The circle branch must NOT reuse [`icon_px`] (14/18/22);
+    /// only the non-circle shapes use the per-tier base icon size.
+    #[inline]
+    pub const fn circle_icon_px(self) -> f32 {
+        match self {
+            Self::Small | Self::Medium => 22.0,
+            Self::Large => 28.0,
+        }
+    }
+
     /// Parse the lowercase wire token written to `Zone.capsule_size`. Unknown
     /// tokens fall back to [`Self::default`] (`Medium`). Cheap `match` on
     /// `&str` (spec §10 hot-path safe).
@@ -226,6 +340,68 @@ mod tests {
         assert!((CapsuleSize::Small.circle_diameter_px() - 42.0).abs() < 0.01);
         assert!((CapsuleSize::Medium.circle_diameter_px() - 52.0).abs() < 0.01);
         assert!((CapsuleSize::Large.circle_diameter_px() - 64.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn pad_lr_table_matches_tauri() {
+        // G5 — asymmetric padding per tier (ZenCapsule.css:8/:81/:101).
+        assert_eq!(CapsuleSize::Small.pad_lr_px(), (12.0, 12.0));
+        assert_eq!(CapsuleSize::Medium.pad_lr_px(), (20.0, 16.0));
+        assert_eq!(CapsuleSize::Large.pad_lr_px(), (28.0, 20.0));
+    }
+
+    #[test]
+    fn inner_gap_table_matches_tauri() {
+        // G5 — single `gap` token per tier (ZenCapsule.css:9/:82/:102).
+        assert!((CapsuleSize::Small.inner_gap_px() - 8.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.inner_gap_px() - 12.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.inner_gap_px() - 16.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn title_font_table_matches_tauri() {
+        // G5 — title font-size per tier (ZenCapsule.css:25/:90/:110).
+        assert!((CapsuleSize::Small.title_font_px() - 11.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.title_font_px() - 14.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.title_font_px() - 16.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn badge_font_table_matches_tauri() {
+        // G5 — badge font-size per tier (ZenCapsule.css:35/:94/:114), weight
+        // semibold 600 on every tier (:36).
+        assert!((CapsuleSize::Small.badge_font_px() - 10.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.badge_font_px() - 11.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.badge_font_px() - 13.0).abs() < 0.01);
+        for s in [CapsuleSize::Small, CapsuleSize::Medium, CapsuleSize::Large] {
+            assert_eq!(s.badge_font_weight(), 600);
+        }
+    }
+
+    #[test]
+    fn badge_padding_and_height_tables_match_tauri() {
+        // G5 — badge padding (h, v) per tier (ZenCapsule.css:40/:95/:115).
+        assert_eq!(CapsuleSize::Small.badge_padding_xy(), (6.0, 1.0));
+        assert_eq!(CapsuleSize::Medium.badge_padding_xy(), (9.0, 2.0));
+        assert_eq!(CapsuleSize::Large.badge_padding_xy(), (12.0, 3.0));
+        // Box height derived from font*1.4 + 2*pad_y, rounded per tier.
+        assert!((CapsuleSize::Small.badge_height_px() - 14.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.badge_height_px() - 16.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.badge_height_px() - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn circle_icon_table_matches_tauri() {
+        // G5 — circle icon override (ZenCapsule.css:68-70 = 22 small+medium,
+        // :127-129 large = 28). Distinct from the base icon_px (14/18/22).
+        assert!((CapsuleSize::Small.circle_icon_px() - 22.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.circle_icon_px() - 22.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.circle_icon_px() - 28.0).abs() < 0.01);
+        // The circle override must NOT equal the base icon size for small/med.
+        assert_ne!(
+            CapsuleSize::Small.circle_icon_px(),
+            CapsuleSize::Small.icon_px()
+        );
     }
 
     #[test]

@@ -320,8 +320,12 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
     let height = size.height_px();
     let icon_size = size.icon_px();
 
-    let pad_horizontal = SPACING.md; // 12 DIPs left/right inset
-    let pad_inner = SPACING.s6; // 6 DIPs between icon/label/badge
+    // G5 (2026-06-01) — per-tier asymmetric horizontal padding + inner gap,
+    // sourced from `CapsuleSize` (Tauri `.zen-capsule` per-tier `padding`/`gap`)
+    // instead of the pre-G5 flat `SPACING.md` (12) both sides + `SPACING.s6`
+    // (6) inner. See `CapsuleSize::pad_lr_px` / `inner_gap_px`.
+    let (pad_left, pad_right) = size.pad_lr_px();
+    let pad_inner = size.inner_gap_px();
     let x = zone.x as f32;
     let y = zone.y as f32;
 
@@ -331,6 +335,10 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
     // slot so downstream paint of those bands is a visual no-op.
     if shape.is_circle() {
         let diameter = size.circle_diameter_px();
+        // G5 (2026-06-01) — the circle icon uses Tauri's circle-only override
+        // (22 small+medium / 28 large), NOT the per-tier base `icon_px`
+        // (14/18/22). `.zen-capsule--circle .zen-capsule__icon` (css:68-70/:127).
+        let icon_size = size.circle_icon_px();
         // True 50% disc — radius is half the ACTUAL (square) box, i.e. the
         // circle diameter, not the non-circle tier height. Mirrors Tauri's
         // `border-radius: 50%` on the 1:1 `aspect-ratio:1` circle box.
@@ -387,9 +395,16 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
     // Non-circle corner radius from the per-shape Tauri token (resolved
     // against the tier height; circle is handled above with its own radius).
     let radius_px = shape.corner_radius_px(height);
-    let badge_width = badge_width_for_count(count);
+    // G5 (2026-06-01) — badge box sized per-tier: width from the tier badge
+    // font + tier padding, height from `CapsuleSize::badge_height_px`
+    // (14/16/20) instead of the flat `PILL_BADGE_HEIGHT` (20).
+    let badge_width = badge_width_for_size_count(size, count);
+    let badge_height = size.badge_height_px();
     let label_width = PILL_LABEL_DEFAULT_WIDTH;
-    let total_width = (pad_horizontal * 2.0)
+    // G5 — total width uses the asymmetric (pad_left + pad_right) horizontal
+    // inset rather than `pad_horizontal * 2`.
+    let total_width = pad_left
+        + pad_right
         + icon_size
         + pad_inner
         + label_width
@@ -415,26 +430,32 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
         height: rect.height,
     };
     let icon_y = rect.y + (height - icon_size) * 0.5;
+    // G5 — icon left-anchored at the tier's LEFT padding (`--spacing-xl` at
+    // medium = 20), not the symmetric 12.
     let icon = Rect {
-        x: rect.x + pad_horizontal,
+        x: rect.x + pad_left,
         y: icon_y,
         width: icon_size,
         height: icon_size,
     };
     let label_x = icon.x + icon.width + pad_inner;
     let label_h = TYPOGRAPHY.md.size_px * TYPOGRAPHY.md.line_height;
+    // G5 — the badge is RIGHT-anchored to the tier's RIGHT padding
+    // (`--spacing-lg` at medium = 16); the label fills the gap between the icon
+    // run and the badge so a wider badge (3-digit count) eats into the label,
+    // matching Tauri's flex layout (icon · title flex:1 · badge).
+    let badge_y = rect.y + (height - badge_height) * 0.5;
+    let badge = Rect {
+        x: rect.right() - pad_right - badge_width,
+        y: badge_y,
+        width: badge_width,
+        height: badge_height,
+    };
     let label = Rect {
         x: label_x,
         y: rect.y + (height - label_h) * 0.5,
-        width: label_width,
+        width: (badge.x - pad_inner - label_x).max(0.0),
         height: label_h,
-    };
-    let badge_y = rect.y + (height - PILL_BADGE_HEIGHT) * 0.5;
-    let badge = Rect {
-        x: label.x + label.width + pad_inner,
-        y: badge_y,
-        width: badge_width,
-        height: PILL_BADGE_HEIGHT,
     };
     // Wave H2 — status dot inset from the pill's top-right corner. The
     // renderer paints it only when `count > 0` so empty zones stay clean.
@@ -458,10 +479,32 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
 }
 
 /// Smallest badge width that fits `count` digits (plus default-min padding).
+///
+/// G5 (2026-06-01) — legacy helper retained for back-compat / API callers; the
+/// live pill now sizes the badge per-tier via [`badge_width_for_size_count`]
+/// (Tauri scales both the badge font AND the badge padding by `CapsuleSize`).
+/// This fixed-`TYPOGRAPHY.xs` version equals the Medium tier.
 pub fn badge_width_for_count(count: usize) -> f32 {
     let digits = digit_count(count);
     let per_digit = TYPOGRAPHY.xs.size_px * 0.62;
     let raw = (digits as f32) * per_digit + SPACING.md;
+    raw.max(PILL_BADGE_MIN_WIDTH)
+}
+
+/// G5 (2026-06-01) — per-tier badge width: the digit run measured against the
+/// tier's badge font ([`CapsuleSize::badge_font_px`]) plus the tier's
+/// horizontal badge padding on both sides ([`CapsuleSize::badge_padding_xy`]).
+///
+/// §10 allocation-free: a digit-count lookup (`digit_count`) times a constant
+/// per-digit ratio — NO per-frame DWrite measure, NO `format!`. Clamped to
+/// [`PILL_BADGE_MIN_WIDTH`] so a single-digit count still reads as a pill.
+pub fn badge_width_for_size_count(size: CapsuleSize, count: usize) -> f32 {
+    let digits = digit_count(count);
+    // Semibold digit advance ≈ 0.60 em for the YaHei/Segoe numerals at these
+    // small sizes; matches the legacy 0.62 ratio used at TYPOGRAPHY.xs (11px).
+    let per_digit = size.badge_font_px() * 0.60;
+    let (pad_x, _pad_y) = size.badge_padding_xy();
+    let raw = (digits as f32) * per_digit + pad_x * 2.0;
     raw.max(PILL_BADGE_MIN_WIDTH)
 }
 

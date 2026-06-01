@@ -342,6 +342,31 @@ pub mod ids {
     pub const SETTINGS_GROUP_APPEARANCE: StringId = StringId(228);
     pub const THEME_PICKER_LABEL: StringId = StringId(229);
     pub const SETTINGS_ACCENT_COLOR: StringId = StringId(230);
+
+    // 231..244 M7 (2026-06-01) — §10 Encryption card (`EncryptionCard.tsx`).
+    // Appended in lockstep with `i18n_en_us` (same index, same order) per the
+    // positional-array contract; the `lookup_tables_have_matching_length` +
+    // `zh_cn_en_us_empty_slots_are_in_lockstep` tests enforce parity. The
+    // existing short row-state tokens (80..86) are NOT the full card strings;
+    // these 13 ids carry the exact Tauri `encryption*` keys
+    // (`src/i18n/locales/zh-CN.ts:347-361`). The card title is distinct from
+    // the legacy `SETTINGS_VAULT_ENCRYPTION` (32, "配置加密") so it can read the
+    // exact Tauri "设置加密"; the mode-button titles reuse `ENCRYPTION_MODE_NONE`
+    // (84) / `ENCRYPTION_MODE_DPAPI` (85) and add a "自定义口令" full-passphrase
+    // title (236) plus three sub-labels (234/235/237).
+    pub const ENCRYPTION_CARD_TITLE: StringId = StringId(231);
+    pub const ENCRYPTION_CARD_DESC: StringId = StringId(232);
+    pub const ENCRYPTION_CURRENT_MODE: StringId = StringId(233);
+    pub const ENCRYPTION_MODE_NONE_SUB: StringId = StringId(234);
+    pub const ENCRYPTION_MODE_DPAPI_SUB: StringId = StringId(235);
+    pub const ENCRYPTION_MODE_PASSPHRASE_FULL: StringId = StringId(236);
+    pub const ENCRYPTION_MODE_PASSPHRASE_SUB: StringId = StringId(237);
+    pub const ENCRYPTION_PASSPHRASE_LABEL: StringId = StringId(238);
+    pub const ENCRYPTION_PASSPHRASE_PLACEHOLDER: StringId = StringId(239);
+    pub const ENCRYPTION_PASSPHRASE_HINT: StringId = StringId(240);
+    pub const ENCRYPTION_REQUIRED: StringId = StringId(241);
+    pub const ENCRYPTION_PROBE_FAILED: StringId = StringId(242);
+    pub const ENCRYPTION_MODE_APPLIED: StringId = StringId(243);
 }
 
 pub static ZH_CN: LookupTable = LookupTable {
@@ -629,5 +654,20 @@ pub static ZH_CN: LookupTable = LookupTable {
         "外观",       // SETTINGS_GROUP_APPEARANCE (228)
         "选择主题",   // THEME_PICKER_LABEL (229)
         "强调色",     // SETTINGS_ACCENT_COLOR (230)
+        // 231..244 M7 — §10 Encryption card (`EncryptionCard.tsx`,
+        // zh-CN.ts:347-361). Appended in lockstep with `i18n_en_us`.
+        "设置加密",                                       // ENCRYPTION_CARD_TITLE (231)
+        "启用加密可防止 OneDrive / Google Drive 同步时泄漏敏感设置。", // ENCRYPTION_CARD_DESC (232)
+        "当前模式",                                       // ENCRYPTION_CURRENT_MODE (233)
+        "默认,兼容最佳",                                 // ENCRYPTION_MODE_NONE_SUB (234)
+        "当前用户透明加密,无需密码",                     // ENCRYPTION_MODE_DPAPI_SUB (235)
+        "自定义口令",                                     // ENCRYPTION_MODE_PASSPHRASE_FULL (236)
+        "AES-256-GCM,跨机器可解",                        // ENCRYPTION_MODE_PASSPHRASE_SUB (237)
+        "口令",                                           // ENCRYPTION_PASSPHRASE_LABEL (238)
+        "至少 8 位字符",                                  // ENCRYPTION_PASSPHRASE_PLACEHOLDER (239)
+        "口令不会以明文存储;丢失后无法找回,请妥善保管。", // ENCRYPTION_PASSPHRASE_HINT (240)
+        "请先输入口令再切换到口令模式",                   // ENCRYPTION_REQUIRED (241)
+        "口令校验失败",                                   // ENCRYPTION_PROBE_FAILED (242)
+        "已切换加密模式为",                               // ENCRYPTION_MODE_APPLIED (243)
     ],
 };

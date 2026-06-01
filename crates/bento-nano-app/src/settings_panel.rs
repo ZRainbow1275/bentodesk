@@ -853,20 +853,55 @@ pub fn settings_language_chip_label_rect(viewport: Size, scroll_offset_y: f32) -
     }
 }
 
-/// α4 (Wave I-α, 2026-05-25) — full row rect for the zone-display-mode
-/// picker. Sits directly below the language row (M1 toggle band + 1
-/// language row) and above the M2 桌面源 section. Honours scroll offset
-/// the same way every other body row does.
+/// G3 parity (2026-06-01) — the §4 DisplayMode group title rect (`显示模式 /
+/// Display Mode`). The zone-display-mode picker was promoted out of the General
+/// band into its own `settings-group` §4 between §3 Appearance and §5
+/// Performance, matching Tauri's body order (`SettingsPanel.tsx:538-598`
+/// `<section class="settings-group"><h3>{settingsGroupDisplayMode}</h3>`).
+/// Anchors off the §3 Appearance section bottom (its last element is the accent
+/// swatch row, whose bottom is `appearance_content_height − section_gap` below
+/// the Appearance title) plus a section gap. The `flags` arg is unused (the
+/// section roots at the fixed source-reserve baseline like Appearance §5) but
+/// kept for signature symmetry with the Appearance helpers.
+///
+/// G3 reuses the existing bilingual `SETTINGS_ZONE_DISPLAY_MODE_LABEL`
+/// (StringId 140 — "默认显示模式" / "Default display mode") as the group title
+/// rather than minting a new StringId (spec §8 — no new strings unless
+/// required). The renderer paints the group title here and the radios below;
+/// the per-row caption that previously sat to the left of the radios is dropped
+/// (the group title now carries the section name).
+pub fn settings_display_mode_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let body = settings_body_rect(viewport);
+    let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
+    // §3 Appearance roots at `settings_appearance_origin_y_offset`; its content
+    // height (title + picker label + grid + trailing gap) minus the trailing gap
+    // is the section bottom. §4 DisplayMode sits one section gap below it.
+    let appearance_bottom = settings_appearance_origin_y_offset()
+        + settings_appearance_content_height(viewport)
+        - SETTINGS_SECTION_GAP;
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: origin_y + appearance_bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// α4 (Wave I-α, 2026-05-25) / G3 parity (2026-06-01) — full row rect for the
+/// zone-display-mode picker (the 3 radios). Now sits directly below the §4
+/// DisplayMode group title ([`settings_display_mode_label_rect`]) as a standalone
+/// section between §3 Appearance and §5 Performance — promoted out of the
+/// General band per Tauri parity. Honours scroll offset the same way every other
+/// body row does.
 pub fn settings_zone_display_mode_picker_row_rect(
     viewport: Size,
     scroll_offset_y: f32,
 ) -> Rect {
-    let body = settings_body_rect(viewport);
-    let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
+    let label = settings_display_mode_label_rect(viewport, scroll_offset_y);
     Rect {
-        x: body.x + SETTINGS_ROW_PAD_X,
-        y: origin_y + SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 1.0),
-        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        x: label.x,
+        y: label.bottom(),
+        width: label.width,
         height: SETTINGS_ROW_H_M1,
     }
 }
@@ -940,6 +975,14 @@ pub fn settings_zone_display_mode_radio_label_rect(
         width: (hit.right() - label_x).max(0.0),
         height: 16.0,
     }
+}
+
+/// G3 parity (2026-06-01) — height the §4 DisplayMode group contributes to
+/// `settings_body_content_height`: the group title + the picker (radio) row +
+/// a trailing section gap. PURE — no global state. Mirrors the term rhythm of
+/// the other section content-height helpers so the scroll clamp stays exact.
+pub fn settings_display_mode_content_height() -> f32 {
+    SETTINGS_SECTION_LABEL_H + SETTINGS_ROW_H_M1 + SETTINGS_SECTION_GAP
 }
 
 /// M1f — which Updater §8 status family is live, for height purposes only.
@@ -1062,7 +1105,17 @@ impl SettingsBodyFlags {
 /// [`SettingsBodyFlags`] (passed by ref) — geometry never reads global state,
 /// the shell passes the live values.
 pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -> f32 {
+    // G3 parity (2026-06-01) — terms summed in the NEW Tauri body order:
+    // General(+Paths §2) → Appearance §3 → DisplayMode §4 → Performance §5 →
+    // Startup §6 → Stealth §7 → Updater §8 → Backup §9 → Encryption §10 →
+    // Plugins §11. The total is order-independent (it is a sum), but the
+    // ordering is kept readable to mirror the laid-out chain.
     settings_m2_content_height(viewport, flags.source_row_count)
+        // §3 Appearance grid — body-width-driven (4-col card grid), now between
+        // §2 Paths and §4 DisplayMode (was painted LAST pre-G3).
+        + settings_appearance_content_height(viewport)
+        // §4 DisplayMode — promoted out of the General band into its own group.
+        + settings_display_mode_content_height()
         + settings_perf_startup_content_height(
             viewport,
             flags.crash_restart_enabled,
@@ -1071,10 +1124,11 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
         + settings_stealth_content_height(flags.stealth_has_retry, flags.stealth_has_error)
         + settings_updater_content_height(flags.updater_kind)
         + settings_backup_content_height(flags.backup_row_count)
+        // M7 — §10 Encryption card slots between Backup §9 and Plugins §11
+        // (Tauri `<BackupCard/><EncryptionCard/>` adjacency). Fixed-height, so a
+        // single constant additive term (no `SettingsBodyFlags` field needed).
+        + settings_encryption_content_height()
         + settings_plugins_content_height(flags.plugin_row_count)
-        // M6-UI — §3 Appearance grid flows last in the nano body order; its
-        // height is body-width-driven (4-col card grid) so it takes `viewport`.
-        + settings_appearance_content_height(viewport)
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -1103,11 +1157,15 @@ pub fn settings_clamp_scroll(
     next.min(max)
 }
 
-/// Round-2 M2 — Y offset (scroll-space) at which the M2 sections start.
-/// Sits below the M1 toggle band + the language row + α4 zone-display
-/// picker row + a section gap.
+/// Round-2 M2 — Y offset (scroll-space) at which the M2 §2 Paths sections
+/// start. G3 parity (2026-06-01): the §4 zone-display-mode picker was promoted
+/// out of the General band into its own group between §3 Appearance and §5
+/// Performance (Tauri body order General → **Paths** → Appearance → DisplayMode
+/// → Performance). So Paths §2 now anchors directly below the M1 toggle band +
+/// the language row (the General band's last element) + a section gap — the
+/// `+ 2.0` picker-row wedge is gone (now `+ 1.0`: 5 toggles + 1 language row).
 fn settings_m2_origin_y_offset() -> f32 {
-    SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 2.0) + SETTINGS_SECTION_GAP
+    SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 1.0) + SETTINGS_SECTION_GAP
 }
 
 /// Round-2 M2 — `桌面源` section label rect (the dim caption above the two
@@ -1339,22 +1397,27 @@ pub const SETTINGS_DESC_H: f32 = 18.0;
 
 // ── Performance §5 geometry (3 SliderRows, no conditionals) ────────────
 
-/// M1d / M1i fidelity — scroll-space Y at which the Performance group title
-/// starts, PINNED at the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`] source
-/// reserve baseline. The live source-count reflow is applied by callers folding
-/// [`settings_sources_reserve_delta`] into `scroll_offset_y` (single-base-offset
-/// mechanism) rather than threading the count through every perf-and-below rect
-/// fn — so this and all sections rooted on it keep their `(viewport,
-/// scroll_offset_y)` signatures untouched.
-fn settings_perf_origin_y_offset() -> f32 {
-    settings_m2_origin_y_offset()
-        + settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize)
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_INPUT_ROW_H
-        + SETTINGS_SECTION_GAP
-        + SETTINGS_SECTION_LABEL_H
-        + SETTINGS_TEXTAREA_H
-        + SETTINGS_SECTION_GAP
+/// M1d / M1i fidelity / G3 parity — scroll-space Y at which the Performance
+/// group title starts, PINNED at the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`]
+/// source reserve baseline. The live source-count reflow is applied by callers
+/// folding [`settings_sources_reserve_delta`] into `scroll_offset_y`
+/// (single-base-offset mechanism) rather than threading the count through every
+/// perf-and-below rect fn — so this and all sections rooted on it keep their
+/// `(viewport, scroll_offset_y)` signatures untouched.
+///
+/// G3 parity (2026-06-01): §3 Appearance + §4 DisplayMode now sit between §2
+/// Paths and §5 Performance (Tauri body order). Their content heights are added
+/// here so Performance and everything below it shift down by exactly the
+/// Appearance grid + DisplayMode group. [`settings_appearance_origin_y_offset`]
+/// already equals the §2 Paths terms (m2 origin + sources + path + watch); we
+/// extend it by the Appearance and DisplayMode section content heights. Takes
+/// `viewport` because the Appearance grid height is body-width driven (the same
+/// width paint/hit feed `settings_appearance_content_height`), keeping the
+/// offset chain exactly consistent with the rendered Appearance section.
+fn settings_perf_origin_y_offset(viewport: Size) -> f32 {
+    settings_appearance_origin_y_offset()
+        + settings_appearance_content_height(viewport)
+        + settings_display_mode_content_height()
 }
 
 /// M1d — `性能 / Performance` group title rect.
@@ -1363,7 +1426,7 @@ pub fn settings_performance_label_rect(viewport: Size, scroll_offset_y: f32) -> 
     let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
-        y: origin_y + settings_perf_origin_y_offset(),
+        y: origin_y + settings_perf_origin_y_offset(viewport),
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
         height: SETTINGS_SECTION_LABEL_H,
     }
@@ -2424,6 +2487,269 @@ pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
     base + list + SETTINGS_SECTION_GAP
 }
 
+// ── M7 2026-06-01 — Encryption §10 inline card (`EncryptionCard.tsx`) ────────
+//
+// Sits BETWEEN Backup §9 and Plugins §11 in the Tauri body order
+// (…→Updater→Backup→**Encryption**→Plugins→footer), matching the Tauri
+// `<BackupCard/><EncryptionCard/>` adjacency (`SettingsPanel.tsx:705-706`). The
+// card is FIXED-HEIGHT (no variable rows), so unlike Backup/Plugins it adds a
+// single constant additive term to `settings_body_content_height` and needs NO
+// `SettingsBodyFlags` field. It anchors off the Backup card's last laid-out row
+// (the backup list's last visible entry, or the empty placeholder) + a section
+// gap; Plugins §11 then re-anchors off this card's status row so the offset
+// chain reflows automatically. Layout (top-to-bottom, vertical column):
+//   section label                                (always) — 设置加密
+//   description line                             (always) — OneDrive sentence
+//   current-mode row                             (always) — 当前模式: <mode>
+//   3-button mode grid (None / DPAPI / Passphrase) (always)
+//   passphrase row (label + masked input box)    (always)
+//   hint line                                    (always) — never-stored
+//   status banner                                (reserved; painted iff set)
+// Both the renderer (paint) and `ui::settings_hit` (hit) call the identical
+// helpers below so paint geometry == hit geometry (the project-wide SSoT rule).
+// Geometry stays PURE — every helper is a function of (viewport, scroll, flags),
+// returning `Copy` `Rect`s; no `AppState` reads (§10).
+
+/// M7 — encryption mode-button row height (each button is a title + sub-label
+/// stacked block; matches the footer-button rhythm with room for two lines).
+/// #7 §10 item 7 (2026-06-01) — bumped 44→52 to fit Tauri's `padding: 10px 12px`
+/// + `gap: 4px` (`EncryptionCard.css:29,36`): 10 (top pad) + 16 (13px title slot)
+/// + 4 (gap) + 16 (11px sub slot) + 10 (bottom pad) ≈ 52. The prior 44 packed the
+/// two-line content against the chip edges.
+pub const SETTINGS_ENCRYPTION_BTN_ROW_H: f32 = 52.0;
+/// M7 — encryption passphrase input row height (single-line masked box; shares
+/// the §2 path-input rhythm).
+pub const SETTINGS_ENCRYPTION_INPUT_ROW_H: f32 = 40.0;
+/// M7 — encryption current-mode / hint / status compact row heights (match the
+/// other card status-line rhythm).
+pub const SETTINGS_ENCRYPTION_ROW_H: f32 = 28.0;
+/// M7 — gap between the three mode buttons in the grid.
+pub const SETTINGS_ENCRYPTION_BTN_GAP: f32 = 8.0;
+/// P13 (#7 fix wave 2026-06-01) — vertical gap between EVERY sibling row of the
+/// §10 card (description / current / grid / passphrase-row / hint / status).
+/// Tauri `.encryption-card { gap: 10px }` (`EncryptionCard.css:4`). The
+/// mode-grid's INTERNAL button gap stays [`SETTINGS_ENCRYPTION_BTN_GAP`] (8px,
+/// CSS:23) — this 10px is the inter-row rhythm only.
+pub const SETTINGS_ENCRYPTION_ROW_GAP: f32 = 10.0;
+/// P4 (#7 fix wave 2026-06-01) — width of the passphrase ROW's left label cell
+/// (口令 / Passphrase). Tauri lays the row out `justify-content: space-between`
+/// with the label on the left + the input filling the rest; this fixed cell is
+/// the native-panel equivalent of the auto-sized `<span>`.
+pub const SETTINGS_ENCRYPTION_PASS_LABEL_W: f32 = 64.0;
+/// P4 — gap between the passphrase row's label cell and the input box.
+pub const SETTINGS_ENCRYPTION_PASS_LABEL_GAP: f32 = 10.0;
+/// M7 — number of mode buttons (None / DPAPI / Passphrase).
+pub const SETTINGS_ENCRYPTION_MODE_COUNT: u8 = 3;
+
+/// M7 — §10 Encryption card group title rect (设置加密 / Settings Encryption).
+/// Anchors off the Backup card's last laid-out row (the backup list's last
+/// visible entry, or the single placeholder at index 0) + a section gap — the
+/// same anchor Plugins §11 used before this card landed. Takes the full flag
+/// set so its Y follows whatever Backup/Updater/Stealth/Startup rows are
+/// currently visible.
+pub fn settings_encryption_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let body = settings_body_rect(viewport);
+    let last_backup_index = flags
+        .backup_row_count
+        .min(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
+        .saturating_sub(1);
+    let backup_bottom =
+        settings_backup_entry_row_rect(viewport, scroll_offset_y, flags, last_backup_index).bottom();
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: backup_bottom + SETTINGS_SECTION_GAP,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// M7 — description line rect (the OneDrive sentence). Below the title.
+/// P13 — separated from the title by the 10px inter-row gap.
+pub fn settings_encryption_desc_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let label = settings_encryption_label_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: label.x,
+        y: label.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: label.width,
+        height: SETTINGS_ENCRYPTION_ROW_H,
+    }
+}
+
+/// M7 — current-mode row rect (当前模式: <mode label>). Below the description.
+/// P13 — separated by the 10px inter-row gap.
+pub fn settings_encryption_current_mode_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let desc = settings_encryption_desc_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: desc.x,
+        y: desc.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: desc.width,
+        height: SETTINGS_ENCRYPTION_ROW_H,
+    }
+}
+
+/// M7 — the 3-button mode-grid row rect (the band holding all three buttons).
+/// Below the current-mode row. Use [`settings_encryption_mode_button_rect`] for
+/// individual buttons inside this band.
+pub fn settings_encryption_mode_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let current = settings_encryption_current_mode_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: current.x,
+        // P13 — separated from the current-mode row by the 10px inter-row gap.
+        y: current.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: current.width,
+        height: SETTINGS_ENCRYPTION_BTN_ROW_H,
+    }
+}
+
+/// M7 — individual mode-button rect inside the grid for `index`
+/// (0 = None, 1 = DPAPI, 2 = Passphrase). The three buttons split the row width
+/// evenly with two inter-button gaps. PURE — no global state.
+pub fn settings_encryption_mode_button_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+    index: u8,
+) -> Rect {
+    let row = settings_encryption_mode_row_rect(viewport, scroll_offset_y, flags);
+    let count = SETTINGS_ENCRYPTION_MODE_COUNT as f32;
+    let total_gap = SETTINGS_ENCRYPTION_BTN_GAP * (count - 1.0);
+    let btn_w = ((row.width - total_gap) / count).max(0.0);
+    let i = (index.min(SETTINGS_ENCRYPTION_MODE_COUNT - 1)) as f32;
+    Rect {
+        x: row.x + (btn_w + SETTINGS_ENCRYPTION_BTN_GAP) * i,
+        y: row.y,
+        width: btn_w,
+        height: row.height,
+    }
+}
+
+/// P4 (#7 fix wave 2026-06-01) — the full passphrase ROW band (label cell +
+/// input box), below the mode-button grid. Tauri `.encryption-passphrase-row`
+/// is a `justify-content: space-between` flex row: a `<span>` label on the left
+/// and the `<input>` filling the rest. The label/input sub-rects derive from
+/// this band. P13 — separated from the grid by the 10px inter-row gap (was the
+/// 8px button gap).
+pub fn settings_encryption_passphrase_row_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let row = settings_encryption_mode_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: row.x,
+        y: row.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: row.width,
+        height: SETTINGS_ENCRYPTION_INPUT_ROW_H,
+    }
+}
+
+/// P4 — passphrase ROW left label cell (口令 / Passphrase). The fixed-width
+/// left cell of the space-between row; non-interactive.
+pub fn settings_encryption_passphrase_label_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let row = settings_encryption_passphrase_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: row.x,
+        y: row.y,
+        width: SETTINGS_ENCRYPTION_PASS_LABEL_W.min(row.width),
+        height: row.height,
+    }
+}
+
+/// M7 — masked passphrase input box rect. P4 — now ONLY the input sub-rect on
+/// the RIGHT of the passphrase row (the left label cell + a gap are reserved by
+/// [`settings_encryption_passphrase_label_rect`]); the hit-test for
+/// `FocusPassphraseField` targets this sub-rect only.
+pub fn settings_encryption_passphrase_input_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let row = settings_encryption_passphrase_row_rect(viewport, scroll_offset_y, flags);
+    let label_w = SETTINGS_ENCRYPTION_PASS_LABEL_W.min(row.width);
+    let x = row.x + label_w + SETTINGS_ENCRYPTION_PASS_LABEL_GAP;
+    Rect {
+        x,
+        y: row.y,
+        width: (row.right() - x).max(0.0),
+        height: row.height,
+    }
+}
+
+/// M7 — hint line rect (the "never stored in plaintext" sentence). Below the
+/// passphrase ROW. P13 — separated by the 10px inter-row gap. Spans the full
+/// card width (not just the input sub-rect) like the Tauri `.encryption-hint`.
+pub fn settings_encryption_hint_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let row = settings_encryption_passphrase_row_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: row.x,
+        y: row.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: row.width,
+        height: SETTINGS_ENCRYPTION_ROW_H,
+    }
+}
+
+/// M7 — status banner rect (error/success). Reserved slot below the hint;
+/// painted only when `settings_encryption_status` is `Some`. The presence of a
+/// status does NOT change the next section's anchor (Plugins anchors off this
+/// rect's reserved slot regardless), keeping the offset chain linear — same
+/// pattern as the Backup card's reserved status row.
+pub fn settings_encryption_status_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let hint = settings_encryption_hint_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: hint.x,
+        // P13 — separated from the hint by the 10px inter-row gap.
+        y: hint.bottom() + SETTINGS_ENCRYPTION_ROW_GAP,
+        width: hint.width,
+        height: SETTINGS_ENCRYPTION_ROW_H,
+    }
+}
+
+/// M7 — fixed height the §10 Encryption card contributes to
+/// `settings_body_content_height`. No variable rows (unlike Backup/Plugins), so
+/// this is a constant: label + desc + current-mode + button-row + passphrase
+/// input + hint + reserved status + a trailing section gap.
+pub fn settings_encryption_content_height() -> f32 {
+    SETTINGS_SECTION_LABEL_H
+        + SETTINGS_ENCRYPTION_ROW_H            // description
+        + SETTINGS_ENCRYPTION_ROW_H            // current-mode row
+        + SETTINGS_ENCRYPTION_BTN_ROW_H        // mode-button grid
+        + SETTINGS_ENCRYPTION_INPUT_ROW_H      // passphrase row (label + input)
+        + SETTINGS_ENCRYPTION_ROW_H            // hint line
+        + SETTINGS_ENCRYPTION_ROW_H            // reserved status banner
+        // P13 — 6 × 10px inter-row gaps (label→desc→current→grid→passphrase→
+        // hint→status). Replaces the single 8px pre-passphrase button gap.
+        + SETTINGS_ENCRYPTION_ROW_GAP * 6.0
+        + SETTINGS_SECTION_GAP
+}
+
 // ── M1h 2026-05-29 — Plugins §11 inline section (`SettingsPanel.tsx:709-781`) ──
 //
 // Sits LAST in the (currently shipped) Tauri body order
@@ -2482,30 +2808,28 @@ pub const SETTINGS_PLUGIN_TOGGLE_HIT_W: f32 = 60.0;
 pub const SETTINGS_PLUGIN_TOGGLE_HIT_H: f32 = 24.0;
 pub const SETTINGS_PLUGIN_UNINSTALL_BTN_W: f32 = 72.0;
 
-/// M1h — scroll-space Y at which the Plugins group title starts. Anchors off
-/// the Backup card's last laid-out element (the backup list's last visible
-/// entry row, or the empty placeholder) plus a section gap. Takes the full flag
-/// set so its Y follows whatever Backup/Updater/Stealth/Startup rows are
-/// currently visible.
+/// M1h — scroll-space Y at which the Plugins group title starts. M7
+/// (2026-06-01): re-anchored off the Encryption §10 card's reserved status row
+/// + a section gap (the card now slots between Backup §9 and Plugins §11 to
+/// match Tauri's `<BackupCard/><EncryptionCard/>` adjacency). The encryption
+/// card is fixed-height, so its status row bottom is a deterministic offset
+/// from the Backup card's last row; the whole chain reflows automatically.
+/// Takes the full flag set so its Y follows whatever Backup/Updater/Stealth/
+/// Startup rows are currently visible.
 pub fn settings_plugins_label_rect(
     viewport: Size,
     scroll_offset_y: f32,
     flags: &SettingsBodyFlags,
 ) -> Rect {
     let body = settings_body_rect(viewport);
-    // The Backup section's last laid-out row is its list (entry rows when
-    // non-empty, otherwise the single placeholder at index 0). Both branches
-    // anchor off the reserved status slot, so the bottom of the last visible
-    // row = the start of the trailing section gap.
-    let last_backup_index = flags
-        .backup_row_count
-        .min(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
-        .saturating_sub(1);
-    let backup_bottom =
-        settings_backup_entry_row_rect(viewport, scroll_offset_y, flags, last_backup_index).bottom();
+    // The §10 Encryption card's last laid-out row is its reserved status slot.
+    // Anchoring off its bottom keeps the offset chain linear regardless of
+    // whether a status banner is actually painted.
+    let encryption_bottom =
+        settings_encryption_status_rect(viewport, scroll_offset_y, flags).bottom();
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
-        y: backup_bottom + SETTINGS_SECTION_GAP,
+        y: encryption_bottom + SETTINGS_SECTION_GAP,
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
         height: SETTINGS_SECTION_LABEL_H,
     }
@@ -2652,37 +2976,55 @@ pub fn settings_plugins_content_height(plugin_row_count: usize) -> f32 {
     base + list + SETTINGS_SECTION_GAP
 }
 
-// ── M6-UI 2026-05-29 — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
+// ── M6-UI 2026-05-29 / G3 parity 2026-06-01 — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
 //
-// Sits AFTER the Plugins §11 section in the (currently shipped) nano body
-// order. The grid geometry (group headings + 17 ThemeCards + accent swatch
-// row) is owned by `crate::theme_picker::appearance_layout`, which is body-
-// width-driven and fully `Copy` (fixed-cap `[Rect; N]`, no `Vec` — §10). These
-// helpers only resolve the section's scroll-space ANCHOR (so paint / hit /
-// scroll all agree) and the content-width fed to the layout.
+// G3 parity (2026-06-01): the §3 Appearance section now sits between §2 Paths
+// and §4 DisplayMode — matching Tauri's body order General → Paths →
+// **Appearance** → DisplayMode → Performance. Previously nano painted it LAST
+// (after Plugins §11). The grid geometry (group headings + 17 ThemeCards +
+// accent swatch row) is owned by `crate::theme_picker::appearance_layout`,
+// which is body-width-driven and fully `Copy` (fixed-cap `[Rect; N]`, no `Vec`
+// — §10). These helpers only resolve the section's scroll-space ANCHOR (so
+// paint / hit / scroll all agree) and the content-width fed to the layout.
 //
 // The section flows inside the body D2D scroll-clip (`push_clip(body_rect)`),
 // so partial rows at the body edge are masked exactly like every other section.
 
-/// M6-UI — the §3 Appearance group title rect. Anchors off the Plugins
-/// section's bottom (its last laid-out element is the plugin list, whose bottom
-/// is `plugins_content_height − section_gap` below the plugins title) plus a
-/// section gap. Takes the full flag set so its Y follows whatever rows above it
-/// are currently visible.
+/// G3 parity — scroll-space Y at which the §3 Appearance group title starts,
+/// PINNED at the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`] source-reserve
+/// baseline (same single-base-offset reflow mechanism as
+/// [`settings_perf_origin_y_offset`]). It sits one section gap below the §2
+/// 监控值 textarea bottom (the last element of the Paths section), computed at
+/// the full source reserve. Callers fold [`settings_sources_reserve_delta`]
+/// into `scroll_offset_y` so the live source-count reflow shifts Appearance +
+/// everything below it.
+fn settings_appearance_origin_y_offset() -> f32 {
+    settings_m2_origin_y_offset()
+        + settings_sources_content_height(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize)
+        + SETTINGS_SECTION_LABEL_H
+        + SETTINGS_INPUT_ROW_H
+        + SETTINGS_SECTION_GAP
+        + SETTINGS_SECTION_LABEL_H
+        + SETTINGS_TEXTAREA_H
+        + SETTINGS_SECTION_GAP
+}
+
+/// M6-UI / G3 parity — the §3 Appearance group title rect. Anchors off the §2
+/// Paths section bottom (the 监控值 textarea) plus a section gap. The `flags`
+/// arg is retained for call-site stability (renderer + hit-tester) but no
+/// longer read — the section now roots at the fixed source-reserve baseline
+/// like the Performance §5 chain, so its Y is independent of the Backup/Plugins
+/// row counts below it.
 pub fn settings_appearance_label_rect(
     viewport: Size,
     scroll_offset_y: f32,
-    flags: &SettingsBodyFlags,
+    _flags: &SettingsBodyFlags,
 ) -> Rect {
-    let plugins_label = settings_plugins_label_rect(viewport, scroll_offset_y, flags);
-    // Bottom of the plugins section content, excluding its trailing pad gap.
-    let plugins_bottom = plugins_label.y
-        + settings_plugins_content_height(flags.plugin_row_count)
-        - SETTINGS_SECTION_GAP;
     let body = settings_body_rect(viewport);
+    let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
-        y: plugins_bottom + SETTINGS_SECTION_GAP,
+        y: origin_y + settings_appearance_origin_y_offset(),
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
         height: SETTINGS_SECTION_LABEL_H,
     }
@@ -2859,22 +3201,42 @@ mod m1_tests {
         assert!((row0_at_50.y + 50.0 - row0_at_0.y).abs() < 0.01);
     }
 
-    /// α4 (Wave I-α, 2026-05-25) — zone-display-mode picker sits between
-    /// the language row and the M2 sources section, and its three radios
-    /// pack right-to-left in cluster order.
+    /// α4 (Wave I-α) / G3 parity (2026-06-01) — the zone-display-mode picker is
+    /// now the §4 DisplayMode group (promoted out of the General band), sitting
+    /// below its own group title which itself sits below the §3 Appearance
+    /// section. The picker row starts exactly where the §4 group title ends.
     #[test]
-    fn alpha4_zone_display_picker_row_sits_below_language_row() {
+    fn alpha4_zone_display_picker_row_sits_below_display_mode_group_title() {
         let v = vp();
-        let lang = settings_language_row_rect(v, 0.0);
+        let title = settings_display_mode_label_rect(v, 0.0);
         let picker = settings_zone_display_mode_picker_row_rect(v, 0.0);
         assert!(
-            (picker.y - lang.bottom()).abs() < 0.01,
-            "picker row must start exactly where the language row ends \
-             (lang.bottom={}, picker.y={})",
-            lang.bottom(),
+            (picker.y - title.bottom()).abs() < 0.01,
+            "picker row must start exactly where the §4 group title ends \
+             (title.bottom={}, picker.y={})",
+            title.bottom(),
             picker.y,
         );
         assert_eq!(picker.height, SETTINGS_ROW_H_M1);
+        // §4 DisplayMode sits below §3 Appearance (the appearance accent row),
+        // a full section gap clear — the General band no longer contains it.
+        let appearance = settings_appearance_label_rect(v, 0.0, &plugin_flags(0));
+        assert!(
+            title.y > appearance.bottom(),
+            "§4 DisplayMode group title (y={}) must sit below §3 Appearance \
+             label (bottom={})",
+            title.y,
+            appearance.bottom(),
+        );
+        // It is no longer wedged into the General band right under Language.
+        let lang = settings_language_row_rect(v, 0.0);
+        assert!(
+            title.y > lang.bottom() + SETTINGS_SECTION_GAP,
+            "§4 DisplayMode must be promoted well below the General band's \
+             Language row (title.y={}, lang.bottom={})",
+            title.y,
+            lang.bottom(),
+        );
     }
 
     #[test]
@@ -2924,19 +3286,22 @@ mod m1_tests {
         }
     }
 
+    /// α4 / G3 parity (2026-06-01) — the relationship INVERTED: the §2 Paths
+    /// sources section now sits ABOVE the §4 DisplayMode picker (Tauri body
+    /// order General → **Paths** → Appearance → **DisplayMode**). The picker is
+    /// no longer wedged between the General band and §2 Paths.
     #[test]
-    fn alpha4_m2_sources_section_shifts_below_picker_row() {
+    fn g3_m2_sources_section_sits_above_display_mode_picker() {
         let v = vp();
         let picker = settings_zone_display_mode_picker_row_rect(v, 0.0);
         let sources_label = settings_sources_label_rect(v, 0.0);
-        // Sources label must clear the picker row by at least the section
-        // gap so the picker and the next section never overlap.
+        // §2 Paths sources label must sit ABOVE the §4 picker row top.
         assert!(
-            sources_label.y >= picker.bottom(),
-            "M2 sources label (y={}) must sit at-or-below picker row \
-             bottom (y={}) so α4 picker has dedicated vertical real estate",
-            sources_label.y,
-            picker.bottom(),
+            sources_label.bottom() <= picker.y,
+            "§2 Paths sources label (bottom={}) must sit above the §4 \
+             DisplayMode picker row (y={}) post-G3 reorder",
+            sources_label.bottom(),
+            picker.y,
         );
     }
 
@@ -3012,22 +3377,29 @@ mod m1_tests {
     }
 
     #[test]
-    fn m1h_plugins_section_sits_below_backup_card() {
+    fn m1h_plugins_section_sits_below_encryption_card() {
+        // M7 (2026-06-01) — Plugins §11 now anchors off the Encryption §10
+        // card's reserved status row (the card slots between Backup §9 and
+        // Plugins §11), not directly off the Backup card. The Backup card still
+        // sits ABOVE the encryption card, and the encryption status row sits
+        // ABOVE the Plugins group title, separated by a section gap.
         let v = vp();
         let f = plugin_flags(2);
-        // The Backup card's last laid-out row (empty placeholder at index 0,
-        // since backup_row_count = 0) must sit ABOVE the Plugins group title.
         let backup_empty = settings_backup_entry_row_rect(v, 0.0, &f, 0);
+        let encryption_status = settings_encryption_status_rect(v, 0.0, &f);
         let plugin_label = settings_plugins_label_rect(v, 0.0, &f);
+        // Encryption card sits below the backup card's last row.
+        assert!(encryption_status.y >= backup_empty.bottom());
+        // Plugins title sits below the encryption card's status row.
         assert!(
-            plugin_label.y >= backup_empty.bottom(),
-            "plugins title (y={}) must sit below the backup card's last row \
-             (bottom={})",
+            plugin_label.y >= encryption_status.bottom(),
+            "plugins title (y={}) must sit below the encryption card's status \
+             row (bottom={})",
             plugin_label.y,
-            backup_empty.bottom(),
+            encryption_status.bottom(),
         );
         // A section gap separates them.
-        assert!((plugin_label.y - backup_empty.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
+        assert!((plugin_label.y - encryption_status.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
     }
 
     #[test]
@@ -3120,6 +3492,167 @@ mod m1_tests {
         let delta_section =
             settings_plugins_content_height(2) - settings_plugins_content_height(0);
         assert!((h2 - h0 - delta_section).abs() < 0.01);
+    }
+
+    // ── M7 — Encryption §10 inline geometry ────────────────────────────────
+
+    #[test]
+    fn m7_encryption_section_ordering() {
+        // The §10 card label must sit BELOW the Backup card's last row and
+        // ABOVE the Plugins group title (anchored between §9 and §11).
+        let v = vp();
+        let f = plugin_flags(0);
+        let backup_last = settings_backup_entry_row_rect(v, 0.0, &f, 0);
+        let enc_label = settings_encryption_label_rect(v, 0.0, &f);
+        let plugin_label = settings_plugins_label_rect(v, 0.0, &f);
+        assert!(
+            enc_label.y >= backup_last.bottom() + SETTINGS_SECTION_GAP - 0.01,
+            "encryption label (y={}) must sit a section gap below the backup \
+             card's last row (bottom={})",
+            enc_label.y,
+            backup_last.bottom(),
+        );
+        assert!(
+            enc_label.y < plugin_label.y,
+            "encryption label (y={}) must sit above the plugins label (y={})",
+            enc_label.y,
+            plugin_label.y,
+        );
+    }
+
+    #[test]
+    fn m7_encryption_content_height_is_fixed_and_positive() {
+        // Fixed-height card (no variable rows): the helper is a constant and
+        // must equal the sum of its laid-out rows.
+        let h = settings_encryption_content_height();
+        assert!(h > 0.0);
+        // P13 (#7 fix wave) — 7 rows separated by 6 × 10px inter-row gaps
+        // (replacing the old single 8px pre-passphrase button gap).
+        let expected = SETTINGS_SECTION_LABEL_H
+            + SETTINGS_ENCRYPTION_ROW_H
+            + SETTINGS_ENCRYPTION_ROW_H
+            + SETTINGS_ENCRYPTION_BTN_ROW_H
+            + SETTINGS_ENCRYPTION_INPUT_ROW_H
+            + SETTINGS_ENCRYPTION_ROW_H
+            + SETTINGS_ENCRYPTION_ROW_H
+            + SETTINGS_ENCRYPTION_ROW_GAP * 6.0
+            + SETTINGS_SECTION_GAP;
+        assert!((h - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn m7_settings_body_content_height_includes_encryption() {
+        // The total body height must grow by exactly the encryption card's
+        // fixed height vs a hypothetical body without it. We assert the live
+        // total minus the sum of all OTHER sections equals the encryption
+        // term (i.e. the term is actually included once).
+        let v = vp();
+        let f = plugin_flags(0);
+        let total = settings_body_content_height(v, &f);
+        // G3 parity (2026-06-01) — the `others` sum now includes the §4
+        // DisplayMode group height (promoted out of the General band into its
+        // own section). Without it the body total no longer matches the sum of
+        // every non-encryption section.
+        let others = settings_m2_content_height(v, f.source_row_count)
+            + settings_appearance_content_height(v)
+            + settings_display_mode_content_height()
+            + settings_perf_startup_content_height(
+                v,
+                f.crash_restart_enabled,
+                f.safe_start_after_hibernation,
+            )
+            + settings_stealth_content_height(f.stealth_has_retry, f.stealth_has_error)
+            + settings_updater_content_height(f.updater_kind)
+            + settings_backup_content_height(f.backup_row_count)
+            + settings_plugins_content_height(f.plugin_row_count);
+        assert!((total - others - settings_encryption_content_height()).abs() < 0.01);
+    }
+
+    #[test]
+    fn m7_encryption_mode_buttons_are_three_non_overlapping_rects() {
+        let v = vp();
+        let f = plugin_flags(0);
+        let b0 = settings_encryption_mode_button_rect(v, 0.0, &f, 0);
+        let b1 = settings_encryption_mode_button_rect(v, 0.0, &f, 1);
+        let b2 = settings_encryption_mode_button_rect(v, 0.0, &f, 2);
+        // Same row (same y/height), increasing x, no overlap.
+        assert_eq!(b0.y, b1.y);
+        assert_eq!(b1.y, b2.y);
+        assert!(b0.width > 0.0);
+        assert!(b1.x >= b0.right() - 0.01);
+        assert!(b2.x >= b1.right() - 0.01);
+        // All three fit inside the mode-grid row band.
+        let row = settings_encryption_mode_row_rect(v, 0.0, &f);
+        assert!(b0.x >= row.x - 0.01);
+        assert!(b2.right() <= row.right() + 0.01);
+    }
+
+    #[test]
+    fn m7_encryption_rows_stack_in_order() {
+        // label → desc → current-mode → mode-grid → passphrase input → hint →
+        // status, each strictly below the previous.
+        let v = vp();
+        let f = plugin_flags(0);
+        let label = settings_encryption_label_rect(v, 0.0, &f);
+        let desc = settings_encryption_desc_rect(v, 0.0, &f);
+        let current = settings_encryption_current_mode_rect(v, 0.0, &f);
+        let mode_row = settings_encryption_mode_row_rect(v, 0.0, &f);
+        let input = settings_encryption_passphrase_input_rect(v, 0.0, &f);
+        let hint = settings_encryption_hint_rect(v, 0.0, &f);
+        let status = settings_encryption_status_rect(v, 0.0, &f);
+        assert!(desc.y >= label.bottom() - 0.01);
+        assert!(current.y >= desc.bottom() - 0.01);
+        assert!(mode_row.y >= current.bottom() - 0.01);
+        assert!(input.y >= mode_row.bottom() - 0.01);
+        assert!(hint.y >= input.bottom() - 0.01);
+        assert!(status.y >= hint.bottom() - 0.01);
+    }
+
+    /// P13 (#7 fix wave 2026-06-01) — every sibling row of the §10 card is
+    /// separated by EXACTLY the 10px Tauri `gap` (`.encryption-card { gap:10px }`).
+    /// Pin each inter-row gap so the rhythm can't silently regress to 0px.
+    #[test]
+    fn p13_encryption_rows_separated_by_ten_px_gap() {
+        let v = vp();
+        let f = plugin_flags(0);
+        let label = settings_encryption_label_rect(v, 0.0, &f);
+        let desc = settings_encryption_desc_rect(v, 0.0, &f);
+        let current = settings_encryption_current_mode_rect(v, 0.0, &f);
+        let mode_row = settings_encryption_mode_row_rect(v, 0.0, &f);
+        let pass_row = settings_encryption_passphrase_row_rect(v, 0.0, &f);
+        let hint = settings_encryption_hint_rect(v, 0.0, &f);
+        let status = settings_encryption_status_rect(v, 0.0, &f);
+        let g = SETTINGS_ENCRYPTION_ROW_GAP;
+        assert!((desc.y - label.bottom() - g).abs() < 0.01);
+        assert!((current.y - desc.bottom() - g).abs() < 0.01);
+        assert!((mode_row.y - current.bottom() - g).abs() < 0.01);
+        assert!((pass_row.y - mode_row.bottom() - g).abs() < 0.01);
+        assert!((hint.y - pass_row.bottom() - g).abs() < 0.01);
+        assert!((status.y - hint.bottom() - g).abs() < 0.01);
+    }
+
+    /// P4 (#7 fix wave 2026-06-01) — the passphrase row splits into a LEFT label
+    /// cell + a RIGHT input box (Tauri `justify-content: space-between`). The
+    /// label sits on the left, the input fills the rest, they don't overlap, and
+    /// the input no longer spans the full row width (so a click on the label cell
+    /// is NOT a focus hit).
+    #[test]
+    fn p4_passphrase_row_splits_label_and_input() {
+        let v = vp();
+        let f = plugin_flags(0);
+        let row = settings_encryption_passphrase_row_rect(v, 0.0, &f);
+        let label = settings_encryption_passphrase_label_rect(v, 0.0, &f);
+        let input = settings_encryption_passphrase_input_rect(v, 0.0, &f);
+        // Label is the left cell, input is to its right, no overlap.
+        assert!((label.x - row.x).abs() < 0.01, "label hugs the row's left edge");
+        assert!(input.x >= label.right() - 0.01, "input sits right of the label");
+        assert!(input.x > label.right(), "a gap separates label and input");
+        // Input ends at the row's right edge (fills the remaining width).
+        assert!((input.right() - row.right()).abs() < 0.01);
+        // Input is strictly narrower than the full row (label cell + gap removed).
+        assert!(input.width < row.width - SETTINGS_ENCRYPTION_PASS_LABEL_W * 0.5);
+        // Same vertical band as the row.
+        assert!((label.y - row.y).abs() < 0.01 && (input.y - row.y).abs() < 0.01);
     }
 }
 
@@ -3298,14 +3831,27 @@ mod m1d_tests {
 
     #[test]
     fn perf_label_sits_below_m2_textarea() {
-        // The Performance label roots at the FIXED 4-card reserve baseline
-        // (scroll 0, no reflow delta), so it must clear the watch textarea
-        // computed at the same full reserve (count = cap).
+        // The Performance §5 label roots at the FIXED 4-card reserve baseline
+        // (scroll 0, no reflow delta), so it must clear the §2 watch textarea
+        // computed at the same full reserve (count = cap). G3 parity
+        // (2026-06-01): §3 Appearance + §4 DisplayMode now sit BETWEEN §2 Paths
+        // and §5 Performance, so the perf label clears the textarea by even more
+        // than pre-G3 (the `>=` still holds — and now with extra slack).
         let v = vp();
         let textarea =
             settings_watch_textarea_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
         let label = settings_performance_label_rect(v, 0.0);
         assert!(label.y >= textarea.bottom());
+        // The §4 DisplayMode picker (the section directly above Performance)
+        // must end at-or-above the perf label — pin the new adjacency.
+        let picker = settings_zone_display_mode_picker_row_rect(v, 0.0);
+        assert!(
+            label.y >= picker.bottom(),
+            "Performance §5 label (y={}) must sit below the §4 DisplayMode \
+             picker row (bottom={})",
+            label.y,
+            picker.bottom(),
+        );
     }
 
     #[test]

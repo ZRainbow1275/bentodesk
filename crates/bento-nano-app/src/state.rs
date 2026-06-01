@@ -146,6 +146,29 @@ pub enum PassphraseEntryPurpose {
     Unlock,
 }
 
+/// M7 (2026-06-01) — which settings text field currently has keyboard focus
+/// (caret), or `None`. Generalises the passphrase-only `passphrase_entry_active`
+/// flag so the inline §2 桌面路径 / 监控值 inputs AND the §10 passphrase row all
+/// route through one WM_CHAR/WM_KEYDOWN dispatch. The non-passphrase arms mutate
+/// the `desktop_path_draft` / `watch_paths_draft` drafts directly; `Passphrase`
+/// mirrors `passphrase_entry_active` for caret rendering while keeping the
+/// already-wired commit-on-Enter flow (`SetEncryptionPassphrase`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTextField {
+    #[default]
+    None,
+    DesktopPath,
+    WatchValues,
+    Passphrase,
+}
+
+/// M7 — char cap for the 桌面路径 single-line input (Windows `MAX_PATH`-ish; an
+/// inline-friendly `SmolStr` length). Counted in scalar values, not bytes.
+pub const SETTINGS_DESKTOP_PATH_DRAFT_LIMIT: usize = 260;
+/// M7 — char cap for the 监控值 multi-line textarea (one path per line; `\n` is
+/// allowed and NOT treated as a control reject). Counted in scalar values.
+pub const SETTINGS_WATCH_VALUES_DRAFT_LIMIT: usize = 1024;
+
 /// M1a 2026-05-29 — snapshot of every persisted Settings toggle captured
 /// when the panel opens. Cancel/Escape/Close × replay this back onto the
 /// `AppState` Cells so a mid-edit dismissal never leaks into the vault.
@@ -155,7 +178,10 @@ pub enum PassphraseEntryPurpose {
 /// 1 toggle + 1 slider) sections. All these fields are Save-gated (NOT
 /// immediate), so Cancel must revert them; `snapshot_settings`/
 /// `restore_settings` stay the single round-trip surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// W2 (#7 fix wave) — `Copy` was dropped when the two `SmolStr` text drafts were
+// added (a heap-backed `SmolStr` is not `Copy`); `Clone` is retained and the few
+// callers that previously relied on `Copy` (the two snapshot tests) clone instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsSnapshot {
     pub ghost_layer_enabled: bool,
     pub launch_at_startup: bool,
@@ -173,6 +199,12 @@ pub struct SettingsSnapshot {
     pub crash_window_secs: i32,
     pub safe_start_after_hibernation: bool,
     pub hibernate_resume_delay_ms: i32,
+    // W2 (#7 fix wave 2026-06-01) — the §2 Paths drafts are Save-gated (NOT
+    // immediate), so Cancel/Escape must revert them too. They were silently
+    // ignored by snapshot/restore before this fix, leaking mid-edit path/watch
+    // mutations for the rest of the session (state.rs invariant §148-151).
+    pub desktop_path_draft: SmolStr,
+    pub watch_paths_draft: SmolStr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +527,11 @@ pub struct AppState {
     /// Round-2 M2 — 监控值 draft multi-line buffer for the watch-paths
     /// textarea. One path per line. Persists on Save (M4).
     pub watch_paths_draft: RefCell<SmolStr>,
+    /// M7 (2026-06-01) — which settings text field currently has keyboard
+    /// focus (caret), or `None`. Drives WM_CHAR/WM_KEYDOWN routing for the
+    /// inline settings body. `Passphrase` mirrors `passphrase_entry_active`
+    /// for caret rendering; the non-passphrase arms edit the drafts above.
+    pub settings_focused_field: Cell<SettingsTextField>,
     /// M1d 2026-05-29 — Performance §5 slider: 展开延迟 / Expand Delay in ms
     /// (50..=500, step 10). Save-gated; reverted by Cancel. Deliberately
     /// produced here to unblock the M3 animation milestone — named exactly
@@ -870,6 +907,7 @@ impl AppState {
             desktop_sources: RefCell::new(Vec::new()),
             desktop_path_draft: RefCell::new(SmolStr::new_static("D:\\Desktop")),
             watch_paths_draft: RefCell::new(SmolStr::default()),
+            settings_focused_field: Cell::new(SettingsTextField::None),
             expand_delay_ms: Cell::new(150),
             collapse_delay_ms: Cell::new(300),
             icon_cache_size: Cell::new(500),
@@ -986,6 +1024,11 @@ impl AppState {
             crash_window_secs: self.crash_window_secs.get(),
             safe_start_after_hibernation: self.safe_start_after_hibernation.get(),
             hibernate_resume_delay_ms: self.hibernate_resume_delay_ms.get(),
+            // W2 — capture the two §2 Paths drafts under the same snapshot so
+            // Cancel/Escape replays them back (they're Save-gated like the
+            // toggles, not immediate).
+            desktop_path_draft: self.desktop_path_draft.borrow().clone(),
+            watch_paths_draft: self.watch_paths_draft.borrow().clone(),
         }
     }
 
@@ -1010,6 +1053,83 @@ impl AppState {
             .set(snap.safe_start_after_hibernation);
         self.hibernate_resume_delay_ms
             .set(snap.hibernate_resume_delay_ms);
+        // W2 — replay the two §2 Paths drafts so a mid-edit Cancel/Escape never
+        // leaks the mutated path/watch values into the rest of the session.
+        *self.desktop_path_draft.borrow_mut() = snap.desktop_path_draft.clone();
+        *self.watch_paths_draft.borrow_mut() = snap.watch_paths_draft.clone();
+    }
+
+    /// M7 (2026-06-01) — append a char into the focused NON-passphrase draft
+    /// (桌面路径 / 监控值). Returns `true` when the draft changed. Append-only
+    /// (type at end); rejects control chars (but `\n` is allowed for the
+    /// WatchValues textarea); caps length by SCALAR-VALUE count (CJK-safe) so a
+    /// multi-byte path char counts as one. Event-driven (one allocation per
+    /// keystroke) — never on the per-frame paint path (§10). The `Passphrase`
+    /// field is intentionally NOT handled here: it keeps its own
+    /// `passphrase_draft` + commit-on-Enter flow via
+    /// `handle_settings_passphrase_char`.
+    pub fn settings_focused_push_char(&self, ch: char) -> bool {
+        let (draft, cap, allow_newline) = match self.settings_focused_field.get() {
+            SettingsTextField::DesktopPath => (
+                &self.desktop_path_draft,
+                SETTINGS_DESKTOP_PATH_DRAFT_LIMIT,
+                false,
+            ),
+            SettingsTextField::WatchValues => (
+                &self.watch_paths_draft,
+                SETTINGS_WATCH_VALUES_DRAFT_LIMIT,
+                true,
+            ),
+            SettingsTextField::None | SettingsTextField::Passphrase => return false,
+        };
+        // Reject control chars — except a literal newline for the multi-line
+        // WatchValues textarea (one watch path per line).
+        if ch.is_control() && !(allow_newline && ch == '\n') {
+            return false;
+        }
+        let mut current = draft.borrow_mut();
+        if current.chars().count() >= cap {
+            return false;
+        }
+        // SmolStr is immutable; rebuild once per keystroke (event-driven, §10).
+        let mut next = String::with_capacity(current.len() + ch.len_utf8());
+        next.push_str(current.as_str());
+        next.push(ch);
+        *current = SmolStr::new(next);
+        true
+    }
+
+    /// M7 — backspace the focused NON-passphrase draft (pops the LAST scalar
+    /// value, CJK-safe — never a partial byte). Returns `true` when the draft
+    /// changed. Append-only edit model, so the caret is always at the end.
+    pub fn settings_focused_backspace(&self) -> bool {
+        let draft = match self.settings_focused_field.get() {
+            SettingsTextField::DesktopPath => &self.desktop_path_draft,
+            SettingsTextField::WatchValues => &self.watch_paths_draft,
+            SettingsTextField::None | SettingsTextField::Passphrase => return false,
+        };
+        let mut current = draft.borrow_mut();
+        if current.is_empty() {
+            return false;
+        }
+        // Drop the final scalar value (chars() yields scalars, so collecting
+        // all-but-last preserves multi-byte CJK correctly).
+        let mut chars = current.chars();
+        chars.next_back();
+        let next: String = chars.collect();
+        *current = SmolStr::new(next);
+        true
+    }
+
+    /// M7 — caret index for the focused draft = its scalar-value count
+    /// (append-only model, so the caret always sits at the end). Returns 0 for
+    /// `None`/`Passphrase` (the passphrase field renders its own masked caret).
+    pub fn settings_focused_caret(&self) -> usize {
+        match self.settings_focused_field.get() {
+            SettingsTextField::DesktopPath => self.desktop_path_draft.borrow().chars().count(),
+            SettingsTextField::WatchValues => self.watch_paths_draft.borrow().chars().count(),
+            SettingsTextField::None | SettingsTextField::Passphrase => 0,
+        }
     }
 
     pub fn active_theme_palette(&self) -> PaletteTokens {
@@ -1405,6 +1525,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_focused_field_default_is_none() {
+        let app = AppState::new();
+        assert_eq!(app.settings_focused_field.get(), SettingsTextField::None);
+        // None/Passphrase fields are no-ops for the non-passphrase edit ops.
+        assert!(!app.settings_focused_push_char('a'));
+        app.settings_focused_field.set(SettingsTextField::Passphrase);
+        assert!(!app.settings_focused_push_char('a'));
+        assert!(!app.settings_focused_backspace());
+        assert_eq!(app.settings_focused_caret(), 0);
+    }
+
+    #[test]
+    fn settings_focused_push_char_appends_and_caps() {
+        let app = AppState::new();
+        // DesktopPath — clear the seeded default, then append. Cap = 260.
+        app.settings_focused_field.set(SettingsTextField::DesktopPath);
+        *app.desktop_path_draft.borrow_mut() = SmolStr::default();
+        assert!(app.settings_focused_push_char('C'));
+        assert!(app.settings_focused_push_char(':'));
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "C:");
+        // Control chars rejected on DesktopPath (incl. newline — single-line).
+        assert!(!app.settings_focused_push_char('\n'));
+        assert!(!app.settings_focused_push_char('\t'));
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "C:");
+        // Cap: fill to the limit, then the next push is rejected.
+        *app.desktop_path_draft.borrow_mut() =
+            SmolStr::new("x".repeat(SETTINGS_DESKTOP_PATH_DRAFT_LIMIT));
+        assert!(!app.settings_focused_push_char('y'));
+        assert_eq!(
+            app.desktop_path_draft.borrow().chars().count(),
+            SETTINGS_DESKTOP_PATH_DRAFT_LIMIT
+        );
+
+        // WatchValues — newline IS allowed (one path per line); other controls
+        // rejected. Non-ASCII (Chinese path) accepted.
+        app.settings_focused_field.set(SettingsTextField::WatchValues);
+        *app.watch_paths_draft.borrow_mut() = SmolStr::default();
+        assert!(app.settings_focused_push_char('D'));
+        assert!(app.settings_focused_push_char('\n'));
+        assert!(app.settings_focused_push_char('桌'));
+        assert!(app.settings_focused_push_char('面'));
+        assert_eq!(app.watch_paths_draft.borrow().as_str(), "D\n桌面");
+        assert!(!app.settings_focused_push_char('\r'));
+        assert_eq!(app.watch_paths_draft.borrow().as_str(), "D\n桌面");
+    }
+
+    #[test]
+    fn settings_focused_backspace_pops_last_scalar() {
+        let app = AppState::new();
+        app.settings_focused_field.set(SettingsTextField::WatchValues);
+        // Mix ASCII + a multi-byte CJK scalar; backspace must pop the scalar,
+        // not a partial byte.
+        *app.watch_paths_draft.borrow_mut() = SmolStr::new("a桌");
+        assert!(app.settings_focused_backspace());
+        assert_eq!(app.watch_paths_draft.borrow().as_str(), "a");
+        assert!(app.settings_focused_backspace());
+        assert_eq!(app.watch_paths_draft.borrow().as_str(), "");
+        // Empty draft → no-op.
+        assert!(!app.settings_focused_backspace());
+    }
+
+    #[test]
+    fn settings_focused_caret_equals_char_count() {
+        let app = AppState::new();
+        app.settings_focused_field.set(SettingsTextField::DesktopPath);
+        *app.desktop_path_draft.borrow_mut() = SmolStr::new("C:\\桌面");
+        // 5 scalar values: C : \ 桌 面 (CJK counts as ONE each).
+        assert_eq!(app.settings_focused_caret(), 5);
+    }
+
+    #[test]
     fn active_theme_exposes_non_palette_tokens_for_renderer() {
         let app = AppState::new();
         let mut tokens = ThemeTokens {
@@ -1778,6 +1969,10 @@ mod tests {
         app.crash_window_secs.set(45);
         app.safe_start_after_hibernation.set(false);
         app.hibernate_resume_delay_ms.set(3500);
+        // W2 (#7 fix wave) — set the two §2 Paths drafts to non-default values
+        // so the snapshot/restore round-trip is exercised for them too.
+        *app.desktop_path_draft.borrow_mut() = SmolStr::new("E:\\Custom\\Desktop");
+        *app.watch_paths_draft.borrow_mut() = SmolStr::new("E:\\Watch\\A\nE:\\Watch\\B");
 
         let snap = app.snapshot_settings();
         assert_eq!(
@@ -1797,6 +1992,8 @@ mod tests {
                 crash_window_secs: 45,
                 safe_start_after_hibernation: false,
                 hibernate_resume_delay_ms: 3500,
+                desktop_path_draft: SmolStr::new("E:\\Custom\\Desktop"),
+                watch_paths_draft: SmolStr::new("E:\\Watch\\A\nE:\\Watch\\B"),
             }
         );
 
@@ -1815,6 +2012,8 @@ mod tests {
         app.crash_window_secs.set(5);
         app.safe_start_after_hibernation.set(true);
         app.hibernate_resume_delay_ms.set(500);
+        *app.desktop_path_draft.borrow_mut() = SmolStr::new("Z:\\scribbled");
+        *app.watch_paths_draft.borrow_mut() = SmolStr::new("Z:\\scribbled\nZ:\\again");
 
         app.restore_settings(&snap);
 
@@ -1833,6 +2032,12 @@ mod tests {
         assert_eq!(app.crash_window_secs.get(), 45);
         assert!(!app.safe_start_after_hibernation.get());
         assert_eq!(app.hibernate_resume_delay_ms.get(), 3500);
+        // W2 — the two §2 Paths drafts round-trip through snapshot → restore.
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "E:\\Custom\\Desktop");
+        assert_eq!(
+            app.watch_paths_draft.borrow().as_str(),
+            "E:\\Watch\\A\nE:\\Watch\\B"
+        );
     }
 
     /// M1a 2026-05-29 — the Cancel/Escape/Close × path stashes the snapshot in
@@ -1860,8 +2065,12 @@ mod tests {
             crash_window_secs: 60,
             safe_start_after_hibernation: true,
             hibernate_resume_delay_ms: 2000,
+            desktop_path_draft: SmolStr::new("D:\\Desktop"),
+            watch_paths_draft: SmolStr::default(),
         };
-        app.settings_snapshot.borrow_mut().replace(snap);
+        // W2 — `SettingsSnapshot` is no longer `Copy` (it carries two `SmolStr`
+        // drafts), so clone into the slot and compare against a clone.
+        app.settings_snapshot.borrow_mut().replace(snap.clone());
         assert_eq!(app.settings_snapshot.borrow().as_ref(), Some(&snap));
 
         let taken = app.settings_snapshot.borrow_mut().take();

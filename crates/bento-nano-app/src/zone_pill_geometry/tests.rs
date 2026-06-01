@@ -4,6 +4,7 @@
 //! reachable from these tests.
 
 use super::*;
+use crate::business::zen_capsule::CapsuleSize;
 use std::borrow::Cow;
 use bento_nano_zone::ZoneId;
 
@@ -143,6 +144,64 @@ fn pill_badge_width_minimum_holds() {
     assert!(badge_width_for_count(0) >= PILL_BADGE_MIN_WIDTH);
     assert!(badge_width_for_count(7) >= PILL_BADGE_MIN_WIDTH);
     assert!(badge_width_for_count(999) >= PILL_BADGE_MIN_WIDTH);
+    // G5 — per-tier variant also respects the floor on every tier.
+    for s in [CapsuleSize::Small, CapsuleSize::Medium, CapsuleSize::Large] {
+        assert!(badge_width_for_size_count(s, 0) >= PILL_BADGE_MIN_WIDTH);
+        assert!(badge_width_for_size_count(s, 999) >= PILL_BADGE_MIN_WIDTH);
+    }
+}
+
+#[test]
+fn pill_padding_is_per_tier_asymmetric() {
+    // G5 — icon left-anchored at the tier's LEFT padding (Tauri --spacing-xl
+    // medium = 20, small 12, large 28); badge right-anchored at the tier's
+    // RIGHT padding (medium 16, small 12, large 20).
+    let small = pill_layout_for_zone(&fixture_appearance("small", "pill"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "pill"), 4);
+    // icon.x - rect.x == pad_left
+    assert!((small.icon.x - small.rect.x - 12.0).abs() < 0.01);
+    assert!((medium.icon.x - medium.rect.x - 20.0).abs() < 0.01);
+    assert!((large.icon.x - large.rect.x - 28.0).abs() < 0.01);
+    // rect.right() - badge.right() == pad_right
+    assert!((small.rect.right() - small.badge.right() - 12.0).abs() < 0.01);
+    assert!((medium.rect.right() - medium.badge.right() - 16.0).abs() < 0.01);
+    assert!((large.rect.right() - large.badge.right() - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn pill_inner_gap_is_per_tier() {
+    // G5 — gap between icon and label equals the tier inner-gap (small 8,
+    // medium 12, large 16), NOT the pre-G5 flat 6.
+    let small = pill_layout_for_zone(&fixture_appearance("small", "pill"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "pill"), 4);
+    assert!((small.label.x - (small.icon.x + small.icon.width) - 8.0).abs() < 0.01);
+    assert!((medium.label.x - (medium.icon.x + medium.icon.width) - 12.0).abs() < 0.01);
+    assert!((large.label.x - (large.icon.x + large.icon.width) - 16.0).abs() < 0.01);
+}
+
+#[test]
+fn pill_badge_height_is_per_tier() {
+    // G5 — badge box height scales 14/16/20 per tier (was flat 20).
+    let small = pill_layout_for_zone(&fixture_appearance("small", "pill"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "pill"), 4);
+    assert!((small.badge.height - 14.0).abs() < 0.01);
+    assert!((medium.badge.height - 16.0).abs() < 0.01);
+    assert!((large.badge.height - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn pill_circle_icon_uses_circle_override_size() {
+    // G5 — circle icon uses the circle-only override (22 small+medium, 28
+    // large), NOT the base per-tier icon_px (14/18/22).
+    let small = pill_layout_for_zone(&fixture_appearance("small", "circle"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "circle"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "circle"), 4);
+    assert!((small.icon.width - 22.0).abs() < 0.01);
+    assert!((medium.icon.width - 22.0).abs() < 0.01);
+    assert!((large.icon.width - 28.0).abs() < 0.01);
 }
 
 #[test]

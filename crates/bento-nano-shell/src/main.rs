@@ -1514,6 +1514,12 @@ unsafe extern "system" fn wnd_proc(
             }
             if slot.kind == WindowKind::Main {
                 if let Some(root) = app_root() {
+                    // M7 — desktop_path / watch values live edit (focused-field
+                    // model) is tried first, then the passphrase capture path.
+                    if handle_settings_text_char(root, wparam as u32) {
+                        request_redraw(hwnd);
+                        return 0;
+                    }
                     if handle_settings_passphrase_char(root, wparam as u32) {
                         request_redraw(hwnd);
                         return 0;
@@ -1870,6 +1876,16 @@ fn dispatch_hotkey_command(root: &AppRoot, command: hotkey::HotkeyCommand) {
     }
 }
 
+/// W3 (#7 fix wave 2026-06-01) — the keybinding-recording / §2 text-field / §10
+/// passphrase keydowns must reach BOTH the Main HWND and the focusable Settings
+/// AUX HWND (which holds focus after `SetForegroundWindow`), or typing into a
+/// focused settings field does nothing. The stack-tray keydown stays Main-only
+/// (see `window_kind_routes_stack_tray_keydown`). Pure predicate so the routing
+/// intent is unit-testable.
+fn window_kind_routes_settings_keydown(kind: WindowKind) -> bool {
+    matches!(kind, WindowKind::Main | WindowKind::Settings)
+}
+
 fn handle_keydown(
     hwnd: HWND,
     vk: u32,
@@ -1911,7 +1927,19 @@ fn handle_keydown(
     if slot.kind == WindowKind::SnapshotPicker {
         return handle_snapshot_picker_keydown(root, vk, hwnd);
     }
-    if slot.kind == WindowKind::Main {
+    // W3 (#7 fix wave 2026-06-01) — the Settings section lives on the focusable
+    // Settings AUX HWND (`show_settings_surface` calls `SetForegroundWindow` on
+    // it), so its keystrokes arrive here with `slot.kind == Settings`, NOT Main.
+    // The keybinding-recording / §2 text-field / §10 passphrase keydowns must
+    // therefore be reachable for BOTH Main and Settings or typing into a focused
+    // field would do nothing (the latent pre-existing bug this fix closes). The
+    // stack-tray keydown stays Main-ONLY (the tray only exists on the desktop).
+    // INVARIANT: `handle_settings_text_keydown` consumes Esc only WHILE a §2
+    // field is focused (first Esc blurs); once no field is focused it returns
+    // `None`, and `handle_settings_passphrase_keydown` returns `None` for Esc
+    // unless a passphrase capture is active — so the auxiliary-escape branch
+    // below still closes Settings on the next Esc.
+    if window_kind_routes_settings_keydown(slot.kind) {
         if let Some(result) = handle_settings_keybinding_keydown(root, vk, hwnd) {
             return result;
         }
@@ -1919,9 +1947,18 @@ fn handle_keydown(
         // §11 section has no separate modal, so Esc no longer needs a plugins-
         // specific close path (panel Esc already closes the whole Settings
         // surface).
+        // M7 — desktop_path / watch values live-edit keydown is tried BEFORE the
+        // passphrase keydown; it returns `Some(0)` only when a non-passphrase
+        // field is focused, else `None` so the passphrase + auxiliary-escape
+        // paths still run.
+        if let Some(result) = handle_settings_text_keydown(root, vk, hwnd) {
+            return result;
+        }
         if let Some(result) = handle_settings_passphrase_keydown(root, vk, hwnd) {
             return result;
         }
+    }
+    if slot.kind == WindowKind::Main {
         if let Some(result) = handle_stack_tray_keydown(root, vk, hwnd) {
             return result;
         }
@@ -4591,6 +4628,111 @@ fn handle_settings_passphrase_char(root: &AppRoot, codepoint: u32) -> bool {
     true
 }
 
+/// M7 (2026-06-01) — WM_CHAR handler for the §2 桌面路径 / 监控值 inline text
+/// fields (the focused-field model that generalises the passphrase-only path).
+/// Gated on `settings_open && settings_focused_field ∈ {DesktopPath,
+/// WatchValues}`; appends the composed Unicode codepoint to the focused draft
+/// via the pure `AppState::settings_focused_push_char` (which caps length, is
+/// CJK-safe, and allows `\n` only for the WatchValues textarea). Marks the
+/// panel dirty so Save lights up. Returns `true` when handled (so the WM_CHAR
+/// dispatcher stops + redraws). The Passphrase field is NOT handled here — it
+/// keeps `handle_settings_passphrase_char` + commit-on-Enter. CJK arrives as a
+/// post-composition codepoint via WM_CHAR (no WM_IME_* needed — same as every
+/// existing nano text field).
+fn handle_settings_text_char(root: &AppRoot, codepoint: u32) -> bool {
+    // Reject the control codepoints the keydown path owns (Backspace/Enter/Esc)
+    // so they never double-route into the draft.
+    if matches!(codepoint, VK_BACKSPACE | VK_ENTER | VK_ESCAPE_KEY) {
+        return false;
+    }
+    let Some(ch) = char::from_u32(codepoint) else {
+        return false;
+    };
+    let app = root.app.borrow();
+    if !app.settings_open.get() {
+        return false;
+    }
+    if !matches!(
+        app.settings_focused_field.get(),
+        bento_nano_app::SettingsTextField::DesktopPath
+            | bento_nano_app::SettingsTextField::WatchValues
+    ) {
+        return false;
+    }
+    if app.settings_focused_push_char(ch) {
+        app.settings_dirty.set(true);
+        true
+    } else {
+        // Field is focused but the char was rejected (control / over cap). Still
+        // consume it so it never leaks to DefWindowProc.
+        true
+    }
+}
+
+/// M7 — WM_KEYDOWN handler for the §2 桌面路径 / 监控值 inline text fields.
+/// Returns `Some(0)` (consumed) ONLY when a non-passphrase field is focused;
+/// otherwise `None` so the passphrase + auxiliary-escape paths still run.
+/// - Backspace → pop last scalar, mark dirty, redraw.
+/// - Enter → DesktopPath (single line): blur the field; WatchValues (textarea):
+///   insert a `\n` into the draft.
+/// - Esc → blur the field (set `None`) + redraw; the panel does NOT close while
+///   a field is focused (only the second Esc, with no focus, reaches the
+///   auxiliary-escape close path).
+fn handle_settings_text_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<LRESULT> {
+    let field = {
+        let app = root.app.borrow();
+        if !app.settings_open.get() {
+            return None;
+        }
+        app.settings_focused_field.get()
+    };
+    let is_text_field = matches!(
+        field,
+        bento_nano_app::SettingsTextField::DesktopPath
+            | bento_nano_app::SettingsTextField::WatchValues
+    );
+    if !is_text_field {
+        return None;
+    }
+    match vk {
+        VK_BACKSPACE => {
+            let app = root.app.borrow();
+            if app.settings_focused_backspace() {
+                app.settings_dirty.set(true);
+            }
+            drop(app);
+            request_redraw(hwnd);
+            Some(0)
+        }
+        VK_ENTER => {
+            let app = root.app.borrow();
+            if matches!(field, bento_nano_app::SettingsTextField::WatchValues) {
+                // Textarea: Enter inserts a newline (one watch path per line).
+                if app.settings_focused_push_char('\n') {
+                    app.settings_dirty.set(true);
+                }
+            } else {
+                // Single-line input: Enter blurs the field.
+                app.settings_focused_field
+                    .set(bento_nano_app::SettingsTextField::None);
+            }
+            drop(app);
+            request_redraw(hwnd);
+            Some(0)
+        }
+        VK_ESCAPE_KEY => {
+            // Blur the field; keep the panel open (first Esc only clears focus).
+            let app = root.app.borrow();
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::None);
+            drop(app);
+            request_redraw(hwnd);
+            Some(0)
+        }
+        _ => None,
+    }
+}
+
 fn handle_zone_editor_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
     match vk {
         VK_BACKSPACE => {
@@ -5154,6 +5296,13 @@ const SETTING_STARTUP_CRASH_MAX_RETRIES: &str = "startup.crash_max_retries";
 const SETTING_STARTUP_CRASH_WINDOW_SECS: &str = "startup.crash_window_secs";
 const SETTING_STARTUP_SAFE_AFTER_HIBERNATION: &str = "startup.safe_start_after_hibernation";
 const SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS: &str = "startup.hibernate_resume_delay_ms";
+// W1 (#7 fix wave 2026-06-01) — §2 Paths persistence keys. Tauri keys these as
+// `desktop_path` (string) + `watch_paths` (string[]). The nano vault stores
+// scalars, so the watch list persists as a single newline-joined `Str` (one
+// path per line) — exactly the in-memory `watch_paths_draft` shape. The dotted
+// `paths.*` names follow the existing `general.*` / `performance.*` convention.
+const SETTING_PATHS_DESKTOP_PATH: &str = "paths.desktop_path";
+const SETTING_PATHS_WATCH_PATHS: &str = "paths.watch_paths";
 
 /// M1a 2026-05-29 — restore each General-section AppState Cell from the
 /// persisted vault values written by `save_settings_general`. Absent keys
@@ -5192,6 +5341,10 @@ fn apply_general_settings_from_vault(app: &AppState) {
     let crash_window = vault.get_setting(SETTING_STARTUP_CRASH_WINDOW_SECS);
     let safe_start = vault.get_setting(SETTING_STARTUP_SAFE_AFTER_HIBERNATION);
     let hibernate_delay = vault.get_setting(SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS);
+    // W1 (#7 fix wave) — rehydrate the two §2 Paths drafts so path/watch edits
+    // survive a relaunch (they were dropped on flush before this fix).
+    let desktop_path = vault.get_setting(SETTING_PATHS_DESKTOP_PATH);
+    let watch_paths = vault.get_setting(SETTING_PATHS_WATCH_PATHS);
     drop(vault);
 
     restore_general_bool_cell(&app.setting_desktop_embed, ghost, "ghost_layer_enabled");
@@ -5265,6 +5418,34 @@ fn apply_general_settings_from_vault(app: &AppState) {
         HIBERNATE_DELAY_MAX_MS,
         "hibernate_resume_delay_ms",
     );
+    // W1 (#7 fix wave) — apply the two §2 Paths drafts. Absent keys keep the
+    // AppState defaults (`D:\\Desktop` / empty) so a fresh install reads as
+    // designed; a persisted (possibly empty) string overrides them.
+    restore_general_str_cell(&app.desktop_path_draft, desktop_path, "desktop_path");
+    restore_general_str_cell(&app.watch_paths_draft, watch_paths, "watch_paths");
+}
+
+/// W1 2026-06-01 — apply a `SettingValue::Str` to one §2 Paths draft
+/// `RefCell<SmolStr>`, logging if the persisted value has the wrong tag. `None`
+/// keeps the AppState default (silent — first-launch path).
+fn restore_general_str_cell(
+    cell: &std::cell::RefCell<SmolStr>,
+    value: Option<bento_nano_backend::config_vault::SettingValue>,
+    label: &'static str,
+) {
+    match value {
+        Some(bento_nano_backend::config_vault::SettingValue::Str(s)) => {
+            *cell.borrow_mut() = s;
+        }
+        Some(_) => {
+            tracing::warn!(
+                target: "bentodesk::vault",
+                key = %label,
+                "general settings restore skipped: non-str value"
+            );
+        }
+        None => {}
+    }
 }
 
 /// M1d 2026-05-29 — apply a `SettingValue::Int` to one `Cell<i32>`, clamped to
@@ -5321,7 +5502,7 @@ fn restore_general_bool_cell(
 /// the write completes the dirty flag clears, leaving the panel in a
 /// "just-saved" state until the next toggle.
 fn save_settings_general(root: &AppRoot) {
-    let (dirty, values, perf_startup, accent_draft) = {
+    let (dirty, values, perf_startup, accent_draft, path_drafts) = {
         let app = root.app.borrow();
         let dirty = app.settings_dirty.get();
         let values = (
@@ -5348,7 +5529,14 @@ fn save_settings_general(root: &AppRoot) {
         // M6-UI — §3 Appearance accent draft, captured under the same borrow so
         // Save flushes it in the same batch as the General/Perf/Startup rows.
         let accent_draft = app.settings_draft_accent_color.borrow().clone();
-        (dirty, values, perf_startup, accent_draft)
+        // W1 (#7 fix wave) — the §2 Paths drafts were never persisted before this
+        // fix, so path/watch edits were silently dropped on flush and reverted on
+        // next launch. Capture them under the same borrow and flush in the batch.
+        let path_drafts = (
+            app.desktop_path_draft.borrow().clone(),
+            app.watch_paths_draft.borrow().clone(),
+        );
+        (dirty, values, perf_startup, accent_draft, path_drafts)
     };
     if !dirty {
         return;
@@ -5458,6 +5646,18 @@ fn save_settings_general(root: &AppRoot) {
             bento_nano_backend::config_vault::SettingValue::Str(accent.clone()),
         );
     }
+    // W1 (#7 fix wave) — persist the two §2 Paths drafts in the same batch.
+    // `desktop_path` is the raw single-line string; `watch_paths` is the
+    // newline-joined draft (one path per line, the in-memory shape).
+    let (desktop_path_draft, watch_paths_draft) = path_drafts;
+    vault.set_setting(
+        SETTING_PATHS_DESKTOP_PATH,
+        bento_nano_backend::config_vault::SettingValue::Str(desktop_path_draft),
+    );
+    vault.set_setting(
+        SETTING_PATHS_WATCH_PATHS,
+        bento_nano_backend::config_vault::SettingValue::Str(watch_paths_draft),
+    );
     if let Err(error) = vault.flush() {
         tracing::warn!(
             target: "bentodesk::vault",
@@ -5494,6 +5694,10 @@ fn cancel_settings_general(root: &AppRoot) {
     // M6-UI — discard the in-flight §3 Appearance accent draft (Cancel reverts
     // the edit; the persisted `theme_base_accent` is untouched).
     app.settings_draft_accent_color.borrow_mut().take();
+    // W-minor (#7 fix wave) — clear the focused-field caret on Cancel/Escape so
+    // a stale focus/caret never leaks past the dismissal.
+    app.settings_focused_field
+        .set(bento_nano_app::SettingsTextField::None);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5814,38 +6018,12 @@ fn queue_stealth_enabled_toggle(root: &AppRoot) {
     ));
 }
 
-fn queue_encryption_mode_cycle(root: &AppRoot) {
-    let capture_purpose = {
-        let app = root.app.borrow();
-        if app.passphrase_unlock_required.get() {
-            Some(PassphraseEntryPurpose::Unlock)
-        } else if app.encryption_mode.get() == SettingsEncryptionMode::Dpapi {
-            Some(PassphraseEntryPurpose::Set)
-        } else {
-            None
-        }
-    };
-    if let Some(purpose) = capture_purpose {
-        let app = root.app.borrow();
-        app.passphrase_entry_active.set(true);
-        app.passphrase_entry_purpose.set(purpose);
-        app.passphrase_draft.borrow_mut().clear();
-        let prompt = match purpose {
-            PassphraseEntryPurpose::Set => "Type passphrase, Enter applies",
-            PassphraseEntryPurpose::Unlock => "Type passphrase, Enter unlocks",
-        };
-        app.settings_encryption_status
-            .borrow_mut()
-            .replace(SettingsBackupStatus::Success(SmolStr::new_static(prompt)));
-        return;
-    }
-    let next_mode = {
-        let app = root.app.borrow();
-        next_encryption_mode(app.encryption_mode.get())
-    };
-    root.dispatcher
-        .push(encryption_mode_setting_command_for(next_mode));
-}
+// M7 (2026-06-01) — `queue_encryption_mode_cycle` removed. The orphan
+// `CycleEncryptionMode` 2-cycle (None↔Dpapi, Passphrase→None) was replaced
+// wholesale by the §10 3-button mode grid; its passphrase-capture-activation
+// snippet moved into the `SelectEncryptionModePassphrase` / `FocusPassphraseField`
+// dispatch arms, and the direct None/Dpapi sets now route through the existing
+// `encryption_mode_setting_command_for` helper from the mode-button arms.
 
 // Wave J1b — kept for future keyboard / tray cycle paths even though the
 // Row 5 chip now toggles the swatch popup instead of cycling inline.
@@ -5932,6 +6110,99 @@ fn encryption_mode_setting_command_for(mode: SettingsEncryptionMode) -> Command 
     }
 }
 
+/// P2 (#7 fix wave 2026-06-01) — the user-visible mode label that MATCHES the
+/// mode-button TITLES (Tauri uses one `modeLabel()` for the current-mode value,
+/// the buttons, AND the applied banner). Passphrase maps to the FULL token
+/// (`ENCRYPTION_MODE_PASSPHRASE_FULL`, id 236 = 自定义口令), NOT the short
+/// `ENCRYPTION_MODE_PASSPHRASE` (id 86 = 密码) the renderer's
+/// `localized_encryption_mode` used. None/DPAPI reuse the shared button ids.
+fn localized_encryption_mode_button_label(mode: SettingsEncryptionMode) -> &'static str {
+    use bento_nano_style::i18n_zh_cn::ids;
+    match mode {
+        SettingsEncryptionMode::None => bento_nano_style::t(ids::ENCRYPTION_MODE_NONE),
+        SettingsEncryptionMode::Dpapi => bento_nano_style::t(ids::ENCRYPTION_MODE_DPAPI),
+        SettingsEncryptionMode::Passphrase => {
+            bento_nano_style::t(ids::ENCRYPTION_MODE_PASSPHRASE_FULL)
+        }
+    }
+}
+
+/// P15 (#7 fix wave 2026-06-01) — PURE focus seam for clicking the passphrase
+/// INPUT (`FocusPassphraseField`). Sets the focused field + the char-capture
+/// flag so typing is captured, but DOES NOT switch the encryption mode/purpose
+/// to an apply and DOES NOT clear the draft (so a click-to-refocus mid-edit
+/// keeps what was typed). The purpose Cell tracks Set vs Unlock so the
+/// subsequent BUTTON apply routes correctly, but selecting the input alone
+/// never applies. Matches Tauri, where the input's focus is inert and only the
+/// Passphrase button calls `applyMode`.
+fn focus_passphrase_field(app: &AppState) {
+    let purpose = if app.passphrase_unlock_required.get() {
+        PassphraseEntryPurpose::Unlock
+    } else {
+        PassphraseEntryPurpose::Set
+    };
+    app.passphrase_entry_purpose.set(purpose);
+    app.passphrase_entry_active.set(true);
+    app.settings_focused_field
+        .set(bento_nano_app::SettingsTextField::Passphrase);
+}
+
+/// P15 (#7 fix wave 2026-06-01) — PURE apply seam for the Passphrase BUTTON
+/// (`SelectEncryptionModePassphrase`), mirroring Tauri `applyMode("Passphrase")`.
+/// Reads the already-typed draft:
+///   • empty → sets the localized `ENCRYPTION_REQUIRED` error banner + returns
+///     `None` (no command — the apply is refused, exactly like Tauri's early
+///     `setError(encryptionPassphraseRequired)` return);
+///   • non-empty → clears the in-flight capture (the button commits the typed
+///     draft directly) + returns the verify-probe→apply `Command`
+///     (`SetEncryptionPassphrase` on Set, `UnlockEncryptionPassphrase` on
+///     Unlock). The command's vault reopen IS the probe — a bad passphrase
+///     fails the reopen and the command handler surfaces the error banner.
+fn passphrase_button_command(app: &AppState) -> Option<Command> {
+    let draft = app.passphrase_draft.borrow().trim().to_owned();
+    if draft.is_empty() {
+        app.settings_encryption_status
+            .borrow_mut()
+            .replace(SettingsBackupStatus::Error(SmolStr::new(
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_REQUIRED),
+            )));
+        return None;
+    }
+    let purpose = if app.passphrase_unlock_required.get() {
+        PassphraseEntryPurpose::Unlock
+    } else {
+        PassphraseEntryPurpose::Set
+    };
+    // The button commits the typed draft directly — the in-flight capture is no
+    // longer needed, so deactivate + clear it (and blur the field).
+    app.passphrase_entry_active.set(false);
+    app.passphrase_draft.borrow_mut().clear();
+    app.settings_focused_field
+        .set(bento_nano_app::SettingsTextField::None);
+    Some(match purpose {
+        PassphraseEntryPurpose::Set => Command::SetEncryptionPassphrase(SmolStr::new(draft)),
+        PassphraseEntryPurpose::Unlock => {
+            Command::UnlockEncryptionPassphrase(SmolStr::new(draft))
+        }
+    })
+}
+
+/// P9 (#7 fix wave 2026-06-01) — set the §10 Encryption success banner to
+/// `"{ENCRYPTION_MODE_APPLIED} {mode label}"` (green) after a None/DPAPI mode
+/// change, mirroring Tauri `applyMode`'s `setInfo`. The label uses the
+/// button-title source so the banner, the current-mode value, and the active
+/// button title all read identically.
+fn set_encryption_mode_applied_banner(app: &AppState) {
+    let mode = app.encryption_mode.get();
+    let prefix = bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_APPLIED);
+    let label = localized_encryption_mode_button_label(mode);
+    app.settings_encryption_status
+        .borrow_mut()
+        .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
+            "{prefix} {label}"
+        ))));
+}
+
 fn bool_setting_command_for(key: &'static str, value: bool) -> Command {
     Command::SetSetting {
         key: SmolStr::new_static(key),
@@ -5939,13 +6210,11 @@ fn bool_setting_command_for(key: &'static str, value: bool) -> Command {
     }
 }
 
-fn next_encryption_mode(current: SettingsEncryptionMode) -> SettingsEncryptionMode {
-    match current {
-        SettingsEncryptionMode::None => SettingsEncryptionMode::Dpapi,
-        SettingsEncryptionMode::Dpapi => SettingsEncryptionMode::None,
-        SettingsEncryptionMode::Passphrase => SettingsEncryptionMode::None,
-    }
-}
+// M7 (2026-06-01) — `next_encryption_mode` removed. It existed only to drive
+// the orphan `CycleEncryptionMode` 2-cycle (now replaced by the §10 3-button
+// mode grid, which sets each mode explicitly rather than cycling). The
+// `encryption_mode_setting_command_for` helper below stays — it's now called
+// from the `SelectEncryptionModeNone` / `SelectEncryptionModeDpapi` arms.
 
 fn next_update_frequency(current: UpdateCheckFrequency) -> UpdateCheckFrequency {
     match current {
@@ -12293,8 +12562,17 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
                 Some(SmolStr::new_static("Enable stealth storage"))
             }
         }
-        ui::SettingsHit::CycleEncryptionMode => {
-            Some(SmolStr::new_static("Cycle vault encryption mode"))
+        ui::SettingsHit::SelectEncryptionModeNone => {
+            Some(SmolStr::new_static("Disable settings encryption"))
+        }
+        ui::SettingsHit::SelectEncryptionModeDpapi => {
+            Some(SmolStr::new_static("Encrypt settings with Windows DPAPI"))
+        }
+        ui::SettingsHit::SelectEncryptionModePassphrase => {
+            Some(SmolStr::new_static("Encrypt settings with a passphrase"))
+        }
+        ui::SettingsHit::FocusPassphraseField => {
+            Some(SmolStr::new_static("Enter the encryption passphrase"))
         }
         ui::SettingsHit::OpenThemeBasePalette => Some(SmolStr::new_static("Choose theme accent")),
         ui::SettingsHit::ImportTheme => Some(SmolStr::new_static("Import theme JSON file")),
@@ -13680,8 +13958,64 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             ui::SettingsHit::ToggleStealthEnabled => {
                 queue_stealth_enabled_toggle(root);
             }
-            ui::SettingsHit::CycleEncryptionMode => {
-                queue_encryption_mode_cycle(root);
+            ui::SettingsHit::SelectEncryptionModeNone => {
+                // M7 — §10 None button → SetSetting{ "encryption.mode", "None" }
+                // direct. Clear any in-flight passphrase capture + field focus.
+                {
+                    let app = root.app.borrow();
+                    app.passphrase_entry_active.set(false);
+                    app.passphrase_draft.borrow_mut().clear();
+                    app.settings_focused_field
+                        .set(bento_nano_app::SettingsTextField::None);
+                }
+                root.dispatcher
+                    .push(encryption_mode_setting_command_for(SettingsEncryptionMode::None));
+            }
+            ui::SettingsHit::SelectEncryptionModeDpapi => {
+                // M7 — §10 DPAPI button → SetSetting{ "encryption.mode", "Dpapi" }
+                // direct. Clear any in-flight passphrase capture + field focus.
+                {
+                    let app = root.app.borrow();
+                    app.passphrase_entry_active.set(false);
+                    app.passphrase_draft.borrow_mut().clear();
+                    app.settings_focused_field
+                        .set(bento_nano_app::SettingsTextField::None);
+                }
+                root.dispatcher
+                    .push(encryption_mode_setting_command_for(SettingsEncryptionMode::Dpapi));
+            }
+            ui::SettingsHit::FocusPassphraseField => {
+                // P15 (#7 fix wave 2026-06-01) — clicking the passphrase INPUT is
+                // PURE FOCUS (matching Tauri: the input's focus never applies a
+                // mode; only the Passphrase BUTTON does). Delegates to the pure
+                // `focus_passphrase_field` seam (unit-tested) which sets focus +
+                // the char-capture flag WITHOUT switching the mode/purpose to an
+                // apply and WITHOUT clearing the draft. P10 — no ASCII prompt
+                // banner: the input PLACEHOLDER already serves as the prompt.
+                {
+                    let app = root.app.borrow();
+                    focus_passphrase_field(&app);
+                }
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::SelectEncryptionModePassphrase => {
+                // P15 (#7 fix wave) — the Passphrase BUTTON applies, mirroring
+                // Tauri `applyMode("Passphrase")`. Delegates to the pure
+                // `passphrase_button_command` seam (unit-tested): empty draft →
+                // sets the localized ENCRYPTION_REQUIRED error + returns `None`;
+                // otherwise clears the in-flight capture + returns the
+                // verify-probe→apply command (`SetEncryptionPassphrase` reopens the
+                // vault with the passphrase, which IS the probe — a bad passphrase
+                // fails the reopen and surfaces an error; Unlock routes to the
+                // unlock command). P10 — no ASCII prompt banner.
+                let command = {
+                    let app = root.app.borrow();
+                    passphrase_button_command(&app)
+                };
+                if let Some(command) = command {
+                    root.dispatcher.push(command);
+                }
+                request_redraw(hwnd);
             }
             ui::SettingsHit::OpenThemeBasePalette => {
                 log_static("settings: OpenThemeBasePalette producer\n");
@@ -13904,14 +14238,26 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 request_redraw(hwnd);
             }
             ui::SettingsHit::EditDesktopPath => {
-                // M2 — input click is a no-op stub. Live keyboard editing
-                // of `desktop_path_draft` lands in a later wave (currently
-                // there is no inline-edit infrastructure for non-passphrase
-                // RefCell<SmolStr> drafts).
-                log_static("settings: M2 EditDesktopPath click (no-op stub)\n");
+                // M7 — focus the 桌面路径 single-line input for live keyboard
+                // editing. Mutually exclusive with passphrase capture.
+                {
+                    let app = root.app.borrow();
+                    app.settings_focused_field
+                        .set(bento_nano_app::SettingsTextField::DesktopPath);
+                    app.passphrase_entry_active.set(false);
+                }
+                request_redraw(hwnd);
             }
             ui::SettingsHit::EditWatchValues => {
-                log_static("settings: M2 EditWatchValues click (no-op stub)\n");
+                // M7 — focus the 监控值 multi-line textarea for live keyboard
+                // editing. Mutually exclusive with passphrase capture.
+                {
+                    let app = root.app.borrow();
+                    app.settings_focused_field
+                        .set(bento_nano_app::SettingsTextField::WatchValues);
+                    app.passphrase_entry_active.set(false);
+                }
+                request_redraw(hwnd);
             }
             ui::SettingsHit::DragPerformanceSlider { index, x_q } => {
                 use bento_nano_app::settings_panel::settings_performance_slider_rect;
@@ -14140,6 +14486,45 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
     }
     if drag_proof_log_enabled() {
         log_static(format!("items: drag-proof lbutton_down no_item x={x:.1} y={y:.1}\n").as_str());
+    }
+
+    // GROUP-4 (2026-06-01, 1:1) — the expanded `PanelHeader` search + close
+    // action buttons. Checked BEFORE the resize-corner / zone-drag paths so a
+    // click on a 28×28 button never falls through to a zone drag. Tauri
+    // `PanelHeader.tsx`: search → `openSearch(zone.id)`; close → `onClose()`
+    // (collapses the panel back to its pill).
+    if let Some((_zone_id, button)) = ui::hit_test_zone_header_button(&app, x, y) {
+        match button {
+            ui::HeaderButton::Search => {
+                // Reuse the existing OpenSearch command — nano's search is a
+                // single global Search HWND (no per-zone search window), so
+                // this is the closest existing "open search" dispatch. (Tauri
+                // scopes it to `zone.id`; nano's search bar queries all live
+                // zones, so the global open matches the user intent 1:1.)
+                drop(app);
+                root.dispatcher.push(Command::OpenSearch);
+                return;
+            }
+            ui::HeaderButton::Close => {
+                // Collapse the expanded panel back to its pill via the SAME
+                // path the hover-grace `HoverAction::Collapse` uses
+                // (`update_zone_pill_hover(app, None, ..)`), then clear the
+                // scheduler's expanded marker + pending timers so the panel
+                // does not immediately re-expand under the still-hovering
+                // cursor. No new Command is invented — this mirrors the
+                // existing collapse morph trigger.
+                // SAFETY: GetTickCount is total + thread-safe.
+                let now_ms = unsafe { GetTickCount() };
+                let mut scheduler = app.hover_scheduler.get();
+                scheduler.reset();
+                app.hover_scheduler.set(scheduler);
+                update_zone_pill_hover(&app, None, now_ms);
+                update_pill_hover_animator(&app, None, now_ms);
+                drop(app);
+                request_redraw(hwnd);
+                return;
+            }
+        }
     }
 
     if let Some(id) = ui::hit_test_zone_resize_corner(&app, x, y) {
@@ -16588,6 +16973,24 @@ unsafe extern "system" fn aux_wnd_proc(
                     }
                 }
             }
+            // W3 (#7 fix wave 2026-06-01) — the Settings section lives on this
+            // aux HWND (it holds focus after `SetForegroundWindow`), so its
+            // WM_CHAR must route into the §2 text-field + §10 passphrase capture
+            // handlers exactly like the Main WM_CHAR block. Without this branch,
+            // typing into the desktop-path / watch / passphrase fields fell to
+            // DefWindowProc and did NOTHING (the latent bug this fix closes).
+            if slot.kind == WindowKind::Settings {
+                if let Some(root) = app_root() {
+                    if handle_settings_text_char(root, wparam as u32) {
+                        request_redraw(hwnd);
+                        return 0;
+                    }
+                    if handle_settings_passphrase_char(root, wparam as u32) {
+                        request_redraw(hwnd);
+                        return 0;
+                    }
+                }
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         },
         WM_DESTROY => {
@@ -16623,6 +17026,10 @@ fn reset_settings_transient_state(app: &AppState) {
     app.settings_keybindings_open.set(false);
     // M1h — `settings_plugins_open` removed (Plugins is inline, no modal).
     app.settings_keybinding_recording.borrow_mut().take();
+    // W-minor (#7 fix wave) — clear the focused-field caret so a stale focus
+    // (and its blinking caret) never persists across Settings opens.
+    app.settings_focused_field
+        .set(bento_nano_app::SettingsTextField::None);
 }
 
 fn show_settings_surface(root: &AppRoot) -> bool {
@@ -17928,6 +18335,19 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                     Ok(true) => {
                                         let app = root.app.borrow();
                                         if apply_setting_value_to_app(&app, key.as_str(), &value) {
+                                            needs_redraw = true;
+                                        }
+                                        // P9 (#7 fix wave 2026-06-01) — mirror Tauri
+                                        // `applyMode`: after a SUCCESSFUL None/DPAPI
+                                        // mode change set the §10 success banner
+                                        // `${ENCRYPTION_MODE_APPLIED} ${modeLabel}`
+                                        // (green #34d399). `persist_setting_to_vault`
+                                        // returns `Ok(true)` ONLY on a valid, flushed
+                                        // None/DPAPI change (Passphrase + rejects are
+                                        // `Ok(false)`), so this never fires a false
+                                        // success.
+                                        if key.as_str() == SETTING_ENCRYPTION_MODE {
+                                            set_encryption_mode_applied_banner(&app);
                                             needs_redraw = true;
                                         }
                                     }
@@ -22237,6 +22657,13 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
 
     let mut app = root.app.borrow_mut();
     let mut any_active = false;
+    // P1 (#7 fix wave 2026-06-01) — keep the frame-pump alive (so this HWND keeps
+    // repainting) while ANY settings text field is focused, so the §2/§10 caret
+    // can blink at the Windows ~530ms cadence. Without this the pump idles after
+    // the keystroke redraw and the caret would freeze ON/OFF.
+    if app.settings_focused_field.get() != bento_nano_app::SettingsTextField::None {
+        any_active = true;
+    }
     if tick_stack_bloom_animation(&app, now) {
         any_active = true;
     }
@@ -22633,6 +23060,7 @@ mod tests {
         handle_bulk_manager_lbutton_up, handle_bulk_manager_text_edit_keydown,
         handle_icon_picker_keydown, handle_icon_picker_lbutton_up, handle_item_context_wm_command,
         handle_rules_wizard_char, handle_rules_wizard_keydown, handle_rules_wizard_lbutton_up,
+        handle_settings_text_char, handle_settings_text_keydown,
         handle_snapshot_picker_lbutton_up, handle_stack_bloom_lbutton_up,
         handle_stack_tray_lbutton_down, handle_stack_tray_lbutton_up, handle_suggestor_keydown,
         handle_suggestor_lbutton_up, handle_timeline_lbutton_up, handle_zone_editor_lbutton_up,
@@ -22642,7 +23070,7 @@ mod tests {
         list_settings_backups_for_vault_path, load_available_theme_options,
         load_startup_zones_or_migrate_legacy, locale_setting_command_for, match_context_window,
         minibar_command_for_pointer, next_bulk_accent, next_bulk_alias, next_bulk_capsule_size,
-        next_bulk_display_mode, next_encryption_mode, next_icon_slug, next_palette_accent,
+        next_bulk_display_mode, next_icon_slug, next_palette_accent,
         next_stack_tray_member, next_update_frequency, normalized_rename_leaf, palette_picker,
         palette_picker_accent_for_hit, parse_minibar_pin_ids, persist_active_theme_to_vault,
         persist_keybinding_reset_to_vault, persist_passphrase_to_vault, persist_rule_run_stats,
@@ -22681,6 +23109,9 @@ mod tests {
         updater_event_should_auto_download, widen_dynamic, widen_static,
         write_minibar_pins_to_vault, zone_context_action_for_choice, zone_display_mode_from_wire,
         zone_list_from_bento_zones, zone_pill_geometry,
+        // #7 fix wave (2026-06-01) — W1/W3/P15 seams under test.
+        focus_passphrase_field, handle_settings_passphrase_char, passphrase_button_command,
+        save_settings_general, window_kind_routes_settings_keydown,
     };
     use bento_nano_app::business::bulk_manager_panel::{BulkTextEditField, SortKey};
     use bento_nano_app::business::capsule_picker::{
@@ -24543,6 +24974,266 @@ mod tests {
         root.dispatcher.push(Command::ToggleDebugOverlay);
         consume_dispatcher(&root, std::ptr::null_mut());
         assert!(!root.app.borrow().debug_overlay.borrow().visible);
+    }
+
+    /// M7 — WM_CHAR routes a typed char into the focused 桌面路径 draft and
+    /// marks the panel dirty. Pure CPU (null HWND, no window/D3D). Not focused →
+    /// rejected.
+    #[test]
+    fn m7_handle_settings_text_char_appends_to_desktop_path() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            // Start from a clean draft so the assertion is exact.
+            *app.desktop_path_draft.borrow_mut() = smol_str::SmolStr::default();
+            app.settings_dirty.set(false);
+        }
+        // No field focused → the char is NOT consumed by the text handler.
+        assert!(!handle_settings_text_char(&root, u32::from('C')));
+        assert_eq!(root.app.borrow().desktop_path_draft.borrow().as_str(), "");
+
+        // Focus DesktopPath → 'C' then ':' append; panel goes dirty.
+        root.app
+            .borrow()
+            .settings_focused_field
+            .set(bento_nano_app::SettingsTextField::DesktopPath);
+        assert!(handle_settings_text_char(&root, u32::from('C')));
+        assert!(handle_settings_text_char(&root, u32::from(':')));
+        let app = root.app.borrow();
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "C:");
+        assert!(app.settings_dirty.get(), "typing must mark settings dirty");
+    }
+
+    /// M7 — WM_KEYDOWN: Backspace pops the last char from the focused draft;
+    /// Esc blurs the field (clears focus). Pure CPU (null HWND).
+    #[test]
+    fn m7_handle_settings_text_keydown_backspace_and_blur() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            *app.watch_paths_draft.borrow_mut() = smol_str::SmolStr::new("ab");
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::WatchValues);
+        }
+        // Backspace pops one scalar → "a".
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_BACKSPACE, std::ptr::null_mut()),
+            Some(0)
+        );
+        assert_eq!(root.app.borrow().watch_paths_draft.borrow().as_str(), "a");
+
+        // Enter on the WatchValues textarea inserts a newline (not a blur).
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_ENTER, std::ptr::null_mut()),
+            Some(0)
+        );
+        assert_eq!(root.app.borrow().watch_paths_draft.borrow().as_str(), "a\n");
+
+        // Esc blurs the field (clears focus); the keydown is consumed.
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_ESCAPE_KEY, std::ptr::null_mut()),
+            Some(0)
+        );
+        assert_eq!(
+            root.app.borrow().settings_focused_field.get(),
+            bento_nano_app::SettingsTextField::None
+        );
+
+        // With no field focused, the text keydown returns None so the
+        // passphrase + auxiliary-escape paths still run.
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_BACKSPACE, std::ptr::null_mut()),
+            None
+        );
+    }
+
+    /// M7 — Enter on the single-line DesktopPath field blurs it (does NOT insert
+    /// a newline, unlike the WatchValues textarea).
+    #[test]
+    fn m7_handle_settings_text_keydown_enter_blurs_single_line_path() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            *app.desktop_path_draft.borrow_mut() = smol_str::SmolStr::new("D:");
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::DesktopPath);
+        }
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_ENTER, std::ptr::null_mut()),
+            Some(0)
+        );
+        let app = root.app.borrow();
+        // Draft unchanged (no newline), field blurred.
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "D:");
+        assert_eq!(
+            app.settings_focused_field.get(),
+            bento_nano_app::SettingsTextField::None
+        );
+    }
+
+    /// W3 (#7 fix wave 2026-06-01) — the settings keydowns must route for BOTH
+    /// Main and the focusable Settings aux HWND; every other aux kind and the
+    /// stack tray must NOT. Pins the routing predicate so a future refactor
+    /// can't silently drop the Settings branch (the latent bug this fix closed).
+    #[test]
+    fn w3_settings_keydown_routes_for_main_and_settings_only() {
+        assert!(window_kind_routes_settings_keydown(WindowKind::Main));
+        assert!(window_kind_routes_settings_keydown(WindowKind::Settings));
+        // A representative sample of NON-settings kinds must NOT route here.
+        assert!(!window_kind_routes_settings_keydown(WindowKind::ZoneEditor));
+        assert!(!window_kind_routes_settings_keydown(WindowKind::IconPicker));
+        assert!(!window_kind_routes_settings_keydown(WindowKind::Search));
+        assert!(!window_kind_routes_settings_keydown(WindowKind::About));
+    }
+
+    /// W3 — once routing reaches the Settings HWND, typing must actually land in
+    /// the focused passphrase draft. Drive `handle_settings_passphrase_char`
+    /// (the seam the aux WM_CHAR Settings branch now calls) with an active
+    /// passphrase capture and assert the draft grows. Pure CPU (no window).
+    #[test]
+    fn w3_passphrase_char_lands_when_settings_focused() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            focus_passphrase_field(&app);
+            app.passphrase_draft.borrow_mut().clear();
+        }
+        assert!(handle_settings_passphrase_char(&root, u32::from('p')));
+        assert!(handle_settings_passphrase_char(&root, u32::from('w')));
+        assert_eq!(root.app.borrow().passphrase_draft.borrow().as_str(), "pw");
+    }
+
+    /// P15 (#7 fix wave 2026-06-01) — clicking the passphrase INPUT is PURE
+    /// FOCUS: it activates capture + focuses the field but NEVER applies a mode,
+    /// NEVER clears the draft, and pushes NO command. Typing must still work
+    /// after the focus.
+    #[test]
+    fn p15_focus_passphrase_field_is_pure_focus() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            app.encryption_mode.set(SettingsEncryptionMode::None);
+            // Pre-existing typed draft must survive a (re)focus.
+            *app.passphrase_draft.borrow_mut() = "secret".to_owned();
+            focus_passphrase_field(&app);
+        }
+        let app = root.app.borrow();
+        assert!(app.passphrase_entry_active.get(), "capture activated");
+        assert_eq!(
+            app.settings_focused_field.get(),
+            bento_nano_app::SettingsTextField::Passphrase
+        );
+        // Pure focus: mode unchanged, draft preserved, no command queued.
+        assert_eq!(app.encryption_mode.get(), SettingsEncryptionMode::None);
+        assert_eq!(app.passphrase_draft.borrow().as_str(), "secret");
+        assert!(
+            app.settings_encryption_status.borrow().is_none(),
+            "P10 — no prompt/status banner on pure focus"
+        );
+    }
+
+    /// P15 — the Passphrase BUTTON applies. Empty draft → localized
+    /// ENCRYPTION_REQUIRED error + NO command. Non-empty draft → the
+    /// verify-probe→apply command + the in-flight capture is cleared.
+    #[test]
+    fn p15_passphrase_button_empty_sets_required_error_and_returns_none() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            app.passphrase_unlock_required.set(false);
+            app.passphrase_draft.borrow_mut().clear();
+        }
+        let app = root.app.borrow();
+        let command = passphrase_button_command(&app);
+        assert!(command.is_none(), "empty draft must NOT push a command");
+        let status = app.settings_encryption_status.borrow();
+        match status.as_ref() {
+            Some(SettingsBackupStatus::Error(msg)) => assert_eq!(
+                msg.as_str(),
+                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_REQUIRED)
+            ),
+            other => panic!("expected localized ENCRYPTION_REQUIRED error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p15_passphrase_button_set_returns_set_command_and_clears_capture() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            app.passphrase_unlock_required.set(false);
+            *app.passphrase_draft.borrow_mut() = "  hunter2  ".to_owned();
+            app.passphrase_entry_active.set(true);
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::Passphrase);
+        }
+        let app = root.app.borrow();
+        match passphrase_button_command(&app) {
+            Some(Command::SetEncryptionPassphrase(pw)) => {
+                // Trimmed before commit.
+                assert_eq!(pw.as_str(), "hunter2");
+            }
+            other => panic!("expected SetEncryptionPassphrase, got {other:?}"),
+        }
+        // In-flight capture cleared + field blurred.
+        assert!(!app.passphrase_entry_active.get());
+        assert!(app.passphrase_draft.borrow().is_empty());
+        assert_eq!(
+            app.settings_focused_field.get(),
+            bento_nano_app::SettingsTextField::None
+        );
+    }
+
+    #[test]
+    fn p15_passphrase_button_unlock_returns_unlock_command() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            // Unlock-required → the button routes to the unlock command.
+            app.passphrase_unlock_required.set(true);
+            *app.passphrase_draft.borrow_mut() = "openme".to_owned();
+        }
+        let app = root.app.borrow();
+        assert!(matches!(
+            passphrase_button_command(&app),
+            Some(Command::UnlockEncryptionPassphrase(_))
+        ));
+    }
+
+    /// W1 (#7 fix wave 2026-06-01) — `save_settings_general` captures the two §2
+    /// Paths drafts under the same borrow it batches the toggles with. The
+    /// process-global vault isn't installed in a headless test, so Save takes the
+    /// "vault global not installed" early-out — but that path STILL captures the
+    /// drafts (proving they're read under the same borrow) and clears the dirty
+    /// flag. Pin that the drafts are read (no panic / no borrow conflict) and the
+    /// post-save state is clean. Pure CPU (no vault, no window).
+    #[test]
+    fn w1_save_settings_general_captures_path_drafts_without_panicking() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            app.settings_dirty.set(true);
+            *app.desktop_path_draft.borrow_mut() = smol_str::SmolStr::new("F:\\Desk");
+            *app.watch_paths_draft.borrow_mut() = smol_str::SmolStr::new("F:\\W1\nF:\\W2");
+        }
+        // Reads desktop_path_draft + watch_paths_draft under the same borrow as
+        // the toggles; the no-vault early-out clears dirty. The drafts must
+        // survive the call (Save persists them; it never mutates the in-memory
+        // drafts).
+        save_settings_general(&root);
+        let app = root.app.borrow();
+        assert!(!app.settings_dirty.get(), "Save clears the dirty flag");
+        assert_eq!(app.desktop_path_draft.borrow().as_str(), "F:\\Desk");
+        assert_eq!(app.watch_paths_draft.borrow().as_str(), "F:\\W1\nF:\\W2");
     }
 
     #[test]
@@ -31500,13 +32191,16 @@ mod tests {
                 value: bento_nano_app::SettingValue::Str(smol_str::SmolStr::new_static("Dpapi")),
             }
         );
+        // M7 (2026-06-01) — `next_encryption_mode` removed (the orphan cycle is
+        // replaced by the §10 3-button grid that sets each mode explicitly).
+        // The §10 None/Dpapi buttons route through this command helper, so pin
+        // the "None" wire string too.
         assert_eq!(
-            next_encryption_mode(SettingsEncryptionMode::None),
-            SettingsEncryptionMode::Dpapi
-        );
-        assert_eq!(
-            next_encryption_mode(SettingsEncryptionMode::Dpapi),
-            SettingsEncryptionMode::None
+            encryption_mode_setting_command_for(SettingsEncryptionMode::None),
+            Command::SetSetting {
+                key: smol_str::SmolStr::new_static("encryption.mode"),
+                value: bento_nano_app::SettingValue::Str(smol_str::SmolStr::new_static("None")),
+            }
         );
         assert_eq!(
             encryption_mode_from_wire("None"),

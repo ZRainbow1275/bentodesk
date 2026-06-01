@@ -236,6 +236,18 @@ impl ItemHoverState {
         (hover_t, press_t)
     }
 
+    /// True while `card` is the card under an actively-held pointer-down
+    /// (press entered, not yet released). FIX 1 (M3-A3) uses this to DROP the
+    /// hover translateY(-1px) lift while pressed — Tauri's `.item-card:active`
+    /// respecifies `transform: scale(0.97)` (scale-only), so per CSS
+    /// specificity the inherited `:hover` `translateY(-1px)` is overwritten
+    /// while the pointer is held. On release (`press_down` false) the lift
+    /// returns even as the press scale ramps back out.
+    #[inline]
+    pub fn press_held(&self, card: (ZoneId, ZoneItemId)) -> bool {
+        self.press_down && self.pressed == Some(card)
+    }
+
     /// True when any ramp is in flight — lets the shell keep the frame pump
     /// alive without mutating state (read-only companion to `tick`).
     #[inline]
@@ -279,6 +291,19 @@ pub struct ItemCardChrome {
     pub text: Color,
     /// Icon glyph text.
     pub icon_text: Color,
+    /// M3-A3 hover background — Tauri `:hover { background: var(--surface-hover) }`.
+    /// The renderer lerps `normal_background` → this by `hover_t`.
+    pub hover_background: Color,
+    /// M3-A3 hover border — Tauri `:hover { border-color: var(--border-hover) }`.
+    /// A 1px stroke whose alpha lerps transparent → this by `hover_t`.
+    pub hover_border: Color,
+    /// M3-A3 hover drop shadow — Tauri `--shadow-item-hover` outer layer
+    /// `0 2px 8px rgba(0,0,0,0.12)` (offset_y 2, blur 8, alpha 0.12). Painted
+    /// behind the card at alpha scaled by `hover_t`.
+    pub hover_shadow_outer: Color,
+    /// M3-A3 hover drop shadow — Tauri `--shadow-item-hover` ambient layer
+    /// `0 8px 24px rgba(0,0,0,0.08)` (offset_y 8, blur 24, alpha 0.08).
+    pub hover_shadow_inner: Color,
 }
 
 impl ItemCardChrome {
@@ -292,6 +317,8 @@ impl ItemCardChrome {
             radius::DEFAULT,
             PALETTE_DARK.surface_subtle,
             PALETTE_DARK.text_secondary,
+            PALETTE_DARK.surface_hover,
+            PALETTE_DARK.border_hover,
         )
     }
 
@@ -316,6 +343,8 @@ impl ItemCardChrome {
         _radius: RadiusTokens,
         surface_subtle: Color,
         text_secondary: Color,
+        surface_hover: Color,
+        border_hover: Color,
     ) -> Self {
         use bento_nano_style::tokens::RADIUS;
         Self {
@@ -327,6 +356,17 @@ impl ItemCardChrome {
             missing_background: with_alpha(palette.danger, 0.10),
             text: text_secondary,
             icon_text: with_alpha(palette.text, 0.94),
+            // M3-A3 — Tauri `--shadow-item-hover` is theme-independent
+            // (black at fixed alphas in BOTH dark/light variables.css; the
+            // dark stack is the parity target). `--surface-hover` /
+            // `--border-hover` arrive from the live `PaletteTauri` so the
+            // hover chrome re-skins with the active theme.
+            hover_background: surface_hover,
+            hover_border: border_hover,
+            // 0 2px 8px rgba(0,0,0,0.12)
+            hover_shadow_outer: Color::from_u8(0x00, 0x00, 0x00, 0x1F),
+            // 0 8px 24px rgba(0,0,0,0.08)
+            hover_shadow_inner: Color::from_u8(0x00, 0x00, 0x00, 0x14),
         }
     }
 }
@@ -392,13 +432,22 @@ pub fn build_with(variant: CardVariant) -> WidgetNode {
         direction: variant.direction(),
         width: Length::Auto,
         height: Length::Px(variant.height_px()),
+        // M3-A3 (2026-05-29) — corrected to Tauri `ItemCard.css` 1:1.
+        // Standard `.item-card { padding: 8px 4px }` (vert 8 / horiz 4);
+        // Wide `.item-card--wide { padding: 10px 12px }` (vert 10 / horiz 12).
+        // (Was a symmetric 6 / 6+8 placeholder.)
         padding: match variant {
-            CardVariant::Standard => Edges::all(6.0),
+            CardVariant::Standard => Edges {
+                top: 8.0,
+                right: 4.0,
+                bottom: 8.0,
+                left: 4.0,
+            },
             CardVariant::Wide => Edges {
-                top: 6.0,
-                right: 8.0,
-                bottom: 6.0,
-                left: 8.0,
+                top: 10.0,
+                right: 12.0,
+                bottom: 10.0,
+                left: 12.0,
             },
         },
         ..ContainerNode::default()
@@ -703,11 +752,59 @@ mod tests {
             radius,
             bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
             bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+            bento_nano_style::tokens::PALETTE_DARK.surface_hover,
+            bento_nano_style::tokens::PALETTE_DARK.border_hover,
         );
 
         assert_eq!(
             chrome.card_radius,
             BorderRadius::all(bento_nano_style::tokens::RADIUS.card)
         );
+    }
+
+    #[test]
+    fn card_hover_lift_dy_zero_at_idle_minus_one_at_full_hover() {
+        // FIX 1 — the renderer offsets `card_rect.y` by `CARD_HOVER_LIFT_DY *
+        // hover_t`, mirroring Tauri `:hover { transform: translateY(-1px) }`.
+        // At idle (hover_t 0) the lift is 0; at full hover (hover_t 1) it is
+        // exactly -1 px; mid-hover lerps linearly. The renderer applies the
+        // const directly so this pure check pins the contract the const must
+        // satisfy.
+        let lift_at = |hover_t: f32| CARD_HOVER_LIFT_DY * hover_t;
+        assert!(lift_at(0.0).abs() < 1e-6, "idle card must not lift");
+        assert!(
+            (lift_at(1.0) - (-1.0)).abs() < 1e-6,
+            "full hover must lift exactly -1px"
+        );
+        // Monotone upward (more negative) as hover ramps in.
+        assert!(lift_at(0.5) < 0.0 && lift_at(0.5) > lift_at(1.0));
+        assert!((lift_at(0.5) - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn item_card_chrome_exposes_tauri_hover_chrome_tokens() {
+        // FIX 2 — hover background/border come from the live palette; the
+        // two-layer `--shadow-item-hover` is theme-independent black at the
+        // Tauri alphas (0.12 outer / 0.08 inner).
+        let palette = bento_nano_theme::current().palette;
+        let chrome = ItemCardChrome::from_tokens(
+            palette,
+            radius::DEFAULT,
+            bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+            bento_nano_style::tokens::PALETTE_DARK.surface_hover,
+            bento_nano_style::tokens::PALETTE_DARK.border_hover,
+        );
+        assert_eq!(
+            chrome.hover_background,
+            bento_nano_style::tokens::PALETTE_DARK.surface_hover
+        );
+        assert_eq!(
+            chrome.hover_border,
+            bento_nano_style::tokens::PALETTE_DARK.border_hover
+        );
+        // 0.12 * 255 ≈ 31 (0x1F); 0.08 * 255 ≈ 20 (0x14).
+        assert_eq!(chrome.hover_shadow_outer, Color::from_u8(0, 0, 0, 0x1F));
+        assert_eq!(chrome.hover_shadow_inner, Color::from_u8(0, 0, 0, 0x14));
     }
 }
