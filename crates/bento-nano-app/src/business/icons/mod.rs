@@ -105,10 +105,12 @@ impl IconKind {
         const TABLE: &[(&str, IconKind)] = &[
             ("folder", IconKind::Folder),
             ("document", IconKind::Document),
+            ("file", IconKind::Document),
             ("image", IconKind::Image),
             ("music", IconKind::Music),
             ("video", IconKind::Video),
             ("code", IconKind::Code),
+            ("terminal", IconKind::Code),
             ("download", IconKind::Download),
             ("archive", IconKind::Archive),
             ("star", IconKind::Star),
@@ -279,8 +281,10 @@ pub const ALL_ICON_KINDS: [IconKind; 30] = [
 ];
 
 /// Three-namespace icon dispatcher. Mirrors the four branches of 1.x
-/// `ZoneIcon`'s `parsed` memo. `Text` covers both "bare unknown name"
-/// and "explicit emoji" — both are rendered as a single text run.
+/// `ZoneIcon`'s `parsed` memo. `Text` preserves bare unknown names and
+/// explicit emoji payloads for wire compatibility; selected-stack runtime
+/// renderers map that branch to a neutral built-in glyph instead of painting
+/// the payload as visible icon text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IconRef {
     Builtin(IconKind),
@@ -376,6 +380,8 @@ mod tests {
             IconRef::parse("folder-open"),
             IconRef::Builtin(IconKind::FolderOpen)
         );
+        assert_eq!(IconRef::parse("file"), IconRef::Builtin(IconKind::Document));
+        assert_eq!(IconRef::parse("terminal"), IconRef::Builtin(IconKind::Code));
     }
 
     #[test]

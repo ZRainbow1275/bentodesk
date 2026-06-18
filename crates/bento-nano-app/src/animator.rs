@@ -1,22 +1,15 @@
 //! V-8 (2026-05-21 video parity audit) — capsule pill animation engine.
 //!
-//! Tauri 1.2.4 reference (`resource/屏幕录制 2026-05-20 161936.mp4` frames
-//! 001–088) shows zone pills with four discrete animation channels layered
-//! on top of the static pill chrome:
+//! Tauri 1.2.4 reference frames show zone pills with discrete animation
+//! channels layered on top of the static pill chrome:
 //!
-//! - `PillHover` — hover-in scales 1.0 → 1.04 over 160 ms (ease_out_cubic);
-//!   hover-out restores over 220 ms.
-//! - `PillPress` — pointer-down nudges 1.0 → 1.03 (down-scale 0.97) over
-//!   80 ms; release restores over 120 ms.
-//! - `PillExpand` — collapse → expand morph over 200 ms (ease_in_out_quad).
-//!   This channel **complements** the existing `AppState::zone_pill_anim_*`
-//!   fields (Wave G2) which still drive the in-flight rect/radius morph in
-//!   `draw_zones`; the channel exists here so the sampler API is uniform
-//!   for future call sites that want a unified eased value (e.g. shadow
-//!   modulation).
-//! - `StatusDotPulse` — continuous breathing pulse for the H2 status dot.
-//!   Phase derived from `now_ms.rem(PULSE_PERIOD_MS)`, so multiple pills
-//!   stay in lockstep without per-zone book-keeping.
+//! - `PillHover` keeps geometry fixed and drives the surface-tone reaction;
+//!   hover-in runs over 160 ms and hover-out over 220 ms.
+//! - `PillPress` keeps geometry fixed and supplies the press timing channel;
+//!   pointer-down runs over 80 ms and release restores over 120 ms.
+//! - `StatusDotPulse` is retained as a pure helper for a future status-dot
+//!   paint consumer. The current renderer does not sample it, so it must not
+//!   keep the shell frame pump alive on its own.
 //!
 //! Spec §10 (hot-path zero allocation): backing storage is a fixed-size
 //! inline array (`[Option<Entry>; 64]`) — no `Vec`, no `String`, no `Box`.
@@ -32,8 +25,9 @@
 use bento_nano_zone::ZoneId;
 
 /// Maximum simultaneous animator entries. 64 is comfortably above the
-/// 16-zone live seed scene (4 channels × 16 zones = 64) and keeps the
-/// inline backing array small. Spec §10 — zero alloc.
+/// 16-zone live seed scene (2 stateful channels × 16 zones = 32 after the
+/// #2 step-6 PillExpand removal) and keeps the inline backing array small.
+/// Spec §10 — zero alloc.
 pub const ANIMATOR_CAPACITY: usize = 64;
 
 /// V-8 — hover-in duration. Tauri reference: ~160 ms snap.
@@ -44,8 +38,11 @@ pub const HOVER_OUT_DURATION_MS: u32 = 220;
 pub const PRESS_DOWN_DURATION_MS: u32 = 80;
 /// V-8 — press-release duration.
 pub const PRESS_UP_DURATION_MS: u32 = 120;
-/// V-8 — expand/collapse duration. ≤200 ms cap (Wave G2 contract).
-pub const EXPAND_DURATION_MS: u32 = 200;
+// #2 step 6 (2026-06-02) — `EXPAND_DURATION_MS` (=200) and the dead
+// `AnimChannel::PillExpand` it timed were REMOVED. The pill↔panel expand is
+// owned solely by the Wave G2 `zone_pill_anim_*` state machine on the M3
+// easeOutBack@500ms curve; the V-8 PillExpand channel was never sampled
+// (render samples only PillHover/PillPress), a dead parallel timeline.
 /// V-8 — status-dot pulse period. 1600 ms full cycle = 0.6 → 1.0 → 0.6.
 pub const PULSE_PERIOD_MS: u32 = 1600;
 /// V-12 (2026-05-21) — pill hover scale **disabled** (0.0). The collapsed
@@ -65,13 +62,16 @@ pub const PRESS_SCALE_DELTA: f32 = 0.0;
 pub const PULSE_ALPHA_FLOOR: f32 = 0.6;
 pub const PULSE_ALPHA_SPAN: f32 = 0.4;
 
-/// Four discrete per-pill animation channels. Stored alongside the target
-/// `ZoneId` so the same animator can drive an arbitrary number of pills.
+/// The live per-pill animation channels. Stored alongside the target `ZoneId`
+/// so the same animator can drive an arbitrary number of pills.
+///
+/// #2 step 6 (2026-06-02) — the dead `PillExpand` channel was removed; the
+/// structural expand is owned by the Wave G2 `zone_pill_anim_*` state machine,
+/// not this animator (the renderer samples only `PillHover`/`PillPress`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimChannel {
     PillHover,
     PillPress,
-    PillExpand,
     /// Status-dot pulse is global (every count>0 dot pulses in lockstep), so
     /// the sampler ignores the `ZoneId` for this channel.
     StatusDotPulse,
@@ -88,11 +88,11 @@ pub enum Easing {
     /// ease-out-cubic helper was removed in M3 once the live pill morph moved
     /// to the easeOutBack curve; this variant keeps its own inline impl below.)
     EaseOutCubic,
-    /// Ease-in-out quadratic — symmetric S-curve. Reference Tauri's CSS
-    /// `cubic-bezier(0.25, 0.1, 0.25, 1.0)` close enough for the 200 ms
-    /// expand/collapse channel.
-    EaseInOutQuad,
 }
+// #2 step 6 (2026-06-02) — the `EaseInOutQuad` selector variant was removed
+// with the dead `PillExpand` channel (it had no other live producer). The
+// `ease_in_out_quad` curve fn below is kept — `status_dot_pulse` calls it
+// directly to smooth the breathing triangle wave.
 
 #[inline]
 pub fn ease_linear(t: f32) -> f32 {
@@ -122,7 +122,6 @@ fn apply_easing(easing: Easing, t: f32) -> f32 {
     match easing {
         Easing::Linear => ease_linear(t),
         Easing::EaseOutCubic => ease_out_cubic(t),
-        Easing::EaseInOutQuad => ease_in_out_quad(t),
     }
 }
 
@@ -408,7 +407,15 @@ mod tests {
     #[test]
     fn start_and_sample_at_zero_returns_from() {
         let mut a = Animator::new();
-        a.start(z(1), AnimChannel::PillHover, 1_000, 160, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(1),
+            AnimChannel::PillHover,
+            1_000,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         let s = a.sample(z(1), AnimChannel::PillHover, 1_000);
         assert!(s.abs() < 1e-5);
     }
@@ -416,7 +423,15 @@ mod tests {
     #[test]
     fn sample_at_full_duration_returns_to() {
         let mut a = Animator::new();
-        a.start(z(2), AnimChannel::PillPress, 100, 80, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(2),
+            AnimChannel::PillPress,
+            100,
+            80,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         let s = a.sample(z(2), AnimChannel::PillPress, 100 + 80);
         assert!((s - 1.0).abs() < 1e-5);
     }
@@ -424,15 +439,31 @@ mod tests {
     #[test]
     fn sample_past_end_clamps_to_terminal() {
         let mut a = Animator::new();
-        a.start(z(3), AnimChannel::PillExpand, 0, 200, 0.0, 1.0, Easing::EaseInOutQuad);
-        let s = a.sample(z(3), AnimChannel::PillExpand, 10_000);
+        a.start(
+            z(3),
+            AnimChannel::PillPress,
+            0,
+            200,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
+        let s = a.sample(z(3), AnimChannel::PillPress, 10_000);
         assert!((s - 1.0).abs() < 1e-5);
     }
 
     #[test]
     fn cancel_drops_entry() {
         let mut a = Animator::new();
-        a.start(z(4), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(4),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         assert_eq!(a.occupancy(), 1);
         a.cancel(z(4), AnimChannel::PillHover);
         assert_eq!(a.occupancy(), 0);
@@ -443,20 +474,51 @@ mod tests {
     #[test]
     fn start_overwrites_existing_slot_no_growth() {
         let mut a = Animator::new();
-        a.start(z(5), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
-        a.start(z(5), AnimChannel::PillHover, 50, 220, 0.5, 0.0, Easing::EaseOutCubic);
+        a.start(
+            z(5),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
+        a.start(
+            z(5),
+            AnimChannel::PillHover,
+            50,
+            220,
+            0.5,
+            0.0,
+            Easing::EaseOutCubic,
+        );
         assert_eq!(a.occupancy(), 1);
     }
 
     #[test]
     fn start_or_reverse_picks_up_current_value() {
         let mut a = Animator::new();
-        a.start(z(6), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(6),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         // Sample halfway.
         let mid = a.sample(z(6), AnimChannel::PillHover, 80);
         assert!(mid > 0.0 && mid < 1.0);
         // Reverse mid-flight back toward 0.0.
-        a.start_or_reverse(z(6), AnimChannel::PillHover, 80, 220, 0.0, Easing::EaseOutCubic);
+        a.start_or_reverse(
+            z(6),
+            AnimChannel::PillHover,
+            80,
+            220,
+            0.0,
+            Easing::EaseOutCubic,
+        );
         let after = a.sample(z(6), AnimChannel::PillHover, 80);
         // Continuity — the sample at the reversal moment equals `mid`.
         assert!((after - mid).abs() < 1e-4);
@@ -465,8 +527,24 @@ mod tests {
     #[test]
     fn multiple_zones_independent() {
         let mut a = Animator::new();
-        a.start(z(10), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
-        a.start(z(11), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(10),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
+        a.start(
+            z(11),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         a.cancel(z(10), AnimChannel::PillHover);
         // 11 still present.
         assert!(a.sample(z(11), AnimChannel::PillHover, 160) > 0.99);
@@ -477,8 +555,24 @@ mod tests {
     #[test]
     fn tick_retires_zero_terminal_entries() {
         let mut a = Animator::new();
-        a.start(z(12), AnimChannel::PillHover, 0, 160, 1.0, 0.0, Easing::EaseOutCubic);
-        a.start(z(13), AnimChannel::PillHover, 0, 160, 0.0, 1.0, Easing::EaseOutCubic);
+        a.start(
+            z(12),
+            AnimChannel::PillHover,
+            0,
+            160,
+            1.0,
+            0.0,
+            Easing::EaseOutCubic,
+        );
+        a.start(
+            z(13),
+            AnimChannel::PillHover,
+            0,
+            160,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         let _ = a.tick(160);
         // Zero-terminal retired, one-terminal held.
         assert!(a.sample(z(12), AnimChannel::PillHover, 200).abs() < f32::EPSILON);
@@ -489,7 +583,15 @@ mod tests {
     fn is_active_tracks_in_flight_entries() {
         let mut a = Animator::new();
         assert!(!a.is_active(0));
-        a.start(z(14), AnimChannel::PillExpand, 0, 200, 0.0, 1.0, Easing::EaseInOutQuad);
+        a.start(
+            z(14),
+            AnimChannel::PillPress,
+            0,
+            200,
+            0.0,
+            1.0,
+            Easing::EaseOutCubic,
+        );
         assert!(a.is_active(100));
         assert!(!a.is_active(300));
     }
@@ -580,7 +682,9 @@ mod tests {
         assert_eq!(HOVER_OUT_DURATION_MS, 220);
         assert_eq!(PRESS_DOWN_DURATION_MS, 80);
         assert_eq!(PRESS_UP_DURATION_MS, 120);
-        assert_eq!(EXPAND_DURATION_MS, 200);
+        // #2 step 6 (2026-06-02) — EXPAND_DURATION_MS removed with the dead
+        // PillExpand channel; the expand timeline is the Wave G2
+        // ZONE_PILL_ANIM_DURATION_MS (500ms) pinned in zone_pill_geometry.
         assert_eq!(PULSE_PERIOD_MS, 1_600);
     }
 
@@ -589,7 +693,9 @@ mod tests {
     // covers the seeded scene demand.
     #[allow(clippy::assertions_on_constants)]
     fn capacity_above_seed_scene_demand() {
-        // 16 seeded zones × 3 stateful channels (hover/press/expand) = 48.
-        assert!(ANIMATOR_CAPACITY >= 48);
+        // #2 step 6 (2026-06-02) — after removing the dead PillExpand channel
+        // there are 2 stateful per-zone channels (hover/press; StatusDotPulse
+        // is global and never stored). 16 seeded zones × 2 = 32.
+        assert!(ANIMATOR_CAPACITY >= 32);
     }
 }

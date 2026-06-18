@@ -22,8 +22,8 @@ use bento_nano_style::tokens::{
     TypographyTauri,
 };
 use bento_nano_theme::{
-    DARK_DEFAULT, LIGHT_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens,
-    THEMES, ThemeTokens, TypoTokens,
+    DARK_DEFAULT, LIGHT_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens, THEMES,
+    ThemeTokens, TypoTokens,
 };
 use bento_nano_tree::{NodeId, Tree, TreeError};
 use bento_nano_widget::WidgetNode;
@@ -725,6 +725,15 @@ pub struct AppState {
     /// in `handle_lbutton_up`. `Copy`, alloc-free — matches the `zone_drag`
     /// idiom.
     pub zone_drag_origin: Cell<Option<(i32, i32, bool)>>,
+    /// Whether the dragged zone's body was visible before mouse-down selection.
+    /// A drag that starts from a collapsed pill must keep rendering/hitting the
+    /// pill even though mouse-down also selects the zone; a drag that starts from
+    /// an already-expanded body keeps the body.
+    pub zone_drag_body_visible_at_start: Cell<Option<(ZoneId, bool)>>,
+    /// Selection active before the current zone drag began. A drag that started
+    /// from a collapsed pill is not a click, so mouse-up restores this selection
+    /// instead of leaving the dragged pill expanded.
+    pub zone_drag_selected_before_start: Cell<Option<ZoneId>>,
     /// In-flight resize — `Some((zone, w0, h0))` where (w0, h0) is the
     /// zone's size at mouse-down (delta added each MOUSEMOVE).
     pub zone_resize: Cell<Option<(ZoneId, i32, i32)>>,
@@ -766,12 +775,11 @@ pub struct AppState {
     /// `true` when the animation is opening (pill → expanded), `false` when
     /// closing (expanded → pill). Determines which end-state is `progress=1`.
     pub zone_pill_anim_expanding: Cell<bool>,
-    /// V-8 (2026-05-21) — capsule pill animator covering hover / press /
-    /// expand / status-dot pulse channels. See `animator.rs` for the full
-    /// channel + easing contract. The Wave G2 `zone_pill_anim_*` fields
-    /// above still drive the rect/radius morph in `draw_zones`; the new
-    /// animator layers hover-in/out + press feedback + the breathing pulse
-    /// at paint time without mutating persisted geometry tokens.
+    /// V-8 (2026-05-21) capsule pill animator for hover / press feedback.
+    /// The Wave G2 `zone_pill_anim_*` fields above drive the structural
+    /// rect/radius morph in `draw_zones`. `StatusDotPulse` helpers remain in
+    /// `animator.rs`, but the current paint path has no status-dot consumer,
+    /// so pulse state must not keep the shell repaint pump alive by itself.
     pub pill_animator: RefCell<Animator>,
     /// V-8 — zone currently registered as "pressed" (mouse-down inside a
     /// pill rect). Cleared on mouse-up regardless of release location so
@@ -958,6 +966,8 @@ impl AppState {
             dirty: Cell::new(false),
             zone_drag: Cell::new(None),
             zone_drag_origin: Cell::new(None),
+            zone_drag_body_visible_at_start: Cell::new(None),
+            zone_drag_selected_before_start: Cell::new(None),
             zone_resize: Cell::new(None),
             item_drag: RefCell::new(None),
             stack_tray: RefCell::new(None),
@@ -1201,14 +1211,14 @@ impl AppState {
             bento_nano_style::tokens::radius_tauri_for_theme(id.as_str()).unwrap_or(RADIUS);
         let shadow_tauri =
             bento_nano_style::tokens::shadow_tauri_for_theme(id.as_str()).unwrap_or(SHADOW);
-        let typography_tauri = bento_nano_style::tokens::typography_tauri_for_theme(id.as_str())
-            .unwrap_or(TYPOGRAPHY);
+        let typography_tauri =
+            bento_nano_style::tokens::typography_tauri_for_theme(id.as_str()).unwrap_or(TYPOGRAPHY);
         // M6c — resolve the per-theme effect (scanlines/neon/chromatic) while
         // `id` is still borrowable. 3 builtins set one; everything else (incl.
         // custom JSON) falls back to `EffectTauri::None`. Family-1 only — the
         // effect does NOT fold into `ThemeTokens` (no Family-2 bridge).
-        let effect_tauri =
-            bento_nano_style::tokens::effect_tauri_for_theme(id.as_str()).unwrap_or(EffectTauri::None);
+        let effect_tauri = bento_nano_style::tokens::effect_tauri_for_theme(id.as_str())
+            .unwrap_or(EffectTauri::None);
         {
             let mut current_id = self.active_theme_id.borrow_mut();
             if *current_id != id {
@@ -1351,6 +1361,65 @@ impl AppState {
             }
             ZoneDisplayMode::Click => self.selected_zone.get() == Some(zone.id),
         }
+    }
+
+    /// Z-order (2026-06-02) — whether `zone`'s SETTLED render surface is the
+    /// expanded body (panel) rather than the collapsed pill. This is the exact
+    /// `pill_body_visible` rule shared by the paint side (`Renderer::draw_zones`)
+    /// and the hit sides (`effective_zone_hit_rect` / `effective_zone_chrome_rect`):
+    ///
+    /// - A stack anchor's body is visible only when it is explicitly SELECTED (a
+    ///   focused member) — never on mere hover (hover shows the bloom).
+    /// - A normal zone's body follows `zone_body_visible_for_mode`.
+    /// - In BOTH cases a RESIZE (armable only on an already-expanded panel) forces
+    ///   the body so the resize drag keeps the panel rect.
+    /// - A zone drag preserves the mouse-down visual form: collapsed-pill drags
+    ///   stay pills even though mouse-down also selects the zone; expanded-body
+    ///   drags stay bodies.
+    ///
+    /// SSoT so paint, hit-rect, and z-layering can never drift.
+    pub fn zone_pill_body_visible(&self, zone: &Zone) -> bool {
+        let resize_id = self.zone_resize.get().map(|t| t.0);
+        let drag_started_collapsed = self
+            .zone_drag
+            .get()
+            .filter(|(dragged, _, _)| *dragged == zone.id)
+            .and_then(|(dragged, _, _)| {
+                self.zone_drag_body_visible_at_start
+                    .get()
+                    .filter(|(recorded, _)| *recorded == dragged)
+                    .map(|(_, body_visible)| !body_visible)
+            })
+            .unwrap_or(false);
+        if drag_started_collapsed {
+            return Some(zone.id) == resize_id;
+        }
+        if zone.is_stack_anchor() {
+            self.selected_zone.get() == Some(zone.id) || Some(zone.id) == resize_id
+        } else {
+            self.zone_body_visible_for_mode(zone) || Some(zone.id) == resize_id
+        }
+    }
+
+    /// Z-order (2026-06-02) — whether `zone` belongs to the TOP draw/hit layer.
+    /// A zone is on top when its body is visible (settled expanded panel) OR a
+    /// pill↔panel morph is in flight for it. The expanded/morphing zones form the
+    /// top layer; all collapsed pills are the bottom layer. `draw_zones` paints
+    /// the bottom layer first then the top layer (so a panel occludes any pill it
+    /// overlaps); the hit/hover resolvers test the top layer first (so a point
+    /// inside an expanded panel resolves to the panel, never a pill behind it).
+    /// Stack anchors never run the morph, so for them this collapses to the
+    /// body-visible rule. SSoT shared by paint and hit so the two can't drift.
+    pub fn zone_on_top(&self, zone: &Zone) -> bool {
+        if self.zone_pill_body_visible(zone) {
+            return true;
+        }
+        // Morph in flight (pill ↔ panel). Anchors don't morph.
+        if !zone.is_stack_anchor() && self.zone_pill_anim_zone.get() == Some(zone.id) {
+            let p = self.zone_pill_anim_progress.get();
+            return p > 0.0 && p < 1.0;
+        }
+        false
     }
 
     pub fn show_tooltip_text(&self, text: SmolStr) -> bool {
@@ -1530,7 +1599,8 @@ mod tests {
         assert_eq!(app.settings_focused_field.get(), SettingsTextField::None);
         // None/Passphrase fields are no-ops for the non-passphrase edit ops.
         assert!(!app.settings_focused_push_char('a'));
-        app.settings_focused_field.set(SettingsTextField::Passphrase);
+        app.settings_focused_field
+            .set(SettingsTextField::Passphrase);
         assert!(!app.settings_focused_push_char('a'));
         assert!(!app.settings_focused_backspace());
         assert_eq!(app.settings_focused_caret(), 0);
@@ -1540,7 +1610,8 @@ mod tests {
     fn settings_focused_push_char_appends_and_caps() {
         let app = AppState::new();
         // DesktopPath — clear the seeded default, then append. Cap = 260.
-        app.settings_focused_field.set(SettingsTextField::DesktopPath);
+        app.settings_focused_field
+            .set(SettingsTextField::DesktopPath);
         *app.desktop_path_draft.borrow_mut() = SmolStr::default();
         assert!(app.settings_focused_push_char('C'));
         assert!(app.settings_focused_push_char(':'));
@@ -1560,7 +1631,8 @@ mod tests {
 
         // WatchValues — newline IS allowed (one path per line); other controls
         // rejected. Non-ASCII (Chinese path) accepted.
-        app.settings_focused_field.set(SettingsTextField::WatchValues);
+        app.settings_focused_field
+            .set(SettingsTextField::WatchValues);
         *app.watch_paths_draft.borrow_mut() = SmolStr::default();
         assert!(app.settings_focused_push_char('D'));
         assert!(app.settings_focused_push_char('\n'));
@@ -1574,7 +1646,8 @@ mod tests {
     #[test]
     fn settings_focused_backspace_pops_last_scalar() {
         let app = AppState::new();
-        app.settings_focused_field.set(SettingsTextField::WatchValues);
+        app.settings_focused_field
+            .set(SettingsTextField::WatchValues);
         // Mix ASCII + a multi-byte CJK scalar; backspace must pop the scalar,
         // not a partial byte.
         *app.watch_paths_draft.borrow_mut() = SmolStr::new("a桌");
@@ -1589,7 +1662,8 @@ mod tests {
     #[test]
     fn settings_focused_caret_equals_char_count() {
         let app = AppState::new();
-        app.settings_focused_field.set(SettingsTextField::DesktopPath);
+        app.settings_focused_field
+            .set(SettingsTextField::DesktopPath);
         *app.desktop_path_draft.borrow_mut() = SmolStr::new("C:\\桌面");
         // 5 scalar values: C : \ 桌 面 (CJK counts as ONE each).
         assert_eq!(app.settings_focused_caret(), 5);
@@ -1747,9 +1821,23 @@ mod tests {
         // the accessors return the per-theme const for all 17 builtins.
         let app = AppState::new();
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(app.apply_active_theme_by_id(id).is_some(), "{id} applied");
             assert_eq!(
@@ -1778,9 +1866,23 @@ mod tests {
         use bento_nano_style::tokens::EffectTauri;
         let app = AppState::new();
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(app.apply_active_theme_by_id(id).is_some(), "{id} applied");
             assert_eq!(
@@ -1796,7 +1898,10 @@ mod tests {
             EffectTauri::Scanlines(_)
         ));
         assert_eq!(app.apply_active_theme_by_id("cyberpunk"), Some(true));
-        assert!(matches!(app.active_theme_effect_tauri(), EffectTauri::Neon(_)));
+        assert!(matches!(
+            app.active_theme_effect_tauri(),
+            EffectTauri::Neon(_)
+        ));
         assert_eq!(app.apply_active_theme_by_id("editorial"), Some(true));
         assert!(matches!(
             app.active_theme_effect_tauri(),
@@ -1834,11 +1939,17 @@ mod tests {
         // M6b that returns Consolas for terminal (closing the partial).
         let app = AppState::new();
         assert_eq!(app.apply_active_theme_by_id("terminal"), Some(true));
-        assert_eq!(app.active_theme_typography().font_family.as_str(), "Consolas");
+        assert_eq!(
+            app.active_theme_typography().font_family.as_str(),
+            "Consolas"
+        );
         assert_eq!(app.active_theme_typography_tauri().font_family, "Consolas");
         // editorial → Georgia, and its widget radius collapses to sharp 0.
         assert_eq!(app.apply_active_theme_by_id("editorial"), Some(true));
-        assert_eq!(app.active_theme_typography().font_family.as_str(), "Georgia");
+        assert_eq!(
+            app.active_theme_typography().font_family.as_str(),
+            "Georgia"
+        );
         assert_eq!(app.active_theme_radius().xl.top_left, 0.0);
     }
 
@@ -1857,8 +1968,14 @@ mod tests {
         let app = AppState::new();
         assert_eq!(app.apply_active_theme_by_id("ocean-blue"), Some(true));
         assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
-        assert_eq!(app.active_theme_radius(), bento_nano_theme::DARK_DEFAULT.radius);
-        assert_eq!(app.active_theme_shadow(), bento_nano_theme::DARK_DEFAULT.shadow);
+        assert_eq!(
+            app.active_theme_radius(),
+            bento_nano_theme::DARK_DEFAULT.radius
+        );
+        assert_eq!(
+            app.active_theme_shadow(),
+            bento_nano_theme::DARK_DEFAULT.shadow
+        );
         assert_eq!(
             app.active_theme_typography().font_family,
             bento_nano_theme::DARK_DEFAULT.typo.font_family,
@@ -1933,6 +2050,40 @@ mod tests {
         app.selected_zone.set(None);
         app.set_zone_display_mode(ZoneDisplayMode::Always);
         assert!(app.zone_body_visible_for_mode(&zone));
+    }
+
+    #[test]
+    fn zone_drag_from_collapsed_pill_suppresses_mouse_down_selection_expand() {
+        let app = AppState::new();
+        let zone = Zone::new(ZoneId(8), Cow::Borrowed("docs"), 10, 10, 160, 120);
+
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        assert!(!app.zone_pill_body_visible(&zone));
+
+        app.selected_zone.set(Some(zone.id));
+        app.zone_drag.set(Some((zone.id, 4, 4)));
+        app.zone_drag_body_visible_at_start
+            .set(Some((zone.id, false)));
+
+        assert!(!app.zone_pill_body_visible(&zone));
+        assert!(!app.zone_on_top(&zone));
+    }
+
+    #[test]
+    fn zone_drag_from_expanded_body_preserves_expanded_body() {
+        let app = AppState::new();
+        let zone = Zone::new(ZoneId(9), Cow::Borrowed("docs"), 10, 10, 160, 120);
+
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        app.selected_zone.set(Some(zone.id));
+        assert!(app.zone_pill_body_visible(&zone));
+
+        app.zone_drag.set(Some((zone.id, 4, 4)));
+        app.zone_drag_body_visible_at_start
+            .set(Some((zone.id, true)));
+
+        assert!(app.zone_pill_body_visible(&zone));
+        assert!(app.zone_on_top(&zone));
     }
 
     /// M1a 2026-05-29 — `snapshot_settings`/`restore_settings` are the single
@@ -2033,7 +2184,10 @@ mod tests {
         assert!(!app.safe_start_after_hibernation.get());
         assert_eq!(app.hibernate_resume_delay_ms.get(), 3500);
         // W2 — the two §2 Paths drafts round-trip through snapshot → restore.
-        assert_eq!(app.desktop_path_draft.borrow().as_str(), "E:\\Custom\\Desktop");
+        assert_eq!(
+            app.desktop_path_draft.borrow().as_str(),
+            "E:\\Custom\\Desktop"
+        );
         assert_eq!(
             app.watch_paths_draft.borrow().as_str(),
             "E:\\Watch\\A\nE:\\Watch\\B"
@@ -2089,20 +2243,40 @@ mod tests {
     fn m1d_slider_fraction_clamps_and_snaps_to_step() {
         // Expand delay 50..500 step 10.
         assert_eq!(
-            slider_fraction_to_value(0.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                0.0,
+                EXPAND_DELAY_MIN_MS,
+                EXPAND_DELAY_MAX_MS,
+                EXPAND_DELAY_STEP_MS
+            ),
             50
         );
         assert_eq!(
-            slider_fraction_to_value(1.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                1.0,
+                EXPAND_DELAY_MIN_MS,
+                EXPAND_DELAY_MAX_MS,
+                EXPAND_DELAY_STEP_MS
+            ),
             500
         );
         // Below 0 / above 1 saturate at the endpoints (never out of range).
         assert_eq!(
-            slider_fraction_to_value(-5.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                -5.0,
+                EXPAND_DELAY_MIN_MS,
+                EXPAND_DELAY_MAX_MS,
+                EXPAND_DELAY_STEP_MS
+            ),
             50
         );
         assert_eq!(
-            slider_fraction_to_value(9.0, EXPAND_DELAY_MIN_MS, EXPAND_DELAY_MAX_MS, EXPAND_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                9.0,
+                EXPAND_DELAY_MIN_MS,
+                EXPAND_DELAY_MAX_MS,
+                EXPAND_DELAY_STEP_MS
+            ),
             500
         );
         // Midpoint snaps to the nearest 10-step. (50 + 0.5*450 = 275 → 280).
@@ -2140,11 +2314,21 @@ mod tests {
 
         // Hibernate delay 500..5000 step 100.
         assert_eq!(
-            slider_fraction_to_value(0.0, HIBERNATE_DELAY_MIN_MS, HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                0.0,
+                HIBERNATE_DELAY_MIN_MS,
+                HIBERNATE_DELAY_MAX_MS,
+                HIBERNATE_DELAY_STEP_MS
+            ),
             500
         );
         assert_eq!(
-            slider_fraction_to_value(1.0, HIBERNATE_DELAY_MIN_MS, HIBERNATE_DELAY_MAX_MS, HIBERNATE_DELAY_STEP_MS),
+            slider_fraction_to_value(
+                1.0,
+                HIBERNATE_DELAY_MIN_MS,
+                HIBERNATE_DELAY_MAX_MS,
+                HIBERNATE_DELAY_STEP_MS
+            ),
             5000
         );
 
@@ -2161,21 +2345,16 @@ mod tests {
     #[test]
     fn m1d_perf_startup_defaults_in_range() {
         let app = AppState::new();
+        assert!((EXPAND_DELAY_MIN_MS..=EXPAND_DELAY_MAX_MS).contains(&app.expand_delay_ms.get()));
         assert!(
-            (EXPAND_DELAY_MIN_MS..=EXPAND_DELAY_MAX_MS).contains(&app.expand_delay_ms.get())
-        );
-        assert!(
-            (COLLAPSE_DELAY_MIN_MS..=COLLAPSE_DELAY_MAX_MS)
-                .contains(&app.collapse_delay_ms.get())
+            (COLLAPSE_DELAY_MIN_MS..=COLLAPSE_DELAY_MAX_MS).contains(&app.collapse_delay_ms.get())
         );
         assert!((ICON_CACHE_MIN..=ICON_CACHE_MAX).contains(&app.icon_cache_size.get()));
         assert!(
-            (CRASH_MAX_RETRIES_MIN..=CRASH_MAX_RETRIES_MAX)
-                .contains(&app.crash_max_retries.get())
+            (CRASH_MAX_RETRIES_MIN..=CRASH_MAX_RETRIES_MAX).contains(&app.crash_max_retries.get())
         );
         assert!(
-            (CRASH_WINDOW_SECS_MIN..=CRASH_WINDOW_SECS_MAX)
-                .contains(&app.crash_window_secs.get())
+            (CRASH_WINDOW_SECS_MIN..=CRASH_WINDOW_SECS_MAX).contains(&app.crash_window_secs.get())
         );
         assert!(
             (HIBERNATE_DELAY_MIN_MS..=HIBERNATE_DELAY_MAX_MS)

@@ -13,9 +13,9 @@ Source: `bentodesk/src/components/Timeline/TimelinePanel.tsx` (360 LOC) + `Timel
 - **Slider input (`.timeline-slider`):** `width: 100%`, `accent-color: var(--color-accent)`. Native browser range, `min={0} max={length-1} value={activeIdx}`. `onInput` updates dragIndex; `onChange` (release) commits restore.
 - **Markers (`.timeline-markers`):** `position: absolute`, `left: 8px`, `right: 8px`, `top: 8px`, `height: 20px`, `pointer-events: none` on the wrap. Each marker (`.timeline-marker`) is `pointer-events: auto`, transparent button, `transform: translateX(-50%)`, `padding: 2px 4px`, positioned via `left: <pct>%`.
 - **Auto marker dot (`.timeline-marker .dot`):** 6×6 px circle, `rgba(255,255,255,0.45)` bg. Active: 9×9 px, `var(--color-accent)` bg. Hover: `var(--color-accent)` bg.
-- **Pinned marker (`.timeline-marker--pinned .pin-label`):** `★` glyph, `#ffcf4d`, 13 px.
+- **Pinned marker (`.timeline-marker--pinned .pin-label`):** selected-stack `IconKind::Pin` line glyph, `#ffcf4d`, 13 px visual target.
 - **Details card (`.timeline-details__card`):** `rgba(255,255,255,0.04)` bg, `border-radius: 12px`, `padding: 14px 16px`, flex column with 10 px gap.
-  - Top row (`.timeline-details__row`): flex space-between, 12 px text, `opacity: 0.9`. Left: timestamp (`Date.toLocaleString()`). Right (only when pinned): `★ Pinned` in `#ffcf4d`.
+  - Top row (`.timeline-details__row`): flex space-between, 12 px text, `opacity: 0.9`. Left: timestamp (`Date.toLocaleString()`). Right (only when pinned): `IconKind::Pin` glyph in `#ffcf4d`.
   - Delta line (`.timeline-details__delta`): 14 px Semibold (`delta_summary` or fallback "no change" copy).
   - Trigger line (`.timeline-details__trigger`): 11 px `opacity: 0.6` ("Trigger: <name>" or "—").
   - Thumbnail (`.timeline-thumbnail`): centered, `max-width: 480px`, `aspect-ratio: 16/9`, `rgba(255,255,255,0.04)` bg, 1 px `rgba(255,255,255,0.08)` border, `border-radius: 8px`. Each `.timeline-thumbnail__zone` is absolute-positioned coloured rect (`accent_color` fill, `border-radius: 4px`, `opacity: 0.7`, 1 px inset shadow).

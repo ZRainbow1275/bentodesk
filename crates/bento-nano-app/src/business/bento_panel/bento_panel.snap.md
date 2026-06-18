@@ -26,7 +26,7 @@ PanelHeader (icon · title · search · close) → optional SearchBar → ItemGr
 | header-gap-below | 8 px                                   |
 | search-row-h     | 32 px (when expanded)                  |
 | search-collapsed | 0 px (animated 200 ms ease-out)        |
-| item-card font   | 11 px (`PANEL_ITEM_CARD_FONT_PX`)      |
+| item-card font   | 14 px (Tauri `--font-size-md`; live `draw_item_card` SSoT, item_card.snap.md:18) |
 | item-grid cols   | 4 (`PANEL_DEFAULT_GRID_COLUMNS`)       |
 | escape           | closes panel (handled by host)         |
 
@@ -35,8 +35,10 @@ Reference 1.x source: `bentodesk/src/components/BentoZone/BentoPanel.tsx`
 
 Locked behaviour:
 - The panel-scope **font group** is what gives an item-grid column its
-  uniform glyph size (1.x v8 `FontGroupContext`). The default font px is
-  exposed as `PANEL_ITEM_CARD_FONT_PX = 11.0`.
+  uniform glyph size (1.x v8 `FontGroupContext`). The item-card label font
+  size is 14px (Tauri `--font-size-md`), sourced from the single live literal
+  at the `draw_item_card` label draw — the stale `PANEL_ITEM_CARD_FONT_PX =
+  11.0` scaffold constant was removed (#1 step 14, 2026-06-02).
 - Default grid column count is exposed as `PANEL_DEFAULT_GRID_COLUMNS = 4`.
 - The header / search / grid are three direct children laid out vertically
   with fixed gaps, no virtualization at the panel level (virtualization

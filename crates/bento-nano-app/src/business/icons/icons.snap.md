@@ -8,7 +8,7 @@ zone-chrome surface that needs a glyph.
 | builtin   | `IconKind::*` — 30 hand-rolled 24×24 line-art SVGs            |
 | `lucide:` | dynamic load from on-disk lucide-static cache (TBD backend)   |
 | `custom:` | user-uploaded PNG via `bentodesk://custom-icon/{uuid}`        |
-| (text)    | emoji / unicode glyph rendered as a single text run           |
+| (text)    | legacy payload parsed for compatibility, rendered as neutral builtin glyph |
 
 | token         | value                                       |
 |---------------|---------------------------------------------|
@@ -27,7 +27,9 @@ Reference 1.x sources:
 Locked behaviour:
 - `IconRef::parse(s)` decodes any of the four forms above with a single
   pass over `s`. Unknown bare names fall through to `IconRef::Text(s)`,
-  matching 1.x `ZoneIcon` semantics.
+  matching 1.x wire semantics, but selected-stack runtime renderers must
+  draw a neutral built-in glyph for that branch instead of painting the
+  payload as visible text / emoji.
 - The 30 built-in `IconKind` variants are the selected-stack wire-format
   contract. Existing snake_case values such as `"folder_open"` keep loading,
   and the source Tauri hyphenated aliases (`"folder-open"`,

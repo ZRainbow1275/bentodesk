@@ -893,10 +893,7 @@ pub fn settings_display_mode_label_rect(viewport: Size, scroll_offset_y: f32) ->
 /// section between §3 Appearance and §5 Performance — promoted out of the
 /// General band per Tauri parity. Honours scroll offset the same way every other
 /// body row does.
-pub fn settings_zone_display_mode_picker_row_rect(
-    viewport: Size,
-    scroll_offset_y: f32,
-) -> Rect {
+pub fn settings_zone_display_mode_picker_row_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
     let label = settings_display_mode_label_rect(viewport, scroll_offset_y);
     Rect {
         x: label.x,
@@ -1324,7 +1321,9 @@ fn settings_sources_stack_height(source_row_count: usize) -> f32 {
 /// source of truth for the source-block height, folded into
 /// [`settings_m2_content_height`].
 pub fn settings_sources_content_height(source_row_count: usize) -> f32 {
-    SETTINGS_SECTION_LABEL_H + settings_sources_stack_height(source_row_count) + SETTINGS_SECTION_GAP
+    SETTINGS_SECTION_LABEL_H
+        + settings_sources_stack_height(source_row_count)
+        + SETTINGS_SECTION_GAP
 }
 
 /// M1i fidelity — the scroll-space SHIFT (>= 0) every section below the 桌面源
@@ -1449,11 +1448,7 @@ pub fn settings_performance_slider_row_rect(
 
 /// M1d — slider track/hit rect inside a Performance SliderRow (full-width
 /// band on the lower line of the row).
-pub fn settings_performance_slider_rect(
-    viewport: Size,
-    scroll_offset_y: f32,
-    index: u8,
-) -> Rect {
+pub fn settings_performance_slider_rect(viewport: Size, scroll_offset_y: f32, index: u8) -> Rect {
     let row = settings_performance_slider_row_rect(viewport, scroll_offset_y, index);
     Rect {
         x: row.x,
@@ -1555,7 +1550,10 @@ pub fn settings_safe_start_row_rect(
     crash_restart_enabled: bool,
 ) -> Rect {
     let (anchor, desc_gap) = if crash_restart_enabled {
-        (settings_crash_window_row_rect(viewport, scroll_offset_y), 0.0)
+        (
+            settings_crash_window_row_rect(viewport, scroll_offset_y),
+            0.0,
+        )
     } else {
         (
             settings_crash_restart_row_rect(viewport, scroll_offset_y),
@@ -2515,7 +2513,7 @@ pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
 /// #7 §10 item 7 (2026-06-01) — bumped 44→52 to fit Tauri's `padding: 10px 12px`
 /// + `gap: 4px` (`EncryptionCard.css:29,36`): 10 (top pad) + 16 (13px title slot)
 /// + 4 (gap) + 16 (11px sub slot) + 10 (bottom pad) ≈ 52. The prior 44 packed the
-/// two-line content against the chip edges.
+///   two-line content against the chip edges.
 pub const SETTINGS_ENCRYPTION_BTN_ROW_H: f32 = 52.0;
 /// M7 — encryption passphrase input row height (single-line masked box; shares
 /// the §2 path-input rhythm).
@@ -2558,7 +2556,8 @@ pub fn settings_encryption_label_rect(
         .min(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
         .saturating_sub(1);
     let backup_bottom =
-        settings_backup_entry_row_rect(viewport, scroll_offset_y, flags, last_backup_index).bottom();
+        settings_backup_entry_row_rect(viewport, scroll_offset_y, flags, last_backup_index)
+            .bottom();
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
         y: backup_bottom + SETTINGS_SECTION_GAP,
@@ -2811,9 +2810,10 @@ pub const SETTINGS_PLUGIN_UNINSTALL_BTN_W: f32 = 72.0;
 /// M1h — scroll-space Y at which the Plugins group title starts. M7
 /// (2026-06-01): re-anchored off the Encryption §10 card's reserved status row
 /// + a section gap (the card now slots between Backup §9 and Plugins §11 to
-/// match Tauri's `<BackupCard/><EncryptionCard/>` adjacency). The encryption
-/// card is fixed-height, so its status row bottom is a deterministic offset
-/// from the Backup card's last row; the whole chain reflows automatically.
+///   match Tauri's `<BackupCard/><EncryptionCard/>` adjacency). The encryption
+///   card is fixed-height, so its status row bottom is a deterministic offset
+///   from the Backup card's last row; the whole chain reflows automatically.
+///
 /// Takes the full flag set so its Y follows whatever Backup/Updater/Stealth/
 /// Startup rows are currently visible.
 pub fn settings_plugins_label_rect(
@@ -3429,7 +3429,9 @@ mod m1_tests {
         // Cards stack with a fixed step = card height + inter-card gap.
         assert!(card0.y < card1.y);
         assert!(card1.y < card2.y);
-        assert!((card1.y - card0.y - (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP)).abs() < 0.01);
+        assert!(
+            (card1.y - card0.y - (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP)).abs() < 0.01
+        );
         assert_eq!(card0.height, SETTINGS_PLUGIN_CARD_H);
     }
 
@@ -3489,8 +3491,7 @@ mod m1_tests {
         assert!(h2 > h0);
         // The growth equals the plugins-section delta exactly (no other section
         // depends on plugin_row_count).
-        let delta_section =
-            settings_plugins_content_height(2) - settings_plugins_content_height(0);
+        let delta_section = settings_plugins_content_height(2) - settings_plugins_content_height(0);
         assert!((h2 - h0 - delta_section).abs() < 0.01);
     }
 
@@ -3644,8 +3645,14 @@ mod m1_tests {
         let label = settings_encryption_passphrase_label_rect(v, 0.0, &f);
         let input = settings_encryption_passphrase_input_rect(v, 0.0, &f);
         // Label is the left cell, input is to its right, no overlap.
-        assert!((label.x - row.x).abs() < 0.01, "label hugs the row's left edge");
-        assert!(input.x >= label.right() - 0.01, "input sits right of the label");
+        assert!(
+            (label.x - row.x).abs() < 0.01,
+            "label hugs the row's left edge"
+        );
+        assert!(
+            input.x >= label.right() - 0.01,
+            "input sits right of the label"
+        );
         assert!(input.x > label.right(), "a gap separates label and input");
         // Input ends at the row's right edge (fills the remaining width).
         assert!((input.right() - row.right()).abs() < 0.01);
@@ -3715,11 +3722,8 @@ mod m2_tests {
     fn m2_desktop_path_input_sits_below_last_source() {
         // Existing invariant must still hold at the full 4-card reserve.
         let v = vp();
-        let refresh = settings_sources_refresh_button_rect(
-            v,
-            0.0,
-            SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize,
-        );
+        let refresh =
+            settings_sources_refresh_button_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
         let label =
             settings_desktop_path_label_rect(v, 0.0, SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
         let input =
@@ -3811,7 +3815,8 @@ mod m2_tests {
         // button, not zero — so downstream sections do not collide upward.
         let empty = settings_sources_content_height(0);
         let label_plus_gap = SETTINGS_SECTION_LABEL_H + SETTINGS_SECTION_GAP;
-        let stack = SETTINGS_SOURCE_EMPTY_H + SETTINGS_SOURCE_REFRESH_GAP + SETTINGS_SOURCE_REFRESH_BTN_H;
+        let stack =
+            SETTINGS_SOURCE_EMPTY_H + SETTINGS_SOURCE_REFRESH_GAP + SETTINGS_SOURCE_REFRESH_BTN_H;
         assert!((empty - (label_plus_gap + stack)).abs() < 0.01);
     }
 }
@@ -3900,8 +3905,7 @@ mod m1d_tests {
     #[test]
     fn startup_label_sits_below_performance_section() {
         let v = vp();
-        let last_perf =
-            settings_performance_slider_row_rect(v, 0.0, SETTINGS_PERF_ROW_COUNT - 1);
+        let last_perf = settings_performance_slider_row_rect(v, 0.0, SETTINGS_PERF_ROW_COUNT - 1);
         let startup = settings_startup_label_rect(v, 0.0);
         assert!(startup.y >= last_perf.bottom() + SETTINGS_SECTION_GAP - 0.01);
     }
@@ -3965,10 +3969,14 @@ mod m1d_tests {
         // Both gates off → shortest. Crash on → +2 stepper rows. Hibernate on
         // → + slider row + desc. All on → tallest.
         let k = UpdaterHeightKind::StatusOnly;
-        let none = settings_body_content_height(v, &SettingsBodyFlags::new(false, false, false, false, k));
-        let crash = settings_body_content_height(v, &SettingsBodyFlags::new(true, false, false, false, k));
-        let hib = settings_body_content_height(v, &SettingsBodyFlags::new(false, true, false, false, k));
-        let both = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
+        let none =
+            settings_body_content_height(v, &SettingsBodyFlags::new(false, false, false, false, k));
+        let crash =
+            settings_body_content_height(v, &SettingsBodyFlags::new(true, false, false, false, k));
+        let hib =
+            settings_body_content_height(v, &SettingsBodyFlags::new(false, true, false, false, k));
+        let both =
+            settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
         assert!(crash > none, "crash steppers must add height");
         assert!(hib > none, "hibernate slider must add height");
         assert!(both > crash);
@@ -4006,8 +4014,7 @@ mod m1d_tests {
         let v = vp();
         // With both Startup gates on, the Stealth title must clear the
         // hibernate slider row (the lowest Startup element).
-        let startup_bottom =
-            settings_hibernate_slider_row_rect(v, 0.0, true).bottom();
+        let startup_bottom = settings_hibernate_slider_row_rect(v, 0.0, true).bottom();
         let title = settings_stealth_label_rect(v, 0.0, true, true);
         assert!(
             (title.y - (startup_bottom + SETTINGS_SECTION_GAP)).abs() < 0.01,
@@ -4041,13 +4048,11 @@ mod m1d_tests {
         let v = vp();
         // Without a retry row, the error block hangs off the mirror row.
         let mirror = settings_stealth_mirror_row_rect(v, 0.0, true, true);
-        let err_no_retry =
-            settings_stealth_error_block_rect(v, 0.0, true, true, false);
+        let err_no_retry = settings_stealth_error_block_rect(v, 0.0, true, true, false);
         assert!((err_no_retry.y - mirror.bottom()).abs() < 0.01);
         // With a retry row, the error block sits a full retry row lower.
         let retry = settings_stealth_retry_row_rect(v, 0.0, true, true);
-        let err_with_retry =
-            settings_stealth_error_block_rect(v, 0.0, true, true, true);
+        let err_with_retry = settings_stealth_error_block_rect(v, 0.0, true, true, true);
         assert!((err_with_retry.y - retry.bottom()).abs() < 0.01);
         assert!(err_with_retry.y > err_no_retry.y);
     }
@@ -4068,8 +4073,7 @@ mod m1d_tests {
     fn m1e_onedrive_block_only_below_buttons() {
         let v = vp();
         let buttons = settings_stealth_buttons_row_rect(v, 0.0, true, true, true, false);
-        let onedrive =
-            settings_stealth_onedrive_block_rect(v, 0.0, true, true, true, false);
+        let onedrive = settings_stealth_onedrive_block_rect(v, 0.0, true, true, true, false);
         assert!(onedrive.y > buttons.bottom());
         assert_eq!(onedrive.height, SETTINGS_STEALTH_ONEDRIVE_H);
     }
@@ -4092,11 +4096,7 @@ mod m1d_tests {
         );
         // The retry branch adds a retry row + the OneDrive block (+ its gap).
         assert!(
-            (retry - base
-                - SETTINGS_STEALTH_ROW_H
-                - 8.0
-                - SETTINGS_STEALTH_ONEDRIVE_H)
-                .abs()
+            (retry - base - SETTINGS_STEALTH_ROW_H - 8.0 - SETTINGS_STEALTH_ONEDRIVE_H).abs()
                 < 0.01,
             "retry-only delta must equal retry row + OneDrive block + gap",
         );
@@ -4108,8 +4108,10 @@ mod m1d_tests {
         // The full body height with stealth conditionals on must exceed the
         // height with them off (the Stealth card grows).
         let k = UpdaterHeightKind::StatusOnly;
-        let off = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
-        let on = settings_body_content_height(v, &SettingsBodyFlags::new(true, true, true, true, k));
+        let off =
+            settings_body_content_height(v, &SettingsBodyFlags::new(true, true, false, false, k));
+        let on =
+            settings_body_content_height(v, &SettingsBodyFlags::new(true, true, true, true, k));
         assert!(on > off, "stealth retry+error rows must grow the body");
     }
 
@@ -4181,16 +4183,20 @@ mod m1d_tests {
     #[test]
     fn m1f_middle_block_height_tracks_status_family() {
         let v = vp();
-        let status_only = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
-        let versioned = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Versioned));
-        let downloading = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        let status_only =
+            settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
+        let versioned =
+            settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Versioned));
+        let downloading =
+            settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
         let error = settings_updater_middle_block_rect(v, 0.0, &flags(UpdaterHeightKind::Error));
         assert_eq!(status_only.height, 0.0);
         assert_eq!(versioned.height, SETTINGS_UPDATER_ROW_H);
         assert_eq!(downloading.height, SETTINGS_UPDATER_PROGRESS_H);
         assert_eq!(error.height, SETTINGS_UPDATER_ERROR_H);
         // The progress track sits inside the downloading block, full width.
-        let track = settings_updater_progress_track_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        let track =
+            settings_updater_progress_track_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
         assert!(track.y >= downloading.y);
         assert!(track.bottom() <= downloading.bottom() + 0.01);
         assert!((track.width - downloading.width).abs() < 0.01);
@@ -4215,8 +4221,10 @@ mod m1d_tests {
     fn m1f_buttons_row_reflows_with_middle_block() {
         let v = vp();
         // The buttons row sits lower when a middle block is present.
-        let no_block = settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
-        let with_progress = settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
+        let no_block =
+            settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::StatusOnly));
+        let with_progress =
+            settings_updater_buttons_row_rect(v, 0.0, &flags(UpdaterHeightKind::Downloading));
         assert!(with_progress.y > no_block.y);
         assert!((with_progress.y - no_block.y - SETTINGS_UPDATER_PROGRESS_H).abs() < 0.01);
     }
@@ -4340,7 +4348,8 @@ mod m1d_tests {
         assert!(r1.y < r2.y);
         // Adjacent rows are one row-height + gap apart.
         assert!(
-            (r1.y - r0.y - SETTINGS_BACKUP_ENTRY_ROW_H - SETTINGS_BACKUP_ENTRY_ROW_GAP).abs() < 0.01
+            (r1.y - r0.y - SETTINGS_BACKUP_ENTRY_ROW_H - SETTINGS_BACKUP_ENTRY_ROW_GAP).abs()
+                < 0.01
         );
         let restore = settings_backup_restore_button_rect(r0);
         assert!(restore.right() <= r0.right());

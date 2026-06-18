@@ -44,11 +44,12 @@ impl ZoneItemId {
     pub const INVALID: ZoneItemId = ZoneItemId(0);
 }
 
-pub const DEFAULT_ZONE_ICON: &str = "T";
+pub const DEFAULT_ZONE_ICON: &str = "folder";
 pub const DEFAULT_ZONE_GRID_COLUMNS: u32 = 4;
 pub const DEFAULT_ZONE_CAPSULE_SIZE: &str = "medium";
 pub const DEFAULT_ZONE_CAPSULE_SHAPE: &str = "pill";
 pub const DEFAULT_ZONE_DISPLAY_MODE: &str = "hover";
+pub const STACK_SCATTER_GAP_DIP: i32 = 16;
 
 /// One desktop item captured inside a zone.
 ///
@@ -171,6 +172,16 @@ pub struct StackDetachOutcome {
     pub detached_member: ZoneId,
     pub new_anchor: Option<ZoneId>,
     pub remaining_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StackScatterLayout {
+    anchor_x: i32,
+    anchor_y: i32,
+    anchor_w: i32,
+    anchor_h: i32,
+    viewport_w: i32,
+    viewport_h: i32,
 }
 
 impl Zone {
@@ -430,6 +441,14 @@ fn default_zone_visible() -> bool {
     true
 }
 
+fn max_top_left(viewport: i32, extent: i32) -> i32 {
+    (viewport.max(1) - extent.max(0)).max(0)
+}
+
+fn clamp_top_left(value: i32, viewport: i32, extent: i32) -> i32 {
+    value.clamp(0, max_top_left(viewport, extent))
+}
+
 /// Collection of zones. Inline-allocated for the steady-state count
 /// (BentoDesk users typically maintain ≤ 8 zones; spec §10 says no
 /// per-frame heap, and zone iteration runs in render path).
@@ -670,6 +689,79 @@ impl ZoneList {
                 .retain(|member| *member != id);
         }
         true
+    }
+
+    /// Dissolve the stack containing `id` and spread every former member from
+    /// the anchor rect so the released zones do not remain visually piled up.
+    pub fn dissolve_stack_scattered(
+        &mut self,
+        id: ZoneId,
+        viewport_w: i32,
+        viewport_h: i32,
+    ) -> bool {
+        let Some(anchor) = self.stack_anchor_for(id) else {
+            return false;
+        };
+        let Some(member_ids) = self.stack_member_ids(anchor) else {
+            return false;
+        };
+        let Some(anchor_zone) = self.get(anchor) else {
+            return false;
+        };
+        let anchor_x = anchor_zone.x;
+        let anchor_y = anchor_zone.y;
+        let anchor_w = anchor_zone.w;
+        let anchor_h = anchor_zone.h;
+
+        if !self.unstack(anchor) {
+            return false;
+        }
+        self.scatter_released_stack_members(
+            &member_ids,
+            StackScatterLayout {
+                anchor_x,
+                anchor_y,
+                anchor_w,
+                anchor_h,
+                viewport_w,
+                viewport_h,
+            },
+        );
+        true
+    }
+
+    /// Preserve [`Self::unstack`] semantics while applying scatter only when
+    /// `id` is a visible stack anchor. Child-only unstack remains a single
+    /// member release.
+    pub fn unstack_with_scatter(&mut self, id: ZoneId, viewport_w: i32, viewport_h: i32) -> bool {
+        if self.get(id).is_some_and(Zone::is_stack_anchor) {
+            return self.dissolve_stack_scattered(id, viewport_w, viewport_h);
+        }
+        self.unstack(id)
+    }
+
+    fn scatter_released_stack_members(
+        &mut self,
+        member_ids: &[ZoneId],
+        layout: StackScatterLayout,
+    ) {
+        let step_x = layout.anchor_w.max(0) + STACK_SCATTER_GAP_DIP;
+        let step_y = layout.anchor_h.max(0) + STACK_SCATTER_GAP_DIP;
+        let max_x = max_top_left(layout.viewport_w, layout.anchor_w);
+
+        let mut cursor_x = layout.anchor_x;
+        let mut cursor_y = layout.anchor_y;
+        for (index, id) in member_ids.iter().copied().enumerate() {
+            if index > 0 && cursor_x > max_x {
+                cursor_x = layout.anchor_x;
+                cursor_y += step_y;
+            }
+            if let Some(zone) = self.get_mut(id) {
+                zone.x = clamp_top_left(cursor_x, layout.viewport_w, zone.w);
+                zone.y = clamp_top_left(cursor_y, layout.viewport_h, zone.h);
+            }
+            cursor_x += step_x;
+        }
     }
 
     pub fn add_item(
@@ -1019,6 +1111,66 @@ mod tests {
         assert!(matches!(zl.get(ZoneId(1)), Some(parent) if parent.stack_members.is_empty()));
         assert!(matches!(zl.get(ZoneId(2)), Some(child) if child.stack_parent.is_none()));
         assert!(matches!(zl.get(ZoneId(3)), Some(child) if child.stack_parent.is_none()));
+    }
+
+    #[test]
+    fn dissolve_stack_scattered_releases_members_into_row() {
+        let mut zl = ZoneList::new();
+        zl.add(Zone::new(ZoneId(1), "anchor", 100, 80, 120, 90));
+        zl.add(Zone::new(ZoneId(2), "child-a", 100, 80, 120, 90));
+        zl.add(Zone::new(ZoneId(3), "child-b", 100, 80, 120, 90));
+
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+        assert!(zl.dissolve_stack_scattered(ZoneId(1), 640, 480));
+
+        assert!(
+            matches!(zl.get(ZoneId(1)), Some(zone) if zone.stack_parent.is_none() && zone.stack_members.is_empty())
+        );
+        assert!(matches!(zl.get(ZoneId(2)), Some(zone) if zone.stack_parent.is_none()));
+        assert!(matches!(zl.get(ZoneId(3)), Some(zone) if zone.stack_parent.is_none()));
+        assert_eq!(
+            zl.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((100, 80))
+        );
+        assert_eq!(
+            zl.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((100 + 120 + STACK_SCATTER_GAP_DIP, 80))
+        );
+        assert_eq!(
+            zl.get(ZoneId(3)).map(|zone| (zone.x, zone.y)),
+            Some((100 + (120 + STACK_SCATTER_GAP_DIP) * 2, 80))
+        );
+    }
+
+    #[test]
+    fn dissolve_stack_scattered_wraps_and_clamps_near_right_edge() {
+        let mut zl = ZoneList::new();
+        zl.add(Zone::new(ZoneId(1), "anchor", 250, 40, 120, 80));
+        zl.add(Zone::new(ZoneId(2), "child-a", 250, 40, 120, 80));
+        zl.add(Zone::new(ZoneId(3), "child-b", 250, 40, 120, 80));
+
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+        assert!(zl.dissolve_stack_scattered(ZoneId(1), 320, 220));
+
+        assert_eq!(
+            zl.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((200, 40))
+        );
+        assert_eq!(
+            zl.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((200, 40 + 80 + STACK_SCATTER_GAP_DIP))
+        );
+        assert_eq!(
+            zl.get(ZoneId(3)).map(|zone| (zone.x, zone.y)),
+            Some((200, 220 - 80))
+        );
+        for zone in zl.iter() {
+            assert!(zone.x >= 0 && zone.y >= 0);
+            assert!(zone.x + zone.w <= 320);
+            assert!(zone.y + zone.h <= 220);
+        }
     }
 
     #[test]

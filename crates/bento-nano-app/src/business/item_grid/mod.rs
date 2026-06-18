@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 /// Mirrors 1.x `VIRTUAL_THRESHOLD = 50` from `ItemGrid.tsx`.
 pub const ITEM_GRID_VIRTUAL_THRESHOLD: usize = 50;
 
-/// Logical-pixel row height inside a virtualized grid. Mirrors 1.x
-/// `ROW_HEIGHT = 80` from `VirtualItemGrid.tsx`.
-pub const ITEM_GRID_ROW_HEIGHT_PX: f32 = 80.0;
+/// Logical-pixel row height inside a virtualized grid. P3.7 (2026-06-02, 1:1):
+/// realigned from the legacy 80 to Tauri's 78 (card stride is `78 + 8` gap =
+/// 86). 1.x `VirtualItemGrid.tsx` `ROW_HEIGHT` predates the final card height.
+pub const ITEM_GRID_ROW_HEIGHT_PX: f32 = 78.0;
 
 /// Number of rows kept rendered above and below the viewport while
 /// virtualized — mirrors 1.x `OVERSCAN_ROWS = 3`.
@@ -33,21 +34,25 @@ pub const ITEM_GRID_ROW_GAP_PX: f32 = 8.0;
 
 /// Vertical offset (logical px) of the first item row below the panel's top
 /// edge — i.e. where the item grid starts, immediately under the expanded
-/// `PanelHeader` band. M2③ (05-31, 1:1): Tauri's `.panel-header` is
-/// `height: 48px` (PanelHeader.css:6) with `flex-shrink: 0`, and the grid
-/// host (`.bento-panel__content`) follows it in the column flex with a
-/// `--spacing-sm` (8px) top pad. nano folds the header band + that pad into a
-/// single grid-top offset == header-band height so the first card lands right
-/// below the header divider. This is the SSoT shared by the renderer
-/// (`highlight_overlay::item_card_rect_for_grid`), both shell hit-tests
-/// (`ui::hit_test_zone_item` / `ui::item_grid_position_for_point`) and the
-/// `expanded_zone_grid` header chrome — so the painted grid and its hit-rects
-/// can never drift (V-13 paint-hit parity).
-pub const ITEM_GRID_TOP_OFFSET_PX: f32 = 48.0;
+/// `PanelHeader` band. P3.6 (2026-06-02, 1:1): Tauri's `.panel-header` is
+/// `height: 48px` (PanelHeader.css:6) with `flex-shrink: 0`, and the grid host
+/// (`.bento-panel__content`) follows it in the column flex with a
+/// `--spacing-sm` (8px) top pad — so the first row begins at `48 + 8 = 56`.
+/// The SSoTs are now SPLIT: `expanded_zone_grid::HEADER_BAND_HEIGHT` stays 48
+/// (the header band / divider seam) while this grid-top offset is 56 (header +
+/// the missing content pad). This is the SSoT shared by the renderer
+/// (`highlight_overlay::item_card_rect_for_grid`) and the shell hit-tests, so
+/// the painted grid and its hit-rects can never drift (V-13 paint-hit parity).
+pub const ITEM_GRID_TOP_OFFSET_PX: f32 = 56.0;
 
 /// Default column count when the zone configuration supplies none.
 /// Mirrors 1.x `props.gridColumns ?? 4`.
 pub const ITEM_GRID_DEFAULT_COLUMNS: u32 = 4;
+
+/// Minimum readable outer width for a standard item card. Below this threshold
+/// the 14px single-line label cannot keep a professional gap from neighbouring
+/// cards, so narrow panels reduce the effective column count at paint/hit time.
+pub const ITEM_GRID_MIN_CARD_WIDTH_PX: f32 = 64.0;
 
 /// Layout mode chosen once per zone load — switched only when item count
 /// crosses `ITEM_GRID_VIRTUAL_THRESHOLD`.
@@ -81,6 +86,20 @@ pub const fn column_span_for(is_wide: bool) -> u32 {
     if is_wide { 2 } else { 1 }
 }
 
+pub fn effective_column_count(zone_width: f32, requested_columns: u32, inset_x: f32) -> u32 {
+    let mut columns = requested_columns.max(1);
+    let available = (zone_width - inset_x * 2.0).max(ITEM_GRID_MIN_CARD_WIDTH_PX);
+    while columns > 1 {
+        let gap_total = ITEM_GRID_COLUMN_GAP_PX * (columns - 1) as f32;
+        let cell_w = ((available - gap_total).max(0.0)) / columns as f32;
+        if cell_w >= ITEM_GRID_MIN_CARD_WIDTH_PX {
+            break;
+        }
+        columns -= 1;
+    }
+    columns
+}
+
 /// Build the grid outer container. Children — the ItemCards or virtualizer
 /// surface — land when widget-library ships `GridLayout`/`VirtualGrid`.
 pub fn build() -> WidgetNode {
@@ -100,13 +119,25 @@ mod tests {
     #[test]
     fn locked_constants_match_snap_md() {
         assert_eq!(ITEM_GRID_VIRTUAL_THRESHOLD, 50);
-        assert!((ITEM_GRID_ROW_HEIGHT_PX - 80.0).abs() < 0.01);
+        // P3.7 (1:1) — card row height is Tauri's 78 (was the legacy 80).
+        assert!((ITEM_GRID_ROW_HEIGHT_PX - 78.0).abs() < 0.01);
         assert_eq!(ITEM_GRID_OVERSCAN_ROWS, 3);
         assert!((ITEM_GRID_COLUMN_GAP_PX - 8.0).abs() < 0.01);
         assert!((ITEM_GRID_ROW_GAP_PX - 8.0).abs() < 0.01);
         assert_eq!(ITEM_GRID_DEFAULT_COLUMNS, 4);
-        // M2③ (1:1) — grid starts below the 48-DIP Tauri `.panel-header`.
-        assert!((ITEM_GRID_TOP_OFFSET_PX - 48.0).abs() < 0.01);
+        assert!((ITEM_GRID_MIN_CARD_WIDTH_PX - 64.0).abs() < 0.01);
+        // P3.6 (1:1) — grid starts at the 48-DIP Tauri `.panel-header` plus the
+        // 8-DIP `--spacing-sm` content pad = 56.
+        assert!((ITEM_GRID_TOP_OFFSET_PX - 56.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn effective_column_count_keeps_cards_readable_in_narrow_panels() {
+        assert_eq!(effective_column_count(320.0, 5, 16.0), 4);
+        assert_eq!(effective_column_count(320.0, 4, 16.0), 4);
+        assert_eq!(effective_column_count(240.0, 5, 16.0), 3);
+        assert_eq!(effective_column_count(720.0, 5, 16.0), 5);
+        assert_eq!(effective_column_count(80.0, 5, 16.0), 1);
     }
 
     #[test]

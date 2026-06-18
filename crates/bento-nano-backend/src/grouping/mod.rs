@@ -121,11 +121,12 @@ pub fn apply_auto_group(
 mod tests {
     use super::*;
     use crate::layout::{AutoGroupRule, GroupRuleType};
+    use bento_nano_zone::DEFAULT_ZONE_ICON;
 
     fn sample_suggestion(name: &str) -> SuggestedGroup {
         SuggestedGroup {
             name: name.to_string(),
-            icon: "\u{1F4C1}".to_string(),
+            icon: DEFAULT_ZONE_ICON.to_string(),
             rule: AutoGroupRule {
                 rule_type: GroupRuleType::Extension,
                 pattern: None,
@@ -152,6 +153,11 @@ mod tests {
         assert_eq!(z.title.as_ref(), "Documents");
         assert_eq!(z.w, APPLY_DEFAULT_W);
         assert_eq!(z.h, APPLY_DEFAULT_H);
+        assert_eq!(
+            z.icon.as_ref(),
+            DEFAULT_ZONE_ICON,
+            "applied groups must start with the selected-stack default icon"
+        );
         assert_eq!(z.items.len(), 3);
         assert_eq!(z.items[0].path.as_ref(), "C:\\Desktop\\a.pdf");
     }

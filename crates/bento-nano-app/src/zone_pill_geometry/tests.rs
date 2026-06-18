@@ -5,8 +5,8 @@
 
 use super::*;
 use crate::business::zen_capsule::CapsuleSize;
-use std::borrow::Cow;
 use bento_nano_zone::ZoneId;
+use std::borrow::Cow;
 
 fn fixture(x: i32, y: i32) -> Zone {
     Zone::new(ZoneId(1), Cow::Borrowed("Docs"), x, y, 160, 120)
@@ -134,9 +134,31 @@ fn pill_icon_label_badge_share_vertical_centerline() {
     let layout = pill_layout_for_zone(&fixture(0, 0), 4);
     let mid = layout.rect.y + layout.rect.height * 0.5;
     let icon_mid = layout.icon.y + layout.icon.height * 0.5;
+    let label_mid = layout.label.y + layout.label.height * 0.5;
     let badge_mid = layout.badge.y + layout.badge.height * 0.5;
     assert!((icon_mid - mid).abs() < 0.5);
+    assert!((label_mid - mid).abs() < 0.5);
     assert!((badge_mid - mid).abs() < 0.5);
+}
+
+#[test]
+fn pill_label_height_tracks_capsule_title_font_tier() {
+    // The paint path uses CapsuleSize::title_font_px(); geometry must keep the
+    // same line box or small/large labels drift vertically while the DWrite run
+    // is drawn at the right size.
+    let small = pill_layout_for_zone(&fixture_appearance("small", "pill"), 4);
+    let medium = pill_layout_for_zone(&fixture_appearance("medium", "pill"), 4);
+    let large = pill_layout_for_zone(&fixture_appearance("large", "pill"), 4);
+
+    assert!((small.label.height - CapsuleSize::Small.title_font_px() * 1.4).abs() < 0.01);
+    assert!((medium.label.height - CapsuleSize::Medium.title_font_px() * 1.4).abs() < 0.01);
+    assert!((large.label.height - CapsuleSize::Large.title_font_px() * 1.4).abs() < 0.01);
+
+    for layout in [small, medium, large] {
+        let mid = layout.rect.y + layout.rect.height * 0.5;
+        let label_mid = layout.label.y + layout.label.height * 0.5;
+        assert!((label_mid - mid).abs() < 0.01);
+    }
 }
 
 #[test]
@@ -238,24 +260,54 @@ fn pill_status_dot_sits_at_top_right_inside_pill() {
 
 #[test]
 fn morph_pill_to_rect_returns_pill_when_morph_zero() {
-    let pill = Rect { x: 10.0, y: 10.0, width: 96.0, height: 36.0 };
-    let expanded = Rect { x: 10.0, y: 10.0, width: 240.0, height: 180.0 };
+    let pill = Rect {
+        x: 10.0,
+        y: 10.0,
+        width: 96.0,
+        height: 36.0,
+    };
+    let expanded = Rect {
+        x: 10.0,
+        y: 10.0,
+        width: 240.0,
+        height: 180.0,
+    };
     let r = morph_pill_to_rect(pill, expanded, 0.0);
     assert_eq!(r, pill);
 }
 
 #[test]
 fn morph_pill_to_rect_returns_expanded_when_morph_one() {
-    let pill = Rect { x: 10.0, y: 10.0, width: 96.0, height: 36.0 };
-    let expanded = Rect { x: 10.0, y: 10.0, width: 240.0, height: 180.0 };
+    let pill = Rect {
+        x: 10.0,
+        y: 10.0,
+        width: 96.0,
+        height: 36.0,
+    };
+    let expanded = Rect {
+        x: 10.0,
+        y: 10.0,
+        width: 240.0,
+        height: 180.0,
+    };
     let r = morph_pill_to_rect(pill, expanded, 1.0);
     assert_eq!(r, expanded);
 }
 
 #[test]
 fn morph_pill_to_rect_interpolates_componentwise() {
-    let pill = Rect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 };
-    let expanded = Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
+    let pill = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let expanded = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    };
     let r = morph_pill_to_rect(pill, expanded, 0.5);
     assert_eq!(r.width, 150.0);
     assert_eq!(r.height, 120.0);
@@ -266,12 +318,62 @@ fn morph_pill_to_rect_clamps_negative_but_allows_overshoot() {
     // M3 — lower bound pins to the pill; upper bound is intentionally NOT
     // clamped so the easeOutBack overshoot (morph > 1.0) can extrapolate
     // the rect past the expanded target mid-flight.
-    let pill = Rect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 };
-    let expanded = Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 };
+    let pill = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let expanded = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+    };
     assert_eq!(morph_pill_to_rect(pill, expanded, -1.0), pill);
     // morph = 1.1 → width extrapolates 10% past expanded (100 + 1.1*100).
     let over = morph_pill_to_rect(pill, expanded, 1.1);
     assert!((over.width - 210.0).abs() < 0.01, "got {}", over.width);
+}
+
+#[test]
+fn current_morph_rect_matches_old_inline_formula() {
+    // #2 step 8 (2026-06-02) — `current_morph_rect` is the single SSoT for the
+    // raw→easeOutBack→(flip)→morph_pill_to_rect math that the paint path and
+    // BOTH hit-geometry sites (effective_zone_chrome_rect /
+    // effective_zone_hit_rect) used to inline. Pin it bit-identical to that
+    // former inline formula at several `t`, in both directions, so paint == hit
+    // can never drift.
+    let pill = Rect {
+        x: 10.0,
+        y: 20.0,
+        width: 96.0,
+        height: 36.0,
+    };
+    let expanded = Rect {
+        x: 10.0,
+        y: 20.0,
+        width: 320.0,
+        height: 240.0,
+    };
+    for &raw in &[0.05_f32, 0.25, 0.5, 0.75, 0.95] {
+        for &expanding in &[true, false] {
+            // Old inline formula (verbatim from the pre-consolidation sites).
+            let eased = ease_out_back_progress(raw);
+            let morph_old = if expanding { eased } else { 1.0 - eased };
+            let rect_old = morph_pill_to_rect(pill, expanded, morph_old);
+            // New shared helper.
+            let (morph_new, rect_new) = current_morph_rect(pill, expanded, raw, expanding);
+            assert_eq!(
+                morph_new, morph_old,
+                "morph drift @raw={raw} exp={expanding}"
+            );
+            assert_eq!(rect_new.x, rect_old.x);
+            assert_eq!(rect_new.y, rect_old.y);
+            assert_eq!(rect_new.width, rect_old.width);
+            assert_eq!(rect_new.height, rect_old.height);
+        }
+    }
 }
 
 #[test]
@@ -355,8 +457,18 @@ fn ease_out_back_x_inversion_round_trips() {
 fn morph_pill_to_rect_with_back_curve_overshoots_then_settles() {
     // The overshoot WILL grow the rect past the expanded target mid-flight
     // (correct — Tauri does it) but settle EXACTLY on target at t=1.
-    let pill = Rect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 };
-    let expanded = Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 };
+    let pill = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+    };
+    let expanded = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 300.0,
+        height: 200.0,
+    };
     // Mid-flight overshoot: find the largest interpolated width.
     let mut max_w = 0.0_f32;
     let mut i = 0;
@@ -368,7 +480,10 @@ fn morph_pill_to_rect_with_back_curve_overshoots_then_settles() {
         }
         i += 1;
     }
-    assert!(max_w > expanded.width, "expected width overshoot, got {max_w}");
+    assert!(
+        max_w > expanded.width,
+        "expected width overshoot, got {max_w}"
+    );
     // Settle is exact at t=1.
     let settled = morph_pill_to_rect(pill, expanded, ease_out_back_progress(1.0));
     assert_eq!(settled, expanded);
@@ -405,7 +520,10 @@ fn ease_standard_pinned_samples_and_monotonic() {
     let mut i = 0;
     while i <= 100 {
         let v = ease_standard_progress(i as f32 / 100.0);
-        assert!(v >= prev - 1e-6, "ease_standard must be monotonic ({prev} -> {v})");
+        assert!(
+            v >= prev - 1e-6,
+            "ease_standard must be monotonic ({prev} -> {v})"
+        );
         prev = v;
         i += 1;
     }
@@ -477,7 +595,10 @@ fn leave_during_lock_defers_collapse_to_lock_until() {
     // 2400 is inside the lock — must NOT collapse.
     assert_eq!(s.poll(2_400), HoverAction::None);
     // 2550 (lock_until) — collapse fires.
-    assert_eq!(s.poll(2_000 + EXPAND_LOCK_MS), HoverAction::Collapse(zid(7)));
+    assert_eq!(
+        s.poll(2_000 + EXPAND_LOCK_MS),
+        HoverAction::Collapse(zid(7))
+    );
 }
 
 #[test]
@@ -489,7 +610,10 @@ fn leave_after_lock_sets_collapse_at_now_plus_delay() {
     // Before now+delay — nothing.
     assert_eq!(s.poll(5_000 + COLLAPSE_DELAY - 1), HoverAction::None);
     // At now+delay — collapse fires (lock long gone, so base wins).
-    assert_eq!(s.poll(5_000 + COLLAPSE_DELAY), HoverAction::Collapse(zid(3)));
+    assert_eq!(
+        s.poll(5_000 + COLLAPSE_DELAY),
+        HoverAction::Collapse(zid(3))
+    );
 }
 
 #[test]

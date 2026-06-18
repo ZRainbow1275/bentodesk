@@ -145,12 +145,12 @@ use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalFlags, GlobalLock, GlobalSize, GlobalUnlock, MEM_COMMIT,
     MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
     PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
-use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 use windows_sys::Win32::System::ProcessStatus::{EmptyWorkingSet, GetModuleFileNameExW};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
@@ -174,18 +174,17 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CreatePopupMenu, DefWindowProcW, DestroyMenu, DestroyWindow,
     EnumWindows, FindWindowW, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW, GetClientRect,
-    GetCursorPos, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HTTRANSPARENT,
-    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDI_APPLICATION, IsIconic, IsWindowVisible, IsZoomed,
-    KillTimer, LoadIconW, MB_ICONERROR, MB_OK, MessageBoxW, MF_SEPARATOR, MF_STRING, PostMessageW,
-    PostQuitMessage, RegisterWindowMessageW, SW_HIDE,
-    SW_MAXIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CHAR,
-    WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-    WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN,
-    WM_TIMER,
+    GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IDI_APPLICATION, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LoadIconW, MB_ICONERROR,
+    MB_OK, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterWindowMessageW, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CHAR, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use bento_nano_shell::{hotkey, ui};
@@ -318,6 +317,10 @@ fn startup_diag_skip_value(value: Option<&str>, flag: &str) -> bool {
 
 fn drag_proof_log_enabled() -> bool {
     std::env::var_os("BENTODESK_NANO_DRAG_PROOF_LOG").is_some()
+}
+
+fn animation_proof_log_enabled() -> bool {
+    std::env::var_os("BENTODESK_NANO_ANIM_PROOF_LOG").is_some()
 }
 
 const ZONE_EDITOR_CAPSULE_PRESETS: &[(CapsuleSizeChoice, CapsuleShapeChoice)] = &[
@@ -562,8 +565,7 @@ fn detected_default_locale() -> &'static bento_nano_style::LookupTable {
     // SAFETY: `buf` is a valid writable [u16; 85]; we pass its length so the
     // API never writes past the end. The returned count bounds the slice we
     // read back.
-    let written =
-        unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+    let written = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
     if written <= 0 {
         // Vista+ guarantees success; defend the impossible path by keeping the
         // current zh-CN default.
@@ -1406,6 +1408,18 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        WM_MOUSEWHEEL => unsafe {
+            let p = get_slot_ptr(hwnd);
+            if !p.is_null() {
+                let slot = &*p;
+                if let Some(root) = app_root() {
+                    if handle_settings_mousewheel(root, slot, hwnd, wparam) {
+                        return 0;
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
         WM_LBUTTONDOWN => {
             unsafe {
                 let p = get_slot_ptr(hwnd);
@@ -1915,6 +1929,107 @@ fn window_kind_routes_settings_keydown(kind: WindowKind) -> bool {
     matches!(kind, WindowKind::Main | WindowKind::Settings)
 }
 
+fn window_kind_routes_settings_pointer(kind: WindowKind, settings_aux_registered: bool) -> bool {
+    matches!(kind, WindowKind::Settings)
+        || matches!(kind, WindowKind::Main) && !settings_aux_registered
+}
+
+fn settings_aux_registered(root: &AppRoot) -> bool {
+    root.registry.borrow().count_kind(WindowKind::Settings) > 0
+}
+
+fn should_ignore_main_pointer_while_settings_aux_open(root: &AppRoot, kind: WindowKind) -> bool {
+    matches!(kind, WindowKind::Main)
+        && root.app.borrow().settings_open.get()
+        && settings_aux_registered(root)
+}
+
+fn logical_viewport_from_device_size(width: u32, height: u32, dpi: u32) -> bento_nano_style::Size {
+    bento_nano_style::dpi::device_size_to_logical(
+        bento_nano_style::Size {
+            width: width.max(1) as f32,
+            height: height.max(1) as f32,
+        },
+        dpi,
+    )
+}
+
+fn window_slot_logical_viewport(slot: &WindowSlot) -> bento_nano_style::Size {
+    logical_viewport_from_device_size(
+        slot.renderer.width,
+        slot.renderer.height,
+        slot.state.dpi.get(),
+    )
+}
+
+fn sync_app_viewport_from_window_slot(root: &AppRoot, slot: &WindowSlot) -> bento_nano_style::Size {
+    let viewport = window_slot_logical_viewport(slot);
+    root.app.borrow_mut().viewport = viewport;
+    viewport
+}
+
+fn settings_wheel_scroll_delta_from_wparam(wparam: WPARAM) -> Option<i32> {
+    let wheel_delta = ((wparam >> 16) & 0xFFFF) as u16 as i16 as i32;
+    (wheel_delta != 0).then_some(-wheel_delta)
+}
+
+fn handle_settings_scroll_delta(root: &AppRoot, hwnd: HWND, delta: i32) {
+    use bento_nano_app::settings_panel::{SettingsBodyFlags, settings_clamp_scroll};
+
+    let app = root.app.borrow();
+    let vp = app.viewport;
+    let (stealth_has_retry, stealth_has_error) = match &*app.stealth_status.borrow() {
+        Some(status) => (status.retry_count > 0, status.last_error.is_some()),
+        None => (false, false),
+    };
+    let updater_kind = bento_nano_app::business::settings::updater_card::updater_height_kind(
+        &app.settings_updater_status.borrow(),
+    );
+    let backup_visible = {
+        let entries = app.settings_backup_entries.borrow();
+        bento_nano_app::business::settings::backup_card::backup_visible_row_count(&entries)
+    };
+    let plugin_visible = {
+        let entries = app.settings_plugin_entries.borrow();
+        bento_nano_app::business::settings::plugins_section::plugin_visible_row_count(&entries)
+    };
+    let flags = SettingsBodyFlags::new(
+        app.crash_restart_enabled.get(),
+        app.safe_start_after_hibernation.get(),
+        stealth_has_retry,
+        stealth_has_error,
+        updater_kind,
+    )
+    .with_source_rows(app.desktop_sources.borrow().len())
+    .with_backup_rows(backup_visible)
+    .with_plugin_rows(plugin_visible);
+    let next = settings_clamp_scroll(app.scroll_offset_y.get(), delta as f32, vp, &flags);
+    app.scroll_offset_y.set(next);
+    drop(app);
+    log_static(format!("settings: scroll delta={delta} offset={next:.1}\n").as_str());
+    request_redraw(hwnd);
+}
+
+fn handle_settings_mousewheel(
+    root: &AppRoot,
+    slot: &WindowSlot,
+    hwnd: HWND,
+    wparam: WPARAM,
+) -> bool {
+    let settings_open = root.app.borrow().settings_open.get();
+    if !settings_open
+        || !window_kind_routes_settings_pointer(slot.kind, settings_aux_registered(root))
+    {
+        return false;
+    }
+    sync_app_viewport_from_window_slot(root, slot);
+    let Some(delta) = settings_wheel_scroll_delta_from_wparam(wparam) else {
+        return true;
+    };
+    handle_settings_scroll_delta(root, hwnd, delta);
+    true
+}
+
 fn handle_keydown(
     hwnd: HWND,
     vk: u32,
@@ -2115,6 +2230,22 @@ fn stack_bloom_hit_for_point(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, 
     if app.settings_open.get() || app.about_open.get() {
         return None;
     }
+    // #5 drag stability (2026-06-08) — a normal zone/item drag owns the
+    // pointer until mouse-up. Do not let a stale bloom hit consume that release
+    // and open/preview a stack before `handle_lbutton_up` clears `zone_drag`.
+    if app.zone_drag.get().is_some()
+        || app.zone_resize.get().is_some()
+        || app.item_drag.borrow().is_some()
+    {
+        return None;
+    }
+    // #4 / R1 (2026-06-02) — mirror the render-side bloom gate so a click only
+    // hits a petal on a frame where the bloom is actually painted: the tray
+    // must be closed and no member focused/selected (mutually exclusive
+    // surfaces — never a hit behind the tray or a focused-member panel).
+    if app.stack_tray.borrow().is_some() || app.selected_zone.get().is_some() {
+        return None;
+    }
     let anchor_id = app
         .hovered_zone
         .get()
@@ -2158,6 +2289,118 @@ fn update_stack_bloom_hover(app: &AppState, hover_zone: Option<ZoneId>, now_ms: 
     app.stack_bloom_progress
         .set(if next_anchor.is_some() { 0.0 } else { 1.0 });
     true
+}
+
+fn normal_pointer_drag_active(app: &AppState) -> bool {
+    app.zone_drag.get().is_some()
+        || app.zone_resize.get().is_some()
+        || app.item_drag.borrow().is_some()
+}
+
+fn proof_zone_id_label(id: Option<ZoneId>) -> String {
+    match id {
+        Some(zone_id) => zone_id.0.to_string(),
+        None => "none".to_owned(),
+    }
+}
+
+fn proof_active_drag_label(app: &AppState) -> &'static str {
+    if app.zone_drag.get().is_some() {
+        "zone"
+    } else if app.zone_resize.get().is_some() {
+        "resize"
+    } else if app.item_drag.borrow().is_some() {
+        "item"
+    } else if app.stack_tray_drag.get().is_some() {
+        "stack_tray"
+    } else {
+        "none"
+    }
+}
+
+fn log_animation_proof_state(
+    app: &AppState,
+    phase: &str,
+    now_ms: u32,
+    x: Option<f32>,
+    y: Option<f32>,
+) {
+    if !animation_proof_log_enabled() {
+        return;
+    }
+    let hover_scheduler = app.hover_scheduler.get();
+    let item_drag = {
+        let drag = app.item_drag.borrow();
+        drag.as_ref()
+            .map(|candidate| format!("{}:{}", candidate.zone_id.0, candidate.item_id.0))
+            .unwrap_or_else(|| "none".to_owned())
+    };
+    let item_hover = app.item_hover.get();
+    let item_hover_active = item_hover.is_active(now_ms);
+    let pill_animator_occupancy = app.pill_animator.borrow().occupancy();
+    let (highlight_targets, highlight_pulses, highlight_auto_clear_ms) = {
+        let overlay = app.highlight_overlay.borrow();
+        (
+            overlay.targets().len(),
+            overlay.pulses().len(),
+            overlay.auto_clear_remaining_ms().unwrap_or(0),
+        )
+    };
+    let input = match (x, y) {
+        (Some(px), Some(py)) => format!("{px:.1},{py:.1}"),
+        _ => "none".to_owned(),
+    };
+    log_static(
+        format!(
+            "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_anim_zone={} pill_anim_progress={:.3} pill_anim_expanding={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
+            proof_active_drag_label(app),
+            proof_zone_id_label(app.zone_drag.get().map(|(id, _, _)| id)),
+            proof_zone_id_label(app.zone_resize.get().map(|(id, _, _)| id)),
+            item_drag,
+            app.stack_tray_drag.get().is_some(),
+            proof_zone_id_label(app.hovered_zone.get()),
+            proof_zone_id_label(app.selected_zone.get()),
+            proof_zone_id_label(app.zone_pill_anim_zone.get()),
+            app.zone_pill_anim_progress.get(),
+            app.zone_pill_anim_expanding.get(),
+            pill_animator_occupancy,
+            proof_zone_id_label(app.stack_bloom_anchor.get()),
+            app.stack_bloom_progress.get(),
+            hover_scheduler.is_pending(),
+            proof_zone_id_label(hover_scheduler.expanded_zone()),
+            item_hover_active,
+            highlight_targets,
+            highlight_pulses,
+            highlight_auto_clear_ms,
+            app.dirty.get()
+        )
+        .as_str(),
+    );
+}
+
+fn reset_pointer_drag_hover_channels(app: &AppState, dragged_zone: Option<ZoneId>, now_ms: u32) {
+    if let Some(zone_id) = dragged_zone {
+        let mut anim = app.pill_animator.borrow_mut();
+        anim.cancel(zone_id, bento_nano_app::animator::AnimChannel::PillHover);
+        anim.cancel(zone_id, bento_nano_app::animator::AnimChannel::PillPress);
+        drop(anim);
+        if app.zone_pill_anim_zone.get() == Some(zone_id) {
+            app.zone_pill_anim_zone.set(None);
+            app.zone_pill_anim_progress.set(1.0);
+            app.zone_pill_anim_expanding.set(false);
+            app.zone_pill_anim_started_ms.set(now_ms);
+        }
+    }
+    app.pill_pressed_zone.set(None);
+    app.hovered_zone.set(None);
+    app.stack_bloom_anchor.set(None);
+    app.stack_bloom_progress.set(1.0);
+    app.highlight_overlay.borrow_mut().clear();
+    let mut scheduler = app.hover_scheduler.get();
+    scheduler.reset();
+    app.hover_scheduler.set(scheduler);
+    app.item_hover
+        .set(bento_nano_app::business::item_card::ItemHoverState::new());
 }
 
 fn tick_stack_bloom_animation(app: &AppState, now_ms: u32) -> bool {
@@ -2259,9 +2502,8 @@ fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
         return false;
     };
     let elapsed = now_ms.wrapping_sub(app.zone_pill_anim_started_ms.get());
-    let progress = (elapsed as f32
-        / zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS as f32)
-        .clamp(0.0, 1.0);
+    let progress =
+        (elapsed as f32 / zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS as f32).clamp(0.0, 1.0);
     let prev = app.zone_pill_anim_progress.get();
     let changed = (prev - progress).abs() > 0.001;
     app.zone_pill_anim_progress.set(progress);
@@ -2269,6 +2511,7 @@ fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
     // to the steady pill chrome (no allocation per frame).
     if progress >= 1.0 && !app.zone_pill_anim_expanding.get() {
         app.zone_pill_anim_zone.set(None);
+        log_animation_proof_state(app, "hover_collapse_settled", now_ms, None, None);
     }
     changed || progress < 1.0
 }
@@ -2300,7 +2543,11 @@ fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32
     // Treat stack anchors as non-pill so they don't engage the scheduler.
     let next_zone = hover_zone.and_then(|id| {
         let zone = app.zones.get(id)?;
-        if zone.is_stack_anchor() { None } else { Some(id) }
+        if zone.is_stack_anchor() {
+            None
+        } else {
+            Some(id)
+        }
     });
     let expand_delay = app.expand_delay_ms.get().max(0) as u32;
     let collapse_delay = app.collapse_delay_ms.get().max(0) as u32;
@@ -2327,6 +2574,11 @@ fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32
         }
     }
     app.hover_scheduler.set(scheduler);
+    if next_zone.is_some() {
+        log_animation_proof_state(app, "hover_enter_armed", now_ms, None, None);
+    } else {
+        log_animation_proof_state(app, "hover_leave_armed", now_ms, None, None);
+    }
 }
 
 /// A3 — poll the scheduler once per frame and apply any due expand/collapse to
@@ -2340,10 +2592,14 @@ fn poll_hover_scheduler(app: &AppState, now_ms: u32) -> bool {
     match action {
         zone_pill_geometry::HoverAction::None => false,
         zone_pill_geometry::HoverAction::Expand(zone) => {
-            update_zone_pill_hover(app, Some(zone), now_ms)
+            let changed = update_zone_pill_hover(app, Some(zone), now_ms);
+            log_animation_proof_state(app, "hover_expand_fired", now_ms, None, None);
+            changed
         }
         zone_pill_geometry::HoverAction::Collapse(_zone) => {
-            update_zone_pill_hover(app, None, now_ms)
+            let changed = update_zone_pill_hover(app, None, now_ms);
+            log_animation_proof_state(app, "hover_collapse_fired", now_ms, None, None);
+            changed
         }
     }
 }
@@ -2362,7 +2618,11 @@ fn update_pill_hover_animator(app: &AppState, hover_zone: Option<ZoneId>, now_ms
     let prev = app.hovered_zone.get();
     let next = hover_zone.and_then(|id| {
         let zone = app.zones.get(id)?;
-        if zone.is_stack_anchor() { None } else { Some(id) }
+        if zone.is_stack_anchor() {
+            None
+        } else {
+            Some(id)
+        }
     });
     if prev == next {
         return false;
@@ -2398,6 +2658,49 @@ fn update_pill_hover_animator(app: &AppState, hover_zone: Option<ZoneId>, now_ms
     true
 }
 
+/// #2 step 5 (2026-06-02) — SINGLE hover-target-change entry point.
+///
+/// Previously the `WM_MOUSEMOVE` handler fired three channel drivers
+/// (`update_pill_hover_animator`, `update_stack_bloom_hover`,
+/// `drive_hover_scheduler`) back-to-back on the same `now_ms`, so a single
+/// pointer move could arm overlapping animation channels. This consolidates
+/// them into ONE function that branches by zone type so a given hover arms
+/// exactly the channel that zone needs:
+///
+/// * **stack anchor** → the bloom only (its hover affordance is the petal fan,
+///   never the pill↔panel expand morph). The pill-hover + expand-scheduler
+///   drivers already self-exclude anchors, so they are simply not engaged.
+/// * **normal zone** → the pill-hover micro-animation + the expand scheduler;
+///   the bloom is cleared (its `update` resolves a non-anchor to `None`).
+///
+/// The pill animator is sampled BEFORE `hovered_zone` is written so the helper
+/// sees the old→new delta (preserving the V-8 ordering contract). The caller
+/// owns the `request_redraw`.
+fn on_hover_target_changed(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) {
+    let is_anchor = hover_zone
+        .and_then(|id| app.zones.get(id))
+        .map(|z| z.is_stack_anchor())
+        .unwrap_or(false);
+    // V-8 ordering: sample the pill animator against the OLD hovered_zone
+    // before we overwrite it. For a stack anchor this is a no-op (the helper
+    // self-excludes anchors), so the pill channel never co-fires with bloom.
+    update_pill_hover_animator(app, hover_zone, now_ms);
+    app.hovered_zone.set(hover_zone);
+    if is_anchor {
+        // Stack anchor → bloom only. Clear any pending pill expand for safety
+        // (the scheduler also self-excludes anchors, so this is belt-and-braces).
+        update_stack_bloom_hover(app, hover_zone, now_ms);
+        drive_hover_scheduler(app, None, now_ms);
+        log_animation_proof_state(app, "hover_changed", now_ms, None, None);
+    } else {
+        // Normal zone → expand scheduler only; clear the bloom anchor (the
+        // helper resolves a non-anchor hover to `None`).
+        update_stack_bloom_hover(app, hover_zone, now_ms);
+        drive_hover_scheduler(app, hover_zone, now_ms);
+        log_animation_proof_state(app, "hover_changed", now_ms, None, None);
+    }
+}
+
 /// M3-A2 (2026-05-29) — drive the per-item hover scale ramp from a pointer
 /// move over the Main overlay. Resolves the card under `(x, y)` via the SAME
 /// `hit_test_zone_item` the drag-out path uses (so the hover ramp tracks the
@@ -2418,6 +2721,34 @@ fn update_item_hover_animator(app: &AppState, x: f32, y: f32) -> bool {
     let changed = state.on_hover(card, now_ms);
     app.item_hover.set(state);
     changed
+}
+
+fn move_zone_live(app: &mut AppState, id: ZoneId, point: DispatchPoint) -> bool {
+    let Some(z) = app.zones.get_mut(id) else {
+        return false;
+    };
+    if z.x == point.x && z.y == point.y {
+        return false;
+    }
+    z.x = point.x;
+    z.y = point.y;
+    app.mark_dirty();
+    true
+}
+
+fn resize_zone_live(app: &mut AppState, id: ZoneId, size: DispatchSize) -> bool {
+    let Some(z) = app.zones.get_mut(id) else {
+        return false;
+    };
+    let width = size.width.max(80);
+    let height = size.height.max(60);
+    if z.w == width && z.h == height {
+        return false;
+    }
+    z.w = width;
+    z.h = height;
+    app.mark_dirty();
+    true
 }
 
 /// M3-A2 — record a pointer-down on the item card at `(x, y)`, starting the
@@ -2486,18 +2817,13 @@ fn release_pill_press_animator(app: &AppState, now_ms: u32) -> bool {
     true
 }
 
-/// V-8 — per-frame tick of the pill animator. Drops fully-decayed entries
-/// (hover-out → 0, press-up → 0). Returns `true` while any entry is still
-/// in flight so the shell keeps pumping frames.
+/// V-8 per-frame tick of the pill hover/press animator. Drops fully-decayed
+/// entries and returns `true` only while a sampled visual transition is still
+/// in flight. `StatusDotPulse` helpers are dormant until a paint consumer
+/// samples them, so they must not keep the main window repainting by themselves.
 fn tick_pill_animator(app: &AppState, now_ms: u32) -> bool {
     let mut anim = app.pill_animator.borrow_mut();
-    // Status-dot pulse is global — always returns true while any zone has
-    // items, since the breathing curve never settles. We only request the
-    // tick to retire decayed hover/press entries; the pulse-driven redraw
-    // is taken care of by the explicit `is_active` check below.
-    let any_inflight = anim.tick(now_ms);
-    let pulse_needed = app.zones.iter().any(|z| !z.items.is_empty());
-    any_inflight || pulse_needed
+    anim.tick(now_ms)
 }
 
 fn stack_tray_hit(
@@ -2507,6 +2833,15 @@ fn stack_tray_hit(
 ) -> Option<(StackTrayPointerHit, ZoneId, Vec<ZoneId>)> {
     let app = root.app.borrow();
     if app.settings_open.get() || app.about_open.get() {
+        return None;
+    }
+    // #5 drag stability (2026-06-08) — the StackTray must not steal mouse-up
+    // from an active zone/resize/item drag. StackTray's own row drag uses
+    // `stack_tray_drag` and is intentionally not gated here.
+    if app.zone_drag.get().is_some()
+        || app.zone_resize.get().is_some()
+        || app.item_drag.borrow().is_some()
+    {
         return None;
     }
     let state = app.stack_tray.borrow().clone()?;
@@ -5164,7 +5499,7 @@ fn next_icon_slug(current: &str) -> SmolStr {
 
 fn normalize_icon_slug(raw: &str) -> SmolStr {
     IconKind::from_str_opt(raw).map_or_else(
-        || SmolStr::new(raw),
+        || SmolStr::new_static(DEFAULT_ZONE_ICON),
         |kind| SmolStr::new_static(kind.as_str()),
     )
 }
@@ -5415,7 +5750,11 @@ fn apply_general_settings_from_vault(app: &AppState) {
         ICON_CACHE_MAX,
         "icon_cache_size",
     );
-    restore_general_bool_cell(&app.startup_high_priority, high_priority, "startup_high_priority");
+    restore_general_bool_cell(
+        &app.startup_high_priority,
+        high_priority,
+        "startup_high_priority",
+    );
     restore_general_bool_cell(
         &app.crash_restart_enabled,
         crash_restart,
@@ -6210,9 +6549,7 @@ fn passphrase_button_command(app: &AppState) -> Option<Command> {
         .set(bento_nano_app::SettingsTextField::None);
     Some(match purpose {
         PassphraseEntryPurpose::Set => Command::SetEncryptionPassphrase(SmolStr::new(draft)),
-        PassphraseEntryPurpose::Unlock => {
-            Command::UnlockEncryptionPassphrase(SmolStr::new(draft))
-        }
+        PassphraseEntryPurpose::Unlock => Command::UnlockEncryptionPassphrase(SmolStr::new(draft)),
     })
 }
 
@@ -7059,6 +7396,7 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
         Some(bento_nano_backend::config_vault::SettingValue::Str(mode)) => {
             if let Some(parsed) = zone_display_mode_from_wire(mode.as_str()) {
                 app.zone_display_mode.set(parsed);
+                log_static(format!("zone_display_mode restored: {}\n", parsed.as_wire()).as_str());
             } else {
                 tracing::warn!(
                     target: "bentodesk::vault",
@@ -8861,20 +9199,62 @@ fn bento_item_from_zone_item(
     }
 }
 
+/// Smallest dimension a migrated zone may be shrunk to when clamped onto the
+/// viewport. Keeps a zone that started off-screen interactable rather than
+/// collapsing it to a 1-px sliver.
+const MIN_MIGRATED_ZONE_DIMENSION: i32 = 48;
+
+/// Clamp a zone's rect so it lies FULLY within `[0, viewport)` (ROOT-CAUSE
+/// -corrupt-zone-geometry.md Part 3). At startup-migration time `app.viewport`
+/// is often 0, so the migration falls back to `default_size(Main)` =
+/// 1920×1080; on a smaller logical screen that oversizes zones and pushes
+/// high-`x_percent` zones off the right/bottom edge. This guarantees:
+/// `x >= 0`, `y >= 0`, `x + w <= vp_w`, `y + h <= vp_h`. Width/height are
+/// shrunk only as much as needed (never below `MIN_MIGRATED_ZONE_DIMENSION`),
+/// then the origin is pulled back in. Pure / allocation-free for testability.
+fn clamp_zone_rect_to_viewport(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    viewport: bento_nano_style::Size,
+) -> (i32, i32, i32, i32) {
+    let vp_w = (viewport.width.max(1.0) as i32).max(MIN_MIGRATED_ZONE_DIMENSION);
+    let vp_h = (viewport.height.max(1.0) as i32).max(MIN_MIGRATED_ZONE_DIMENSION);
+
+    // A zone can never be wider/taller than the viewport itself.
+    let mut w = w.clamp(MIN_MIGRATED_ZONE_DIMENSION, vp_w);
+    let mut h = h.clamp(MIN_MIGRATED_ZONE_DIMENSION, vp_h);
+
+    // Pull the origin in so the (clamped) body fits on-screen, never < 0.
+    let x = x.clamp(0, (vp_w - w).max(0));
+    let y = y.clamp(0, (vp_h - h).max(0));
+
+    // Final shrink in case the viewport is smaller than the minimum dimension
+    // (degenerate screens) so `x + w <= vp_w` / `y + h <= vp_h` always hold.
+    if x + w > vp_w {
+        w = (vp_w - x).max(1);
+    }
+    if y + h > vp_h {
+        h = (vp_h - y).max(1);
+    }
+    (x, y, w, h)
+}
+
 fn zone_list_from_bento_zones(zones: &[BentoZone], viewport: bento_nano_style::Size) -> ZoneList {
     let width = viewport.width.max(1.0);
     let height = viewport.height.max(1.0);
     let mut list = ZoneList::new();
     for (index, source) in zones.iter().enumerate() {
         let id = parse_zone_id(source.id.as_str()).unwrap_or(ZoneId((index + 1) as u64));
-        let mut zone = Zone::new(
-            id,
-            Cow::Owned(source.name.clone()),
+        let (zx, zy, zw, zh) = clamp_zone_rect_to_viewport(
             percent_to_dip(source.position.x_percent, width),
             percent_to_dip(source.position.y_percent, height),
             percent_to_dip(source.expanded_size.w_percent, width).max(1),
             percent_to_dip(source.expanded_size.h_percent, height).max(1),
+            viewport,
         );
+        let mut zone = Zone::new(id, Cow::Owned(source.name.clone()), zx, zy, zw, zh);
         zone.icon = Cow::Owned(source.icon.to_string());
         zone.accent_color = source
             .accent_color
@@ -12364,13 +12744,7 @@ fn handle_minibar_lbutton_up(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) 
     if slot.kind != WindowKind::MiniBar {
         return false;
     }
-    let viewport = bento_nano_style::dpi::device_size_to_logical(
-        bento_nano_style::Size {
-            width: slot.renderer.width as f32,
-            height: slot.renderer.height as f32,
-        },
-        slot.state.dpi.get(),
-    );
+    let viewport = window_slot_logical_viewport(slot);
     let command = {
         let app = root.app.borrow();
         minibar_command_for_pointer(&app, viewport, x, y)
@@ -12668,18 +13042,10 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
                 Some(SmolStr::new_static("Enable crash auto restart"))
             }
         }
-        ui::SettingsHit::IncCrashMaxRetries => {
-            Some(SmolStr::new_static("Increase max retries"))
-        }
-        ui::SettingsHit::DecCrashMaxRetries => {
-            Some(SmolStr::new_static("Decrease max retries"))
-        }
-        ui::SettingsHit::IncCrashWindowSecs => {
-            Some(SmolStr::new_static("Increase crash window"))
-        }
-        ui::SettingsHit::DecCrashWindowSecs => {
-            Some(SmolStr::new_static("Decrease crash window"))
-        }
+        ui::SettingsHit::IncCrashMaxRetries => Some(SmolStr::new_static("Increase max retries")),
+        ui::SettingsHit::DecCrashMaxRetries => Some(SmolStr::new_static("Decrease max retries")),
+        ui::SettingsHit::IncCrashWindowSecs => Some(SmolStr::new_static("Increase crash window")),
+        ui::SettingsHit::DecCrashWindowSecs => Some(SmolStr::new_static("Decrease crash window")),
         ui::SettingsHit::ToggleSafeStartHibernation => {
             if app.safe_start_after_hibernation.get() {
                 Some(SmolStr::new_static("Disable safe start after hibernation"))
@@ -12691,9 +13057,9 @@ fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option
             Some(SmolStr::new_static("Adjust hibernate resume delay"))
         }
         ui::SettingsHit::RefreshStealth => Some(SmolStr::new_static("Refresh stealth status")),
-        ui::SettingsHit::ReapplyStealth => {
-            Some(SmolStr::new_static("Re-apply stealth attributes to .bentodesk/"))
-        }
+        ui::SettingsHit::ReapplyStealth => Some(SmolStr::new_static(
+            "Re-apply stealth attributes to .bentodesk/",
+        )),
         ui::SettingsHit::Body | ui::SettingsHit::Outside => None,
     }
 }
@@ -13433,12 +13799,13 @@ fn tooltip_command_for_minibar_hover(
 }
 
 fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
-    // P2.6 / Wave F1.3 — drag/resize go through the dispatcher so the bus
-    // invariant holds for future scripting / replay / undo. We compute the
-    // target geometry here (need the mouse delta + the in-flight grab
-    // origin), then push `Command::MoveZone` / `Command::ResizeZone` and
-    // return; `consume_dispatcher` applies the mutation under a fresh
-    // `borrow_mut()` on the next pump.
+    // #5 drag motion arbitration (2026-06-08) — once a normal zone/resize/item
+    // drag is armed, the captured pointer owns the move stream. Apply live
+    // drag geometry before any hover/tooltip producer can retarget morph,
+    // bloom, or item-hover channels. Persistence still waits until mouse-up.
+    if handle_active_pointer_drag(root, slot, x, y) {
+        return;
+    }
     {
         let app = root.app.borrow();
         if slot.kind == WindowKind::Search {
@@ -13563,13 +13930,7 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
             return;
         }
         if slot.kind == WindowKind::MiniBar {
-            let viewport = bento_nano_style::dpi::device_size_to_logical(
-                bento_nano_style::Size {
-                    width: slot.renderer.width as f32,
-                    height: slot.renderer.height as f32,
-                },
-                slot.state.dpi.get(),
-            );
+            let viewport = window_slot_logical_viewport(slot);
             if let Some(command) = tooltip_command_for_minibar_hover(
                 &app,
                 viewport,
@@ -13606,19 +13967,13 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
         if app.hovered_zone.get() != hover_zone {
             // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
             let now_ms = unsafe { GetTickCount() };
-            // V-8 — sample the animator BEFORE writing the new hovered_zone
-            // so the helper sees the old → new delta.
-            update_pill_hover_animator(&app, hover_zone, now_ms);
-            app.hovered_zone.set(hover_zone);
-            update_stack_bloom_hover(&app, hover_zone, now_ms);
-            // A3 (2026-05-29) — feed the hover-intent / grace-collapse
-            // scheduler. The structural expand/collapse morph is NO LONGER
-            // fired immediately here; the scheduler defers it by the
-            // user-tunable expand_delay_ms / collapse_delay_ms (M1d) and the
-            // per-frame `poll_hover_scheduler` (ghost-passthrough timer pump)
-            // applies the morph when the grace elapses. This replaces the
-            // pre-A3 instant-expand-on-move behaviour.
-            drive_hover_scheduler(&app, hover_zone, now_ms);
+            // #2 step 5 (2026-06-02) — ONE consolidated hover entry point that
+            // branches by zone type so a single move arms exactly one channel
+            // (stack anchor → bloom; normal zone → pill-hover + expand
+            // scheduler). It samples the pill animator before writing
+            // hovered_zone (V-8 ordering) and defers the structural morph to
+            // the per-frame `poll_hover_scheduler` (A3 grace timer).
+            on_hover_target_changed(&app, hover_zone, now_ms);
             request_redraw(slot.hwnd);
         }
         // M3-A2 (2026-05-29) — per-item hover scale. Runs on EVERY move (not
@@ -13628,112 +13983,6 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
         // — `update_item_hover_animator` clears the hovered card in that case.
         if update_item_hover_animator(&app, x, y) {
             request_redraw(slot.hwnd);
-        }
-        let item_candidate = app.item_drag.borrow().clone();
-        if let Some(mut candidate) = item_candidate {
-            let dx = (x as i32 - candidate.start_x).abs();
-            let dy = (y as i32 - candidate.start_y).abs();
-            if drag_proof_log_enabled() {
-                log_static(
-                    format!(
-                        "items: drag-proof mouse_move x={x:.1} y={y:.1} dx={dx} dy={dy} threshold={} path={}\n",
-                        ITEM_DRAG_THRESHOLD_DIP,
-                        candidate.path
-                    )
-                    .as_str(),
-                );
-            }
-            if dx >= ITEM_DRAG_THRESHOLD_DIP || dy >= ITEM_DRAG_THRESHOLD_DIP {
-                candidate.last_x = x as i32;
-                candidate.last_y = y as i32;
-                if should_start_item_drag_out(&app, x, y, item_external_drag_modifier_down()) {
-                    if drag_proof_log_enabled() {
-                        log_static(
-                            format!(
-                                "items: drag-proof starting_external x={x:.1} y={y:.1} path={}\n",
-                                candidate.path
-                            )
-                            .as_str(),
-                        );
-                    }
-                    app.item_drag.borrow_mut().take();
-                    drop(app);
-                    root.pending_item_drag_out
-                        .borrow_mut()
-                        .replace(candidate.path);
-                    // SAFETY: `slot.hwnd` is the live source HWND and the
-                    // message only carries process-local state stored above.
-                    unsafe {
-                        PostMessageW(slot.hwnd, WM_ITEM_DRAG_OUT, 0, 0);
-                    }
-                    return;
-                }
-                candidate.is_internal_dragging = true;
-                app.item_drag.borrow_mut().replace(candidate);
-                return;
-            }
-        }
-        if let Some((id, dx, dy)) = app.zone_drag.get() {
-            // M4 — gate MoveZone behind the 4-DIP drag threshold (Tauri
-            // parity ZONE_DRAG_THRESHOLD_PX = 4). Measure travel against the
-            // mouse-down ORIGIN, not the grab offset; latch `moved` so a drag
-            // stays a drag once it crosses the threshold (one-way, matching
-            // Tauri's `moved = true`). A sub-threshold release stays a pure
-            // click (no MoveZone pushed). Integer-only, alloc-free (§10).
-            let (sx, sy, already_moved) = app
-                .zone_drag_origin
-                .get()
-                .unwrap_or((x as i32, y as i32, true));
-            if !already_moved
-                && !bento_nano_app::zone_gesture_geometry::exceeds_drag_threshold(
-                    x as i32 - sx,
-                    y as i32 - sy,
-                )
-            {
-                // Sub-threshold: still a pending click — no move yet.
-                return;
-            }
-            if !already_moved {
-                app.zone_drag_origin.set(Some((sx, sy, true)));
-            }
-            let nx = x as i32 - dx;
-            let ny = y as i32 - dy;
-            // M4 strict live-drag clamp (ZRainbow ruling Option A — STRICT
-            // INSET, UNION BOUNDS): hold the dragged zone fully inside the
-            // union of all monitor work areas; it may never overhang the
-            // outer desktop edge. On a single monitor this is pixel-identical
-            // to Tauri's [0, 100-cap] clamp. `slot.state.monitors` is the live
-            // cache; the MoveZone reducer has no monitor list in scope, so the
-            // clamp lives here.
-            let (cx, cy) = if let Some(z) = app.zones.get(id) {
-                bento_nano_platform::clamp_rect_into_union_bounds(
-                    nx,
-                    ny,
-                    z.w,
-                    z.h,
-                    &slot.state.monitors,
-                )
-            } else {
-                (nx, ny)
-            };
-            drop(app);
-            root.dispatcher
-                .push(Command::MoveZone(id, DispatchPoint::new(cx, cy)));
-            return;
-        }
-        if let Some((id, w0, h0)) = app.zone_resize.get() {
-            // The grab-origin (w0, h0) is preserved for the future
-            // proportional-resize Phase 2.6 tweak; today we recompute new
-            // size from the current zone origin (mouse - zone.x/y).
-            let _ = (w0, h0);
-            if let Some(z) = app.zones.get(id) {
-                let new_w = ((x as i32) - z.x).max(80);
-                let new_h = ((y as i32) - z.y).max(60);
-                drop(app);
-                root.dispatcher
-                    .push(Command::ResizeZone(id, DispatchSize::new(new_w, new_h)));
-            }
-            return;
         }
     }
 
@@ -13820,6 +14069,16 @@ fn clear_hover(root: &AppRoot) {
     let mut app = root.app.borrow_mut();
     // SAFETY: GetTickCount is total + thread-safe.
     let now_ms = unsafe { GetTickCount() };
+    let should_hide_tooltip = app.active_tooltip.borrow().is_some();
+    if normal_pointer_drag_active(&app) {
+        let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
+        reset_pointer_drag_hover_channels(&app, dragged_zone, now_ms);
+        drop(app);
+        if should_hide_tooltip {
+            root.dispatcher.push(Command::HideTooltip);
+        }
+        return;
+    }
     // V-8 — release any in-flight hover micro-animation before we clobber
     // `hovered_zone`. Mirrors the mouse-move path.
     update_pill_hover_animator(&app, None, now_ms);
@@ -13841,7 +14100,6 @@ fn clear_hover(root: &AppRoot) {
     // inside `drive_hover_scheduler`. The per-frame `poll_hover_scheduler`
     // fires the actual collapse morph once the grace elapses (HOVER mode).
     drive_hover_scheduler(&app, None, now_ms);
-    let should_hide_tooltip = app.active_tooltip.borrow().is_some();
     let mut prev = root.hovered.borrow_mut();
     if let Some(old) = *prev {
         if ui::is_icon_button(&app, old) {
@@ -13859,6 +14117,15 @@ fn clear_hover(root: &AppRoot) {
 }
 
 fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f32) {
+    if should_ignore_main_pointer_while_settings_aux_open(root, slot.kind) {
+        return;
+    }
+    let settings_aux_registered = settings_aux_registered(root);
+    let settings_pointer_active = root.app.borrow().settings_open.get()
+        && window_kind_routes_settings_pointer(slot.kind, settings_aux_registered);
+    if settings_pointer_active {
+        sync_app_viewport_from_window_slot(root, slot);
+    }
     let app = root.app.borrow();
 
     if app.about_open.get() && matches!(slot.kind, WindowKind::Main | WindowKind::About) {
@@ -13872,7 +14139,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
         return;
     }
 
-    if app.settings_open.get() && matches!(slot.kind, WindowKind::Main | WindowKind::Settings) {
+    if settings_pointer_active {
         let settings_hit = ui::settings_hit(&app, x, y);
         let viewport = app.viewport;
         log_static(
@@ -13997,8 +14264,9 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     app.settings_focused_field
                         .set(bento_nano_app::SettingsTextField::None);
                 }
-                root.dispatcher
-                    .push(encryption_mode_setting_command_for(SettingsEncryptionMode::None));
+                root.dispatcher.push(encryption_mode_setting_command_for(
+                    SettingsEncryptionMode::None,
+                ));
             }
             ui::SettingsHit::SelectEncryptionModeDpapi => {
                 // M7 — §10 DPAPI button → SetSetting{ "encryption.mode", "Dpapi" }
@@ -14010,8 +14278,9 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     app.settings_focused_field
                         .set(bento_nano_app::SettingsTextField::None);
                 }
-                root.dispatcher
-                    .push(encryption_mode_setting_command_for(SettingsEncryptionMode::Dpapi));
+                root.dispatcher.push(encryption_mode_setting_command_for(
+                    SettingsEncryptionMode::Dpapi,
+                ));
             }
             ui::SettingsHit::FocusPassphraseField => {
                 // P15 (#7 fix wave 2026-06-01) — clicking the passphrase INPUT is
@@ -14077,8 +14346,9 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 // ThemeTokens). Also dispatch the backend `SetActiveTheme` so
                 // the choice persists through the config vault, and mark the
                 // panel dirty so Save lights up (Tauri `setTheme(id); setDirty`).
-                if let Some(preset) =
-                    bento_nano_app::theme_picker::BUILTIN_THEMES.iter().find(|p| p.id == id)
+                if let Some(preset) = bento_nano_app::theme_picker::BUILTIN_THEMES
+                    .iter()
+                    .find(|p| p.id == id)
                 {
                     let theme_id = preset.theme_id;
                     let app = root.app.borrow();
@@ -14224,41 +14494,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 queue_locale_setting_toggle(root);
             }
             ui::SettingsHit::ScrollBodyDelta(delta) => {
-                use bento_nano_app::settings_panel::{
-                    SettingsBodyFlags, settings_clamp_scroll,
-                };
-                let app = root.app.borrow();
-                let vp = app.viewport;
-                // M1d + M1e + M1f — the body content height depends on the
-                // Startup gating bools (conditional crash steppers + hibernate
-                // slider), the Stealth conditional rows (retry/error/OneDrive),
-                // AND the Updater status family (version/progress/error block),
-                // so the max-scroll clamp reads all of them via SettingsBodyFlags.
-                let (stealth_has_retry, stealth_has_error) =
-                    match &*app.stealth_status.borrow() {
-                        Some(s) => (s.retry_count > 0, s.last_error.is_some()),
-                        None => (false, false),
-                    };
-                let updater_kind = bento_nano_app::business::settings::updater_card::updater_height_kind(
-                    &app.settings_updater_status.borrow(),
-                );
-                let flags = SettingsBodyFlags::new(
-                    app.crash_restart_enabled.get(),
-                    app.safe_start_after_hibernation.get(),
-                    stealth_has_retry,
-                    stealth_has_error,
-                    updater_kind,
-                )
-                // M1i fidelity — the §2 source list reflows to the live count,
-                // so the body content height (and thus the max-scroll clamp)
-                // shrinks/grows with it. Thread the live count in lockstep with
-                // the renderer + hit-tester.
-                .with_source_rows(app.desktop_sources.borrow().len());
-                let next =
-                    settings_clamp_scroll(app.scroll_offset_y.get(), delta as f32, vp, &flags);
-                app.scroll_offset_y.set(next);
-                drop(app);
-                request_redraw(hwnd);
+                handle_settings_scroll_delta(root, hwnd, delta);
             }
             ui::SettingsHit::RefreshDesktopSources => {
                 // M1i — re-resolve the real Desktop sources and repopulate the
@@ -14467,6 +14703,14 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
     }
 
     let clicked_zone = ui::hit_test_zone(&app, x, y);
+    let clicked_zone_body_visible_before_select = clicked_zone
+        .and_then(|id| {
+            app.zones
+                .get(id)
+                .map(|zone| app.zone_pill_body_visible(zone))
+        })
+        .unwrap_or(false);
+    let selected_zone_before_mouse_down = app.selected_zone.get();
     if app.selected_zone.get() != clicked_zone {
         app.selected_zone.set(clicked_zone);
     }
@@ -14584,16 +14828,20 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             let dx = x as i32 - z.x;
             let dy = y as i32 - z.y;
             app.zone_drag.set(Some((id, dx, dy)));
+            app.zone_drag_body_visible_at_start
+                .set(Some((id, clicked_zone_body_visible_before_select)));
+            app.zone_drag_selected_before_start
+                .set(selected_zone_before_mouse_down);
             // M4 — capture the mouse-down origin so the move handler can gate
             // MoveZone behind the 4-DIP drag threshold (moved = false until
             // the pointer travels past it). Tuple = (start_x, start_y, moved).
-            app.zone_drag_origin
-                .set(Some((x as i32, y as i32, false)));
+            app.zone_drag_origin.set(Some((x as i32, y as i32, false)));
+            // SAFETY: GetTickCount is total + thread-safe.
+            let now_ms = unsafe { GetTickCount() };
+            reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
             // V-8 — fire press-down animator unless this is a stack anchor
             // (which paints via its own chrome and doesn't run the V-8 path).
             if !z.is_stack_anchor() {
-                // SAFETY: GetTickCount is total + thread-safe.
-                let now_ms = unsafe { GetTickCount() };
                 start_pill_press_animator(&app, id, now_ms);
             }
             // SAFETY: SetCapture canonical.
@@ -14601,6 +14849,23 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             // Production reader for `monitors` cache.
             let _ = bento_nano_platform::zone_active_monitor_index(z, &slot.state.monitors);
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragSelectionRelease {
+    KeepCurrent,
+    Restore(Option<ZoneId>),
+}
+
+fn drag_selection_release(app: &AppState, moved: bool) -> DragSelectionRelease {
+    let Some((_, body_visible_at_start)) = app.zone_drag_body_visible_at_start.get() else {
+        return DragSelectionRelease::KeepCurrent;
+    };
+    if moved && !body_visible_at_start {
+        DragSelectionRelease::Restore(app.zone_drag_selected_before_start.get())
+    } else {
+        DragSelectionRelease::KeepCurrent
     }
 }
 
@@ -14638,6 +14903,9 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     if slot.kind == WindowKind::Search && handle_search_lbutton_up(root, hwnd, x, y) {
         return;
     }
+    if should_ignore_main_pointer_while_settings_aux_open(root, slot.kind) {
+        return;
+    }
     if slot.kind == WindowKind::Main && handle_stack_tray_lbutton_up(root, hwnd, x, y) {
         return;
     }
@@ -14651,7 +14919,7 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     // actual drag latched (moved past the 4-DIP threshold), never a
     // sub-threshold click-release. Compute the target BEFORE clearing
     // zone_drag; the dragged zone's live rect is already written into
-    // app.zones by the synchronous MoveZone reducer. Anchor = the overlapped
+    // app.zones by the drag mouse-move hot path. Anchor = the overlapped
     // zone, member = the dragged zone ⇒ Command::StackZone(anchor, dragged)
     // (matches the (parent, child) reducer contract and the context-menu push
     // at the StackWith arm).
@@ -14672,9 +14940,24 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     } else {
         None
     };
+    let selection_release = if was_drag {
+        let moved = app
+            .zone_drag_origin
+            .get()
+            .map(|(_, _, m)| m)
+            .unwrap_or(false);
+        drag_selection_release(&app, moved)
+    } else {
+        DragSelectionRelease::KeepCurrent
+    };
     if was_drag {
+        if let DragSelectionRelease::Restore(selection) = selection_release {
+            app.selected_zone.set(selection);
+        }
         app.zone_drag.set(None);
         app.zone_drag_origin.set(None);
+        app.zone_drag_body_visible_at_start.set(None);
+        app.zone_drag_selected_before_start.set(None);
         app.mark_dirty();
     }
     if was_resize {
@@ -14695,6 +14978,11 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     }
     let item_drag = app.item_drag.borrow_mut().take();
     let was_item_drag = item_drag.is_some();
+    if was_drag || was_resize || was_item_drag {
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        let now_ms = unsafe { GetTickCount() };
+        log_animation_proof_state(&app, "lbutton_up_after_clear", now_ms, Some(x), Some(y));
+    }
     let item_command = item_drag.as_ref().and_then(|candidate| {
         if !candidate.is_internal_dragging {
             return None;
@@ -14742,6 +15030,125 @@ fn should_start_item_drag_out(
         || x >= app.viewport.width
         || y >= app.viewport.height
         || ui::hit_test_zone(app, x, y).is_none()
+}
+
+fn handle_active_pointer_drag(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) -> bool {
+    {
+        let app = root.app.borrow();
+        let item_candidate = app.item_drag.borrow().clone();
+        if let Some(mut candidate) = item_candidate {
+            let dx = (x as i32 - candidate.start_x).abs();
+            let dy = (y as i32 - candidate.start_y).abs();
+            if drag_proof_log_enabled() {
+                log_static(
+                    format!(
+                        "items: drag-proof mouse_move x={x:.1} y={y:.1} dx={dx} dy={dy} threshold={} path={}\n",
+                        ITEM_DRAG_THRESHOLD_DIP,
+                        candidate.path
+                    )
+                    .as_str(),
+                );
+            }
+            if dx >= ITEM_DRAG_THRESHOLD_DIP || dy >= ITEM_DRAG_THRESHOLD_DIP {
+                candidate.last_x = x as i32;
+                candidate.last_y = y as i32;
+                if should_start_item_drag_out(&app, x, y, item_external_drag_modifier_down()) {
+                    if drag_proof_log_enabled() {
+                        log_static(
+                            format!(
+                                "items: drag-proof starting_external x={x:.1} y={y:.1} path={}\n",
+                                candidate.path
+                            )
+                            .as_str(),
+                        );
+                    }
+                    app.item_drag.borrow_mut().take();
+                    drop(app);
+                    root.pending_item_drag_out
+                        .borrow_mut()
+                        .replace(candidate.path);
+                    // SAFETY: `slot.hwnd` is the live source HWND and the
+                    // message only carries process-local state stored above.
+                    unsafe {
+                        PostMessageW(slot.hwnd, WM_ITEM_DRAG_OUT, 0, 0);
+                    }
+                    return true;
+                }
+                candidate.is_internal_dragging = true;
+                // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+                let now_ms = unsafe { GetTickCount() };
+                reset_pointer_drag_hover_channels(&app, None, now_ms);
+                app.item_drag.borrow_mut().replace(candidate);
+                log_animation_proof_state(&app, "item_drag_live", now_ms, Some(x), Some(y));
+            }
+            return true;
+        }
+    }
+
+    {
+        let mut app = root.app.borrow_mut();
+        if let Some((id, dx, dy)) = app.zone_drag.get() {
+            let (sx, sy, already_moved) = app
+                .zone_drag_origin
+                .get()
+                .unwrap_or((x as i32, y as i32, true));
+            if !already_moved
+                && !bento_nano_app::zone_gesture_geometry::exceeds_drag_threshold(
+                    x as i32 - sx,
+                    y as i32 - sy,
+                )
+            {
+                return true;
+            }
+            // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+            let now_ms = unsafe { GetTickCount() };
+            if !already_moved {
+                app.zone_drag_origin.set(Some((sx, sy, true)));
+                reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
+                log_animation_proof_state(&app, "zone_drag_latched", now_ms, Some(x), Some(y));
+            }
+            let nx = x as i32 - dx;
+            let ny = y as i32 - dy;
+            let (cx, cy) = if let Some(z) = app.zones.get(id) {
+                bento_nano_platform::clamp_rect_into_union_bounds(
+                    nx,
+                    ny,
+                    z.w,
+                    z.h,
+                    &slot.state.monitors,
+                )
+            } else {
+                (nx, ny)
+            };
+            let moved = move_zone_live(&mut app, id, DispatchPoint::new(cx, cy));
+            if moved && drag_proof_log_enabled() {
+                log_static(
+                    format!(
+                        "drag: live_move zone_id={} x={cx} y={cy} now_ms={now_ms}\n",
+                        id.0
+                    )
+                    .as_str(),
+                );
+            }
+            log_animation_proof_state(&app, "zone_drag_live", now_ms, Some(x), Some(y));
+            return true;
+        }
+        if let Some((id, w0, h0)) = app.zone_resize.get() {
+            let _ = (w0, h0);
+            if let Some(z) = app.zones.get(id) {
+                let new_w = ((x as i32) - z.x).max(80);
+                let new_h = ((y as i32) - z.y).max(60);
+                // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+                let now_ms = unsafe { GetTickCount() };
+                reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
+                let _ = resize_zone_live(&mut app, id, DispatchSize::new(new_w, new_h));
+                log_animation_proof_state(&app, "zone_resize_live", now_ms, Some(x), Some(y));
+            }
+            return true;
+        }
+    }
+
+    false
 }
 
 fn item_external_drag_modifier_down() -> bool {
@@ -16905,6 +17312,18 @@ unsafe extern "system" fn aux_wnd_proc(
             }
             0
         }
+        WM_MOUSEWHEEL => unsafe {
+            let p = get_slot_ptr(hwnd);
+            if !p.is_null() {
+                let slot = &*p;
+                if let Some(root) = app_root() {
+                    if handle_settings_mousewheel(root, slot, hwnd, wparam) {
+                        return 0;
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
         WM_LBUTTONDOWN => {
             unsafe {
                 let p = get_slot_ptr(hwnd);
@@ -17380,25 +17799,19 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
             }
             Command::MoveZone(id, point) => {
                 let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.x = point.x;
-                    z.y = point.y;
+                if move_zone_live(&mut app, id, point) {
                     // Phase 2.5 — cross-monitor drag clamping. The
                     // monitor cache lives on `WindowSlot.state`, which we
                     // can't reach without an HWND here. Per-window clamp
                     // happens in the slot's WM_MOVE / WM_SIZE; the bus
                     // path stays geometry-only. F2 may add a clamp here
                     // once the slot routing per command is wired.
-                    app.mark_dirty();
                     needs_redraw = true;
                 }
             }
             Command::ResizeZone(id, size) => {
                 let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.w = size.width.max(80);
-                    z.h = size.height.max(60);
-                    app.mark_dirty();
+                if resize_zone_live(&mut app, id, size) {
                     needs_redraw = true;
                 }
             }
@@ -17940,10 +18353,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         format!("stack: StackZone anchor={} child={}\n", parent.0, child.0)
                             .as_str(),
                     );
-                    app.stack_tray.borrow_mut().replace(
-                        StackTrayState::new(parent, child)
-                            .with_status(SmolStr::new_static("Stacked member")),
-                    );
+                    // Stack creation must NOT auto-open the management tray. The collapsed
+                    // anchor simply re-renders as the compact stack pill (render.rs pill
+                    // branch). Command::OpenStackTray is the sole explicit opener (reached
+                    // via the context-menu action or a bloom-petal click).
                     app.mark_dirty();
                     needs_redraw = true;
                 } else {
@@ -17956,7 +18369,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
             }
             Command::UnstackZone(id) => {
                 let mut app = root.app.borrow_mut();
-                if app.zones.unstack(id) {
+                let viewport_w = app.viewport.width.max(1.0).round() as i32;
+                let viewport_h = app.viewport.height.max(1.0).round() as i32;
+                if app.zones.unstack_with_scatter(id, viewport_w, viewport_h) {
                     log_static(format!("stack: UnstackZone id={}\n", id.0).as_str());
                     app.stack_tray.borrow_mut().take();
                     app.mark_dirty();
@@ -18077,7 +18492,12 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
             Command::DissolveStack(id) => {
                 let mut app = root.app.borrow_mut();
                 let anchor = app.zones.stack_anchor_for(id).unwrap_or(id);
-                if app.zones.unstack(anchor) {
+                let viewport_w = app.viewport.width.max(1.0).round() as i32;
+                let viewport_h = app.viewport.height.max(1.0).round() as i32;
+                if app
+                    .zones
+                    .dissolve_stack_scattered(anchor, viewport_w, viewport_h)
+                {
                     log_static(format!("stack: DissolveStack anchor={}\n", anchor.0).as_str());
                     app.stack_tray.borrow_mut().take();
                     app.stack_tray_drag.set(None);
@@ -19587,6 +20007,21 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
 
 fn flush_dirty_zones(root: &AppRoot) {
     let app = root.app.borrow();
+    // #5 step 15 (2026-06-02) — DRAG JANK FIX. Suppress the synchronous
+    // atomic disk write (temp-write + fsync + .bak copy) while a zone drag /
+    // zone resize / item drag is in flight. The MoveZone/ResizeZone reducers
+    // still update the in-memory z.x/z.y/z.w/z.h every frame, so the zone keeps
+    // tracking the cursor 1:1 (no easing); only the per-frame fsync is deferred.
+    // `handle_lbutton_up` re-marks dirty on gesture END (one write on release)
+    // and WM_DESTROY covers the never-released edge. BulkMoveZones marks dirty
+    // itself, so scripted/bulk moves still persist. The `dirty` flag is LEFT SET
+    // here so the deferred write lands on the next non-gesture flush.
+    if app.zone_drag.get().is_some()
+        || app.zone_resize.get().is_some()
+        || app.item_drag.borrow().is_some()
+    {
+        return;
+    }
     if app.dirty.get() && !app.zones_path.as_os_str().is_empty() {
         let _ = storage::write_zones_atomic(&app.zones_path, &app.zones);
         app.dirty.set(false);
@@ -20365,8 +20800,11 @@ fn stealth_config_now(root: &AppRoot) -> Option<bento_nano_backend::stealth::Ste
             Some(PathBuf::from(trimmed))
         }
     };
-    let desktop_dir = configured
-        .or_else(|| bento_nano_backend::desktop_sources::all_desktop_dirs(None).into_iter().next())?;
+    let desktop_dir = configured.or_else(|| {
+        bento_nano_backend::desktop_sources::all_desktop_dirs(None)
+            .into_iter()
+            .next()
+    })?;
     // Hand the helper a child path so its `.parent()` yields `desktop_dir`.
     let sentinel = desktop_dir.join(".bentodesk-reapply");
     stealth_config_for_source(root, &sentinel.to_string_lossy())
@@ -21922,7 +22360,7 @@ fn search_icon_for_kind(kind: &SearchItemKind) -> SmolStr {
         SearchItemKind::Folder => SmolStr::new_static("folder"),
         SearchItemKind::Zone => SmolStr::new_static("grid"),
         SearchItemKind::Setting => SmolStr::new_static("settings"),
-        SearchItemKind::Action => SmolStr::new_static("command"),
+        SearchItemKind::Action => SmolStr::new_static("code"),
     }
 }
 
@@ -22573,14 +23011,14 @@ unsafe fn handle_device_lost(root: &AppRoot, hwnd: HWND) {
                 }
                 // SAFETY: non-null per the guard above; single-threaded pump.
                 let slot = unsafe { &mut *p };
-                slot.renderer
-                    .rebuild_after_device_loss()
-                    .map_err(|e| bento_nano_platform::PlatformError::Init(match e {
+                slot.renderer.rebuild_after_device_loss().map_err(|e| {
+                    bento_nano_platform::PlatformError::Init(match e {
                         bento_nano_app::RenderError::DeviceLost => {
                             "renderer rebuild_after_device_loss: device still lost"
                         }
                         _ => "renderer rebuild_after_device_loss failed",
-                    }))
+                    })
+                })
             });
 
             match recovered {
@@ -22708,35 +23146,40 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
     if app.settings_focused_field.get() != bento_nano_app::SettingsTextField::None {
         any_active = true;
     }
-    if tick_stack_bloom_animation(&app, now) {
-        any_active = true;
-    }
-    // A3 (2026-05-29) — poll the hover-intent / grace-collapse scheduler on
-    // the frame-tick timestamp (no WM_TIMER, fits the immediate-mode pump).
-    // When an expand/collapse deadline elapses this flips the Wave G2 morph
-    // target, which `tick_zone_pill_animation` below then advances.
-    if poll_hover_scheduler(&app, now) {
-        any_active = true;
-    }
-    // A3 — keep the pump alive while a hover/collapse timer is still armed so
-    // the deadline is actually reached even if the cursor has gone idle.
-    if app.hover_scheduler.get().is_pending() {
-        any_active = true;
-    }
-    // Wave G2 — capsule pill expand/shrink morph.
-    if tick_zone_pill_animation(&app, now) {
-        any_active = true;
-    }
-    // V-8 — hover / press / pulse animator. Keeps frame-pump alive while
-    // entries are in flight OR while any zone has items (pulse is global).
-    if tick_pill_animator(&app, now) {
-        any_active = true;
-    }
-    // M3-A2 — per-item hover/press ramp. Same frame cadence as the pill
-    // animator; retires leaving/released cards and keeps the pump alive while
-    // a 150ms hover / 80ms press transition is still in flight.
-    if tick_item_hover_animator(&app, now) {
-        any_active = true;
+    let pointer_drag_active = normal_pointer_drag_active(&app);
+    if !pointer_drag_active {
+        if tick_stack_bloom_animation(&app, now) {
+            any_active = true;
+        }
+        // A3 (2026-05-29) — poll the hover-intent / grace-collapse scheduler on
+        // the frame-tick timestamp (no WM_TIMER, fits the immediate-mode pump).
+        // When an expand/collapse deadline elapses this flips the Wave G2 morph
+        // target, which `tick_zone_pill_animation` below then advances.
+        if poll_hover_scheduler(&app, now) {
+            any_active = true;
+        }
+        // A3 — keep the pump alive while a hover/collapse timer is still armed so
+        // the deadline is actually reached even if the cursor has gone idle.
+        if app.hover_scheduler.get().is_pending() {
+            any_active = true;
+        }
+        // Wave G2 — capsule pill expand/shrink morph.
+        if tick_zone_pill_animation(&app, now) {
+            any_active = true;
+        }
+        // V-8 hover / press animator. Keeps the frame-pump alive only while
+        // sampled pill visual entries are in flight.
+        if tick_pill_animator(&app, now) {
+            any_active = true;
+        }
+        // M3-A2 — per-item hover/press ramp. Same frame cadence as the pill
+        // animator; retires leaving/released cards and keeps the pump alive while
+        // a 150ms hover / 80ms press transition is still in flight.
+        if tick_item_hover_animator(&app, now) {
+            any_active = true;
+        }
+    } else {
+        log_animation_proof_state(&app, "tick_pointer_drag_skip", now, None, None);
     }
     if app.highlight_overlay.borrow_mut().tick(dt_ms) {
         any_active = true;
@@ -23068,100 +23511,275 @@ fn flush_hibernation(root: &AppRoot, now_ms: u32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALL_ICON_KINDS, AppRoot, AuxiliaryEscapeAction, BentoItem, BentoZone, BulkZoneUpdate,
-        Command, ContextCapsuleWindow, DispatchPoint, DispatchSize, EventDispatcher, GridPosition,
-        HWND, ITEM_CONTEXT_COPY_PATH_ID, ITEM_CONTEXT_DELETE_FILE_ID,
-        ITEM_CONTEXT_MOVE_ZONE_BASE_ID, ITEM_CONTEXT_OPEN_ID, ITEM_CONTEXT_REMOVE_ID,
-        ITEM_CONTEXT_RENAME_FILE_ID, ITEM_CONTEXT_REVEAL_ID, ITEM_CONTEXT_TOGGLE_WIDE_ID,
-        ItemContextAction, ItemContextDispatch, ItemType, LayoutData, LiveContextWindow, MiniBar,
-        MiniBarRoster, PendingItemContextMenu, RecoveryIconRestoreOutcome, RecycleDeleteOutcome,
-        RelativePosition, RelativeSize, SETTING_ACTIVE_THEME, SETTING_BACKUP_LAST_CREATED,
-        SETTING_BACKUP_LAST_RESTORED, SETTING_DEBUG_OVERLAY, SETTING_DISPLAY_LOCALE,
-        SETTING_ENCRYPTION_MODE, SETTING_MINIBAR_PINNED_ZONES, SETTING_STEALTH_ENABLED,
-        SETTING_THEME_BASE_ACCENT, SETTING_UPDATES_AUTO_DOWNLOAD, SETTING_UPDATES_CHECK_FREQUENCY,
-        SETTING_ZONE_DISPLAY_MODE, StartupLayoutLoadSource, VK_A_KEY, VK_BACKSPACE, VK_D_KEY,
-        VK_DOWN_KEY, VK_ENTER, VK_ESCAPE_KEY, VK_N_KEY, VK_P_KEY, VK_SPACE_KEY,
-        WindowRegistry, WindowState, ZONE_CONTEXT_BIND_LIVE_FOLDER_ID, ZoneContextAction,
-        add_item_to_zone_with, apply_active_theme_to_app,
+        ALL_ICON_KINDS,
+        AppRoot,
+        AuxiliaryEscapeAction,
+        BentoItem,
+        BentoZone,
+        BulkZoneUpdate,
+        Command,
+        ContextCapsuleWindow,
+        DispatchPoint,
+        DispatchSize,
+        DragSelectionRelease,
+        EventDispatcher,
+        GridPosition,
+        HWND,
+        ITEM_CONTEXT_COPY_PATH_ID,
+        ITEM_CONTEXT_DELETE_FILE_ID,
+        ITEM_CONTEXT_MOVE_ZONE_BASE_ID,
+        ITEM_CONTEXT_OPEN_ID,
+        ITEM_CONTEXT_REMOVE_ID,
+        ITEM_CONTEXT_RENAME_FILE_ID,
+        ITEM_CONTEXT_REVEAL_ID,
+        ITEM_CONTEXT_TOGGLE_WIDE_ID,
+        ItemContextAction,
+        ItemContextDispatch,
+        ItemType,
+        LayoutData,
+        LiveContextWindow,
+        MiniBar,
+        MiniBarRoster,
+        PendingItemContextMenu,
+        RecoveryIconRestoreOutcome,
+        RecycleDeleteOutcome,
+        RelativePosition,
+        RelativeSize,
+        SETTING_ACTIVE_THEME,
+        SETTING_BACKUP_LAST_CREATED,
+        SETTING_BACKUP_LAST_RESTORED,
+        SETTING_DEBUG_OVERLAY,
+        SETTING_DISPLAY_LOCALE,
+        SETTING_ENCRYPTION_MODE,
+        SETTING_MINIBAR_PINNED_ZONES,
+        SETTING_STEALTH_ENABLED,
+        SETTING_THEME_BASE_ACCENT,
+        SETTING_UPDATES_AUTO_DOWNLOAD,
+        SETTING_UPDATES_CHECK_FREQUENCY,
+        SETTING_ZONE_DISPLAY_MODE,
+        StartupLayoutLoadSource,
+        VK_A_KEY,
+        VK_BACKSPACE,
+        VK_D_KEY,
+        VK_DOWN_KEY,
+        VK_ENTER,
+        VK_ESCAPE_KEY,
+        VK_N_KEY,
+        VK_P_KEY,
+        VK_SPACE_KEY,
+        WPARAM,
+        WindowRegistry,
+        WindowState,
+        ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
+        ZoneContextAction,
+        add_item_to_zone_with,
+        apply_active_theme_to_app,
         apply_bulk_layout_algorithm,
-        apply_bulk_zone_updates, apply_bulk_zone_visibility, apply_hotkey_binding,
-        apply_hotkey_setting_to_runtime, apply_item_context_dispatch_with, apply_locale_wire,
-        apply_rules_execution_plan, apply_rules_move_to_folder, apply_setting_value_to_app,
-        apply_theme_base_accent_to_app, apply_update_event_to_app, auxiliary_escape_action,
-        bento_zones_from_app, bool_setting_command_for, build_tray_delete_icon_data,
-        build_tray_notify_icon_data, bulk_layout_target_ids, bulk_manager_rows_from_app,
-        bulk_metadata_updates_for_target_ids, bulk_text_update_for_id,
-        bulk_text_updates_for_selected, capture_context_capsule_for_path,
-        capture_current_timeline_snapshot, capture_recovery_bundle, compute_bulk_layout_positions,
-        consume_dispatcher, context_capsule_payload_is_json, copy_item_path_with,
-        create_settings_backup_from_vault, current_minibar_pins_csv,
-        decode_context_capsule_envelope, decode_context_capsule_zones, default_hotkey_bindings,
-        delete_context_capsule_for_path, delete_item_file_to_recycle_bin_using, drive_hover_scheduler,
-        delete_path_to_recycle_bin_with, duplicate_selected_zone, encode_context_capsule_envelope,
-        encryption_mode_from_wire, encryption_mode_setting_command_for,
-        export_recovery_diagnostics, focus_visible_zone, global_hotkey_command, global_hotkey_id,
-        global_hotkey_modifiers, handle_bulk_manager_char, handle_bulk_manager_keydown,
-        handle_bulk_manager_lbutton_up, handle_bulk_manager_text_edit_keydown,
-        handle_icon_picker_keydown, handle_icon_picker_lbutton_up, handle_item_context_wm_command,
-        handle_rules_wizard_char, handle_rules_wizard_keydown, handle_rules_wizard_lbutton_up,
-        handle_settings_text_char, handle_settings_text_keydown,
-        handle_snapshot_picker_lbutton_up, handle_stack_bloom_lbutton_up,
-        handle_stack_tray_lbutton_down, handle_stack_tray_lbutton_up, handle_suggestor_keydown,
-        handle_suggestor_lbutton_up, handle_timeline_lbutton_up, handle_zone_editor_lbutton_up,
-        hide_tooltip_payload, icon_picker_slug_for_hit, import_theme_for_root,
-        item_context_action_for_choice, item_context_dispatch_for_action, item_file_display_path,
-        list_context_capsules_for_path, list_pinned_minibar_labels, list_plugins_for_root,
-        list_settings_backups_for_vault_path, load_available_theme_options,
-        load_startup_zones_or_migrate_legacy, locale_setting_command_for, match_context_window,
-        minibar_command_for_pointer, next_bulk_accent, next_bulk_alias, next_bulk_capsule_size,
-        next_bulk_display_mode, next_icon_slug, next_palette_accent,
-        next_stack_tray_member, next_update_frequency, normalized_rename_leaf, palette_picker,
-        palette_picker_accent_for_hit, parse_minibar_pin_ids, persist_active_theme_to_vault,
-        persist_keybinding_reset_to_vault, persist_passphrase_to_vault, persist_rule_run_stats,
-        persist_setting_to_vault, persist_theme_base_accent_to_vault,
-        persist_zone_display_mode_to_vault, pin_zone_minibar_state, poll_hover_scheduler,
-        queue_active_theme_cycle,
-        queue_add_items, queue_update_action, record_rule_execution_timeline_pair,
-        recovery_vault_snapshot_from_vault, recycle_delete_flags, refresh_live_folder_zone,
-        refresh_settings_plugins_for_root, rehydrate_live_folder_bindings_with,
-        restore_context_capsule_for_path, restore_latest_settings_backup_from_vault,
-        restore_minibar_pins_from_wire_value, restore_recovery_bundle,
-        restore_recovery_icon_backup_with, restore_recovery_vault_payload_to_vault,
-        restore_settings_backup_by_id_from_vault, restore_timeline_checkpoint,
-        rules_item_type_for_path, rules_preview_zones_from_app, rules_state_dir_for_zones_path,
-        rules_zone_id_from_wire, run_interval_rule_for_scheduler_event_with_desktop,
-        run_on_file_change_rules, save_icon_picker, save_layout_snapshot, save_palette_picker,
-        save_rule_for_state_dir, save_timeline_checkpoint, seed_suggestor_from_files,
-        settings_backup_file_name, shell_file_list_from_path, should_start_background_update_check,
-        should_start_item_drag_out, show_tooltip_payload, snapshot_dir_for_zones_path,
-        stack_bloom_hover_anchor_for_point, stack_bloom_reveal_progress_for_anchor,
-        stamp_rule_id_if_empty, start_item_drag_out_with, startup_diag_skip_value,
-        startup_heal_recovery_bundle, state_dir_for_root, theme_base_accent_from_wire,
-        tick_stack_bloom_animation, tick_zone_pill_animation, timeline_dir_for_zones_path,
-        tooltip_command_for_bulk_manager_hover, tooltip_command_for_capsule_picker_hover,
-        tooltip_command_for_hover, tooltip_command_for_icon_picker_hover,
-        tooltip_command_for_item_file_rename_hover,
-        tooltip_command_for_minibar_hover, tooltip_command_for_palette_picker_hover,
-        tooltip_command_for_rules_wizard_hover, tooltip_command_for_search_hover,
-        tooltip_command_for_snapshot_picker_hover,
-        tooltip_command_for_suggestor_hover, tooltip_command_for_timeline_hover,
-        tooltip_command_for_zone_editor_hover, tray_command_for_callback,
-        tray_menu_command_for_choice, tray_menu_command_for_item, ui, unlock_passphrase_vault,
-        unpin_zone_minibar, update_check_interval, update_frequency_from_wire,
-        update_frequency_setting_command_for,
-        update_stack_bloom_hover, update_zone_pill_hover,
-        updater_event_should_auto_download, widen_dynamic, widen_static,
-        write_minibar_pins_to_vault, zone_context_action_for_choice, zone_display_mode_from_wire,
-        zone_list_from_bento_zones, zone_pill_geometry,
+        apply_bulk_zone_updates,
+        apply_bulk_zone_visibility,
+        apply_hotkey_binding,
+        apply_hotkey_setting_to_runtime,
+        apply_item_context_dispatch_with,
+        apply_locale_wire,
+        apply_rules_execution_plan,
+        apply_rules_move_to_folder,
+        apply_setting_value_to_app,
+        apply_theme_base_accent_to_app,
+        apply_update_event_to_app,
+        auxiliary_escape_action,
+        bento_zones_from_app,
+        bool_setting_command_for,
+        build_tray_delete_icon_data,
+        build_tray_notify_icon_data,
+        bulk_layout_target_ids,
+        bulk_manager_rows_from_app,
+        bulk_metadata_updates_for_target_ids,
+        bulk_text_update_for_id,
+        bulk_text_updates_for_selected,
+        capture_context_capsule_for_path,
+        capture_current_timeline_snapshot,
+        capture_recovery_bundle,
+        clamp_zone_rect_to_viewport,
+        compute_bulk_layout_positions,
+        consume_dispatcher,
+        context_capsule_payload_is_json,
+        copy_item_path_with,
+        create_settings_backup_from_vault,
+        current_minibar_pins_csv,
+        decode_context_capsule_envelope,
+        decode_context_capsule_zones,
+        default_hotkey_bindings,
+        delete_context_capsule_for_path,
+        delete_item_file_to_recycle_bin_using,
+        delete_path_to_recycle_bin_with,
+        drag_selection_release,
+        drive_hover_scheduler,
+        duplicate_selected_zone,
+        encode_context_capsule_envelope,
+        encryption_mode_from_wire,
+        encryption_mode_setting_command_for,
+        export_recovery_diagnostics,
         // #7 fix wave (2026-06-01) — W1/W3/P15 seams under test.
-        focus_passphrase_field, handle_settings_passphrase_char, passphrase_button_command,
-        save_settings_general, window_kind_routes_settings_keydown,
+        focus_passphrase_field,
+        focus_visible_zone,
+        global_hotkey_command,
+        global_hotkey_id,
+        global_hotkey_modifiers,
+        handle_bulk_manager_char,
+        handle_bulk_manager_keydown,
+        handle_bulk_manager_lbutton_up,
+        handle_bulk_manager_text_edit_keydown,
+        handle_icon_picker_keydown,
+        handle_icon_picker_lbutton_up,
+        handle_item_context_wm_command,
+        handle_rules_wizard_char,
+        handle_rules_wizard_keydown,
+        handle_rules_wizard_lbutton_up,
+        handle_settings_passphrase_char,
+        handle_settings_text_char,
+        handle_settings_text_keydown,
+        handle_snapshot_picker_lbutton_up,
+        handle_stack_bloom_lbutton_up,
+        handle_stack_tray_lbutton_down,
+        handle_stack_tray_lbutton_up,
+        handle_suggestor_keydown,
+        handle_suggestor_lbutton_up,
+        handle_timeline_lbutton_up,
+        handle_zone_editor_lbutton_up,
+        hide_tooltip_payload,
+        icon_picker_slug_for_hit,
+        import_theme_for_root,
+        item_context_action_for_choice,
+        item_context_dispatch_for_action,
+        item_file_display_path,
+        list_context_capsules_for_path,
+        list_pinned_minibar_labels,
+        list_plugins_for_root,
+        list_settings_backups_for_vault_path,
+        load_available_theme_options,
+        load_startup_zones_or_migrate_legacy,
+        locale_setting_command_for,
+        logical_viewport_from_device_size,
+        match_context_window,
+        minibar_command_for_pointer,
+        move_zone_live,
+        next_bulk_accent,
+        next_bulk_alias,
+        next_bulk_capsule_size,
+        next_bulk_display_mode,
+        next_icon_slug,
+        next_palette_accent,
+        next_stack_tray_member,
+        next_update_frequency,
+        normal_pointer_drag_active,
+        normalize_icon_slug,
+        normalized_rename_leaf,
+        palette_picker,
+        palette_picker_accent_for_hit,
+        parse_minibar_pin_ids,
+        passphrase_button_command,
+        persist_active_theme_to_vault,
+        persist_keybinding_reset_to_vault,
+        persist_passphrase_to_vault,
+        persist_rule_run_stats,
+        persist_setting_to_vault,
+        persist_theme_base_accent_to_vault,
+        persist_zone_display_mode_to_vault,
+        pin_zone_minibar_state,
+        poll_hover_scheduler,
+        queue_active_theme_cycle,
+        queue_add_items,
+        queue_update_action,
+        record_rule_execution_timeline_pair,
+        recovery_vault_snapshot_from_vault,
+        recycle_delete_flags,
+        refresh_live_folder_zone,
+        refresh_settings_plugins_for_root,
+        rehydrate_live_folder_bindings_with,
+        reset_pointer_drag_hover_channels,
+        resize_zone_live,
+        restore_context_capsule_for_path,
+        restore_latest_settings_backup_from_vault,
+        restore_minibar_pins_from_wire_value,
+        restore_recovery_bundle,
+        restore_recovery_icon_backup_with,
+        restore_recovery_vault_payload_to_vault,
+        restore_settings_backup_by_id_from_vault,
+        restore_timeline_checkpoint,
+        rules_item_type_for_path,
+        rules_preview_zones_from_app,
+        rules_state_dir_for_zones_path,
+        rules_zone_id_from_wire,
+        run_interval_rule_for_scheduler_event_with_desktop,
+        run_on_file_change_rules,
+        save_icon_picker,
+        save_layout_snapshot,
+        save_palette_picker,
+        save_rule_for_state_dir,
+        save_settings_general,
+        save_timeline_checkpoint,
+        search_icon_for_kind,
+        seed_suggestor_from_files,
+        settings_backup_file_name,
+        settings_wheel_scroll_delta_from_wparam,
+        shell_file_list_from_path,
+        should_start_background_update_check,
+        should_start_item_drag_out,
+        show_tooltip_payload,
+        snapshot_dir_for_zones_path,
+        stack_bloom_hover_anchor_for_point,
+        stack_bloom_reveal_progress_for_anchor,
+        stamp_rule_id_if_empty,
+        start_item_drag_out_with,
+        startup_diag_skip_value,
+        startup_heal_recovery_bundle,
+        state_dir_for_root,
+        theme_base_accent_from_wire,
+        tick_pill_animator,
+        tick_stack_bloom_animation,
+        tick_zone_pill_animation,
+        timeline_dir_for_zones_path,
+        tooltip_command_for_bulk_manager_hover,
+        tooltip_command_for_capsule_picker_hover,
+        tooltip_command_for_hover,
+        tooltip_command_for_icon_picker_hover,
+        tooltip_command_for_item_file_rename_hover,
+        tooltip_command_for_minibar_hover,
+        tooltip_command_for_palette_picker_hover,
+        tooltip_command_for_rules_wizard_hover,
+        tooltip_command_for_search_hover,
+        tooltip_command_for_snapshot_picker_hover,
+        tooltip_command_for_suggestor_hover,
+        tooltip_command_for_timeline_hover,
+        tooltip_command_for_zone_editor_hover,
+        tray_command_for_callback,
+        tray_menu_command_for_choice,
+        tray_menu_command_for_item,
+        ui,
+        unlock_passphrase_vault,
+        unpin_zone_minibar,
+        update_check_interval,
+        update_frequency_from_wire,
+        update_frequency_setting_command_for,
+        update_stack_bloom_hover,
+        update_zone_pill_hover,
+        updater_event_should_auto_download,
+        widen_dynamic,
+        widen_static,
+        window_kind_routes_settings_keydown,
+        window_kind_routes_settings_pointer,
+        write_minibar_pins_to_vault,
+        zone_context_action_for_choice,
+        zone_display_mode_from_wire,
+        zone_list_from_bento_zones,
+        zone_pill_geometry,
     };
     use bento_nano_app::business::bulk_manager_panel::{BulkTextEditField, SortKey};
     use bento_nano_app::business::capsule_picker::{
         CapsuleEntry, capsule_picker_empty_rect, capsule_picker_error_rect,
         capsule_picker_hint_rect, capsule_picker_row_rect,
     };
+    use bento_nano_app::business::icons::IconKind;
     use bento_nano_app::business::rules_wizard;
     use bento_nano_app::business::smart_group_suggestor;
     use bento_nano_app::business::stack_tray;
@@ -23184,7 +23802,7 @@ mod tests {
         zone_editor_icon_rect, zone_editor_save_rect,
     };
     use bento_nano_app::{
-        AppState, BulkLayoutAlgorithm, IconPickerSession, ItemFileRenameSession,
+        AppState, BulkLayoutAlgorithm, IconPickerSession, ItemDragCandidate, ItemFileRenameSession,
         PalettePickerSession, SettingsBackupStatus, SettingsEncryptionMode, SettingsUpdaterStatus,
         ZoneDisplayMode, ZoneEditorSession,
     };
@@ -23194,13 +23812,14 @@ mod tests {
     use bento_nano_backend::rules::executor::{ActionEffect, ExecutionPlan};
     use bento_nano_backend::rules::scheduler::SchedulerEvent;
     use bento_nano_backend::rules::{Action, Condition, ConditionGroup, ConditionNode, RunMode};
+    use bento_nano_backend::search::SearchItemKind;
     use bento_nano_backend::updater::{
         UpdateCheckFrequency, UpdateEvent, UpdateInfo, UpdateProgress,
     };
     use bento_nano_backend::watcher::FileChangedEvent;
     use bento_nano_platform::{WindowKind, storage};
     use bento_nano_style::Size;
-    use bento_nano_zone::{Zone, ZoneId, ZoneItem, ZoneItemId, ZoneList};
+    use bento_nano_zone::{DEFAULT_ZONE_ICON, Zone, ZoneId, ZoneItem, ZoneItemId, ZoneList};
     use smol_str::SmolStr;
     use std::borrow::Cow;
     use std::io::Write as _;
@@ -23223,7 +23842,8 @@ mod tests {
         {
             let mut app = root.app.borrow_mut();
             // Default ZoneDisplayMode::Hover so the leave auto-collapses.
-            app.zones.add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+            app.zones
+                .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
             app.expand_delay_ms.set(150);
             app.collapse_delay_ms.set(300);
         }
@@ -23267,8 +23887,10 @@ mod tests {
         let root = test_app_root();
         {
             let mut app = root.app.borrow_mut();
-            app.zones.add(Zone::new(ZoneId(1), "Pinned", 100, 100, 240, 180));
-            app.zone_display_mode.set(bento_nano_app::ZoneDisplayMode::Always);
+            app.zones
+                .add(Zone::new(ZoneId(1), "Pinned", 100, 100, 240, 180));
+            app.zone_display_mode
+                .set(bento_nano_app::ZoneDisplayMode::Always);
             app.expand_delay_ms.set(150);
             app.collapse_delay_ms.set(300);
         }
@@ -25131,6 +25753,53 @@ mod tests {
         assert!(!window_kind_routes_settings_keydown(WindowKind::IconPicker));
         assert!(!window_kind_routes_settings_keydown(WindowKind::Search));
         assert!(!window_kind_routes_settings_keydown(WindowKind::About));
+    }
+
+    #[test]
+    fn w3_settings_pointer_uses_aux_window_when_registered() {
+        assert!(window_kind_routes_settings_pointer(WindowKind::Main, false));
+        assert!(window_kind_routes_settings_pointer(
+            WindowKind::Settings,
+            true
+        ));
+        assert!(!window_kind_routes_settings_pointer(WindowKind::Main, true));
+        assert!(!window_kind_routes_settings_pointer(
+            WindowKind::Search,
+            true
+        ));
+    }
+
+    #[test]
+    fn w3_settings_mousewheel_delta_uses_native_wheel_direction() {
+        fn wheel_wparam(delta: i16) -> WPARAM {
+            ((delta as u16 as usize) << 16) as WPARAM
+        }
+
+        assert_eq!(
+            settings_wheel_scroll_delta_from_wparam(wheel_wparam(120)),
+            Some(-120),
+            "wheel-up must move the Settings body toward the top"
+        );
+        assert_eq!(
+            settings_wheel_scroll_delta_from_wparam(wheel_wparam(-120)),
+            Some(120),
+            "wheel-down must increase the Settings body scroll offset"
+        );
+        assert_eq!(
+            settings_wheel_scroll_delta_from_wparam(wheel_wparam(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn w3_settings_input_viewport_uses_current_window_slot_size() {
+        let logical = logical_viewport_from_device_size(800, 600, 96);
+        assert_eq!(logical.width, 800.0);
+        assert_eq!(logical.height, 600.0);
+
+        let hidpi = logical_viewport_from_device_size(1_200, 900, 144);
+        assert!((hidpi.width - 800.0).abs() < f32::EPSILON);
+        assert!((hidpi.height - 600.0).abs() < f32::EPSILON);
     }
 
     /// W3 — once routing reaches the Settings HWND, typing must actually land in
@@ -27087,6 +27756,23 @@ mod tests {
     }
 
     #[test]
+    fn search_icon_for_kind_returns_selected_stack_icon_slugs() {
+        for kind in [
+            SearchItemKind::File,
+            SearchItemKind::Folder,
+            SearchItemKind::Zone,
+            SearchItemKind::Setting,
+            SearchItemKind::Action,
+        ] {
+            let slug = search_icon_for_kind(&kind);
+            assert!(
+                IconKind::from_str_opt(slug.as_str()).is_some(),
+                "search icon must render through built-in glyph path: {slug}"
+            );
+        }
+    }
+
+    #[test]
     fn search_activation_for_action_queues_real_command() {
         let root = test_app_root();
         let _count = super::run_search_query(&root, "bulk");
@@ -27616,7 +28302,7 @@ mod tests {
         assert_eq!(rows[0].accent_hex.as_str(), "#3b82f6");
         assert!(rows[0].visible);
         assert!(!rows[0].locked);
-        assert_eq!(rows[0].icon_slug.as_str(), "T");
+        assert_eq!(rows[0].icon_slug.as_str(), DEFAULT_ZONE_ICON);
         assert_eq!(rows[0].capsule_size.as_str(), "medium");
         assert_eq!(rows[0].display_mode.as_str(), "inherit");
         assert_eq!(rows[0].width_percent, 50);
@@ -27739,7 +28425,11 @@ mod tests {
         let two = app.zones.get(ZoneId(2)).expect("zone 2");
         assert!(two.alias.is_none());
         assert!(two.display_mode.is_none());
-        assert_eq!(two.icon.as_ref(), "T", "whitespace icon is a no-op");
+        assert_eq!(
+            two.icon.as_ref(),
+            DEFAULT_ZONE_ICON,
+            "whitespace icon is a no-op"
+        );
     }
 
     #[test]
@@ -28197,6 +28887,17 @@ mod tests {
     }
 
     #[test]
+    fn normalize_icon_slug_rejects_unknown_or_emoji_payloads() {
+        assert_eq!(normalize_icon_slug("folder-open").as_str(), "folder_open");
+        assert_eq!(normalize_icon_slug("file").as_str(), "document");
+        assert_eq!(
+            normalize_icon_slug("not_a_real_icon").as_str(),
+            DEFAULT_ZONE_ICON
+        );
+        assert_eq!(normalize_icon_slug("\u{1F4C1}").as_str(), DEFAULT_ZONE_ICON);
+    }
+
+    #[test]
     fn icon_picker_pointer_commit_updates_zone_and_persists_restart_equivalent() {
         let root = test_app_root();
         let zones_path = scratch_zones_path("icon-picker-pointer-persist");
@@ -28567,6 +29268,89 @@ mod tests {
         assert!(zone.locked);
         assert_eq!(zone.alias.as_deref(), Some("Alias"));
         assert_eq!(zone.display_mode.as_deref(), Some("always"));
+    }
+
+    #[test]
+    fn clamp_zone_rect_pulls_high_percent_zone_fully_on_screen() {
+        // ROOT-CAUSE-corrupt-zone-geometry.md Part 3: a zone at ~90% x with a
+        // big body, migrated against a SMALL viewport (the 1707×960 logical
+        // screen), must end up fully on-screen (x + w <= vp_w, y + h <= vp_h).
+        let vp = Size {
+            width: 1707.0,
+            height: 960.0,
+        };
+        // x near 90% of width, oversized body.
+        let (x, y, w, h) = clamp_zone_rect_to_viewport(1536, 864, 800, 600, vp);
+        assert!(x >= 0, "x >= 0");
+        assert!(y >= 0, "y >= 0");
+        assert!(x + w <= 1707, "x+w within viewport: {x}+{w}");
+        assert!(y + h <= 960, "y+h within viewport: {y}+{h}");
+        assert!(w >= super::MIN_MIGRATED_ZONE_DIMENSION, "w not collapsed");
+        assert!(h >= super::MIN_MIGRATED_ZONE_DIMENSION, "h not collapsed");
+    }
+
+    #[test]
+    fn clamp_zone_rect_caps_oversized_body_to_viewport() {
+        // A body far larger than the viewport (the 170667×91200 corruption,
+        // already neutralised by storage clamp but defended again here) is
+        // capped to the viewport extents.
+        let vp = Size {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let (x, y, w, h) = clamp_zone_rect_to_viewport(0, 0, 170_667, 91_200, vp);
+        assert_eq!((x, y), (0, 0));
+        assert!(w <= 1280 && h <= 720, "body capped to viewport: {w}x{h}");
+        assert!(x + w <= 1280 && y + h <= 720);
+    }
+
+    #[test]
+    fn clamp_zone_rect_keeps_in_bounds_zone_intact() {
+        // A zone already comfortably inside the viewport passes through
+        // unchanged.
+        let vp = Size {
+            width: 1920.0,
+            height: 1080.0,
+        };
+        assert_eq!(
+            clamp_zone_rect_to_viewport(100, 80, 400, 300, vp),
+            (100, 80, 400, 300)
+        );
+    }
+
+    #[test]
+    fn migrated_high_percent_zone_ends_up_on_screen() {
+        // End-to-end through `zone_list_from_bento_zones`: a 90%-x zone on a
+        // small viewport migrates fully on-screen.
+        let vp = Size {
+            width: 1707.0,
+            height: 960.0,
+        };
+        let mut layout = legacy_layout_with_zone("90", "Edge", "Edge.txt");
+        layout.zones[0].position = RelativePosition {
+            x_percent: 90.0,
+            y_percent: 85.0,
+        };
+        layout.zones[0].expanded_size = RelativeSize {
+            w_percent: 40.0,
+            h_percent: 40.0,
+        };
+
+        let zones = zone_list_from_bento_zones(&layout.zones, vp);
+        let zone = zones.iter().next().expect("migrated zone");
+        assert!(zone.x >= 0 && zone.y >= 0);
+        assert!(
+            zone.x + zone.w <= 1707,
+            "x+w on-screen: {}+{}",
+            zone.x,
+            zone.w
+        );
+        assert!(
+            zone.y + zone.h <= 960,
+            "y+h on-screen: {}+{}",
+            zone.y,
+            zone.h
+        );
     }
 
     #[test]
@@ -31674,6 +32458,30 @@ mod tests {
     }
 
     #[test]
+    fn drag_selection_release_restores_only_real_collapsed_pill_drags() {
+        let app = AppState::new();
+        app.zone_drag_body_visible_at_start
+            .set(Some((ZoneId(2), false)));
+        app.zone_drag_selected_before_start.set(Some(ZoneId(1)));
+
+        assert_eq!(
+            drag_selection_release(&app, true),
+            DragSelectionRelease::Restore(Some(ZoneId(1)))
+        );
+        assert_eq!(
+            drag_selection_release(&app, false),
+            DragSelectionRelease::KeepCurrent
+        );
+
+        app.zone_drag_body_visible_at_start
+            .set(Some((ZoneId(2), true)));
+        assert_eq!(
+            drag_selection_release(&app, true),
+            DragSelectionRelease::KeepCurrent
+        );
+    }
+
+    #[test]
     fn stack_tray_pointer_row_dispatches_preview_command() {
         let root = test_app_root();
         {
@@ -31782,14 +32590,8 @@ mod tests {
             let mut app = root.app.borrow_mut();
             // Default ZoneDisplayMode::Hover (see AppState::new) — pill is
             // collapsed unless hovered/selected.
-            app.zones.add(Zone::new(
-                ZoneId(1),
-                "Compiler",
-                100,
-                100,
-                240,
-                180,
-            ));
+            app.zones
+                .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
         }
         let duration = zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS;
         {
@@ -31839,9 +32641,221 @@ mod tests {
     }
 
     #[test]
+    fn live_drag_geometry_updates_memory_before_dispatcher_drain() {
+        let mut app = AppState::new();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180));
+
+        assert!(move_zone_live(
+            &mut app,
+            ZoneId(1),
+            DispatchPoint::new(220, 260)
+        ));
+        let moved = app.zones.get(ZoneId(1)).expect("moved zone");
+        assert_eq!((moved.x, moved.y), (220, 260));
+        assert!(
+            app.dirty.get(),
+            "live drag update must defer one release-time write"
+        );
+
+        app.dirty.set(false);
+        assert!(resize_zone_live(
+            &mut app,
+            ZoneId(1),
+            DispatchSize::new(300, 40)
+        ));
+        let resized = app.zones.get(ZoneId(1)).expect("resized zone");
+        assert_eq!((resized.w, resized.h), (300, 60));
+        assert!(app.dirty.get());
+    }
+
+    #[test]
+    fn pointer_drag_reset_clears_hover_morph_channels_without_tray_drag_guard() {
+        let mut app = AppState::new();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180));
+        app.hovered_zone.set(Some(ZoneId(1)));
+        app.stack_bloom_anchor.set(Some(ZoneId(1)));
+        app.stack_bloom_progress.set(0.25);
+        app.zone_pill_anim_zone.set(Some(ZoneId(1)));
+        app.zone_pill_anim_expanding.set(true);
+        app.zone_pill_anim_progress.set(0.5);
+        app.zone_pill_anim_started_ms.set(900);
+        app.hover_scheduler.set({
+            let mut scheduler = zone_pill_geometry::HoverScheduler::new();
+            scheduler.on_enter(ZoneId(1), 1_000, 150);
+            scheduler
+        });
+        app.item_hover
+            .set(bento_nano_app::business::item_card::ItemHoverState::new());
+        {
+            let mut item_hover = app.item_hover.get();
+            assert!(item_hover.on_hover(Some((ZoneId(1), ZoneItemId(1))), 1_000));
+            app.item_hover.set(item_hover);
+        }
+        app.highlight_overlay.borrow_mut().set_targets([
+            bento_nano_app::business::highlight_overlay::HighlightRect::new(
+                112.0, 144.0, 80.0, 56.0,
+            ),
+        ]);
+        {
+            let mut anim = app.pill_animator.borrow_mut();
+            anim.start(
+                ZoneId(1),
+                bento_nano_app::animator::AnimChannel::PillHover,
+                1_000,
+                bento_nano_app::animator::HOVER_IN_DURATION_MS,
+                0.0,
+                1.0,
+                bento_nano_app::animator::Easing::EaseOutCubic,
+            );
+            anim.start(
+                ZoneId(1),
+                bento_nano_app::animator::AnimChannel::PillPress,
+                1_000,
+                bento_nano_app::animator::PRESS_DOWN_DURATION_MS,
+                0.0,
+                1.0,
+                bento_nano_app::animator::Easing::EaseOutCubic,
+            );
+        }
+        app.zone_drag.set(Some((ZoneId(1), 4, 4)));
+
+        assert!(normal_pointer_drag_active(&app));
+        reset_pointer_drag_hover_channels(&app, Some(ZoneId(1)), 1_020);
+
+        assert_eq!(app.hovered_zone.get(), None);
+        assert_eq!(app.stack_bloom_anchor.get(), None);
+        assert_eq!(app.stack_bloom_progress.get(), 1.0);
+        assert_eq!(app.zone_pill_anim_zone.get(), None);
+        assert_eq!(app.zone_pill_anim_progress.get(), 1.0);
+        assert!(!app.hover_scheduler.get().is_pending());
+        assert!(!app.item_hover.get().is_active(1_020));
+        assert!(
+            !app.highlight_overlay.borrow().has_targets(),
+            "normal pointer drag must clear Search/Suggestor highlight chrome"
+        );
+        let anim = app.pill_animator.borrow();
+        assert_eq!(
+            anim.sample(
+                ZoneId(1),
+                bento_nano_app::animator::AnimChannel::PillHover,
+                1_020
+            ),
+            0.0
+        );
+        assert_eq!(
+            anim.sample(
+                ZoneId(1),
+                bento_nano_app::animator::AnimChannel::PillPress,
+                1_020
+            ),
+            0.0
+        );
+        drop(anim);
+
+        app.zone_drag.set(None);
+        app.stack_tray_drag
+            .set(Some(stack_tray::StackTrayDragState::new(
+                ZoneId(1),
+                ZoneId(1),
+                0,
+            )));
+        assert!(
+            !normal_pointer_drag_active(&app),
+            "StackTray row reorder must not be blocked by the normal drag guard"
+        );
+    }
+
+    #[test]
+    fn pill_animator_tick_does_not_repaint_for_item_only_status_dot_pulse() {
+        let mut app = AppState::new();
+        let mut zone = Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180);
+        zone.items.push(ZoneItem::new(
+            ZoneItemId(1),
+            r"C:\Users\Alice\Desktop\main.rs",
+            "rust-icon",
+            0,
+            0,
+        ));
+        app.zones.add(zone);
+
+        assert!(
+            !tick_pill_animator(&app, 10_000),
+            "item presence alone must not keep the main window repainting"
+        );
+
+        {
+            let mut anim = app.pill_animator.borrow_mut();
+            anim.start(
+                ZoneId(1),
+                bento_nano_app::animator::AnimChannel::PillHover,
+                10_000,
+                bento_nano_app::animator::HOVER_IN_DURATION_MS,
+                0.0,
+                1.0,
+                bento_nano_app::animator::Easing::EaseOutCubic,
+            );
+        }
+
+        assert!(
+            tick_pill_animator(&app, 10_040),
+            "real hover/press animation entries must still keep repaint cadence alive"
+        );
+    }
+
+    #[test]
+    fn stack_zone_does_not_auto_open_tray_but_open_stack_tray_does() {
+        // #4 (2026-06-02) — the 3-state stack machine: creating a stack must
+        // NOT pop the management tray (it leaves the anchor as the compact
+        // pill). Only the explicit Command::OpenStackTray opens it, and
+        // CloseStackTray closes it again. Pure-CPU state assertion.
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+        }
+
+        // Create the stack via the dispatcher — the tray must stay closed.
+        root.dispatcher
+            .push(Command::StackZone(ZoneId(1), ZoneId(2)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        {
+            let app = root.app.borrow();
+            assert_eq!(app.zones.stack_anchor_for(ZoneId(2)), Some(ZoneId(1)));
+            assert!(
+                app.stack_tray.borrow().is_none(),
+                "StackZone must NOT auto-open the management tray"
+            );
+        }
+
+        // Explicit open — tray becomes Some, anchored on the stack.
+        root.dispatcher.push(Command::OpenStackTray(ZoneId(1)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        assert!(
+            root.app.borrow().stack_tray.borrow().is_some(),
+            "OpenStackTray is the sole opener and must set stack_tray"
+        );
+
+        // Explicit close — back to None.
+        root.dispatcher.push(Command::CloseStackTray);
+        consume_dispatcher(&root, std::ptr::null_mut());
+        assert!(root.app.borrow().stack_tray.borrow().is_none());
+    }
+
+    #[test]
     fn pill_hover_skips_stack_anchors() {
-        // Stack anchors keep their bespoke chrome and stack_bloom owns the
-        // hover animation; pill morph must not steal that slot.
+        // #4 (2026-06-02) — stack anchors don't run the pill↔panel morph
+        // (stack_bloom owns the hover affordance); pill morph must not steal
+        // that animation slot. A collapsed anchor still renders as the compact
+        // pill, but via the non-morph pill paint path.
         let root = test_app_root();
         {
             let mut app = root.app.borrow_mut();
@@ -31895,6 +32909,182 @@ mod tests {
         assert!(matches!(
             drained.get(1),
             Some(Command::PreviewStackMember(ZoneId(1), ZoneId(2)))
+        ));
+    }
+
+    fn stack_bloom_click_fixture() -> (AppRoot, f32, f32) {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            app.hovered_zone.set(Some(ZoneId(1)));
+        }
+        let petal = {
+            let app = root.app.borrow();
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            stack_tray::stack_bloom_petal_rects(app.viewport, anchor, 2)[1]
+        };
+        (root, petal.x + 4.0, petal.y + 4.0)
+    }
+
+    fn stack_tray_row_fixture() -> (AppRoot, f32, f32) {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            app.stack_tray
+                .borrow_mut()
+                .replace(stack_tray::StackTrayState::new(ZoneId(1), ZoneId(1)));
+        }
+        let row = {
+            let app = root.app.borrow();
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            stack_tray::stack_tray_row_rect(app.viewport, anchor, 2, 1)
+        };
+        (root, row.x + 4.0, row.y + 4.0)
+    }
+
+    fn arm_test_item_drag(app: &AppState) {
+        app.item_drag.borrow_mut().replace(ItemDragCandidate {
+            zone_id: ZoneId(1),
+            item_id: ZoneItemId(1),
+            path: SmolStr::new("C:/Users/HP/Desktop/Child.lnk"),
+            start_x: 0,
+            start_y: 0,
+            last_x: 0,
+            last_y: 0,
+            is_internal_dragging: false,
+        });
+    }
+
+    fn assert_stack_bloom_ignores_drag(arm_drag: impl FnOnce(&AppState), expected_message: &str) {
+        let (root, x, y) = stack_bloom_click_fixture();
+        {
+            let app = root.app.borrow();
+            arm_drag(&app);
+        }
+
+        assert!(
+            !handle_stack_bloom_lbutton_up(&root, std::ptr::null_mut(), x, y),
+            "{expected_message}"
+        );
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 0);
+        assert!(root.app.borrow().stack_tray.borrow().is_none());
+    }
+
+    fn assert_stack_tray_row_ignores_drag(
+        arm_drag: impl FnOnce(&AppState),
+        expected_message: &str,
+    ) {
+        let (root, x, y) = stack_tray_row_fixture();
+        {
+            let app = root.app.borrow();
+            arm_drag(&app);
+        }
+
+        assert!(
+            !handle_stack_tray_lbutton_up(&root, std::ptr::null_mut(), x, y),
+            "{expected_message}"
+        );
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 0);
+        assert!(root.app.borrow().stack_tray_drag.get().is_none());
+    }
+
+    #[test]
+    fn stack_bloom_petal_click_ignored_during_active_drag() {
+        assert_stack_bloom_ignores_drag(
+            |app| app.zone_drag.set(Some((ZoneId(2), 0, 0))),
+            "zone drag owns mouse-up; stale bloom must not open tray",
+        );
+        assert_stack_bloom_ignores_drag(
+            |app| app.zone_resize.set(Some((ZoneId(1), 180, 130))),
+            "zone resize owns mouse-up; stale bloom must not open tray",
+        );
+        assert_stack_bloom_ignores_drag(
+            arm_test_item_drag,
+            "item drag owns mouse-up; stale bloom must not open tray",
+        );
+    }
+
+    #[test]
+    fn stack_tray_row_click_ignored_during_active_drag() {
+        assert_stack_tray_row_ignores_drag(
+            |app| app.zone_drag.set(Some((ZoneId(2), 0, 0))),
+            "zone drag owns mouse-up; tray row must not preview",
+        );
+        assert_stack_tray_row_ignores_drag(
+            |app| app.zone_resize.set(Some((ZoneId(1), 180, 130))),
+            "zone resize owns mouse-up; tray row must not preview",
+        );
+        assert_stack_tray_row_ignores_drag(
+            arm_test_item_drag,
+            "item drag owns mouse-up; tray row must not preview",
+        );
+    }
+
+    #[test]
+    fn stack_tray_drag_still_reorders_without_normal_drag_guard() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child A", 420, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(3), "Child B", 640, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(3)));
+            app.stack_tray
+                .borrow_mut()
+                .replace(stack_tray::StackTrayState::new(ZoneId(1), ZoneId(1)));
+            app.stack_tray_drag
+                .set(Some(stack_tray::StackTrayDragState::new(
+                    ZoneId(1),
+                    ZoneId(3),
+                    2,
+                )));
+        }
+        let target_row = {
+            let app = root.app.borrow();
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            stack_tray::stack_tray_row_rect(app.viewport, anchor, 3, 1)
+        };
+
+        assert!(handle_stack_tray_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            target_row.x + 4.0,
+            target_row.y + 4.0
+        ));
+
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 1);
+        assert!(matches!(
+            drained.first(),
+            Some(Command::ReorderStackMember(ZoneId(1), ZoneId(3), 1))
         ));
     }
 
@@ -32018,6 +33208,49 @@ mod tests {
             app.stack_tray.borrow().as_ref(),
             Some(state) if state.anchor_zone_id == ZoneId(1) && state.selected_member_id == ZoneId(1)
         ));
+    }
+
+    #[test]
+    fn dissolve_stack_command_scatters_released_members() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 640.0,
+                height: 480.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 80, 120, 90));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child A", 100, 80, 120, 90));
+            app.zones
+                .add(Zone::new(ZoneId(3), "Child B", 100, 80, 120, 90));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(3)));
+            app.stack_tray
+                .borrow_mut()
+                .replace(stack_tray::StackTrayState::new(ZoneId(1), ZoneId(1)));
+        }
+
+        root.dispatcher.push(Command::DissolveStack(ZoneId(1)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+
+        let app = root.app.borrow();
+        assert!(app.zones.stack_member_ids(ZoneId(1)).is_none());
+        assert_eq!(
+            app.zones.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((100, 80))
+        );
+        assert_eq!(
+            app.zones.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((236, 80))
+        );
+        assert_eq!(
+            app.zones.get(ZoneId(3)).map(|zone| (zone.x, zone.y)),
+            Some((372, 80))
+        );
+        assert!(app.stack_tray.borrow().is_none());
+        assert!(app.dirty.get());
     }
 
     #[test]

@@ -24,6 +24,7 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::business::{item_card, item_grid};
+use crate::expanded_zone_grid;
 
 // -----------------------------------------------------------------------------
 // Snap.md geometry + colour constants.
@@ -140,26 +141,163 @@ impl HighlightPulse {
 /// painting. This must stay aligned with the item-grid renderer so the overlay
 /// lands on the same real item cards that the user sees.
 pub fn item_card_rect_for_grid(zone: &Zone, grid_x: i32, grid_y: i32, is_wide: bool) -> Rect {
-    let zone_left = zone.x as f32;
-    let zone_top = zone.y as f32;
-    let zone_right = zone_left + zone.w as f32;
-    let zone_bottom = zone_top + zone.h as f32;
-    let columns = zone.grid_columns.max(1) as f32;
+    let requested_columns = zone.grid_columns.max(1);
+    // P3.5 (1:1) — horizontal grid inset is `--spacing-lg` (16) per side, the
+    // same `HEADER_INSET_X` the header band uses, so column 1 aligns under the
+    // header icon (was a fixed 8). The available width subtracts `16 × 2`.
+    let columns = effective_grid_columns(zone);
+    let columns_i = columns.max(1) as i32;
+    let requested_columns_i = requested_columns.max(1) as i32;
+    let linear_index = grid_y.max(0) * requested_columns_i + grid_x.max(0);
+    let effective_grid_x = linear_index % columns_i;
+    let effective_grid_y = linear_index / columns_i;
+    item_card_rect_for_effective_grid(zone, effective_grid_x, effective_grid_y, columns, is_wide)
+}
+
+/// Shared item-card geometry for a concrete zone item. Unlike
+/// [`item_card_rect_for_grid`], this mirrors CSS Grid auto-placement: items are
+/// placed in `zone.items` order and an `is_wide` card consumes two column slots,
+/// so the next visible item cannot paint into the same lane.
+pub fn item_card_rect_for_item(zone: &Zone, item: &ZoneItem) -> Rect {
+    item_card_rect_for_item_in_panel(
+        zone,
+        item,
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        },
+    )
+}
+
+/// Shared item-card geometry for a concrete zone item inside an arbitrary
+/// panel rect. Used by the in-flight capsule->panel morph so body content can
+/// fade in on the same timeline without cloning or mutating the persisted zone.
+pub fn item_card_rect_for_item_in_panel(zone: &Zone, item: &ZoneItem, panel: Rect) -> Rect {
+    let columns = effective_grid_columns(zone);
+    if let Some(slot) = effective_grid_slot_for_item(zone, item, columns) {
+        let columns_i = columns.max(1) as i32;
+        return item_card_rect_for_effective_grid_in_panel(
+            zone.grid_columns.max(1),
+            panel,
+            slot % columns_i,
+            slot / columns_i,
+            columns,
+            item.is_wide,
+        );
+    }
+    item_card_rect_for_grid_in_panel(zone, item.x, item.y, item.is_wide, panel)
+}
+
+fn item_card_rect_for_grid_in_panel(
+    zone: &Zone,
+    grid_x: i32,
+    grid_y: i32,
+    is_wide: bool,
+    panel: Rect,
+) -> Rect {
+    let requested_columns = zone.grid_columns.max(1);
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        requested_columns,
+        expanded_zone_grid::HEADER_INSET_X,
+    );
+    let columns_i = columns.max(1) as i32;
+    let requested_columns_i = requested_columns.max(1) as i32;
+    let linear_index = grid_y.max(0) * requested_columns_i + grid_x.max(0);
+    let effective_grid_x = linear_index % columns_i;
+    let effective_grid_y = linear_index / columns_i;
+    item_card_rect_for_effective_grid_in_panel(
+        requested_columns,
+        panel,
+        effective_grid_x,
+        effective_grid_y,
+        columns,
+        is_wide,
+    )
+}
+
+fn effective_grid_columns(zone: &Zone) -> u32 {
+    item_grid::effective_column_count(
+        zone.w as f32,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    )
+}
+
+fn bounded_column_span(is_wide: bool, columns: u32) -> i32 {
+    item_grid::column_span_for(is_wide).min(columns.max(1)) as i32
+}
+
+fn effective_grid_slot_for_item(zone: &Zone, target: &ZoneItem, columns: u32) -> Option<i32> {
+    let columns_i = columns.max(1) as i32;
+    let mut slot = 0_i32;
+    for item in &zone.items {
+        let span = bounded_column_span(item.is_wide, columns);
+        let col = slot % columns_i;
+        if col + span > columns_i {
+            slot += columns_i - col;
+        }
+        if item.id == target.id {
+            return Some(slot);
+        }
+        slot += span;
+    }
+    None
+}
+
+fn item_card_rect_for_effective_grid(
+    zone: &Zone,
+    effective_grid_x: i32,
+    effective_grid_y: i32,
+    columns: u32,
+    is_wide: bool,
+) -> Rect {
+    item_card_rect_for_effective_grid_in_panel(
+        zone.grid_columns.max(1),
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        },
+        effective_grid_x,
+        effective_grid_y,
+        columns,
+        is_wide,
+    )
+}
+
+fn item_card_rect_for_effective_grid_in_panel(
+    _requested_columns: u32,
+    panel: Rect,
+    effective_grid_x: i32,
+    effective_grid_y: i32,
+    columns: u32,
+    is_wide: bool,
+) -> Rect {
+    let zone_left = panel.x;
+    let zone_top = panel.y;
+    let zone_right = panel.right();
+    let zone_bottom = panel.bottom();
     let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
-    let cell_w = ((zone.w as f32 - 16.0) - gap * (columns - 1.0)).max(44.0) / columns;
-    let span = item_grid::column_span_for(is_wide) as f32;
-    let item_x = zone_left + 8.0 + grid_x.max(0) as f32 * (cell_w + gap);
+    let inset_x = expanded_zone_grid::HEADER_INSET_X;
+    let columns_f = columns as f32;
+    let cell_w = ((panel.width - inset_x * 2.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
+    let span = bounded_column_span(is_wide, columns) as f32;
+    let item_x = zone_left + inset_x + effective_grid_x as f32 * (cell_w + gap);
     // M2③ (05-31, 1:1): grid starts below the 48-DIP `PanelHeader` band via
     // the shared SSoT offset — keeps the painted grid in lockstep with the
     // shell hit-tests that read the same constant.
     let item_y = zone_top
         + item_grid::ITEM_GRID_TOP_OFFSET_PX
-        + grid_y.max(0) as f32
+        + effective_grid_y as f32
             * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX);
     Rect {
         x: item_x,
         y: item_y,
-        width: (cell_w * span + gap * (span - 1.0)).min((zone_right - 8.0 - item_x).max(0.0)),
+        width: (cell_w * span + gap * (span - 1.0)).min((zone_right - inset_x - item_x).max(0.0)),
         height: item_card::CardVariant::Standard
             .height_px()
             .min((zone_bottom - 8.0 - item_y).max(0.0)),
@@ -173,7 +311,7 @@ pub fn zone_target_rect(zone: &Zone) -> HighlightRect {
 
 /// Item target used by Search item hits and Suggestor matching-path previews.
 pub fn item_target_rect(zone: &Zone, item: &ZoneItem) -> HighlightRect {
-    HighlightRect::from_rect(item_card_rect_for_grid(zone, item.x, item.y, item.is_wide))
+    HighlightRect::from_rect(item_card_rect_for_item(zone, item))
 }
 
 /// Renderer paint rect after applying the snap.md inset.
@@ -697,11 +835,96 @@ mod tests {
 
         let target = item_target_rect(&zone, item);
 
-        // M2③: grid-top is now the 48-DIP header offset (zone_top 20 + 48 = 68).
-        assert!((target.x - 18.0).abs() < f32::EPSILON);
+        // P3.5: column 1 starts at zone_left + the 16-DIP `HEADER_INSET_X`
+        // (zone_x 10 + 16 = 26). P3.6: grid-top is the 56-DIP offset
+        // (zone_top 20 + 56 = 76).
+        assert!((target.x - (10.0 + expanded_zone_grid::HEADER_INSET_X)).abs() < f32::EPSILON);
         assert!((target.y - (20.0 + item_grid::ITEM_GRID_TOP_OFFSET_PX)).abs() < f32::EPSILON);
         assert!(target.width > 0.0);
         assert!(target.height > 0.0);
+    }
+
+    #[test]
+    fn item_card_rect_for_item_in_panel_tracks_morph_panel_rect() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(9), "Docs", 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        let item_id = zone
+            .add_item("C:/Desktop/doc.pdf", "hash")
+            .expect("item id");
+        let item = zone.item(item_id).expect("item");
+        let morph_panel = Rect {
+            x: 80.0,
+            y: 360.0,
+            width: 260.0,
+            height: 160.0,
+        };
+
+        let rect = item_card_rect_for_item_in_panel(&zone, item, morph_panel);
+
+        assert!((rect.x - (morph_panel.x + expanded_zone_grid::HEADER_INSET_X)).abs() < 0.01);
+        assert!((rect.y - (morph_panel.y + item_grid::ITEM_GRID_TOP_OFFSET_PX)).abs() < 0.01);
+        assert!(rect.right() <= morph_panel.right() - expanded_zone_grid::HEADER_INSET_X + 0.01);
+        assert!(rect.bottom() <= morph_panel.bottom() - 8.0 + 0.01);
+    }
+
+    #[test]
+    fn item_card_rect_reflows_requested_columns_when_panel_is_too_narrow() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(9), "Docs", 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+
+        let first = item_card_rect_for_grid(&zone, 0, 0, false);
+        let fourth = item_card_rect_for_grid(&zone, 3, 0, false);
+        let fifth = item_card_rect_for_grid(&zone, 4, 0, false);
+
+        assert!(first.width >= item_grid::ITEM_GRID_MIN_CARD_WIDTH_PX);
+        assert!(
+            fourth.right()
+                <= zone.x as f32 + zone.w as f32 - expanded_zone_grid::HEADER_INSET_X + 0.01
+        );
+        assert!((fifth.x - first.x).abs() < 0.01);
+        assert!(
+            fifth.y > fourth.y,
+            "5 requested columns in a 320-DIP panel should reflow to a new row"
+        );
+    }
+
+    #[test]
+    fn item_card_rect_for_item_advances_after_wide_cards() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(9), "Docs", 64, 332, 320, 260);
+        zone.set_grid_columns(5);
+        let first_id = zone
+            .add_item("C:/Desktop/item-01.txt", "h1")
+            .expect("first");
+        let second_id = zone
+            .add_item("C:/Desktop/item-02.txt", "h2")
+            .expect("second");
+        let third_id = zone
+            .add_item("C:/Desktop/item-03.txt", "h3")
+            .expect("third");
+        let fourth_id = zone
+            .add_item("C:/Desktop/item-04.txt", "h4")
+            .expect("fourth");
+        assert!(zone.toggle_item_wide(first_id));
+
+        let first = item_card_rect_for_item(&zone, zone.item(first_id).expect("first item"));
+        let second = item_card_rect_for_item(&zone, zone.item(second_id).expect("second item"));
+        let third = item_card_rect_for_item(&zone, zone.item(third_id).expect("third item"));
+        let fourth = item_card_rect_for_item(&zone, zone.item(fourth_id).expect("fourth item"));
+
+        assert!(first.width > second.width);
+        assert!(
+            second.x >= first.right() + item_grid::ITEM_GRID_COLUMN_GAP_PX - 0.01,
+            "wide first card must reserve two lanes before the second card"
+        );
+        assert!(
+            third.x >= second.right() + item_grid::ITEM_GRID_COLUMN_GAP_PX - 0.01,
+            "third card should continue after the second card"
+        );
+        assert!((fourth.x - first.x).abs() < 0.01);
+        assert!(
+            fourth.y > first.y,
+            "fourth card wraps because the first wide card consumed two lanes"
+        );
     }
 
     #[test]

@@ -225,7 +225,7 @@ pub fn clusters_to_suggestions(files: &[FileInfo]) -> Vec<SuggestedGroup> {
 
         out.push(SuggestedGroup {
             name: format!("{name} (AI)"),
-            icon: "sparkles".to_string(),
+            icon: "star".to_string(),
             rule,
             matching_files: paths,
             confidence: conf,
@@ -320,6 +320,7 @@ mod tests {
         ];
         let suggestions = clusters_to_suggestions(&files);
         for s in suggestions {
+            assert_eq!(s.icon, "star");
             if s.rule.rule_type == GroupRuleType::NamePattern {
                 let pat = s.rule.pattern.as_deref().unwrap_or("");
                 assert!(!pat.starts_with('^'), "Q2: bare prefix only, got {pat:?}");

@@ -25,10 +25,42 @@ pub const TRAY_DETACH_BUTTON_WIDTH_PX: f32 = 70.0;
 pub const TRAY_CLOSE_BUTTON_WIDTH_PX: f32 = 54.0;
 pub const TRAY_DISSOLVE_BUTTON_WIDTH_PX: f32 = 76.0;
 pub const TRAY_VISIBLE_ROW_LIMIT: usize = 6;
+pub const TRAY_HEADER_TITLE_WIDTH_PX: f32 = 92.0;
+pub const TRAY_HEADER_TITLE_HEIGHT_PX: f32 = 18.0;
+pub const TRAY_HEADER_COUNT_HEIGHT_PX: f32 = 20.0;
+pub const TRAY_HEADER_COUNT_BADGE_MIN_WIDTH_PX: f32 = 24.0;
+pub const TRAY_HEADER_COUNT_BADGE_PAD_X_PX: f32 = 9.0;
+pub const TRAY_HEADER_COUNT_BADGE_DIGIT_WIDTH_PX: f32 = 7.0;
+pub const TRAY_TITLE_FONT_PX: f32 = 13.0;
+pub const TRAY_TITLE_FONT_WEIGHT: u16 = 700;
+pub const TRAY_COUNT_FONT_PX: f32 = 12.0;
+pub const TRAY_COUNT_FONT_WEIGHT: u16 = 400;
+pub const TRAY_TOOLBAR_FONT_PX: f32 = 12.0;
+pub const TRAY_TOOLBAR_FONT_WEIGHT: u16 = 600;
+pub const TRAY_MEMBER_NAME_FONT_PX: f32 = 13.0;
+pub const TRAY_MEMBER_NAME_FONT_WEIGHT: u16 = 600;
+pub const TRAY_MEMBER_META_FONT_PX: f32 = 11.0;
+pub const TRAY_MEMBER_META_FONT_WEIGHT: u16 = 400;
+pub const TRAY_ACTION_FONT_PX: f32 = 11.0;
+pub const TRAY_ACTION_FONT_WEIGHT: u16 = 400;
+pub const TRAY_STATUS_FONT_PX: f32 = 11.0;
+pub const TRAY_STATUS_FONT_WEIGHT: u16 = 400;
+pub const TRAY_TEXT_LINE_HEIGHT: f32 = 1.25;
 
 pub const PREVIEW_WIDTH_PX: f32 = 300.0;
 pub const PREVIEW_HEIGHT_PX: f32 = 196.0;
 pub const PREVIEW_GAP_PX: f32 = 10.0;
+pub const PREVIEW_EYEBROW_FONT_PX: f32 = 12.0;
+pub const PREVIEW_EYEBROW_FONT_WEIGHT: u16 = 600;
+pub const PREVIEW_TITLE_FONT_PX: f32 = 13.0;
+pub const PREVIEW_TITLE_FONT_WEIGHT: u16 = 600;
+pub const PREVIEW_META_FONT_PX: f32 = 11.0;
+pub const PREVIEW_META_FONT_WEIGHT: u16 = 400;
+pub const PREVIEW_ITEM_FONT_PX: f32 = 12.0;
+pub const PREVIEW_ITEM_FONT_WEIGHT: u16 = 400;
+pub const PREVIEW_EMPTY_FONT_PX: f32 = 12.0;
+pub const PREVIEW_EMPTY_FONT_WEIGHT: u16 = 400;
+pub const PREVIEW_TEXT_LINE_HEIGHT: f32 = 1.25;
 
 pub const BLOOM_PETAL_WIDTH_PX: f32 = 164.0;
 pub const BLOOM_PETAL_HEIGHT_PX: f32 = 28.0;
@@ -280,6 +312,47 @@ pub fn stack_tray_dissolve_rect(viewport: Size, anchor: &Zone, member_count: usi
     }
 }
 
+pub fn stack_tray_header_title_rect(viewport: Size, anchor: &Zone, member_count: usize) -> Rect {
+    let tray = stack_tray_rect(viewport, anchor, member_count);
+    Rect {
+        x: tray.x + TRAY_INSET_PX,
+        y: tray.y + 10.0,
+        width: TRAY_HEADER_TITLE_WIDTH_PX,
+        height: TRAY_HEADER_TITLE_HEIGHT_PX,
+    }
+}
+
+pub fn stack_tray_header_count_rect(viewport: Size, anchor: &Zone, member_count: usize) -> Rect {
+    let title = stack_tray_header_title_rect(viewport, anchor, member_count);
+    let dissolve = stack_tray_dissolve_rect(viewport, anchor, member_count);
+    let x = title.right() + TRAY_GAP_PX;
+    let max_width = (dissolve.x - TRAY_GAP_PX - x).max(0.0);
+    Rect {
+        x,
+        y: title.y,
+        width: stack_tray_header_count_badge_width(member_count).min(max_width),
+        height: TRAY_HEADER_COUNT_HEIGHT_PX,
+    }
+}
+
+pub fn stack_tray_header_count_badge_width(member_count: usize) -> f32 {
+    let text_width = stack_tray_header_count_label_len(member_count) as f32
+        * TRAY_HEADER_COUNT_BADGE_DIGIT_WIDTH_PX;
+    (text_width + TRAY_HEADER_COUNT_BADGE_PAD_X_PX * 2.0).max(TRAY_HEADER_COUNT_BADGE_MIN_WIDTH_PX)
+}
+
+pub fn stack_tray_header_count_label_len(member_count: usize) -> usize {
+    if member_count >= 1000 {
+        4
+    } else if member_count >= 100 {
+        3
+    } else if member_count >= 10 {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn stack_tray_close_rect(viewport: Size, anchor: &Zone, member_count: usize) -> Rect {
     let tray = stack_tray_rect(viewport, anchor, member_count);
     Rect {
@@ -293,7 +366,16 @@ pub fn stack_tray_close_rect(viewport: Size, anchor: &Zone, member_count: usize)
 pub fn focused_preview_rect(viewport: Size, tray: Rect) -> Rect {
     let right_candidate = tray.right() + PREVIEW_GAP_PX;
     let left_candidate = tray.x - PREVIEW_GAP_PX - PREVIEW_WIDTH_PX;
-    let x = if right_candidate + PREVIEW_WIDTH_PX + TRAY_VIEWPORT_MARGIN_PX <= viewport.width {
+    let left_available = (tray.x - PREVIEW_GAP_PX - TRAY_VIEWPORT_MARGIN_PX).max(0.0);
+    let right_available =
+        (viewport.width - TRAY_VIEWPORT_MARGIN_PX - PREVIEW_GAP_PX - tray.right()).max(0.0);
+    let right_fits = right_available >= PREVIEW_WIDTH_PX;
+    let left_fits = left_available >= PREVIEW_WIDTH_PX;
+    let x = if right_fits && (!left_fits || right_available >= left_available) {
+        right_candidate
+    } else if left_fits {
+        left_candidate
+    } else if right_available >= left_available {
         right_candidate
     } else {
         left_candidate
@@ -487,7 +569,6 @@ fn stack_bloom_motion_frame(
     let eased = ease_out_cubic(progress);
     let scale = BLOOM_MOTION_MIN_SCALE + (1.0 - BLOOM_MOTION_MIN_SCALE) * eased;
     let alpha = BLOOM_MOTION_MIN_ALPHA + (1.0 - BLOOM_MOTION_MIN_ALPHA) * eased;
-    let anchor_center_y = anchor.y as f32 + anchor.h as f32 / 2.0;
     let start_center_x = if opens_right {
         anchor.x as f32 + anchor.w as f32 + BLOOM_PETAL_GAP_PX + BLOOM_PETAL_WIDTH_PX / 2.0
     } else {
@@ -496,7 +577,7 @@ fn stack_bloom_motion_frame(
     let final_center_x = final_rect.x + final_rect.width / 2.0;
     let final_center_y = final_rect.y + final_rect.height / 2.0;
     let center_x = lerp(start_center_x, final_center_x, eased);
-    let center_y = lerp(anchor_center_y, final_center_y, eased);
+    let center_y = final_center_y;
     let rect = clamp_rect_to_viewport(
         rect_from_center(
             center_x,
@@ -593,19 +674,65 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.preview_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_hover);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
-        assert_eq!(chrome.danger_background, style_tokens::PALETTE_DARK.accent_red);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.preview_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_hover
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
+        assert_eq!(
+            chrome.danger_background,
+            style_tokens::PALETTE_DARK.accent_red
+        );
         assert_eq!(chrome.text_primary, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.text_muted, style_tokens::PALETTE_DARK.text_muted);
         assert_eq!(chrome.text_accent, style_tokens::PALETTE_DARK.accent_blue);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.button_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
+    }
+
+    #[test]
+    fn stack_tray_typography_matches_tauri_compact_roles() {
+        assert_eq!(TRAY_TITLE_FONT_PX, 13.0);
+        assert_eq!(TRAY_TITLE_FONT_WEIGHT, 700);
+        assert_eq!(TRAY_COUNT_FONT_PX, 12.0);
+        assert_eq!(TRAY_TOOLBAR_FONT_PX, 12.0);
+        assert_eq!(TRAY_TOOLBAR_FONT_WEIGHT, 600);
+        assert_eq!(TRAY_MEMBER_NAME_FONT_PX, 13.0);
+        assert_eq!(TRAY_MEMBER_NAME_FONT_WEIGHT, 600);
+        assert_eq!(TRAY_MEMBER_META_FONT_PX, 11.0);
+        assert_eq!(TRAY_ACTION_FONT_PX, 11.0);
+        assert_eq!(TRAY_STATUS_FONT_PX, 11.0);
+        const { assert!(TRAY_TEXT_LINE_HEIGHT <= 1.25) };
+
+        assert_eq!(PREVIEW_EYEBROW_FONT_PX, 12.0);
+        assert_eq!(PREVIEW_TITLE_FONT_PX, 13.0);
+        assert_eq!(PREVIEW_META_FONT_PX, 11.0);
+        assert_eq!(PREVIEW_ITEM_FONT_PX, 12.0);
+        assert_eq!(PREVIEW_EMPTY_FONT_PX, 12.0);
+        const { assert!(PREVIEW_TEXT_LINE_HEIGHT <= 1.25) };
     }
 
     fn anchor() -> Zone {
@@ -750,6 +877,49 @@ mod tests {
     }
 
     #[test]
+    fn stack_tray_header_count_clears_action_buttons() {
+        let viewport = Size {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let zone = Zone::new(ZoneId(1), Cow::Borrowed("Anchor"), 100, 100, 180, 130);
+
+        let title = stack_tray_header_title_rect(viewport, &zone, 3);
+        let count = stack_tray_header_count_rect(viewport, &zone, 3);
+        let many_count = stack_tray_header_count_rect(viewport, &zone, 1000);
+        let dissolve = stack_tray_dissolve_rect(viewport, &zone, 3);
+        let close = stack_tray_close_rect(viewport, &zone, 3);
+
+        assert!(title.width > 0.0);
+        assert!(count.width > 0.0);
+        assert_eq!(stack_tray_header_count_label_len(3), 1);
+        assert_eq!(stack_tray_header_count_label_len(10), 2);
+        assert_eq!(stack_tray_header_count_label_len(999), 3);
+        assert_eq!(stack_tray_header_count_label_len(1000), 4);
+        assert!(
+            count.width >= stack_tray_header_count_badge_width(3) - 0.01,
+            "3-member badge keeps the full numeric label"
+        );
+        assert!(
+            many_count.width >= stack_tray_header_count_badge_width(1000) - 0.01,
+            "1000+ member badge keeps the capped 999+ label"
+        );
+        assert!(
+            count.x >= title.right() + TRAY_GAP_PX - 0.01,
+            "count starts after title"
+        );
+        assert!(
+            count.right() <= dissolve.x - TRAY_GAP_PX + 0.01,
+            "count must not overlap Dissolve"
+        );
+        assert!(
+            many_count.right() <= dissolve.x - TRAY_GAP_PX + 0.01,
+            "wide count badge must not overlap Dissolve"
+        );
+        assert!(dissolve.right() <= close.x - TRAY_GAP_PX + 0.01);
+    }
+
+    #[test]
     fn stack_tray_hit_test_prefers_detach_over_row() {
         let viewport = Size {
             width: 1280.0,
@@ -782,6 +952,45 @@ mod tests {
         assert!(preview.y >= TRAY_VIEWPORT_MARGIN_PX);
         assert!(preview.right() <= viewport.width - TRAY_VIEWPORT_MARGIN_PX);
         assert!(preview.bottom() <= viewport.height - TRAY_VIEWPORT_MARGIN_PX);
+    }
+
+    #[test]
+    fn focused_preview_uses_left_side_when_left_has_more_room() {
+        let viewport = Size {
+            width: 1707.0,
+            height: 912.0,
+        };
+        let tray = Rect {
+            x: 756.0,
+            y: 332.0,
+            width: TRAY_WIDTH_PX,
+            height: TRAY_MIN_HEIGHT_PX,
+        };
+
+        let preview = focused_preview_rect(viewport, tray);
+
+        assert!(preview.right() <= tray.x - PREVIEW_GAP_PX + 0.01);
+        assert!(preview.x >= TRAY_VIEWPORT_MARGIN_PX);
+        assert!(preview.right() <= viewport.width - TRAY_VIEWPORT_MARGIN_PX);
+    }
+
+    #[test]
+    fn focused_preview_keeps_right_side_when_right_has_more_room() {
+        let viewport = Size {
+            width: 2560.0,
+            height: 1440.0,
+        };
+        let tray = Rect {
+            x: 756.0,
+            y: 332.0,
+            width: TRAY_WIDTH_PX,
+            height: TRAY_MIN_HEIGHT_PX,
+        };
+
+        let preview = focused_preview_rect(viewport, tray);
+
+        assert!(preview.x >= tray.right() + PREVIEW_GAP_PX - 0.01);
+        assert!(preview.right() <= viewport.width - TRAY_VIEWPORT_MARGIN_PX);
     }
 
     #[test]
@@ -901,6 +1110,26 @@ mod tests {
         assert!(start[0].rect.x < settled[0].rect.x);
         assert!(start[0].alpha <= midway[0].alpha && midway[0].alpha <= settled[0].alpha);
         assert!(start[0].scale <= midway[0].scale && midway[0].scale <= settled[0].scale);
+    }
+
+    #[test]
+    fn stack_bloom_reveal_frames_never_overlap_vertically() {
+        let viewport = Size {
+            width: 1280.0,
+            height: 720.0,
+        };
+        let zone = Zone::new(ZoneId(1), Cow::Borrowed("Anchor"), 120, 240, 180, 130);
+
+        for progress in [0.0, 0.2, 0.45, 1.0] {
+            let frames = stack_bloom_frames_at(viewport, &zone, 5, progress);
+            assert_eq!(frames.len(), BLOOM_VISIBLE_PETAL_LIMIT);
+            assert!(
+                frames
+                    .windows(2)
+                    .all(|pair| pair[0].rect.bottom() <= pair[1].rect.y),
+                "bloom frames must stay vertically separated at progress {progress}"
+            );
+        }
     }
 
     #[test]

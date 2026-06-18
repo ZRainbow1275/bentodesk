@@ -46,8 +46,9 @@
 //! literals in user-visible text positions.
 
 use bento_nano_app::{
-    AppState, WindowState, expanded_zone_grid, zone_pill_geometry,
-    business::{item_grid, stack_tray},
+    AppState, WindowState,
+    business::{highlight_overlay, item_grid, stack_tray},
+    expanded_zone_grid, zone_pill_geometry,
 };
 use bento_nano_layout::Direction;
 use bento_nano_style::{BorderRadius, Color, Edges, Length, Rect, Shadow};
@@ -68,16 +69,31 @@ use bento_nano_zone::{Zone, ZoneId, ZoneItemId};
 ///    after hover starts snapped the hit-rect to the full expanded body
 ///    while the visual was still a pill — clicks/hover registered in the
 ///    invisible "phantom" zone box surrounding the pill.
-/// 2. **Collapsed pill** (body not visible per mode and not a stack
-///    anchor) — pill rect from `zone_pill_geometry` is the only clickable
-///    region.
-/// 3. **Expanded body** (body visible per mode, OR stack anchor with its
-///    own chrome) — full stored `(x, y, w, h)` rectangle is authoritative.
+/// 2. **Collapsed pill** (body not visible through `zone_pill_body_visible`) —
+///    pill rect from `zone_pill_geometry` is the only clickable region.
+/// 3. **Expanded body** (body visible through `zone_pill_body_visible`) — full
+///    stored `(x, y, w, h)` rectangle is authoritative.
 ///
 /// Pure / allocation-free.
 fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
-    let body_visible = app.zone_body_visible_for_mode(zone);
-    let count = zone.items.len();
+    // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
+    // explicitly selected (a focused member), NOT on hover (hover shows the
+    // bloom). #5 (2026-06-02) — only a RESIZE (armable solely on an already-
+    // expanded panel, gated by `hit_test_zone_resize_corner`) may force the
+    // expanded body; a DRAG keeps a collapsed pill a pill so its hit rect stays
+    // the PILL rect and follows the cursor. Both rules now live in the shared
+    // `AppState::zone_pill_body_visible` SSoT — the SAME predicate the paint side
+    // (`Renderer::draw_zones`) and the z-layering (`zone_on_top`) key off — so
+    // paint == hit geometry can never drift across the app/shell boundary.
+    let body_visible = app.zone_pill_body_visible(zone);
+    // #4 (2026-06-02) — a collapsed stack anchor renders as the compact pill
+    // with the stack-MEMBER count as the badge value; mirror the paint side
+    // (Renderer::draw_zones) so paint == hit geometry for the anchor pill.
+    let count = app
+        .zones
+        .stack_member_ids(zone.id)
+        .map(|m| m.len())
+        .unwrap_or_else(|| zone.items.len());
     let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
     let expanded_rect = Rect {
         x: zone.x as f32,
@@ -86,33 +102,34 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
         height: zone.h as f32,
     };
 
-    // V-13 case 1 — pill morph in flight. Mirrors render.rs:1252-1287.
+    // V-13 case 1 — pill morph in flight. Anchors don't morph (the paint-side
+    // pill_anim_active also excludes them).
+    // V-13 paint–hit parity: during the ~10% easeOutBack overshoot the painted
+    // rect bulges past the expanded target; the hit-rect must bulge with it or
+    // clicks fall outside the visible shape. #2 step 8 (2026-06-02) — the
+    // raw→easeOutBack→(flip)→rect math is the shared `current_morph_rect` SSoT,
+    // the SAME helper render.rs paints with, so paint == hit is enforced (no
+    // chance of the two formulas drifting).
     if app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() {
         let raw = app.zone_pill_anim_progress.get();
         if raw > 0.0 && raw < 1.0 {
-            // V-13 paint–hit parity: mirror EXACTLY the curve render.rs:1308
-            // paints (M3 easeOutBack `cubic-bezier(0.34,1.56,0.64,1)`). During
-            // the ~10% overshoot window the painted rect bulges past the
-            // expanded target; the hit-rect must bulge with it or clicks fall
-            // outside the visible shape.
-            let eased = zone_pill_geometry::ease_out_back_progress(raw);
-            // `expanding` true → morph from pill (0) → expanded (1); false
-            // reverses the morph so the shrink animation tracks correctly.
-            let morph = if app.zone_pill_anim_expanding.get() {
-                eased
-            } else {
-                1.0 - eased
-            };
-            return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
+            let (_morph, rect) = zone_pill_geometry::current_morph_rect(
+                pill_layout.rect,
+                expanded_rect,
+                raw,
+                app.zone_pill_anim_expanding.get(),
+            );
+            return rect;
         }
     }
 
-    // V-13 case 2 — collapsed pill (no morph, body hidden).
-    if !body_visible && !zone.is_stack_anchor() {
+    // V-13 case 2 — collapsed pill (no morph, body hidden). #4: a collapsed
+    // stack anchor now ALSO renders as the compact pill, so it reaches here.
+    if !body_visible {
         return pill_layout.rect;
     }
 
-    // V-13 case 3 — expanded body (or stack anchor chrome).
+    // V-13 case 3 — expanded body (focused stack member uses the normal panel).
     expanded_rect
 }
 
@@ -322,6 +339,13 @@ fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
         }
     }
 
+    // #4 / R1 (2026-06-02) — the hover-bloom is a gated, mutually-exclusive
+    // surface: it only paints when the tray is closed and no member is
+    // focused/selected. Mirror that here so the overlay region (click-through)
+    // never claims petal points on a frame where no bloom is shown.
+    if app.stack_tray.borrow().is_some() || app.selected_zone.get().is_some() {
+        return false;
+    }
     let Some(anchor_id) = app
         .hovered_zone
         .get()
@@ -350,17 +374,28 @@ fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {
 /// is the canonical "easy to grab without crowding the zone body".
 pub const ZONE_RESIZE_CORNER: f32 = 12.0;
 
-/// Topmost (= last drawn = highest z) zone whose body contains `(x, y)`.
-/// Reverse iteration so newer zones win over older ones — matches paint
-/// order in `Renderer::draw_zones`.
+/// Topmost (= last drawn = highest z) zone whose effective surface contains
+/// `(x, y)`. Z-order (2026-06-02): mirror the two-layer draw stack in
+/// `Renderer::draw_zones` — test `on_top` (expanded/morphing) zones BEFORE
+/// `!on_top` (collapsed pills), so a point inside an expanded panel resolves to
+/// the panel, never to a pill drawn behind it (which would otherwise mis-target
+/// the buried pill and make the panel collapse/flicker on hover). Within each
+/// layer keep the existing reverse/topmost order (newer zones win over older).
+/// Uses the shared `AppState::zone_on_top` SSoT so the hit stack and the paint
+/// stack can't drift.
 pub fn hit_test_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
-    for z in app.zones.iter().rev() {
-        if !z.is_visible() || z.is_stacked_child() {
-            continue;
-        }
-        let rect = effective_zone_hit_rect(app, z);
-        if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
-            return Some(z.id);
+    for on_top_layer in [true, false] {
+        for z in app.zones.iter().rev() {
+            if !z.is_visible() || z.is_stacked_child() {
+                continue;
+            }
+            if app.zone_on_top(z) != on_top_layer {
+                continue;
+            }
+            let rect = effective_zone_hit_rect(app, z);
+            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                return Some(z.id);
+            }
         }
     }
     None
@@ -374,10 +409,12 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         if !z.is_visible() || z.is_stacked_child() {
             continue;
         }
-        // Wave C — collapsed pill mode hides the item grid, so items
-        // attached to a non-expanded non-anchor zone are not hit-testable.
-        // Stack anchors keep the legacy expanded chrome and remain reachable.
-        if !app.zone_body_visible_for_mode(z) && !z.is_stack_anchor() {
+        // Wave C — collapsed pill mode hides the item grid, so items attached
+        // to a non-expanded zone are not hit-testable. #4 (2026-06-02): a
+        // collapsed stack anchor now ALSO renders as a compact pill (no item
+        // grid), so it is skipped too; an EXPANDED anchor (focused member) uses
+        // the normal panel and its items stay reachable via body_visible.
+        if !app.zone_pill_body_visible(z) {
             continue;
         }
         let zx = z.x as f32;
@@ -387,23 +424,20 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         if x < zx || x >= zr || y < zy || y >= zb {
             continue;
         }
-        let columns = z.grid_columns.max(1) as f32;
-        let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
-        let cell_w = ((z.w as f32 - 16.0) - gap * (columns - 1.0)).max(44.0) / columns;
         for item in z.items.iter().rev() {
-            let span = item_grid::column_span_for(item.is_wide) as f32;
-            let ix = zx + 8.0 + item.x as f32 * (cell_w + gap);
-            // V-13 paint-hit parity: grid-top offset is the shared SSoT
-            // (`ITEM_GRID_TOP_OFFSET_PX` = 48) so this hit-rect tracks the
-            // renderer's `item_card_rect_for_grid` exactly after the M2③
-            // header-height change.
-            let iy = zy
-                + item_grid::ITEM_GRID_TOP_OFFSET_PX
-                + item.y as f32
-                    * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX);
-            let iw = (cell_w * span + gap * (span - 1.0)).min((zr - 8.0 - ix).max(0.0));
-            let ih = item_grid::ITEM_GRID_ROW_HEIGHT_PX.min((zb - 8.0 - iy).max(0.0));
-            if iw > 0.0 && ih > 0.0 && x >= ix && x < ix + iw && y >= iy && y < iy + ih {
+            // P3.8 paint-hit parity: reuse the same item-card rectangle SSoT as
+            // the renderer and highlight overlay. This keeps the 16-DIP horizontal
+            // inset, 56-DIP grid top, row height, wide-card span, and bottom clamp
+            // in lockstep; the old local 8/16/48 math made hit/drag targets drift
+            // from the cards the user actually saw.
+            let card = highlight_overlay::item_card_rect_for_item(z, item);
+            if card.width > 0.0
+                && card.height > 0.0
+                && x >= card.x
+                && x < card.right()
+                && y >= card.y
+                && y < card.bottom()
+            {
                 return Some((z.id, item.id, item.path.to_string()));
             }
         }
@@ -422,15 +456,19 @@ pub fn item_grid_position_for_point(
     y: f32,
 ) -> Option<(i32, i32)> {
     let z = app.zones.get(zone_id)?;
-    let columns = z.grid_columns.max(1) as i32;
     let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    // P3.8: mirror `highlight_overlay::item_card_rect_for_grid` / renderer
+    // geometry. The grid starts 16 DIPs in from the panel edge; row 0 starts at
+    // the 56-DIP header+content-pad SSoT.
+    let inset_x = expanded_zone_grid::HEADER_INSET_X;
+    let columns =
+        item_grid::effective_column_count(z.w as f32, z.grid_columns.max(1), inset_x).max(1) as i32;
     let columns_f = columns as f32;
-    let cell_w = ((z.w as f32 - 16.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
+    let cell_w = ((z.w as f32 - inset_x * 2.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
     let col_stride = cell_w + gap;
     let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
-    let raw_col = ((x - z.x as f32 - 8.0) / col_stride).floor() as i32;
-    // V-13 paint-hit parity: same shared grid-top SSoT as the renderer +
-    // `hit_test_zone_item`, so drop-row math tracks the 48-DIP header.
+    let raw_col = ((x - z.x as f32 - inset_x) / col_stride).floor() as i32;
+    // Same shared grid-top SSoT as the renderer + `hit_test_zone_item`.
     let raw_row =
         ((y - z.y as f32 - item_grid::ITEM_GRID_TOP_OFFSET_PX) / row_stride).floor() as i32;
     Some((raw_col.clamp(0, columns - 1), raw_row.max(0)))
@@ -446,8 +484,9 @@ pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<Zon
         }
         // Wave C — collapsed pills have no resize handle (they auto-size to
         // their badge + label content). Only expanded zones surface the
-        // bottom-right resize corner.
-        if !app.zone_body_visible_for_mode(z) && !z.is_stack_anchor() {
+        // bottom-right resize corner. #4 (2026-06-02): a collapsed stack anchor
+        // is now a compact pill too, so it has no resize handle either.
+        if !app.zone_pill_body_visible(z) {
             continue;
         }
         let zr = (z.x + z.w) as f32;
@@ -475,8 +514,10 @@ pub enum HeaderButton {
 /// Topmost expanded-zone header action button under `(x, y)`. The button
 /// rects come from the paint==hit SSoT (`expanded_zone_grid::ExpandedZoneLayout`)
 /// so a click lands exactly on the painted 28×28 glyph. Only surfaced when the
-/// zone body is visible (collapsed pills have no header buttons). Stack anchors
-/// are excluded — their bespoke chrome paints no `PanelHeader`.
+/// zone body is visible (collapsed pills have no header buttons). #4 (2026-06-02):
+/// an EXPANDED stack anchor (focused member) now paints the normal `PanelHeader`,
+/// so its header buttons are reachable too — only the collapsed (pill) state has
+/// none.
 pub fn hit_test_zone_header_button(
     app: &AppState,
     x: f32,
@@ -486,7 +527,7 @@ pub fn hit_test_zone_header_button(
         if !z.is_visible() || z.is_stacked_child() {
             continue;
         }
-        if !app.zone_body_visible_for_mode(z) || z.is_stack_anchor() {
+        if !app.zone_pill_body_visible(z) {
             continue;
         }
         let layout = expanded_zone_grid::expanded_zone_layout(z);
@@ -522,9 +563,8 @@ pub fn hit_test_zone_header_button(
 pub use bento_nano_app::settings_panel::{
     SETTINGS_BACKUP_ENTRY_VISIBLE_MAX, SETTINGS_CLOSE_BTN_H, SETTINGS_CLOSE_BTN_W,
     SETTINGS_PANEL_HEIGHT, SETTINGS_PANEL_PADDING, SETTINGS_PANEL_WIDTH, SETTINGS_SWITCH_BTN_H,
-    SETTINGS_SWITCH_BTN_W, settings_keybinding_record_rect,
-    settings_keybinding_reset_rect, settings_keybindings_close_rect,
-    settings_keybindings_modal_rect,
+    SETTINGS_SWITCH_BTN_W, settings_keybinding_record_rect, settings_keybinding_reset_rect,
+    settings_keybindings_close_rect, settings_keybindings_modal_rect,
 };
 
 /// What part of the settings overlay was clicked.
@@ -778,11 +818,7 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     }
     // Footer Cancel + Save — sticky.
     let cancel_btn = bento_nano_app::settings_panel::settings_cancel_button_rect(vp);
-    if x >= cancel_btn.x
-        && x < cancel_btn.right()
-        && y >= cancel_btn.y
-        && y < cancel_btn.bottom()
-    {
+    if x >= cancel_btn.x && x < cancel_btn.right() && y >= cancel_btn.y && y < cancel_btn.bottom() {
         return SettingsHit::CancelSettings;
     }
     let save_btn = bento_nano_app::settings_panel::settings_save_button_rect(vp);
@@ -829,14 +865,19 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // Click re-resolves the desktop sources and repopulates the read-only list.
     // The source cards themselves are display-only (no per-card hit-box).
     let refresh = bento_nano_app::settings_panel::settings_sources_refresh_button_rect(
-        vp, scroll_y, source_count,
+        vp,
+        scroll_y,
+        source_count,
     );
     if x >= refresh.x && x < refresh.right() && y >= refresh.y && y < refresh.bottom() {
         return SettingsHit::RefreshDesktopSources;
     }
     // Round-2 M2 — 桌面路径 input box (reflows below the live source stack).
-    let path_box =
-        bento_nano_app::settings_panel::settings_desktop_path_input_rect(vp, scroll_y, source_count);
+    let path_box = bento_nano_app::settings_panel::settings_desktop_path_input_rect(
+        vp,
+        scroll_y,
+        source_count,
+    );
     if x >= path_box.x && x < path_box.right() && y >= path_box.y && y < path_box.bottom() {
         return SettingsHit::EditDesktopPath;
     }
@@ -878,9 +919,8 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // a drag carrying the quantized client x for the dispatcher's
     // track-x→value map.
     for index in 0..bento_nano_app::settings_panel::SETTINGS_PERF_ROW_COUNT {
-        let track = bento_nano_app::settings_panel::settings_performance_slider_rect(
-            vp, scroll_y, index,
-        );
+        let track =
+            bento_nano_app::settings_panel::settings_performance_slider_rect(vp, scroll_y, index);
         if x >= track.x && x < track.right() && y >= track.y && y < track.bottom() {
             return SettingsHit::DragPerformanceSlider {
                 index,
@@ -902,8 +942,7 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         return SettingsHit::ToggleStartupHighPriority;
     }
     // 崩溃自动重启 toggle (row 1).
-    let crash_row =
-        bento_nano_app::settings_panel::settings_crash_restart_row_rect(vp, scroll_y);
+    let crash_row = bento_nano_app::settings_panel::settings_crash_restart_row_rect(vp, scroll_y);
     let crash_hit = bento_nano_app::settings_panel::settings_startup_toggle_hit_rect(crash_row);
     if x >= crash_hit.x && x < crash_hit.right() && y >= crash_hit.y && y < crash_hit.bottom() {
         return SettingsHit::ToggleCrashRestart;
@@ -972,13 +1011,19 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     );
     let refresh_btn =
         bento_nano_app::settings_panel::settings_stealth_refresh_button_rect(stealth_btn_row);
-    if x >= refresh_btn.x && x < refresh_btn.right() && y >= refresh_btn.y && y < refresh_btn.bottom()
+    if x >= refresh_btn.x
+        && x < refresh_btn.right()
+        && y >= refresh_btn.y
+        && y < refresh_btn.bottom()
     {
         return SettingsHit::RefreshStealth;
     }
     let reapply_btn =
         bento_nano_app::settings_panel::settings_stealth_reapply_button_rect(stealth_btn_row);
-    if x >= reapply_btn.x && x < reapply_btn.right() && y >= reapply_btn.y && y < reapply_btn.bottom()
+    if x >= reapply_btn.x
+        && x < reapply_btn.right()
+        && y >= reapply_btn.y
+        && y < reapply_btn.bottom()
     {
         return SettingsHit::ReapplyStealth;
     }
@@ -992,9 +1037,8 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // non-interactive. Action-button column indices match the renderer: col 0
     // = 检查更新 (always), col 1 = 下载/安装并重启 (gated), col 2 = 跳过此版本 (gated).
     let updater_status = app.settings_updater_status.borrow();
-    let updater_kind = bento_nano_app::business::settings::updater_card::updater_height_kind(
-        &updater_status,
-    );
+    let updater_kind =
+        bento_nano_app::business::settings::updater_card::updater_height_kind(&updater_status);
     let updater_flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
         crash_restart_on,
         safe_start_on,
@@ -1018,15 +1062,17 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     {
         let action_btn =
             bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 1);
-        if x >= action_btn.x && x < action_btn.right() && y >= action_btn.y && y < action_btn.bottom()
+        if x >= action_btn.x
+            && x < action_btn.right()
+            && y >= action_btn.y
+            && y < action_btn.bottom()
         {
             return SettingsHit::RunUpdateAction;
         }
     }
     // Col 2 — 跳过此版本 (Available/Ready) → SkipCurrentUpdate.
     if bento_nano_app::business::settings::updater_card::updater_show_skip(&updater_status) {
-        let skip_btn =
-            bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 2);
+        let skip_btn = bento_nano_app::settings_panel::settings_updater_button_rect(upd_btn_row, 2);
         if x >= skip_btn.x && x < skip_btn.right() && y >= skip_btn.y && y < skip_btn.bottom() {
             return SettingsHit::SkipCurrentUpdate;
         }
@@ -1063,9 +1109,8 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // non-interactive. The per-row 恢复 carries the newest-first list index;
     // the dispatch arm maps index → entry → backup_id.
     let backup_entries = app.settings_backup_entries.borrow();
-    let backup_visible = bento_nano_app::business::settings::backup_card::backup_visible_row_count(
-        &backup_entries,
-    );
+    let backup_visible =
+        bento_nano_app::business::settings::backup_card::backup_visible_row_count(&backup_entries);
     let backup_flags = updater_flags.with_backup_rows(backup_visible);
     let backup_actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
         vp,
@@ -1079,7 +1124,10 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     }
     let refresh_btn =
         bento_nano_app::settings_panel::settings_backup_refresh_button_rect(backup_actions);
-    if x >= refresh_btn.x && x < refresh_btn.right() && y >= refresh_btn.y && y < refresh_btn.bottom()
+    if x >= refresh_btn.x
+        && x < refresh_btn.right()
+        && y >= refresh_btn.y
+        && y < refresh_btn.bottom()
     {
         return SettingsHit::ListSettingsBackups;
     }
@@ -1196,8 +1244,7 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         scroll_y,
         &plugin_flags,
     );
-    let appearance_inner_w =
-        bento_nano_app::settings_panel::settings_appearance_inner_width(vp);
+    let appearance_inner_w = bento_nano_app::settings_panel::settings_appearance_inner_width(vp);
     let appearance =
         bento_nano_app::theme_picker::appearance_layout(appearance_origin, appearance_inner_w);
     match bento_nano_app::theme_picker::appearance_hit_test(&appearance, x, y) {
@@ -1367,8 +1414,42 @@ mod phase21_tests {
         ]);
         assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
 
-        assert_eq!(hit_test_zone(&app, 75.0, 75.0), Some(ZoneId(1)));
+        // #4 (2026-06-02) — a COLLAPSED stack anchor renders as the compact
+        // stack pill at its origin (≤96×36), NOT the full expanded body, so a
+        // point near the origin hits the anchor and the stacked child (ZoneId 2)
+        // is never independently hit-testable. The legacy `(75, 75)` was inside
+        // the old always-expanded anchor body; the pill no longer reaches it.
+        assert_eq!(hit_test_zone(&app, 8.0, 8.0), Some(ZoneId(1)));
+        assert_eq!(hit_test_zone(&app, 75.0, 75.0), None);
+        // A collapsed pill (incl. a stack-anchor pill) has no resize corner.
         assert_eq!(hit_test_zone_resize_corner(&app, 195.0, 195.0), None);
+    }
+
+    #[test]
+    fn hovered_stack_anchor_has_no_hidden_panel_hit_targets() {
+        let mut anchor = Zone::new(ZoneId(1), Cow::Borrowed("anchor"), 0, 0, 220, 160);
+        let _item = anchor
+            .add_item(
+                Cow::Owned("C:/Users/HP/Desktop/Anchor.lnk".to_owned()),
+                Cow::Borrowed("hash-anchor"),
+            )
+            .expect("anchor item");
+        let mut app = app_with_zones(vec![
+            anchor,
+            Zone::new(ZoneId(2), Cow::Borrowed("child"), 50, 50, 150, 150),
+        ]);
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        // Default Hover mode sets `zone_body_visible_for_mode(anchor) == true`,
+        // but the 2026-06-02 stack contract says hover shows compact pill +
+        // bloom only. The shared `zone_pill_body_visible` SSoT must therefore
+        // keep every expanded-panel hit target absent until explicit selection.
+        app.hovered_zone.set(Some(ZoneId(1)));
+
+        assert!(!app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
+        assert_eq!(hit_test_zone(&app, 120.0, 120.0), None);
+        assert_eq!(hit_test_zone_item(&app, 24.0, 70.0), None);
+        assert_eq!(hit_test_zone_resize_corner(&app, 215.0, 155.0), None);
+        assert_eq!(hit_test_zone_header_button(&app, 196.0, 24.0), None);
     }
 
     #[test]
@@ -1383,9 +1464,11 @@ mod phase21_tests {
             .expect("item id");
         let app = app_with_zones(vec![hidden]);
 
-        // M2③: grid row 0 starts at zone_top(10) + 48-DIP header = 58; click
-        // at y=70 lands inside it but the zone is hidden, so still None.
-        assert_eq!(hit_test_zone_item(&app, 24.0, 70.0), None);
+        // P3.8: row 0 starts at zone_top(10) + 56-DIP header/content offset =
+        // 66 and column 0 starts at zone_left(10) + 16-DIP inset = 26. The
+        // point is inside the painted card, but the zone is hidden, so still
+        // None.
+        assert_eq!(hit_test_zone_item(&app, 28.0, 70.0), None);
     }
 
     #[test]
@@ -1401,9 +1484,9 @@ mod phase21_tests {
         // Wave C — items are reachable only when the zone is expanded.
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
 
-        // M2③: grid row 0 now begins at zone_top(10) + 48-DIP header = 58;
-        // click at y=70 lands on the first card.
-        let hit = hit_test_zone_item(&app, 24.0, 70.0).expect("item hit");
+        // P3.8: grid row 0 begins at zone_top(10) + 56-DIP header/content
+        // offset = 66; x starts at zone_left(10) + 16-DIP inset = 26.
+        let hit = hit_test_zone_item(&app, 28.0, 70.0).expect("item hit");
         assert_eq!(hit.0, ZoneId(1));
         assert_eq!(hit.1, item_id);
         assert_eq!(hit.2, "C:/Users/HP/Desktop/App.lnk");
@@ -1429,11 +1512,52 @@ mod phase21_tests {
         let app = app_with_zones(vec![zone]);
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
 
-        // M2③: row 0 starts at zone_top(10) + 48-DIP header = 58; y=70 hits it.
+        // P3.8: row 0 starts at zone_top(10) + 56-DIP header/content offset =
+        // 66; y=70 hits it. With 2 columns and 16-DIP side insets, x=150 lands
+        // in the right column.
         let hit = hit_test_zone_item(&app, 150.0, 70.0).expect("right-column item hit");
         assert_eq!(hit.0, ZoneId(3));
         assert_eq!(hit.1, second);
         assert_eq!(hit.2, "C:/Users/HP/Desktop/Right.lnk");
+    }
+
+    #[test]
+    fn hit_test_zone_item_uses_auto_placed_item_rects_when_wide_cards_shift_following_items() {
+        let mut zone = Zone::new(ZoneId(4), Cow::Borrowed("z"), 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        let first = zone
+            .add_item(
+                Cow::Owned("C:/Users/HP/Desktop/item-01.txt".to_owned()),
+                Cow::Borrowed("wide"),
+            )
+            .expect("first item");
+        assert!(zone.toggle_item_wide(first));
+        let second = zone
+            .add_item(
+                Cow::Owned("C:/Users/HP/Desktop/item-02.txt".to_owned()),
+                Cow::Borrowed("second"),
+            )
+            .expect("second item");
+        let third = zone
+            .add_item(
+                Cow::Owned("C:/Users/HP/Desktop/item-03.txt".to_owned()),
+                Cow::Borrowed("third"),
+            )
+            .expect("third item");
+        let app = app_with_zones(vec![zone]);
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
+
+        // The renderer auto-places the wide first card across slots 0-1. The
+        // second item is therefore painted in effective slot 2, not at its raw
+        // persisted grid_x=1. The shell hit-test must use that same item-aware
+        // helper or a click on the visible second card starts no drag.
+        let second_hit = hit_test_zone_item(&app, 261.0, 427.0).expect("second item hit");
+        assert_eq!(second_hit.0, ZoneId(4));
+        assert_eq!(second_hit.1, second);
+        assert_eq!(second_hit.2, "C:/Users/HP/Desktop/item-02.txt");
+
+        let third_hit = hit_test_zone_item(&app, 335.0, 427.0).expect("third item hit");
+        assert_eq!(third_hit.1, third);
     }
 
     #[test]
@@ -1469,9 +1593,8 @@ mod phase21_tests {
         // Header buttons only exist on an expanded (body-visible) zone.
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
 
-        let layout = expanded_zone_grid::expanded_zone_layout(
-            app.zones.get(ZoneId(9)).expect("zone"),
-        );
+        let layout =
+            expanded_zone_grid::expanded_zone_layout(app.zones.get(ZoneId(9)).expect("zone"));
         let centre = |r: Rect| (r.x + r.width * 0.5, r.y + r.height * 0.5);
 
         let (cx, cy) = centre(layout.header_close_btn);
@@ -1498,9 +1621,8 @@ mod phase21_tests {
         // PanelHeader, so the action buttons must not be hit-testable.
         let zone = Zone::new(ZoneId(11), Cow::Borrowed("z"), 100, 100, 400, 200);
         let app = app_with_zones(vec![zone]);
-        let layout = expanded_zone_grid::expanded_zone_layout(
-            app.zones.get(ZoneId(11)).expect("zone"),
-        );
+        let layout =
+            expanded_zone_grid::expanded_zone_layout(app.zones.get(ZoneId(11)).expect("zone"));
         let cx = layout.header_close_btn.x + layout.header_close_btn.width * 0.5;
         let cy = layout.header_close_btn.y + layout.header_close_btn.height * 0.5;
         assert_eq!(hit_test_zone_header_button(&app, cx, cy), None);
@@ -1530,7 +1652,10 @@ mod phase21_tests {
         let app = app_with_zones(vec![zone]);
         app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
         // Far corner of expanded rect is now reachable.
-        assert_eq!(hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0), Some(ZoneId(43)));
+        assert_eq!(
+            hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
+            Some(ZoneId(43))
+        );
     }
 
     // V-13 (2026-05-21) — during the pill→expanded morph the hit-rect MUST
@@ -1601,10 +1726,7 @@ mod phase21_tests {
         assert_eq!(hit_test_zone(&app, cx, cy), Some(ZoneId(45)));
         // Just outside the morphed rect (1 DIP beyond right edge) →
         // no hit. This is the paint-hit parity guarantee.
-        assert_eq!(
-            hit_test_zone(&app, morphed.right() + 1.0, cy),
-            None
-        );
+        assert_eq!(hit_test_zone(&app, morphed.right() + 1.0, cy), None);
     }
 
     #[test]
@@ -1618,7 +1740,191 @@ mod phase21_tests {
         app.zone_pill_anim_expanding.set(true);
         app.zone_pill_anim_progress.set(1.0);
         // Far corner of full expanded rect → hit.
-        assert_eq!(hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0), Some(ZoneId(46)));
+        assert_eq!(
+            hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
+            Some(ZoneId(46))
+        );
+    }
+
+    // #5 / Bug A (2026-06-02) — DRAGGING a COLLAPSED pill must keep its hit rect
+    // the PILL rect (the pill follows the cursor), NOT force the expanded body.
+    // Pre-fix `pill_body_visible` (and a mirrored hit-rect rule) OR-ed in
+    // `active_id` (drag OR resize), so a dragged collapsed pill snapped to its
+    // mostly-empty 240×180 expanded box — the pill appeared to "disappear" into
+    // the panel that then followed the cursor. The fix narrows the force term to
+    // RESIZE only.
+    #[test]
+    fn hit_test_dragged_collapsed_pill_stays_pill_sized() {
+        let zone = Zone::new(ZoneId(47), Cow::Borrowed("Docs"), 100, 100, 240, 180);
+        let app = app_with_zones(vec![zone]);
+        // Default ZoneDisplayMode::Hover, no hover before mouse-down → collapsed
+        // pill. Production mouse-down selects before arming DRAG; the drag-start
+        // visual snapshot must keep that selected state from expanding the hit
+        // rect mid-gesture.
+        app.selected_zone.set(Some(ZoneId(47)));
+        app.zone_drag.set(Some((ZoneId(47), 5, 5)));
+        app.zone_drag_body_visible_at_start
+            .set(Some((ZoneId(47), false)));
+        // The legacy 240×180 far corner must NOT hit — a drag does not expand.
+        assert_eq!(hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0), None);
+        // The pill rect centre still hits (the pill itself is the drag target).
+        let layout = bento_nano_app::zone_pill_geometry::pill_layout_for_zone(
+            app.zones.get(ZoneId(47)).expect("zone"),
+            0,
+        );
+        let cx = layout.rect.x + layout.rect.width * 0.5;
+        let cy = layout.rect.y + layout.rect.height * 0.5;
+        assert_eq!(hit_test_zone(&app, cx, cy), Some(ZoneId(47)));
+    }
+
+    // #5 / Bug A (2026-06-02) — a RESIZE (only armable on an already-expanded
+    // panel) keeps forcing the expanded body, so paint==hit during a resize.
+    #[test]
+    fn hit_test_resizing_zone_keeps_full_rect() {
+        let zone = Zone::new(ZoneId(48), Cow::Borrowed("Docs"), 100, 100, 240, 180);
+        let app = app_with_zones(vec![zone]);
+        // Resize is only ever armed on an expanded panel; emulate that state.
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
+        app.zone_resize.set(Some((ZoneId(48), 240, 180)));
+        // Far corner of the expanded rect remains reachable during the resize.
+        assert_eq!(
+            hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
+            Some(ZoneId(48))
+        );
+    }
+
+    // Z-order (2026-06-02) — an EXPANDED panel must occlude (in both paint and
+    // hit) the COLLAPSED pills of zones that sit inside its footprint. With the
+    // dense 4×4 grid an expanded zone's 480×432 body overlaps the pills of zones
+    // a row below; the single-pass resolver returned the buried pill (drawn last,
+    // reverse-iterated first), so hovering the overlap region mis-targeted the
+    // pill and the panel collapsed/flickered. The two-layer resolver tests the
+    // `on_top` (expanded/morphing) layer FIRST, so a point inside the panel
+    // resolves to the panel.
+    #[test]
+    fn hit_test_overlapping_expanded_panel_wins_over_buried_pill() {
+        // A = ZoneId(50) will be SELECTED (body visible in default Hover mode).
+        // B = ZoneId(51) stays a collapsed pill, declared LATER in zone order so
+        // the old single reverse pass would have hit B first.
+        let a = Zone::new(ZoneId(50), Cow::Borrowed("Panel"), 100, 100, 240, 180);
+        let b = Zone::new(ZoneId(51), Cow::Borrowed("Pill"), 150, 150, 240, 180);
+        let app = app_with_zones(vec![a, b]);
+        // Default ZoneDisplayMode::Hover. Select A only → A's body is visible
+        // (expanded/top layer), B remains a collapsed pill (bottom layer).
+        app.selected_zone.set(Some(ZoneId(50)));
+
+        // Sanity: the layer predicate splits them as intended.
+        assert!(app.zone_on_top(app.zones.get(ZoneId(50)).unwrap()));
+        assert!(!app.zone_on_top(app.zones.get(ZoneId(51)).unwrap()));
+
+        // Point P = centre of B's collapsed pill, which sits INSIDE A's expanded
+        // 240×180 body (100..340, 100..280).
+        let pill = bento_nano_app::zone_pill_geometry::pill_layout_for_zone(
+            app.zones.get(ZoneId(51)).expect("b"),
+            0,
+        );
+        let px = pill.rect.x + pill.rect.width * 0.5;
+        let py = pill.rect.y + pill.rect.height * 0.5;
+        // P really is over B's pill AND inside A's expanded body.
+        assert!(px >= pill.rect.x && px < pill.rect.right());
+        assert!((100.0..340.0).contains(&px) && (100.0..280.0).contains(&py));
+
+        // The expanded panel A wins, NOT the buried pill B.
+        assert_eq!(hit_test_zone(&app, px, py), Some(ZoneId(50)));
+    }
+
+    // Z-order (2026-06-02) — the same invariant for a MORPHING zone (mid pill↔
+    // panel transition is on the top layer too) so a buried pill never wins
+    // over the in-flight panel.
+    #[test]
+    fn hit_test_overlapping_morphing_panel_wins_over_buried_pill() {
+        let a = Zone::new(ZoneId(52), Cow::Borrowed("Morph"), 100, 100, 240, 180);
+        let b = Zone::new(ZoneId(53), Cow::Borrowed("Pill"), 150, 150, 240, 180);
+        let app = app_with_zones(vec![a, b]);
+        // A is mid-morph (expanding, halfway) → top layer via zone_on_top.
+        app.hovered_zone.set(Some(ZoneId(52)));
+        app.zone_pill_anim_zone.set(Some(ZoneId(52)));
+        app.zone_pill_anim_expanding.set(true);
+        app.zone_pill_anim_progress.set(0.5);
+        assert!(app.zone_on_top(app.zones.get(ZoneId(52)).unwrap()));
+        assert!(!app.zone_on_top(app.zones.get(ZoneId(53)).unwrap()));
+
+        // Centre of A's morphed rect (mirrors the painted interpolated rect).
+        let pill_a = bento_nano_app::zone_pill_geometry::pill_layout_for_zone(
+            app.zones.get(ZoneId(52)).expect("a"),
+            0,
+        );
+        let expanded_a = bento_nano_style::Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 240.0,
+            height: 180.0,
+        };
+        let eased = bento_nano_app::zone_pill_geometry::ease_out_back_progress(0.5);
+        let morphed =
+            bento_nano_app::zone_pill_geometry::morph_pill_to_rect(pill_a.rect, expanded_a, eased);
+        let cx = morphed.x + morphed.width * 0.5;
+        let cy = morphed.y + morphed.height * 0.5;
+        // The morphing panel A wins over the buried pill B underneath it.
+        assert_eq!(hit_test_zone(&app, cx, cy), Some(ZoneId(52)));
+    }
+
+    // Z-order (2026-06-02) — draw-ordering assertion. Given one expanded zone
+    // and several collapsed pills, the `zone_on_top` layering helper puts ALL
+    // collapsed indices in the bottom layer and the expanded zone in the top
+    // layer. Reproduce the exact two-pass order `draw_zones` walks (pass 1 =
+    // !on_top in zone order, pass 2 = on_top in zone order) and assert every
+    // collapsed zone is drawn before the expanded zone.
+    #[test]
+    fn draw_order_places_all_pills_before_expanded_panel() {
+        let zones = vec![
+            Zone::new(ZoneId(60), Cow::Borrowed("p0"), 0, 0, 240, 180),
+            Zone::new(ZoneId(61), Cow::Borrowed("expanded"), 300, 0, 240, 180),
+            Zone::new(ZoneId(62), Cow::Borrowed("p2"), 0, 200, 240, 180),
+            Zone::new(ZoneId(63), Cow::Borrowed("p3"), 300, 200, 240, 180),
+        ];
+        let app = app_with_zones(zones);
+        // Default Hover mode; select only ZoneId(61) → it is the sole top-layer
+        // zone, the other three stay collapsed pills (bottom layer).
+        app.selected_zone.set(Some(ZoneId(61)));
+
+        // Walk the exact two-pass draw order used by `Renderer::draw_zones`.
+        let mut draw_order = Vec::new();
+        for on_top_layer in [false, true] {
+            for zone in app.zones.iter() {
+                if !zone.is_visible() || zone.is_stacked_child() {
+                    continue;
+                }
+                if app.zone_on_top(zone) != on_top_layer {
+                    continue;
+                }
+                draw_order.push(zone.id);
+            }
+        }
+
+        // Exactly one expanded zone; it is drawn LAST.
+        let expanded_pos = draw_order
+            .iter()
+            .position(|id| *id == ZoneId(61))
+            .expect("expanded drawn");
+        assert_eq!(
+            expanded_pos,
+            draw_order.len() - 1,
+            "expanded panel must be last"
+        );
+        // Every collapsed pill is drawn BEFORE the expanded panel, in zone order.
+        assert_eq!(
+            &draw_order[..expanded_pos],
+            &[ZoneId(60), ZoneId(62), ZoneId(63)],
+        );
+        // And the layer predicate agrees: only ZoneId(61) is on top.
+        for id in [ZoneId(60), ZoneId(62), ZoneId(63)] {
+            assert!(
+                !app.zone_on_top(app.zones.get(id).unwrap()),
+                "{id:?} should be a pill"
+            );
+        }
+        assert!(app.zone_on_top(app.zones.get(ZoneId(61)).unwrap()));
     }
 
     #[test]
@@ -1647,15 +1953,15 @@ mod phase21_tests {
         )]);
 
         assert_eq!(
-            item_grid_position_for_point(&app, ZoneId(9), 24.0, 52.0),
+            item_grid_position_for_point(&app, ZoneId(9), 28.0, 80.0),
             Some((0, 0))
         );
         assert_eq!(
             item_grid_position_for_point(&app, ZoneId(9), 500.0, 200.0),
-            Some((3, 1))
+            Some((2, 1))
         );
         assert_eq!(
-            item_grid_position_for_point(&app, ZoneId(99), 24.0, 52.0),
+            item_grid_position_for_point(&app, ZoneId(99), 28.0, 80.0),
             None
         );
     }
@@ -1667,8 +1973,20 @@ mod phase21_tests {
         let app = app_with_zones(vec![zone]);
 
         assert_eq!(
-            item_grid_position_for_point(&app, ZoneId(10), 220.0, 52.0),
+            item_grid_position_for_point(&app, ZoneId(10), 220.0, 80.0),
             Some((1, 0))
+        );
+    }
+
+    #[test]
+    fn item_grid_position_for_point_uses_effective_columns_for_narrow_five_column_zones() {
+        let mut zone = Zone::new(ZoneId(11), Cow::Borrowed("grid"), 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        let app = app_with_zones(vec![zone]);
+
+        assert_eq!(
+            item_grid_position_for_point(&app, ZoneId(11), 335.0, 458.0),
+            Some((3, 0))
         );
     }
 
@@ -1689,57 +2007,40 @@ mod phase21_tests {
 
         // Top 5 toggles map to their ToggleX variants in order.
         let scroll_y = 0.0;
-        let r0 = bento_nano_app::settings_panel::settings_top_toggle_hit_rect(
-            app.viewport,
-            scroll_y,
-            0,
-        );
+        let r0 =
+            bento_nano_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 0);
         assert_eq!(
             settings_hit(&app, r0.x + r0.width * 0.5, r0.y + r0.height * 0.5),
             SettingsHit::ToggleDesktopEmbed
         );
-        let r1 = bento_nano_app::settings_panel::settings_top_toggle_hit_rect(
-            app.viewport,
-            scroll_y,
-            1,
-        );
+        let r1 =
+            bento_nano_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 1);
         assert_eq!(
             settings_hit(&app, r1.x + r1.width * 0.5, r1.y + r1.height * 0.5),
             SettingsHit::ToggleAutostart
         );
-        let r2 = bento_nano_app::settings_panel::settings_top_toggle_hit_rect(
-            app.viewport,
-            scroll_y,
-            2,
-        );
+        let r2 =
+            bento_nano_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 2);
         assert_eq!(
             settings_hit(&app, r2.x + r2.width * 0.5, r2.y + r2.height * 0.5),
             SettingsHit::ToggleShowInTaskbar
         );
-        let r3 = bento_nano_app::settings_panel::settings_top_toggle_hit_rect(
-            app.viewport,
-            scroll_y,
-            3,
-        );
+        let r3 =
+            bento_nano_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 3);
         assert_eq!(
             settings_hit(&app, r3.x + r3.width * 0.5, r3.y + r3.height * 0.5),
             SettingsHit::ToggleSmartLayout
         );
-        let r4 = bento_nano_app::settings_panel::settings_top_toggle_hit_rect(
-            app.viewport,
-            scroll_y,
-            4,
-        );
+        let r4 =
+            bento_nano_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 4);
         assert_eq!(
             settings_hit(&app, r4.x + r4.width * 0.5, r4.y + r4.height * 0.5),
             SettingsHit::TogglePortableMode
         );
 
         // Language chip → OpenLocaleMenu.
-        let lang = bento_nano_app::settings_panel::settings_language_chip_rect(
-            app.viewport,
-            scroll_y,
-        );
+        let lang =
+            bento_nano_app::settings_panel::settings_language_chip_rect(app.viewport, scroll_y);
         assert_eq!(
             settings_hit(&app, lang.x + lang.width * 0.5, lang.y + lang.height * 0.5),
             SettingsHit::OpenLocaleMenu
@@ -1757,18 +2058,18 @@ mod phase21_tests {
         );
         let save = bento_nano_app::settings_panel::settings_save_button_rect(app.viewport);
         assert_eq!(
-            settings_hit(
-                &app,
-                save.x + save.width * 0.5,
-                save.y + save.height * 0.5
-            ),
+            settings_hit(&app, save.x + save.width * 0.5, save.y + save.height * 0.5),
             SettingsHit::SaveSettings
         );
 
         // Close × in the sticky header.
         let close = bento_nano_app::settings_panel::settings_close_button_rect_m1(app.viewport);
         assert_eq!(
-            settings_hit(&app, close.x + close.width * 0.5, close.y + close.height * 0.5),
+            settings_hit(
+                &app,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5
+            ),
             SettingsHit::Close
         );
 
@@ -1880,12 +2181,20 @@ mod phase21_tests {
         );
         let create = bento_nano_app::settings_panel::settings_backup_create_button_rect(actions);
         assert_eq!(
-            settings_hit(&app, create.x + create.width * 0.5, create.y + create.height * 0.5),
+            settings_hit(
+                &app,
+                create.x + create.width * 0.5,
+                create.y + create.height * 0.5
+            ),
             SettingsHit::CreateSettingsBackup,
         );
         let refresh = bento_nano_app::settings_panel::settings_backup_refresh_button_rect(actions);
         assert_eq!(
-            settings_hit(&app, refresh.x + refresh.width * 0.5, refresh.y + refresh.height * 0.5),
+            settings_hit(
+                &app,
+                refresh.x + refresh.width * 0.5,
+                refresh.y + refresh.height * 0.5
+            ),
             SettingsHit::ListSettingsBackups,
         );
         // Per-row 恢复 — index 0 and index 1 each route to their own index.
@@ -1896,8 +2205,7 @@ mod phase21_tests {
                 &flags,
                 entry_index,
             );
-            let restore =
-                bento_nano_app::settings_panel::settings_backup_restore_button_rect(row);
+            let restore = bento_nano_app::settings_panel::settings_backup_restore_button_rect(row);
             assert_eq!(
                 settings_hit(
                     &app,
@@ -1951,7 +2259,11 @@ mod phase21_tests {
         );
         let create = bento_nano_app::settings_panel::settings_backup_create_button_rect(actions);
         assert_eq!(
-            settings_hit(&app, create.x + create.width * 0.5, create.y + create.height * 0.5),
+            settings_hit(
+                &app,
+                create.x + create.width * 0.5,
+                create.y + create.height * 0.5
+            ),
             SettingsHit::CreateSettingsBackup,
         );
         // The empty-placeholder row's centre must NOT produce a restore hit —
@@ -2179,8 +2491,11 @@ mod phase21_tests {
         // compare against, exactly as production paint/hit does.
         let scroll_y = scroll_off + reserve_delta_0;
         let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
-        let label =
-            bento_nano_app::settings_panel::settings_plugins_label_rect(app.viewport, scroll_y, &flags);
+        let label = bento_nano_app::settings_panel::settings_plugins_label_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+        );
         assert!(
             label.y >= body.y && label.y < body.bottom(),
             "plugins section must scroll into the visible body (label.y={}, body=[{}, {}])",
@@ -2196,7 +2511,11 @@ mod phase21_tests {
             &flags,
         );
         assert_eq!(
-            settings_hit(&app, install.x + install.width * 0.5, install.y + install.height * 0.5),
+            settings_hit(
+                &app,
+                install.x + install.width * 0.5,
+                install.y + install.height * 0.5
+            ),
             SettingsHit::InstallPlugin,
         );
 
@@ -2210,7 +2529,11 @@ mod phase21_tests {
             );
             let toggle = bento_nano_app::settings_panel::settings_plugin_toggle_hit_rect(card);
             assert_eq!(
-                settings_hit(&app, toggle.x + toggle.width * 0.5, toggle.y + toggle.height * 0.5),
+                settings_hit(
+                    &app,
+                    toggle.x + toggle.width * 0.5,
+                    toggle.y + toggle.height * 0.5
+                ),
                 SettingsHit::TogglePlugin(card_index),
                 "per-card toggle must carry the list index",
             );
@@ -2269,7 +2592,11 @@ mod phase21_tests {
             &flags,
         );
         assert_eq!(
-            settings_hit(&app, install.x + install.width * 0.5, install.y + install.height * 0.5),
+            settings_hit(
+                &app,
+                install.x + install.width * 0.5,
+                install.y + install.height * 0.5
+            ),
             SettingsHit::InstallPlugin,
         );
         // The empty-placeholder row's centre must NOT produce a plugin hit — it
@@ -2294,7 +2621,9 @@ mod phase21_tests {
     /// and return the (viewport-folded) scroll_y the hit-tester sees, plus the
     /// `backup_flags`-equivalent flag set the encryption card uses (no variable
     /// rows of its own). Mirrors the backup/plugins reachability-test scaffold.
-    fn scroll_encryption_into_body(app: &AppState) -> (bento_nano_app::settings_panel::SettingsBodyFlags, f32) {
+    fn scroll_encryption_into_body(
+        app: &AppState,
+    ) -> (bento_nano_app::settings_panel::SettingsBodyFlags, f32) {
         let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
             app.crash_restart_enabled.get(),
             app.safe_start_after_hibernation.get(),
@@ -2369,7 +2698,11 @@ mod phase21_tests {
             &flags,
         );
         assert_eq!(
-            settings_hit(&app, input.x + input.width * 0.5, input.y + input.height * 0.5),
+            settings_hit(
+                &app,
+                input.x + input.width * 0.5,
+                input.y + input.height * 0.5
+            ),
             SettingsHit::FocusPassphraseField,
         );
     }

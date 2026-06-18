@@ -106,6 +106,16 @@ const MAX_ITEM_STRING_BYTES: u16 = 2048;
 const MAX_ITEMS_PER_ZONE: u16 = 4096;
 /// Hard cap on tags per item. Tags are user metadata, not an unbounded index.
 const MAX_TAGS_PER_ITEM: u16 = 64;
+/// Hard cap on a zone's width/height (DIP). Far beyond any real monitor, so a
+/// legitimate zone is never clamped, but a corrupt blob (e.g. the legacy
+/// `w=170667 h=91200` = logical-viewport ×100 that auto-expands to a full-screen
+/// click-eating veil) can never brick the UI. Matches the MAX_ZONES /
+/// MAX_TITLE_BYTES sanity-limit idiom.
+const MAX_ZONE_DIMENSION: i32 = 8192;
+/// Sane fallback width applied when a decoded zone's `w` is out of range.
+const DEFAULT_ZONE_W: i32 = 320;
+/// Sane fallback height applied when a decoded zone's `h` is out of range.
+const DEFAULT_ZONE_H: i32 = 220;
 /// Explicit state-dir override for isolated selected-stack runtime proof.
 /// The value is a directory; `zones.bin` is appended by [`appdata_path`].
 const STATE_DIR_ENV: &str = "BENTODESK_NANO_STATE_DIR";
@@ -336,8 +346,19 @@ pub fn decode(buf: &[u8]) -> Result<ZoneList, PlatformError> {
         };
         let x = cur.take_i32()?;
         let y = cur.take_i32()?;
-        let w = cur.take_i32()?;
-        let h = cur.take_i32()?;
+        let mut w = cur.take_i32()?;
+        let mut h = cur.take_i32()?;
+        // Defensive geometry clamp (every load path: read_zones, recovery,
+        // tests). A corrupt/oversized zone (e.g. legacy `w=170667 h=91200`,
+        // = logical-viewport ×100) would otherwise auto-expand into a
+        // full-screen click-eating veil. Reset BOTH dims to a sane default
+        // when either is non-positive or beyond MAX_ZONE_DIMENSION. x/y are
+        // left intact — off-screen positions are handled by viewport clamping
+        // at migration / render time.
+        if w <= 0 || h <= 0 || w > MAX_ZONE_DIMENSION || h > MAX_ZONE_DIMENSION {
+            w = DEFAULT_ZONE_W;
+            h = DEFAULT_ZONE_H;
+        }
         let mut zone = Zone::new(ZoneId(id), Cow::Owned(title), x, y, w, h);
         if version >= VERSION_V7 {
             let zone_flags = cur.take_u8()?;
@@ -1031,6 +1052,77 @@ mod tests {
         assert!(zone.items.is_empty());
     }
 
+    #[test]
+    fn decode_clamps_corrupt_oversized_zone_geometry() {
+        // Reproduces the legacy corruption: a zone persisted with
+        // `w=170667 h=91200` (= logical-viewport ×100) auto-expanded into a
+        // full-screen click-eating veil. `decode` must reset BOTH dims to the
+        // sane default so the load can never brick the UI.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&VERSION_V1.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&42u64.to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(b"Zone");
+        buf.extend_from_slice(&11i32.to_le_bytes()); // x preserved
+        buf.extend_from_slice(&22i32.to_le_bytes()); // y preserved
+        buf.extend_from_slice(&170_667i32.to_le_bytes()); // corrupt w
+        buf.extend_from_slice(&91_200i32.to_le_bytes()); // corrupt h
+
+        let zones = decode(&buf).expect("decode corrupt blob");
+        let zone = zones.get(ZoneId(42)).expect("zone");
+        assert_eq!(zone.x, 11, "x must be preserved");
+        assert_eq!(zone.y, 22, "y must be preserved");
+        assert_eq!(zone.w, super::DEFAULT_ZONE_W, "corrupt w must reset");
+        assert_eq!(zone.h, super::DEFAULT_ZONE_H, "corrupt h must reset");
+        assert!(zone.w <= super::MAX_ZONE_DIMENSION);
+        assert!(zone.h <= super::MAX_ZONE_DIMENSION);
+    }
+
+    #[test]
+    fn decode_clamps_nonpositive_zone_geometry() {
+        // A zero/negative dimension is equally fatal (degenerate body) — reset
+        // BOTH dims to the sane default.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&VERSION_V1.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&7u64.to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(b"Zone");
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes()); // w = 0
+        buf.extend_from_slice(&(-5i32).to_le_bytes()); // h < 0
+
+        let zones = decode(&buf).expect("decode degenerate blob");
+        let zone = zones.get(ZoneId(7)).expect("zone");
+        assert_eq!(zone.w, super::DEFAULT_ZONE_W);
+        assert_eq!(zone.h, super::DEFAULT_ZONE_H);
+    }
+
+    #[test]
+    fn decode_keeps_in_range_geometry_intact() {
+        // A legitimately-sized zone must pass through untouched.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&VERSION_V1.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&5u64.to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(b"Zone");
+        buf.extend_from_slice(&30i32.to_le_bytes());
+        buf.extend_from_slice(&40i32.to_le_bytes());
+        buf.extend_from_slice(&512i32.to_le_bytes());
+        buf.extend_from_slice(&384i32.to_le_bytes());
+
+        let zones = decode(&buf).expect("decode in-range blob");
+        let zone = zones.get(ZoneId(5)).expect("zone");
+        assert_eq!(zone.w, 512, "in-range w must be preserved");
+        assert_eq!(zone.h, 384, "in-range h must be preserved");
+    }
+
     fn encode_legacy_zone_without_appearance(version: u16) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&MAGIC);
@@ -1286,8 +1378,7 @@ mod tests {
     #[test]
     fn migrate_stale_display_modes_rewrites_only_always_to_none() {
         let mut zones = ZoneList::new();
-        let mut z_always =
-            Zone::new(ZoneId(1), Cow::Borrowed("stale-always"), 0, 0, 100, 100);
+        let mut z_always = Zone::new(ZoneId(1), Cow::Borrowed("stale-always"), 0, 0, 100, 100);
         z_always.set_display_mode(Some(Cow::Borrowed("always")));
         let mut z_hover = Zone::new(ZoneId(2), Cow::Borrowed("hover-keep"), 0, 0, 100, 100);
         z_hover.set_display_mode(Some(Cow::Borrowed("hover")));
@@ -1300,7 +1391,10 @@ mod tests {
         zones.add(z_none);
 
         let changed = migrate_stale_display_modes(&mut zones);
-        assert!(changed, "migration must report a change when 'always' present");
+        assert!(
+            changed,
+            "migration must report a change when 'always' present"
+        );
 
         let modes: Vec<Option<String>> = zones
             .iter()
@@ -1335,8 +1429,7 @@ mod tests {
 
         // Seed: encode a ZoneList that has a stale "always" zone.
         let mut zones = ZoneList::new();
-        let mut zone =
-            Zone::new(ZoneId(5), Cow::Borrowed("Stale Zone 5"), 64, 72, 320, 220);
+        let mut zone = Zone::new(ZoneId(5), Cow::Borrowed("Stale Zone 5"), 64, 72, 320, 220);
         zone.set_display_mode(Some(Cow::Borrowed("always")));
         zones.add(zone);
 
@@ -1346,10 +1439,7 @@ mod tests {
         // Load — expect display_mode to be None after migration.
         let loaded = read_zones(&p).expect("load seeded zones.bin");
         assert_eq!(loaded.len(), 1);
-        let migrated = loaded
-            .iter()
-            .next()
-            .expect("one zone in loaded list");
+        let migrated = loaded.iter().next().expect("one zone in loaded list");
         assert!(
             migrated.display_mode.is_none(),
             "stale 'always' must be migrated to None, got {:?}",

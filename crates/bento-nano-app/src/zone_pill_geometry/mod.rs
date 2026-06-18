@@ -276,6 +276,27 @@ pub fn morph_pill_to_rect(pill: Rect, expanded: Rect, morph: f32) -> Rect {
     }
 }
 
+/// #2 step 8 (2026-06-02) — the SINGLE source of the in-flight morph rect.
+///
+/// Both the paint path (`Renderer::draw_zones` → `draw_zone_pill_morph`) and
+/// the hit/chrome geometry (`render::effective_zone_chrome_rect` +
+/// `shell::ui::effective_zone_hit_rect`) used to inline the identical
+/// `raw → ease_out_back_progress → (flip if collapsing) → morph_pill_to_rect`
+/// block. They MUST stay bit-identical (paint == hit), so the math lives here
+/// once and every site calls it.
+///
+/// Returns `(morph, rect)`: `morph` is the eased fraction (possibly > 1.0 mid-
+/// flight from the easeOutBack overshoot — callers that need a clamped value
+/// for non-geometry interpolation clamp it themselves); `rect` is the
+/// interpolated surface rectangle. Pure / allocation-free.
+pub fn current_morph_rect(pill: Rect, expanded: Rect, raw: f32, expanding: bool) -> (f32, Rect) {
+    let eased = ease_out_back_progress(raw);
+    // `expanding` true → morph from pill (0) toward expanded (1); false →
+    // reverse so the collapse animation tracks back to the pill.
+    let morph = if expanding { eased } else { 1.0 - eased };
+    (morph, morph_pill_to_rect(pill, expanded, morph))
+}
+
 /// Morph the pill corner radius (capsule, 24px) toward the expanded surface
 /// radius supplied by `expanded_radius`. Used by the renderer so the chrome
 /// "uncurls" smoothly during the expand transition.
@@ -403,13 +424,8 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
     let label_width = PILL_LABEL_DEFAULT_WIDTH;
     // G5 — total width uses the asymmetric (pad_left + pad_right) horizontal
     // inset rather than `pad_horizontal * 2`.
-    let total_width = pad_left
-        + pad_right
-        + icon_size
-        + pad_inner
-        + label_width
-        + pad_inner
-        + badge_width;
+    let total_width =
+        pad_left + pad_right + icon_size + pad_inner + label_width + pad_inner + badge_width;
     let width = total_width.max(PILL_MIN_WIDTH);
     let rect = Rect {
         x,
@@ -439,7 +455,11 @@ pub fn pill_layout_for_zone(zone: &Zone, count: usize) -> ZonePillLayout {
         height: icon_size,
     };
     let label_x = icon.x + icon.width + pad_inner;
-    let label_h = TYPOGRAPHY.md.size_px * TYPOGRAPHY.md.line_height;
+    // G5.1 (2026-06-08) - layout height must follow the same per-tier title
+    // font that the renderer draws (`small=11`, `medium=14`, `large=16`).
+    // The previous flat `TYPOGRAPHY.md` line box kept small/large labels
+    // vertically offset even after their paint size changed.
+    let label_h = size.title_font_px() * TYPOGRAPHY.md.line_height;
     // G5 — the badge is RIGHT-anchored to the tier's RIGHT padding
     // (`--spacing-lg` at medium = 16); the label fills the gap between the icon
     // run and the badge so a wider badge (3-digit count) eats into the label,

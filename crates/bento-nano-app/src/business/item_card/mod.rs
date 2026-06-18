@@ -81,11 +81,11 @@ pub fn card_scale_for(hover_t: f32, press_t: f32) -> f32 {
 pub fn card_ramp_t(elapsed_ms: u32, duration_ms: u32, rising: bool) -> f32 {
     let d = duration_ms.max(1) as f32;
     let raw = (elapsed_ms as f32 / d).clamp(0.0, 1.0);
-    // Ease-out cubic — `1 - (1 - t)^3`, the decelerating curve CSS `ease-out`
-    // approximates. Matches `animator::ease_out_cubic` so item + pill feel
-    // identical.
-    let inv = 1.0 - raw;
-    let eased = 1.0 - inv * inv * inv;
+    // #2 step 9 (2026-06-02) — ease-out cubic via the single
+    // `animator::ease_out_cubic` SSoT (was an inlined `1 - (1 - t)^3` copy whose
+    // own comment admitted it "Matches animator::ease_out_cubic"). One curve
+    // definition shared by the pill + item-card so they can never drift.
+    let eased = crate::animator::ease_out_cubic(raw);
     if rising { eased } else { 1.0 - eased }
 }
 
@@ -287,7 +287,8 @@ pub struct ItemCardChrome {
     pub ghost_shadow: Color,
     /// Destructive fill for items whose backing file is missing.
     pub missing_background: Color,
-    /// Primary item label text.
+    /// Primary item label text. P3.2 — Tauri `.item-card__name` uses
+    /// `color: var(--text-primary)` (#F0F0F5 opaque), not `--text-secondary`.
     pub text: Color,
     /// Icon glyph text.
     pub icon_text: Color,
@@ -309,14 +310,14 @@ pub struct ItemCardChrome {
 impl ItemCardChrome {
     /// Build ItemCard chrome from explicit active palette tokens.
     pub fn from_palette(palette: PaletteTokens) -> Self {
-        // Dark-default surface_subtle / text_secondary so callers that only
+        // Dark-default surface_subtle / text_primary so callers that only
         // have a `PaletteTokens` keep the pre-M6a byte-exact dark card.
         use bento_nano_style::tokens::PALETTE_DARK;
         Self::from_tokens(
             palette,
             radius::DEFAULT,
             PALETTE_DARK.surface_subtle,
-            PALETTE_DARK.text_secondary,
+            PALETTE_DARK.text_primary,
             PALETTE_DARK.surface_hover,
             PALETTE_DARK.border_hover,
         )
@@ -327,13 +328,16 @@ impl ItemCardChrome {
     /// M2 E-03 (2026-05-29) — corrected to Tauri `ItemCard.css` 1:1.
     /// Radius is `--radius-card` = 10 (was `radius.md` = 6); normal bg is
     /// `--surface-subtle` = `rgba(255,255,255,0.03)` (was the warm/opaque
-    /// `surface_alt @0.46`); name text is `--text-secondary` = `#c0c0cc`
-    /// (was `text @0.82`); missing bg is softened toward Tauri's
+    /// `surface_alt @0.46`); missing bg is softened toward Tauri's
     /// `rgba(239,68,68,0.08)` (was `danger @0.55`, far too strong).
     ///
+    /// P3.2 (2026-06-02) — the card name text is `--text-primary` = `#f0f0f5`
+    /// (Tauri `.item-card__name { color: var(--text-primary) }`); it was wrongly
+    /// `--text-secondary` `#c0c0cc`.
+    ///
     /// M6a (2026-05-29) — `surface_subtle` (normal card fill) and
-    /// `text_secondary` (card name text) now arrive as explicit args from the
-    /// renderer's live `PaletteTauri` (`pal.surface_subtle` / `pal.text_secondary`)
+    /// `text_primary` (card name text) now arrive as explicit args from the
+    /// renderer's live `PaletteTauri` (`pal.surface_subtle` / `pal.text_primary`)
     /// so the card re-skins with the active theme. The dark-default values
     /// reproduce the prior static `PALETTE_DARK` bytes 1:1 (cfg(test) callers
     /// pass them explicitly to lock byte-parity). The leaf crate stays free of
@@ -342,7 +346,7 @@ impl ItemCardChrome {
         palette: PaletteTokens,
         _radius: RadiusTokens,
         surface_subtle: Color,
-        text_secondary: Color,
+        text_primary: Color,
         surface_hover: Color,
         border_hover: Color,
     ) -> Self {
@@ -354,7 +358,7 @@ impl ItemCardChrome {
             ghost_background: with_alpha(palette.surface, 0.86),
             ghost_shadow: with_alpha(palette.scrim, 0.24),
             missing_background: with_alpha(palette.danger, 0.10),
-            text: text_secondary,
+            text: text_primary,
             icon_text: with_alpha(palette.text, 0.94),
             // M3-A3 — Tauri `--shadow-item-hover` is theme-independent
             // (black at fixed alphas in BOTH dark/light variables.css; the
@@ -547,6 +551,28 @@ mod tests {
     }
 
     #[test]
+    fn card_ramp_uses_single_ease_out_cubic_ssot() {
+        // #2 step 9 (2026-06-02) — `card_ramp_t` (rising) must equal the shared
+        // `animator::ease_out_cubic` SSoT at sample points (the inlined cubic
+        // copy was replaced by a call to it). Pin a few `t` so the item-card and
+        // pill easing can never silently diverge again.
+        for &(elapsed, raw) in &[
+            (0_u32, 0.0_f32),
+            (30, 0.2),
+            (75, 0.5),
+            (120, 0.8),
+            (150, 1.0),
+        ] {
+            let ramp = card_ramp_t(elapsed, 150, true);
+            let direct = crate::animator::ease_out_cubic(raw);
+            assert!(
+                (ramp - direct).abs() < 1e-6,
+                "card_ramp_t({elapsed}) = {ramp} != ease_out_cubic({raw}) = {direct}"
+            );
+        }
+    }
+
+    #[test]
     fn card_ramp_zero_duration_does_not_div_by_zero() {
         // `duration_ms.max(1)` guards the divide. With a 0ms duration the
         // 1ms floor means any elapsed >= 1 reads as fully complete (rising →
@@ -609,7 +635,10 @@ mod tests {
         st.on_hover(Some(card(2, 5)), 0);
         st.on_press(card(2, 5), 0);
         // Full press → press_t 1.0 → composed scale is the 1.02*0.97 shrink.
-        let (h, p) = st.sample(card(2, 5), CARD_HOVER_DURATION_MS.max(CARD_PRESS_DURATION_MS));
+        let (h, p) = st.sample(
+            card(2, 5),
+            CARD_HOVER_DURATION_MS.max(CARD_PRESS_DURATION_MS),
+        );
         assert!((p - 1.0).abs() < 1e-5);
         let scale = card_scale_for(h, p);
         assert!(scale < 1.0);
@@ -725,10 +754,10 @@ mod tests {
         assert_eq!(chrome.ghost_shadow, with_alpha(palette.scrim, 0.24));
         // Missing fill softened toward Tauri `rgba(239,68,68,0.08)`.
         assert_eq!(chrome.missing_background, with_alpha(palette.danger, 0.10));
-        // Name text is the Tauri `--text-secondary` (#c0c0cc).
+        // P3.2 — name text is the Tauri `--text-primary` (#f0f0f5).
         assert_eq!(
             chrome.text,
-            bento_nano_style::tokens::PALETTE_DARK.text_secondary
+            bento_nano_style::tokens::PALETTE_DARK.text_primary
         );
         assert_eq!(chrome.icon_text, with_alpha(palette.text, 0.94));
     }
@@ -751,7 +780,7 @@ mod tests {
             palette,
             radius,
             bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
-            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+            bento_nano_style::tokens::PALETTE_DARK.text_primary,
             bento_nano_style::tokens::PALETTE_DARK.surface_hover,
             bento_nano_style::tokens::PALETTE_DARK.border_hover,
         );
@@ -791,7 +820,7 @@ mod tests {
             palette,
             radius::DEFAULT,
             bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
-            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+            bento_nano_style::tokens::PALETTE_DARK.text_primary,
             bento_nano_style::tokens::PALETTE_DARK.surface_hover,
             bento_nano_style::tokens::PALETTE_DARK.border_hover,
         );

@@ -1,9 +1,9 @@
 //! Business surface — `ItemIcon`, the icon slot inside an `ItemCard`.
 //!
 //! Visual spec: see `item_icon.snap.md`. Geometry is locked; the
-//! `fallback_emoji_for` table is the verbatim port of the 1.x extension
-//! map and is exercised by unit tests so a future refactor can't regress
-//! the user-visible icon for any of the 50+ cataloged types.
+//! selected-stack runtime fallback maps extensions to the same line-art
+//! `IconKind` family used by real zone icons. The legacy `fallback_emoji_for`
+//! table is retained only for compatibility tests around the old 1.x map.
 //!
 //! Status: scaffolding per Wave E Option-A. The `build()` returns the
 //! outer Container; the inner image / glyph composition lands when
@@ -14,6 +14,8 @@ use bento_nano_style::Length;
 use bento_nano_widget::{ContainerNode, WidgetNode};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+
+use crate::business::icons::IconKind;
 
 /// Card layout variant — drives both container and render size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -55,7 +57,7 @@ pub enum IconRenderState {
     /// PNG decoded successfully; render the image at `render_px`.
     Ready,
     /// Extraction failed (file missing / HICON returned transparent).
-    /// Render the extension-keyed emoji fallback.
+    /// Render the extension-keyed selected-stack line-art fallback.
     Error,
 }
 
@@ -63,16 +65,61 @@ pub enum IconRenderState {
 /// starts warming up an icon. Mirrors 1.x `PRELOAD_ROOT_MARGIN = "200px"`.
 pub const ICON_PRELOAD_MARGIN_PX: f32 = 200.0;
 
-/// Map a file path's extension to the fallback emoji. The lookup is
-/// ASCII-case-insensitive. Returns `📁` (folder) when the extension is
-/// missing or unknown — matches the 1.x default branch.
-pub fn fallback_emoji_for(path: &str) -> SmolStr {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackIconFamily {
+    Folder,
+    Document,
+    TextDocument,
+    Spreadsheet,
+    Image,
+    Video,
+    Audio,
+    Code,
+    Archive,
+    Executable,
+    Shortcut,
+}
+
+impl FallbackIconFamily {
+    const fn icon_kind(self) -> IconKind {
+        match self {
+            Self::Folder => IconKind::Folder,
+            Self::Document | Self::TextDocument => IconKind::Document,
+            Self::Spreadsheet => IconKind::Grid,
+            Self::Image => IconKind::Image,
+            Self::Video => IconKind::Video,
+            Self::Audio => IconKind::Music,
+            Self::Code => IconKind::Code,
+            Self::Archive => IconKind::Archive,
+            Self::Executable => IconKind::Settings,
+            Self::Shortcut => IconKind::ExternalLink,
+        }
+    }
+
+    const fn legacy_emoji(self) -> &'static str {
+        match self {
+            Self::Folder => "\u{1F4C1}",
+            Self::Document => "\u{1F4C4}",
+            Self::TextDocument => "\u{1F4C3}",
+            Self::Spreadsheet => "\u{1F4CA}",
+            Self::Image => "\u{1F5BC}",
+            Self::Video => "\u{1F3AC}",
+            Self::Audio => "\u{1F3B5}",
+            Self::Code => "\u{1F4BB}",
+            Self::Archive => "\u{1F4E6}",
+            Self::Executable => "\u{2699}",
+            Self::Shortcut => "\u{1F517}",
+        }
+    }
+}
+
+fn fallback_icon_family_for(path: &str) -> FallbackIconFamily {
     let ext = path
         .rsplit('.')
         .next()
         .filter(|e| !e.is_empty() && *e != path);
     let Some(ext) = ext else {
-        return SmolStr::new_inline("\u{1F4C1}");
+        return FallbackIconFamily::Folder;
     };
 
     let mut buf = [0u8; 16];
@@ -86,30 +133,47 @@ pub fn fallback_emoji_for(path: &str) -> SmolStr {
         ext
     };
 
-    let glyph = match lower {
+    match lower {
         // documents
-        "doc" | "docx" | "pdf" => "\u{1F4C4}",
-        "txt" | "md" | "rtf" => "\u{1F4C3}",
+        "doc" | "docx" | "pdf" => FallbackIconFamily::Document,
+        "txt" | "md" | "rtf" => FallbackIconFamily::TextDocument,
         // spreadsheets / presentations
-        "xlsx" | "xls" | "csv" | "pptx" | "ppt" => "\u{1F4CA}",
+        "xlsx" | "xls" | "csv" | "pptx" | "ppt" => FallbackIconFamily::Spreadsheet,
         // images
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico" => "\u{1F5BC}",
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico" => {
+            FallbackIconFamily::Image
+        }
         // video
-        "mp4" | "avi" | "mkv" | "mov" | "wmv" | "webm" => "\u{1F3AC}",
+        "mp4" | "avi" | "mkv" | "mov" | "wmv" | "webm" => FallbackIconFamily::Video,
         // audio
-        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "\u{1F3B5}",
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => FallbackIconFamily::Audio,
         // code
         "rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "go" | "java" | "cpp" | "c" | "h" | "cs"
-        | "html" | "css" => "\u{1F4BB}",
+        | "html" | "css" => FallbackIconFamily::Code,
         // archives
-        "zip" | "rar" | "7z" | "tar" | "gz" => "\u{1F4E6}",
+        "zip" | "rar" | "7z" | "tar" | "gz" => FallbackIconFamily::Archive,
         // executables / scripts
-        "exe" | "msi" | "bat" | "cmd" | "ps1" => "\u{2699}",
+        "exe" | "msi" | "bat" | "cmd" | "ps1" => FallbackIconFamily::Executable,
         // shortcuts
-        "lnk" | "url" => "\u{1F517}",
-        _ => "\u{1F4C1}",
-    };
-    SmolStr::new_inline(glyph)
+        "lnk" | "url" => FallbackIconFamily::Shortcut,
+        _ => FallbackIconFamily::Folder,
+    }
+}
+
+/// Map a file path's extension to the selected-stack line-art fallback icon.
+///
+/// The lookup is ASCII-case-insensitive. Missing or unknown extensions return
+/// [`IconKind::Folder`], matching the legacy 1.x default category without
+/// painting an emoji glyph in the native renderer.
+pub fn fallback_icon_kind_for(path: &str) -> IconKind {
+    fallback_icon_family_for(path).icon_kind()
+}
+
+/// Map a file path's extension to the legacy 1.x fallback emoji.
+///
+/// The selected-stack runtime should use [`fallback_icon_kind_for`] instead.
+pub fn fallback_emoji_for(path: &str) -> SmolStr {
+    SmolStr::new_inline(fallback_icon_family_for(path).legacy_emoji())
 }
 
 /// Build the icon container with the default (Standard) size.
@@ -170,6 +234,25 @@ mod tests {
         assert_eq!(fallback_emoji_for("pack.zip"), "\u{1F4E6}");
         assert_eq!(fallback_emoji_for("setup.exe"), "\u{2699}");
         assert_eq!(fallback_emoji_for("shortcut.lnk"), "\u{1F517}");
+    }
+
+    #[test]
+    fn fallback_icon_kind_uses_line_art_categories() {
+        assert_eq!(fallback_icon_kind_for(""), IconKind::Folder);
+        assert_eq!(fallback_icon_kind_for("foo.unknownext"), IconKind::Folder);
+        assert_eq!(fallback_icon_kind_for("a.pdf"), IconKind::Document);
+        assert_eq!(fallback_icon_kind_for("notes.MD"), IconKind::Document);
+        assert_eq!(fallback_icon_kind_for("sheet.csv"), IconKind::Grid);
+        assert_eq!(fallback_icon_kind_for("p.png"), IconKind::Image);
+        assert_eq!(fallback_icon_kind_for("v.MP4"), IconKind::Video);
+        assert_eq!(fallback_icon_kind_for("a.mp3"), IconKind::Music);
+        assert_eq!(fallback_icon_kind_for("src.rs"), IconKind::Code);
+        assert_eq!(fallback_icon_kind_for("pack.zip"), IconKind::Archive);
+        assert_eq!(fallback_icon_kind_for("setup.exe"), IconKind::Settings);
+        assert_eq!(
+            fallback_icon_kind_for("shortcut.lnk"),
+            IconKind::ExternalLink
+        );
     }
 
     #[test]

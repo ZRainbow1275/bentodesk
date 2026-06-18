@@ -12,9 +12,12 @@ use bento_nano_layout::Direction;
 use bento_nano_style::{Edges, Length};
 use bento_nano_widget::{ContainerNode, WidgetNode};
 
-/// Default font size (logical px) for ItemCard names inside this panel.
-/// Matches 1.x `ITEM_CARD_DEFAULT_FONT_PX = 11` (Theme v8 FontGroup default).
-pub const PANEL_ITEM_CARD_FONT_PX: f32 = 11.0;
+// #1 step 14 (2026-06-02) — the orphaned `PANEL_ITEM_CARD_FONT_PX = 11.0`
+// scaffold constant was DELETED. It had no live consumer (only its own test
+// referenced it) and conflicted with the live 14px item-card label SSoT at
+// render.rs (`.item-card__name { font-size: var(--font-size-md) }` = 14px,
+// item_card.snap.md:18). The single source of truth is the literal `14.0` at
+// the `draw_item_card` label draw; this stale 11px duplicate is removed.
 
 /// Default ItemGrid column count when the zone supplies none.
 /// Matches 1.x `ItemGrid` `props.gridColumns ?? 4`.
@@ -56,7 +59,9 @@ mod tests {
 
     #[test]
     fn locked_constants_match_snap_md() {
-        assert!((PANEL_ITEM_CARD_FONT_PX - 11.0).abs() < 0.01);
+        // #1 step 14 (2026-06-02) — the `PANEL_ITEM_CARD_FONT_PX` assertion was
+        // removed with the deleted constant (the item-card label font size is the
+        // 14px literal at the live `draw_item_card` path, item_card.snap.md:18).
         assert_eq!(PANEL_DEFAULT_GRID_COLUMNS, 4);
         assert!((PANEL_HEADER_HEIGHT_PX - 48.0).abs() < 0.01);
     }

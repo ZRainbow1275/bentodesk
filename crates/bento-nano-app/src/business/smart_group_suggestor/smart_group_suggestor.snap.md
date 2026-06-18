@@ -8,8 +8,9 @@ Per Ruling R3. 1.x source: `bentodesk/src/components/SmartGroup/SmartGroupSugges
 > `IconKind`. Reality is `SuggestedGroup` (T-087, serde-clean) +
 > free-form `icon: String` slug. The 2.0 module uses the real names per
 > team-lead Option-A ruling 2026-05-03 — wrapping for vocabulary parity
-> was YAGNI. `business::icons::IconRef::parse(&suggestion.icon)` resolves
-> the slug into the existing 30-builtin / lucide / custom / text dispatch.
+> was YAGNI. Runtime rows pass `suggestion.icon` through the selected-stack
+> icon renderer, so legacy unknown/text payloads fall back to a neutral
+> built-in glyph instead of being painted as visible text.
 
 ## Geometry
 
@@ -41,7 +42,7 @@ Row layout (Row direction, 12 px inner gap):
 
 | Slot | Width | Notes |
 |------|-------|-------|
-| Icon | 28 px square | `IconRef::parse(suggestion.icon)` → SvgIcon / Text glyph. |
+| Icon | 28 px square | `suggestion.icon` → selected-stack line-art glyph; unknown legacy payloads use neutral builtin fallback. |
 | Info column | flex 1 | Stack: name (`palette.text`, 14 pt Semibold) + meta line (`palette.text_muted`, 12 pt). Meta = `"{n} files · {rule_summary}"`. |
 | Confidence badge | auto | Pill, 4 px corner, padding 4 / 8 px. Tone keyed off score (see Tones). |
 | Apply button | auto | Primary `ButtonNode`, label = `"Apply"`. Disabled when `applying`. |

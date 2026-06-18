@@ -7,7 +7,7 @@ spans 2 grid columns).
 | token              | value                                  |
 |--------------------|----------------------------------------|
 | min-width          | 88 px (Standard) / 200 px (Wide)       |
-| min-height         | 76 px (Standard) / auto (Wide). nano renders each card at `ITEM_GRID_ROW_HEIGHT_PX` = 80 px — a deliberate grid-aligned super-set so the card pixel-aligns with its parent grid row. |
+| min-height         | 76 px (Standard) / auto (Wide). nano renders each card at `ITEM_GRID_ROW_HEIGHT_PX` = 78 px (Tauri row height; stride 78 + 8 gap = 86) so the card pixel-aligns with its parent grid row. |
 | corner-radius      | 10 px (`--radius-card`)                |
 | background         | `--surface-subtle` `rgba(255,255,255,0.03)` |
 | missing background | `rgba(239,68,68,0.08)` (softened)      |
@@ -15,8 +15,8 @@ spans 2 grid columns).
 | layout             | column / center / center (Standard)    |
 |                    | row / start / center (Wide)            |
 | icon size          | 28 px container (Wide) / 36 px (Standard)|
-| name font          | 11 px default (panel-scope FontGroup)  |
-| name color         | `--text-secondary` `#c0c0cc`           |
+| name font          | 14 px / weight 400 (`--font-size-md`), single line |
+| name color         | `--text-primary` `#f0f0f5`             |
 | name max-lines     | 2 (Standard) / 1 (Wide)                |
 | transition         | `all var(--transition-fast)` = 150 ms ease-out (base) |
 | hover              | translateY(-1px) + scale(1.02), 150 ms ease-out (`--transition-fast`). FIX 1: `CARD_HOVER_LIFT_DY * hover_t` lift; dropped while actively pressed (CSS `:active` scale-only specificity). |

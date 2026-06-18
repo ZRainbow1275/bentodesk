@@ -37,8 +37,7 @@ use bento_nano_backend::{
 };
 use bento_nano_layout::LayoutError;
 use bento_nano_platform::{
-    Backdrop, PlatformError, WindowKind, backdrop_brush_scale,
-    capture_primary_workarea_blurred,
+    Backdrop, PlatformError, WindowKind, backdrop_brush_scale, capture_primary_workarea_blurred,
     d2d::{self, WindowSurface},
     dcomp::WindowComp,
     dwrite, ok, svg,
@@ -53,13 +52,14 @@ use windows::Win32::Foundation::HWND as W_HWND;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_BRUSH_PROPERTIES,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1BitmapBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP, D2D1_ROUNDED_RECT, ID2D1Bitmap1,
+    ID2D1BitmapBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{IDWriteInlineObject, IDWriteTextFormat};
 use windows::core::Interface;
 
+use crate::animator;
 use crate::business::{
     bulk_manager_panel, capsule_picker, debug_overlay, highlight_overlay, icon_picker,
     icons::{ALL_ICON_KINDS, IconKind},
@@ -69,7 +69,6 @@ use crate::business::{
     timeline::{panel as timeline_panel, snapshot_picker},
     tooltip,
 };
-use crate::animator;
 use crate::dispatcher::PaletteTarget;
 use crate::picker_geometry;
 use crate::zone_pill_geometry::{self, ZonePillLayout};
@@ -86,6 +85,19 @@ const IMAGE_WIDGET_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// var(--zone-accent, transparent) }` (BentoZone.css:114). Const-only so the
 /// per-frame zone draw stays allocation-free (§10).
 const PANEL_ACCENT_EDGE_THICKNESS_PX: f32 = 2.0;
+// Tauri `.content-reveal` starts after 100ms and fades for 300-350ms while the
+// 500ms size morph is still running. In morph-space that is roughly 0.20->0.80;
+// the height gate below pushes the first readable frame to about 0.26 for the
+// medium capsule, avoiding early capsule-sized body overlap without the old
+// late "empty shell, then content pops in" phase split.
+const MORPH_EXPANDED_CONTENT_START: f32 = 0.28;
+const MORPH_EXPANDED_CONTENT_SPAN: f32 = 0.52;
+const MORPH_EXPANDED_CONTENT_MIN_HEIGHT_PX: f32 = 92.0;
+const MORPH_HEADER_TITLE_FONT_PX: f32 = 14.0;
+const MORPH_HEADER_TITLE_WEIGHT: u16 = 500;
+const MORPH_HEADER_TITLE_LINE_HEIGHT: f32 = 1.4;
+const PANEL_HEADER_TITLE_TRACKING_PX: f32 = 0.3;
+const ITEM_LABEL_BASE_FONT_PX: f32 = 14.0;
 
 /// Frosted-backdrop rollback switch (`receipts/FROSTED-BACKDROP-SPEC.md` §
 /// "Degrade ladder" #3, Wave G Mica-leak precedent). When `false` the entire
@@ -96,15 +108,96 @@ const PANEL_ACCENT_EDGE_THICKNESS_PX: f32 = 2.0;
 const FROSTED_BACKDROP: bool = true;
 
 /// Frosted-backdrop downsample factor (`screencap::capture_primary_workarea_blurred`).
-/// `2` = half-res source + baked bitmap (bounds RSS to ~2×workarea/4×4 bytes;
-/// see spec § "Memory"). Bump to `3` if the debug-overlay RSS pushes past ~95 MB.
-const FROSTED_BACKDROP_DOWNSAMPLE: u32 = 2;
+/// `4` = quarter-res source + baked bitmap. The original half-res capture held
+/// the visual target but pushed the selected-stack release budget above the
+/// WS-7 25 MB Private Bytes gate on 2560px work areas; quarter-res keeps the
+/// same screen-space blur radius while capping the persistent bitmap footprint.
+const FROSTED_BACKDROP_DOWNSAMPLE: u32 = 4;
 
-/// Frosted-backdrop gaussian standard deviation in DOWNSAMPLED px. Tauri is
-/// `backdrop-filter: blur(20px)` at full res; at downsample 2 the half-res
-/// starting point is ~10 (spec § "New platform module" step 5 — TUNE by eye in
-/// live verify: too low reads as a sharp wallpaper, too high as a flat grey).
-const FROSTED_BACKDROP_STDDEV: f32 = 10.0;
+/// Frosted-backdrop gaussian standard deviation in DOWNSAMPLED px. Tauri spec
+/// is `backdrop-filter: blur(24px) saturate(1.7)` under `surface-expanded`
+/// rgba(12,12,18,0.82); at downsample 4 the source stddev is `24 / 4 = 6.0`
+/// (Blink maps `blur(r)` to `feGaussianBlur stdDeviation = r` in CSS px). If it
+/// reads too sharp in visual proof, tune upward in screen-space terms rather
+/// than growing the backing bitmap again.
+const FROSTED_BACKDROP_STDDEV: f32 = 6.0;
+
+/// Frosted-backdrop post-blur saturation factor (`D2D1Saturation` chained after
+/// the gaussian). Tauri's `saturate(1.7)` — a plain blur of the desktop reads
+/// noticeably greyer than the CSS reference, so the blurred output is
+/// re-saturated ×1.7 before the bake.
+const FROSTED_BACKDROP_SATURATION: f32 = 1.7;
+
+#[inline]
+fn morph_expanded_content_alpha(morph: f32, rect_height: f32) -> f32 {
+    if rect_height < MORPH_EXPANDED_CONTENT_MIN_HEIGHT_PX {
+        return 0.0;
+    }
+    ((morph.clamp(0.0, 1.0) - MORPH_EXPANDED_CONTENT_START) / MORPH_EXPANDED_CONTENT_SPAN)
+        .clamp(0.0, 1.0)
+}
+
+#[inline]
+fn expanded_panel_accent_clip_rect(rect: bento_nano_style::Rect) -> bento_nano_style::Rect {
+    bento_nano_style::Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: PANEL_ACCENT_EDGE_THICKNESS_PX.min(rect.height.max(0.0)),
+    }
+}
+
+#[inline]
+fn moved_zone_drag_source(app: &AppState, zone_id: ZoneId) -> bool {
+    let Some((dragged, _, _)) = app.zone_drag.get() else {
+        return false;
+    };
+    if dragged != zone_id {
+        return false;
+    }
+    app.zone_drag_origin
+        .get()
+        .map(|(_, _, moved)| moved)
+        .unwrap_or(false)
+}
+
+#[inline]
+fn zone_drag_merge_ghost_source(app: &AppState, zone_id: ZoneId) -> bool {
+    if !moved_zone_drag_source(app, zone_id) {
+        return false;
+    }
+    crate::zone_gesture_geometry::stack_target_for_drop(&app.zones, zone_id).is_some()
+}
+
+#[inline]
+fn collapsed_pill_display_count(app: &AppState, zone: &Zone) -> usize {
+    app.zones
+        .stack_member_ids(zone.id)
+        .map(|members| members.len())
+        .unwrap_or_else(|| zone.items.len())
+}
+
+#[inline]
+fn morph_header_title_rect(rect: bento_nano_style::Rect) -> bento_nano_style::Rect {
+    let title_x = rect.x
+        + expanded_zone_grid::HEADER_INSET_X
+        + expanded_zone_grid::HEADER_ICON_SIZE
+        + expanded_zone_grid::HEADER_GAP;
+    let title_right = (rect.right() - expanded_zone_grid::HEADER_INSET_X).max(title_x);
+    bento_nano_style::Rect {
+        x: title_x,
+        y: rect.y,
+        width: (title_right - title_x).max(0.0),
+        height: expanded_zone_grid::HEADER_BAND_HEIGHT.min(rect.height.max(0.0)),
+    }
+}
+
+#[inline]
+fn item_label_font_size_for_width(_text: &str, _avail_w: f32) -> f32 {
+    // Tauri keeps item labels on a single 14px token and clips/trims long
+    // names inside the card; it does not resize each label per card width.
+    ITEM_LABEL_BASE_FONT_PX
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ActiveItemDragVisual {
@@ -187,6 +280,10 @@ pub struct Renderer {
     /// underlying format so the `…` glyph stays in sync with theme typography.
     /// Spec §10 — one COM allocation per format recreate, zero per frame.
     ellipsis_sign: Option<IDWriteInlineObject>,
+    /// Item labels use a fixed 14px token with no-wrap ellipsis trimming.
+    /// The default `ellipsis_sign` is tied to the 16px body format, so item
+    /// cards keep a sign built against the 14px item-label format.
+    item_label_ellipsis_sign: Option<IDWriteInlineObject>,
     /// M1i fidelity (2026-05-29) — lazily-created monospace text format for the
     /// §2 desktop-source `.desktop-source-card__path` line (Tauri
     /// `font-family: ui-monospace, Consolas, monospace`, `font-size: 11px`).
@@ -309,6 +406,7 @@ impl Renderer {
             text_format_line_height: 1.4,
             text_format_cache: SmallVec::new(),
             ellipsis_sign: None,
+            item_label_ellipsis_sign: None,
             monospace_format: None,
             monospace_ellipsis_sign: None,
             dashed_stroke_style: None,
@@ -547,6 +645,7 @@ impl Renderer {
                     self.hwnd,
                     FROSTED_BACKDROP_DOWNSAMPLE,
                     FROSTED_BACKDROP_STDDEV,
+                    FROSTED_BACKDROP_SATURATION,
                 )),
                 // Hibernated surface — leave dirty set so the next resident
                 // paint captures; nothing to do this frame.
@@ -792,7 +891,7 @@ impl Renderer {
         // (which the docs file under user32) — in `Graphics::Gdi`. Verified by
         // compile: `SetWindowRgn` is NOT in `UI::WindowsAndMessaging` here.
         use windows_sys::Win32::Graphics::Gdi::{
-            CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+            CombineRgn, CreateRectRgn, DeleteObject, RGN_OR, SetWindowRgn,
         };
 
         // DIP → physical device px. `base_scale` is `dpi/96` (set once per
@@ -887,6 +986,7 @@ impl Renderer {
         // draw lazily re-creates a sign against the new format. One COM
         // allocation per theme/font swap, none per frame.
         self.ellipsis_sign = None;
+        self.item_label_ellipsis_sign = None;
         Ok(())
     }
 
@@ -1289,34 +1389,73 @@ impl Renderer {
         self.fill_rounded_rect(tray_shadow, chrome.panel_shadow.color, chrome.panel_radius)?;
         self.fill_rounded_rect(tray, chrome.panel_background, chrome.panel_radius)?;
 
-        self.draw_text(
+        self.draw_text_no_wrap_with_style(
             "StackTray",
-            bento_nano_style::Rect {
-                x: tray.x + stack_tray::TRAY_INSET_PX,
-                y: tray.y + 10.0,
-                width: 92.0,
-                height: 18.0,
-            },
+            stack_tray::stack_tray_header_title_rect(app.viewport, anchor, member_count),
             chrome.text_primary,
+            stack_tray::TRAY_TITLE_FONT_PX,
+            stack_tray::TRAY_TITLE_FONT_WEIGHT,
+            stack_tray::TRAY_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign::DEFAULT,
         )?;
-        let count_label = format!("{member_count} members");
-        self.draw_text(
-            count_label.as_str(),
-            bento_nano_style::Rect {
-                x: tray.x + stack_tray::TRAY_INSET_PX + 96.0,
-                y: tray.y + 11.0,
-                width: 96.0,
-                height: 16.0,
-            },
-            chrome.text_muted,
-        )?;
+        let count_badge =
+            stack_tray::stack_tray_header_count_rect(app.viewport, anchor, member_count);
+        if count_badge.width > 0.0 && count_badge.height > 0.0 {
+            self.fill_rounded_rect(
+                count_badge,
+                with_alpha(chrome.text_accent, 0.30),
+                bento_nano_style::BorderRadius::all(count_badge.height * 0.5),
+            )?;
+            let count_label = format_small_count(member_count);
+            let count_text_rect = bento_nano_style::Rect {
+                x: count_badge.x + stack_tray::TRAY_HEADER_COUNT_BADGE_PAD_X_PX,
+                y: count_badge.y,
+                width: (count_badge.width - stack_tray::TRAY_HEADER_COUNT_BADGE_PAD_X_PX * 2.0)
+                    .max(0.0),
+                height: count_badge.height,
+            };
+            self.draw_text_no_wrap_with_style(
+                count_label.as_str(),
+                count_text_rect,
+                chrome.text_primary,
+                stack_tray::TRAY_COUNT_FONT_PX,
+                stack_tray::TRAY_COUNT_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign {
+                    h: dwrite::HAlign::Center,
+                    v: dwrite::VAlign::Center,
+                },
+            )?;
+        }
 
         let dissolve = stack_tray::stack_tray_dissolve_rect(app.viewport, anchor, member_count);
         self.fill_rounded_rect(dissolve, chrome.danger_background, chrome.button_radius)?;
-        self.draw_text("Dissolve", inset_rect(dissolve, 5.0), chrome.text_primary)?;
+        self.draw_text_no_wrap_with_style(
+            "Dissolve",
+            inset_rect(dissolve, 5.0),
+            chrome.text_primary,
+            stack_tray::TRAY_TOOLBAR_FONT_PX,
+            stack_tray::TRAY_TOOLBAR_FONT_WEIGHT,
+            stack_tray::TRAY_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign {
+                h: dwrite::HAlign::Center,
+                v: dwrite::VAlign::Center,
+            },
+        )?;
         let close = stack_tray::stack_tray_close_rect(app.viewport, anchor, member_count);
         self.fill_rounded_rect(close, chrome.button_background, chrome.button_radius)?;
-        self.draw_text("Close", inset_rect(close, 5.0), chrome.text_primary)?;
+        self.draw_text_no_wrap_with_style(
+            "Close",
+            inset_rect(close, 5.0),
+            chrome.text_primary,
+            stack_tray::TRAY_TOOLBAR_FONT_PX,
+            stack_tray::TRAY_TOOLBAR_FONT_WEIGHT,
+            stack_tray::TRAY_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign {
+                h: dwrite::HAlign::Center,
+                v: dwrite::VAlign::Center,
+            },
+        )?;
 
         let selected_id = if member_ids.contains(&state.selected_member_id) {
             state.selected_member_id
@@ -1355,48 +1494,58 @@ impl Renderer {
                 height: 22.0,
             };
             self.fill_rounded_rect(icon_rect, chrome.button_background, chrome.button_radius)?;
-            self.draw_text(
-                member.icon.as_ref(),
-                bento_nano_style::Rect {
-                    x: icon_rect.x + 6.0,
-                    y: icon_rect.y + 3.0,
-                    width: icon_rect.width - 12.0,
-                    height: 14.0,
-                },
-                chrome.text_primary,
-            )?;
-            self.draw_text(
+            self.draw_icon_glyph(member.icon.as_ref(), icon_rect, chrome.text_primary)?;
+            self.draw_text_no_wrap_with_style(
                 member.title.as_ref(),
                 bento_nano_style::Rect {
                     x: row_rect.x + 44.0,
-                    y: row_rect.y + 7.0,
+                    y: row_rect.y + 6.0,
                     width: (row_rect.width - 128.0).max(0.0),
-                    height: 16.0,
+                    height: 17.0,
                 },
                 chrome.text_primary,
+                stack_tray::TRAY_MEMBER_NAME_FONT_PX,
+                stack_tray::TRAY_MEMBER_NAME_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
             let item_count = member.items.len();
             let item_label = format!("{item_count} items");
-            self.draw_text(
+            self.draw_text_no_wrap_with_style(
                 item_label.as_str(),
                 bento_nano_style::Rect {
                     x: row_rect.x + 44.0,
-                    y: row_rect.y + 22.0,
+                    y: row_rect.y + 23.0,
                     width: (row_rect.width - 128.0).max(0.0),
                     height: 14.0,
                 },
                 chrome.text_muted,
+                stack_tray::TRAY_MEMBER_META_FONT_PX,
+                stack_tray::TRAY_MEMBER_META_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
             let detach =
                 stack_tray::stack_tray_detach_rect(app.viewport, anchor, member_count, row_index);
             self.fill_rounded_rect(detach, chrome.button_background, chrome.button_radius)?;
-            self.draw_text("Detach", inset_rect(detach, 5.0), chrome.text_primary)?;
+            self.draw_text_no_wrap_with_style(
+                "Detach",
+                inset_rect(detach, 5.0),
+                chrome.text_primary,
+                stack_tray::TRAY_ACTION_FONT_PX,
+                stack_tray::TRAY_ACTION_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign {
+                    h: dwrite::HAlign::Center,
+                    v: dwrite::VAlign::Center,
+                },
+            )?;
         }
 
         if member_count > stack_tray::TRAY_VISIBLE_ROW_LIMIT {
             let hidden = member_count - stack_tray::TRAY_VISIBLE_ROW_LIMIT;
             let label = format!("+{hidden} more members");
-            self.draw_text(
+            self.draw_text_no_wrap_with_style(
                 label.as_str(),
                 bento_nano_style::Rect {
                     x: tray.x + stack_tray::TRAY_INSET_PX,
@@ -1405,9 +1554,13 @@ impl Renderer {
                     height: 14.0,
                 },
                 chrome.text_muted,
+                stack_tray::TRAY_STATUS_FONT_PX,
+                stack_tray::TRAY_STATUS_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
         } else if app.stack_tray_drag.get().is_some() {
-            self.draw_text(
+            self.draw_text_no_wrap_with_style(
                 "Drag over a row to reorder",
                 bento_nano_style::Rect {
                     x: tray.x + stack_tray::TRAY_INSET_PX,
@@ -1416,9 +1569,13 @@ impl Renderer {
                     height: 14.0,
                 },
                 chrome.text_accent,
+                stack_tray::TRAY_STATUS_FONT_PX,
+                stack_tray::TRAY_STATUS_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
         } else if let Some(status) = state.status.as_ref() {
-            self.draw_text(
+            self.draw_text_no_wrap_with_style(
                 status.as_str(),
                 bento_nano_style::Rect {
                     x: tray.x + stack_tray::TRAY_INSET_PX,
@@ -1427,6 +1584,10 @@ impl Renderer {
                     height: 14.0,
                 },
                 chrome.text_accent,
+                stack_tray::TRAY_STATUS_FONT_PX,
+                stack_tray::TRAY_STATUS_FONT_WEIGHT,
+                stack_tray::TRAY_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
         }
 
@@ -1441,7 +1602,7 @@ impl Renderer {
             chrome.panel_radius,
         )?;
         self.fill_rounded_rect(preview, chrome.preview_background, chrome.panel_radius)?;
-        self.draw_text(
+        self.draw_text_no_wrap_with_style(
             "FocusedZonePreview",
             bento_nano_style::Rect {
                 x: preview.x + 16.0,
@@ -1450,8 +1611,12 @@ impl Renderer {
                 height: 18.0,
             },
             chrome.text_accent,
+            stack_tray::PREVIEW_EYEBROW_FONT_PX,
+            stack_tray::PREVIEW_EYEBROW_FONT_WEIGHT,
+            stack_tray::PREVIEW_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign::DEFAULT,
         )?;
-        self.draw_text(
+        self.draw_text_no_wrap_with_style(
             preview_zone.title.as_ref(),
             bento_nano_style::Rect {
                 x: preview.x + 16.0,
@@ -1460,15 +1625,18 @@ impl Renderer {
                 height: 18.0,
             },
             chrome.text_primary,
+            stack_tray::PREVIEW_TITLE_FONT_PX,
+            stack_tray::PREVIEW_TITLE_FONT_WEIGHT,
+            stack_tray::PREVIEW_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign::DEFAULT,
         )?;
         let geometry_label = format!(
-            "{} · {}×{} · {} items",
-            preview_zone.icon,
+            "{}×{} · {} items",
             preview_zone.w,
             preview_zone.h,
             preview_zone.items.len()
         );
-        self.draw_text(
+        self.draw_text_no_wrap_with_style(
             geometry_label.as_str(),
             bento_nano_style::Rect {
                 x: preview.x + 16.0,
@@ -1477,9 +1645,13 @@ impl Renderer {
                 height: 16.0,
             },
             chrome.text_muted,
+            stack_tray::PREVIEW_META_FONT_PX,
+            stack_tray::PREVIEW_META_FONT_WEIGHT,
+            stack_tray::PREVIEW_TEXT_LINE_HEIGHT,
+            dwrite::TextAlign::DEFAULT,
         )?;
         if preview_zone.items.is_empty() {
-            self.draw_text(
+            self.draw_text_no_wrap_with_style(
                 "No captured desktop items in this member.",
                 bento_nano_style::Rect {
                     x: preview.x + 16.0,
@@ -1488,6 +1660,10 @@ impl Renderer {
                     height: 18.0,
                 },
                 chrome.text_muted,
+                stack_tray::PREVIEW_EMPTY_FONT_PX,
+                stack_tray::PREVIEW_EMPTY_FONT_WEIGHT,
+                stack_tray::PREVIEW_TEXT_LINE_HEIGHT,
+                dwrite::TextAlign::DEFAULT,
             )?;
         } else {
             for (idx, item) in preview_zone.items.iter().take(4).enumerate() {
@@ -1499,15 +1675,19 @@ impl Renderer {
                     height: 20.0,
                 };
                 self.fill_rounded_rect(row, chrome.row_background, chrome.preview_item_radius)?;
-                self.draw_text(
+                self.draw_text_no_wrap_with_style(
                     item.name.as_ref(),
                     bento_nano_style::Rect {
                         x: row.x + 8.0,
-                        y: row.y + 3.0,
+                        y: row.y + 2.0,
                         width: row.width - 16.0,
-                        height: 13.0,
+                        height: 15.0,
                     },
                     chrome.text_primary,
+                    stack_tray::PREVIEW_ITEM_FONT_PX,
+                    stack_tray::PREVIEW_ITEM_FONT_WEIGHT,
+                    stack_tray::PREVIEW_TEXT_LINE_HEIGHT,
+                    dwrite::TextAlign::DEFAULT,
                 )?;
             }
         }
@@ -1568,30 +1748,36 @@ impl Renderer {
             palette,
             app.active_theme_radius(),
             pal.surface_subtle,
-            pal.text_secondary,
+            // P3.2 — card label is `--text-primary` (#F0F0F5), not secondary.
+            pal.text_primary,
             pal.surface_hover,
             pal.border_hover,
         );
-        // V-9 round 4 (2026-05-21) — Tauri 1.2.4 reference (frame_010 / 015
-        // of resource/屏幕录制 2026-05-20 161936.mp4) paints the expanded
-        // zone surface with `--surface-dialog` (rgba 12,12,18,0.92) AND
-        // honours its natural 0xEB alpha so the desktop wallpaper bleeds
-        // through as a heavily dimmed acrylic-style veil. Round 3 forced
-        // alpha to 1.0 → completely opaque slab, fails parity (user audit
-        // 2026-05-21 said "这和原版动效完全不一样"). Drop the alpha clamp
-        // and use the token directly. The 0.38/0.34 baseline (pre-round-2)
-        // was the opposite failure: too transparent, desktop icons visible
-        // at full saturation. The 0.92 token alpha is the Tauri-pinned mid.
-        let zone_fill_idle = pal.surface_dialog;
+        // P1.3 / P2.1 (2026-06-02 real-blur inversion) — the idle expanded
+        // panel tint is `--surface-expanded` rgba(12,12,18,0.82), the token
+        // Tauri's `.bento-zone--expanded { background: var(--surface-expanded) }`
+        // actually uses (NOT `--surface-dialog`, which is reserved for the
+        // Dialog/Settings primitive). The V-9 round-4 ruling that pinned 0.92
+        // (`surface_dialog`) PREDATES the real D2D gaussian+saturation backdrop
+        // (`screencap::capture_primary_workarea_blurred`): at 0.92α only ~8% of
+        // the blur shows through, masking even a correct frost — exactly the
+        // "完全不一样" delta. With a real backdrop the 0.82α is correct: it lets
+        // the required ~18% wallpaper-bleed through so the blur(24px) saturate(1.7)
+        // reads. The palette test (`surface_dialog.a > surface_expanded.a`) still
+        // holds. `zone_fill_active` (active-drag accent) stays near-opaque.
+        let zone_fill_idle = pal.surface_expanded;
         let zone_fill_active = with_alpha(palette.accent, 0.92);
-        let zone_title = with_alpha(palette.text, 0.88);
+        // P2.5 — title is the opaque `--text-primary` #F0F0F5 (Tauri
+        // `.panel-header__title { color: var(--text-primary) }`), not the legacy
+        // palette text at 0.88α.
+        let zone_title = pal.text_primary;
         let zone_icon_chip = with_alpha(palette.surface_alt, 0.58);
         let zone_icon_text = with_alpha(palette.text, 0.92);
         let zone_live_folder_text = with_alpha(palette.text_muted, 0.94);
-        let stack_shadow = with_alpha(palette.accent, 0.14);
-        let stack_wrapper_halo = with_alpha(palette.accent, 0.10);
-        let stack_badge_fill = with_alpha(palette.accent, 0.82);
-        let stack_peek_fill = with_alpha(palette.surface_alt, 0.78);
+        // #4 (2026-06-02) — the stack-anchor halo / "Stack ×N" badge / "Peek:"
+        // row fills were removed (no Tauri reference); their colour bindings
+        // (stack_shadow / stack_wrapper_halo / stack_badge_fill / stack_peek_fill)
+        // went with them.
         let zone_drop_target_glow = with_alpha(palette.accent_hover, 0.30);
         let drop_preview_fill = with_alpha(palette.accent, 0.20);
         let drop_preview_core = with_alpha(palette.accent_hover, 0.34);
@@ -1601,6 +1787,18 @@ impl Renderer {
             .get()
             .map(|t| t.0)
             .or_else(|| app.zone_resize.get().map(|t| t.0));
+        // #5 (2026-06-02) — `active_id` (drag OR resize) drives the active-fill
+        // tint / drop-target highlight; it must NOT force the expanded body.
+        // A RESIZE can only be armed on an already-expanded panel
+        // (`hit_test_zone_resize_corner` gates on `zone_pill_body_visible`),
+        // so only a resize may force `pill_body_visible`. A DRAG of a
+        // COLLAPSED pill must keep it a pill that follows the cursor (Tauri
+        // drags the capsule itself) — forcing the body there made the pill
+        // "disappear" into its mostly-empty 480×432 expanded body. The hit /
+        // chrome SSoTs (`effective_zone_hit_rect` / `effective_zone_chrome_rect`)
+        // already key off `zone_pill_body_visible`, so dropping the drag-force
+        // restores paint == hit. The resize-force itself now lives inside the
+        // shared `AppState::zone_pill_body_visible` SSoT.
         let item_drag = active_item_drag_visual(app);
         let drag_target_id =
             item_drag.and_then(|drag| hit_test_render_zone(app, drag.last_x, drag.last_y));
@@ -1612,518 +1810,530 @@ impl Renderer {
             })
             .unwrap_or(false);
         let theme_base_accent = app.theme_base_accent.borrow().clone();
-        for zone in app.zones.iter() {
-            if !zone.is_visible() || zone.is_stacked_child() {
-                continue;
-            }
-            // Wave C (05-20 visual parity) — collapsed pill render path.
-            // Stack anchors keep the legacy halo + peek chrome below; every
-            // other zone whose `body_visible_for_mode` is false renders as a
-            // Tauri-style capsule pill at `(zone.x, zone.y)` consuming the
-            // Wave B token SSoT in `zone_pill_geometry`.
-            let pill_body_visible =
-                app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
-            // Wave G2 — morphing capsule. When the hover transition is
-            // in-flight for this zone, paint an intermediate rounded-rect
-            // instead of snapping between collapsed pill and expanded body.
-            // Stack anchors keep their bespoke chrome and skip the morph.
-            let pill_anim_active = app.zone_pill_anim_zone.get() == Some(zone.id)
-                && !zone.is_stack_anchor()
-                && {
-                    let p = app.zone_pill_anim_progress.get();
-                    p > 0.0 && p < 1.0
-                };
-            if pill_anim_active {
-                let count = zone.items.len();
-                let pill_layout =
-                    zone_pill_geometry::pill_layout_for_zone(zone, count);
-                let expanded_rect = bento_nano_style::Rect {
+        // Z-order (2026-06-02) — two-layer draw. The expanded/morphing zones
+        // form the TOP layer; all collapsed pills are the BOTTOM layer. With the
+        // dense 4×4 grid a panel's 480×432 footprint overlaps the pills of zones
+        // a row below it, so a single zone-order pass let a later pill overpaint
+        // an earlier expanded panel (the bright count badges bled through the
+        // dark frosted surface — a Tauri `.bento-zone--expanded` z-index break).
+        // Fix: iterate the zones twice — pass 1 draws only `!on_top` (pills),
+        // pass 2 draws only `on_top` (panels/morphs), so a panel occludes any
+        // pill it overlaps. Existing relative order WITHIN each layer is kept
+        // (still `app.zones.iter()` order). Two filtered passes — no per-frame
+        // Vec / heap alloc. The `on_top` key is the shared `AppState::zone_on_top`
+        // SSoT so the `continue` filter and the body's own `pill_body_visible` /
+        // `pill_anim_active` decision (and the hit resolvers) can't drift.
+        for on_top_layer in [false, true] {
+            for zone in app.zones.iter() {
+                if !zone.is_visible() || zone.is_stacked_child() {
+                    continue;
+                }
+                if app.zone_on_top(zone) != on_top_layer {
+                    continue;
+                }
+                // Wave C (05-20 visual parity) — collapsed pill render path.
+                // #4 (2026-06-02): a COLLAPSED stack anchor renders as the compact
+                // stack pill too (count badge = member count); every zone whose
+                // `body_visible_for_mode` is false renders as a Tauri-style capsule
+                // pill at `(zone.x, zone.y)` consuming the Wave B token SSoT in
+                // `zone_pill_geometry`.
+                //
+                // #4 / R1 — a stack anchor's HOVER affordance is the bloom, NOT a
+                // panel expand (Tauri `StackWrapper.tsx` has no hover-to-expand
+                // state). So an anchor's body is visible only when it is explicitly
+                // selected (a focused member) or being dragged — never on mere
+                // hover — so the collapsed pill + bloom can co-exist without the
+                // panel popping underneath them.
+                // (Shared SSoT — `zone_on_top` above keys off the SAME predicate.)
+                let pill_body_visible = app.zone_pill_body_visible(zone);
+                // Wave G2 — morphing capsule. When the hover transition is
+                // in-flight for this zone, paint an intermediate rounded-rect
+                // instead of snapping between collapsed pill and expanded body.
+                // Stack anchors don't run the pill↔panel morph (they toggle between
+                // the compact pill and the focused-member panel without it).
+                let pill_anim_active =
+                    app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() && {
+                        let p = app.zone_pill_anim_progress.get();
+                        p > 0.0 && p < 1.0
+                    };
+                if pill_anim_active {
+                    let count = zone.items.len();
+                    let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
+                    let expanded_rect = bento_nano_style::Rect {
+                        x: zone.x as f32,
+                        y: zone.y as f32,
+                        width: zone.w as f32,
+                        height: zone.h as f32,
+                    };
+                    let raw = app.zone_pill_anim_progress.get();
+                    // M3 (2026-05-29) — Tauri `.spring-expand` easeOutBack curve
+                    // (cubic-bezier(0.34,1.56,0.64,1)). The eased `morph` overshoots
+                    // ~10% past 1.0 mid-flight then settles exactly to 1.0; the
+                    // overshoot flows through `morph_pill_to_rect`/`_radius` (which
+                    // no longer upper-clamp) so the rect+radius bulge then snap back.
+                    // #2 step 8 (2026-06-02) — the raw→easeOutBack→(flip)→morph math
+                    // is the shared `current_morph_rect` SSoT so paint == hit
+                    // geometry (effective_zone_chrome_rect / effective_zone_hit_rect
+                    // call the same helper). `draw_zone_pill_morph` re-derives the
+                    // rect from the same `morph` via `morph_pill_to_rect`, so the
+                    // returned rect here is discarded but stays bit-identical.
+                    let (morph, _morph_rect) = zone_pill_geometry::current_morph_rect(
+                        pill_layout.rect,
+                        expanded_rect,
+                        raw,
+                        app.zone_pill_anim_expanding.get(),
+                    );
+                    // B2 (2026-05-29) — Tauri drives `background`/`border-color`
+                    // on a SEPARATE 0.3s CSS-`ease` timeline (animations.css:44-45),
+                    // NOT the 0.5s easeOutBack size curve. The morph `raw` fraction
+                    // spans the full 500ms; the color transition completes in the
+                    // FIRST 300ms, so we rescale raw by 500/300 (clamped) then run
+                    // the CSS-`ease` curve. Collapse reverses it in lockstep with
+                    // the size morph so the channels stay phase-aligned.
+                    let color_raw = (raw * 500.0 / 300.0).min(1.0);
+                    let color_eased = zone_pill_geometry::ease_standard_progress(color_raw);
+                    let color_t = if app.zone_pill_anim_expanding.get() {
+                        color_eased
+                    } else {
+                        1.0 - color_eased
+                    };
+                    // #2 step 7 (2026-06-02) — sample the V-8 PillHover channel and
+                    // feed it into the morph so the +8% surface brighten the
+                    // collapsed pill carried is continuous across the pill→morph
+                    // hand-off (no tone snap). The brighten fades out as the morph
+                    // expands; the color_t cross-fade then owns the settled tone.
+                    let hover_t = {
+                        let anim = app.pill_animator.borrow();
+                        anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms)
+                    };
+                    self.draw_zone_pill_morph(
+                        zone,
+                        &pill_layout,
+                        expanded_rect,
+                        morph,
+                        color_t,
+                        hover_t,
+                        theme_base_accent.as_deref(),
+                        pal,
+                        &item_chrome,
+                        effect,
+                    )?;
+                    continue;
+                }
+                if !pill_body_visible {
+                    // #4 (2026-06-02) — a COLLAPSED stack anchor renders as the
+                    // compact stack pill (reference f00/f15), NOT the bespoke
+                    // expanded halo/badge/peek chrome. The pill's count badge shows
+                    // the stack-member count for an anchor (geometry already
+                    // supports it in `pill_layout_for_zone`); a normal zone keeps
+                    // its item count. (Member-names-in-pill is a noted later
+                    // refinement — count badge is sufficient this pass.)
+                    let count = collapsed_pill_display_count(app, zone);
+                    let layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
+                    // V-8 — sample hover / press channels at paint time. The
+                    // animator borrow is released before any further mutation
+                    // (the pill paint helpers are read-only on app state).
+                    let (hover_t, press_t) = {
+                        let anim = app.pill_animator.borrow();
+                        (
+                            anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms),
+                            anim.sample(zone.id, animator::AnimChannel::PillPress, anim_now_ms),
+                        )
+                    };
+                    self.draw_zone_pill(
+                        zone,
+                        &layout,
+                        count,
+                        theme_base_accent.as_deref(),
+                        hover_t,
+                        press_t,
+                        anim_now_ms,
+                        pal,
+                        effect,
+                    )?;
+                    continue;
+                }
+                let rect = bento_nano_style::Rect {
                     x: zone.x as f32,
                     y: zone.y as f32,
                     width: zone.w as f32,
                     height: zone.h as f32,
                 };
-                let raw = app.zone_pill_anim_progress.get();
-                // M3 (2026-05-29) — Tauri `.spring-expand` easeOutBack curve
-                // (cubic-bezier(0.34,1.56,0.64,1)). `eased` overshoots ~10%
-                // past 1.0 mid-flight then settles exactly to 1.0; the
-                // overshoot flows through `morph_pill_to_rect`/`_radius`
-                // (which no longer upper-clamp) so the rect+radius bulge then
-                // snap back, 1:1 with the Tauri capsule<->panel transition.
-                let eased = zone_pill_geometry::ease_out_back_progress(raw);
-                // `expanding` true → morph from pill (0) to expanded (1);
-                // false → morph from expanded (0) to pill (1). We flip when
-                // collapsing so the same morph helper still produces the
-                // right intermediate rect.
-                let morph = if app.zone_pill_anim_expanding.get() {
-                    eased
-                } else {
-                    1.0 - eased
-                };
-                // B2 (2026-05-29) — Tauri drives `background`/`border-color`
-                // on a SEPARATE 0.3s CSS-`ease` timeline (animations.css:44-45),
-                // NOT the 0.5s easeOutBack size curve. The morph `raw` fraction
-                // spans the full 500ms; the color transition completes in the
-                // FIRST 300ms, so we rescale raw by 500/300 (clamped) then run
-                // the CSS-`ease` curve. Collapse reverses it in lockstep with
-                // the size morph so the channels stay phase-aligned.
-                let color_raw = (raw * 500.0 / 300.0).min(1.0);
-                let color_eased = zone_pill_geometry::ease_standard_progress(color_raw);
-                let color_t = if app.zone_pill_anim_expanding.get() {
-                    color_eased
-                } else {
-                    1.0 - color_eased
-                };
-                self.draw_zone_pill_morph(
-                    zone,
-                    &pill_layout,
-                    expanded_rect,
-                    morph,
-                    color_t,
-                    theme_base_accent.as_deref(),
-                    pal,
-                    effect,
-                )?;
-                continue;
-            }
-            if !pill_body_visible && !zone.is_stack_anchor() {
-                let count = zone.items.len();
-                let layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
-                // V-8 — sample hover / press channels at paint time. The
-                // animator borrow is released before any further mutation
-                // (the pill paint helpers are read-only on app state).
-                let (hover_t, press_t) = {
-                    let anim = app.pill_animator.borrow();
-                    (
-                        anim.sample(zone.id, animator::AnimChannel::PillHover, anim_now_ms),
-                        anim.sample(zone.id, animator::AnimChannel::PillPress, anim_now_ms),
-                    )
-                };
-                self.draw_zone_pill(
-                    zone,
-                    &layout,
-                    theme_base_accent.as_deref(),
-                    hover_t,
-                    press_t,
-                    anim_now_ms,
-                    pal,
-                    effect,
-                )?;
-                continue;
-            }
-            let rect = bento_nano_style::Rect {
-                x: zone.x as f32,
-                y: zone.y as f32,
-                width: zone.w as f32,
-                height: zone.h as f32,
-            };
-            // Wave I2 — expanded body chrome (panel shadow / header band /
-            // divider / count badge). M2 (05-29): the footer thumbnail strip
-            // (E-01) was deleted — Tauri's BentoPanel has no footer node.
-            // `stack_member_ids_for_anchor` is still bound here because the
-            // stack-anchor halo / "Stack ×N" badge / peek chrome below all
-            // read it. Stack anchors keep their bespoke halo + shadow chrome
-            // below; the shadow band is suppressed for anchors so we don't
-            // double-stamp shadows.
-            let stack_member_ids_for_anchor = app.zones.stack_member_ids(zone.id);
-            let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone);
-            if !zone.is_stack_anchor() {
-                // M6b — per-theme `expanded` stack under the panel band so the
-                // expanded surface lifts off the desktop backdrop. `draw_shadow_stack`
-                // grows the panel base rect per layer (the Angular `none` themes
-                // paint nothing here; tinted Rounded themes carry their L2 colour).
-                self.draw_shadow_stack(expanded_layout.panel, shadow_tauri.expanded, radius)?;
-                // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
-                // expanded panel (`.bento-zone-expanded`), ADDITIVE on top of
-                // the M6b box-shadow above and UNDER the surface fill below.
-                if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
-                    self.draw_neon_glow(expanded_layout.panel, n.expanded, radius)?;
+                // Wave I2 — expanded body chrome (panel shadow / header band /
+                // divider / count badge). M2 (05-29): the footer thumbnail strip
+                // (E-01) was deleted — Tauri's BentoPanel has no footer node.
+                // #4 (2026-06-02) — a focused stack member (incl. the anchor) now
+                // renders as the NORMAL expanded panel, so the shadow is no longer
+                // suppressed for anchors (the bespoke anchor halo + double-shadow
+                // that this guard avoided double-stamping was removed below).
+                let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone);
+                {
+                    // M6b — per-theme `expanded` stack under the panel band so the
+                    // expanded surface lifts off the desktop backdrop. `draw_shadow_stack`
+                    // grows the panel base rect per layer (the Angular `none` themes
+                    // paint nothing here; tinted Rounded themes carry their L2 colour).
+                    self.draw_shadow_stack(expanded_layout.panel, shadow_tauri.expanded, radius)?;
+                    // M6c — the `cyberpunk` neon `filter: drop-shadow` bloom on the
+                    // expanded panel (`.bento-zone-expanded`), ADDITIVE on top of
+                    // the M6b box-shadow above and UNDER the surface fill below.
+                    if let bento_nano_style::tokens::EffectTauri::Neon(n) = effect {
+                        self.draw_neon_glow(expanded_layout.panel, n.expanded, radius)?;
+                    }
                 }
-            }
-            if zone.is_stack_anchor() {
-                let member_count = stack_member_ids_for_anchor
-                    .as_ref()
-                    .map(|ids| ids.len())
-                    .unwrap_or(1);
-                let halo_rect = stack_tray::stack_wrapper_halo_rect(zone, member_count);
-                self.fill_rounded_rect(
-                    halo_rect,
-                    stack_wrapper_halo,
-                    zone_chrome.stack_halo_radius,
-                )?;
-                for offset in [8.0_f32, 4.0_f32] {
-                    let shadow_rect = bento_nano_style::Rect {
-                        x: rect.x + offset,
-                        y: rect.y + offset,
-                        width: rect.width,
-                        height: rect.height,
+                // #4 (2026-06-02) — the per-anchor wrapper halo + double drop-shadow
+                // were REMOVED: they have no Tauri reference counterpart and were
+                // part of the bug-screenshot pile-up. A focused stack member now
+                // renders as the NORMAL expanded panel (the `!zone.is_stack_anchor()`
+                // shadow above), and a collapsed anchor renders as the compact pill.
+                let merge_drag_ghost = zone_drag_merge_ghost_source(app, zone.id);
+                if Some(zone.id) == drag_target_id {
+                    let glow_rect = bento_nano_style::Rect {
+                        x: rect.x - 3.0,
+                        y: rect.y - 3.0,
+                        width: rect.width + 6.0,
+                        height: rect.height + 6.0,
                     };
-                    self.fill_rounded_rect(shadow_rect, stack_shadow, radius)?;
+                    self.fill_rounded_rect(
+                        glow_rect,
+                        zone_drop_target_glow,
+                        zone_chrome.drop_target_radius,
+                    )?;
                 }
-            }
-            if Some(zone.id) == drag_target_id {
-                let glow_rect = bento_nano_style::Rect {
-                    x: rect.x - 3.0,
-                    y: rect.y - 3.0,
-                    width: rect.width + 6.0,
-                    height: rect.height + 6.0,
+                let fill = if merge_drag_ghost {
+                    lerp_color(zone_fill_idle, with_alpha(palette.accent, 0.34), 0.35)
+                } else if Some(zone.id) == active_id {
+                    zone_fill_active
+                } else {
+                    zone_fill_idle
                 };
-                self.fill_rounded_rect(
-                    glow_rect,
-                    zone_drop_target_glow,
-                    zone_chrome.drop_target_radius,
-                )?;
-            }
-            let fill = if Some(zone.id) == active_id {
-                zone_fill_active
-            } else {
-                zone_fill_idle
-            };
-            // Frosted-backdrop (2026-06-01) — the settled expanded panel surface
-            // is now real acrylic: [blurred desktop clipped to the panel rect] +
-            // [ONE tint] (`surface_dialog` 92% idle / `accent@0.92` active),
-            // matching Tauri's panel chrome over `backdrop-filter: blur(20px)`.
-            // Frosting under the active-drag accent tint is intentional (Tauri's
-            // accent panels also sit over the blur). Degrades to the flat tint
-            // when no backdrop. The M6b shadow stack + accent edge are unchanged.
-            self.fill_frosted_rect(rect, fill, radius)?;
-            // M2③ (05-31, ruling = A / 1:1) — re-add the 2px top accent edge
-            // that V-9 (2026-05-21) removed. Authoritative source is Tauri
-            // `.bento-zone--expanded { border-top: 2px solid var(--zone-accent,
-            // transparent) }` (BentoZone.css:113-114). `--zone-accent` is
-            // injected ONLY from `zone.accent_color` (BentoZone.tsx:1409-1410);
-            // when the zone has no accent the border resolves to `transparent`,
-            // i.e. nothing is painted. So we match 1:1: paint a full-alpha 2px
-            // bar in the zone's own accent colour, and skip it entirely (no
-            // theme-base fallback) when the zone defines no accent.
-            //
-            // The bar is inset horizontally by the panel corner radius so it
-            // runs across the flat top span between the two rounded corners,
-            // mirroring how CSS `border-top` follows `border-radius` without
-            // bleeding past the arcs. `fill_rounded_rect` short-circuits on
-            // `color.a <= 0.0`, so the `None`/transparent case is a true no-op.
-            if let Some(accent) = zone.accent_color.as_deref().and_then(parse_hex_color) {
-                let accent_inset = radius.top_left.min(rect.width * 0.5);
-                let accent_edge = bento_nano_style::Rect {
-                    x: rect.x + accent_inset,
+                // Frosted-backdrop (2026-06-02 real-blur inversion) — the settled
+                // expanded panel surface is real acrylic: [blurred+saturated desktop
+                // clipped to the panel rect] + [ONE tint] (`surface_expanded` 82%
+                // idle / `accent@0.92` active), matching Tauri's panel chrome over
+                // `backdrop-filter: blur(24px) saturate(1.7)`. The idle tint dropped
+                // from `surface_dialog` 0.92 → `surface_expanded` 0.82 (P1.3): at
+                // 0.92 the blur was masked, the dominant "完全不一样" delta. Frosting
+                // under the active-drag accent tint is intentional (Tauri's accent
+                // panels also sit over the blur). Degrades to the flat tint when no
+                // backdrop. The M6b shadow stack + accent edge are unchanged.
+                self.fill_frosted_rect(rect, fill, radius)?;
+                // P2.2 — the 1px white-12% panel hairline (Tauri
+                // `.bento-zone--expanded { border: 1px solid rgba(255,255,255,0.12) }`
+                // = `--border-expanded`) that nano never painted. Stroked AFTER the
+                // frosted fill and BEFORE the accent top-edge below so the 2px accent
+                // bar layers over the hairline (CSS border-top paints over the box
+                // border). `stroke_rounded_rect` short-circuits on `color.a <= 0.0`.
+                self.stroke_rounded_rect(rect, pal.border_expanded, radius, 1.0)?;
+                if let Some(accent) = zone.accent_color.as_deref().and_then(parse_hex_color) {
+                    self.draw_expanded_panel_accent_edge(rect, radius, accent)?;
+                }
+                // GROUP-4 (2026-06-01, 1:1) fix #1 — the zone icon is a bare 18×18
+                // glyph (Tauri `.panel-header__icon { font-size: 18px }`,
+                // PanelHeader.css:18-22). The bogus 68×18 background chip that
+                // M2③ painted here does not exist in Tauri and was REMOVED. The
+                // glyph slot is sourced from the layout SSoT so paint == future
+                // hit geometry, vertically centred in the 48-DIP band.
+                let icon_rect = expanded_layout.header_icon;
+                // RC-4 Gap 1 — render the zone icon as a line-art glyph rather
+                // than the raw wire-format name.
+                self.draw_icon_glyph(zone.icon.as_ref(), icon_rect, zone_icon_text)?;
+                // GROUP-4 fix #1 + #3 — title starts at `icon.right() + 8` (Tauri
+                // `gap: var(--spacing-sm)`), no longer the legacy `+82` chip
+                // compensation, and runs up to the badge/actions group. Painted at
+                // 14px / weight 500 / 0.3px tracking (Tauri
+                // `.panel-header__title { font-size: var(--font-size-md);
+                // font-weight: var(--font-weight-medium); letter-spacing: .3px }`).
+                let title_x = icon_rect.right() + expanded_zone_grid::HEADER_GAP;
+                // The title slot stops 8px before the badge's left edge (Tauri
+                // `flex: 1` shrinks against the badge + actions group).
+                let title_right =
+                    (expanded_layout.header_badge.x - expanded_zone_grid::HEADER_GAP).max(title_x);
+                // #1 step 13 (2026-06-02) — the title rect now spans the FULL 48-DIP
+                // header band anchored at `rect.y`; vertical centring is done by
+                // DWrite paragraph-center (below), not the old `(BAND-14*1.4)/2` y math.
+                let title_rect = bento_nano_style::Rect {
+                    x: title_x,
                     y: rect.y,
-                    width: (rect.width - accent_inset * 2.0).max(0.0),
-                    height: PANEL_ACCENT_EDGE_THICKNESS_PX,
+                    width: (title_right - title_x).max(0.0),
+                    height: expanded_zone_grid::HEADER_BAND_HEIGHT,
                 };
+                // #1 step 13 (2026-06-02) — the header title stays horizontally
+                // LEADING (left, next to the icon) but is paragraph-CENTERED in the
+                // 48-DIP band, replacing the manual `(BAND - 14*1.4)/2` baseline
+                // approximation with DWrite's exact vertical centring.
+                self.draw_text_no_wrap_tracked_with_style(
+                    &zone.title,
+                    title_rect,
+                    zone_title,
+                    14.0,
+                    500,
+                    1.4,
+                    PANEL_HEADER_TITLE_TRACKING_PX,
+                    dwrite::TextAlign {
+                        h: dwrite::HAlign::Leading,
+                        v: dwrite::VAlign::Center,
+                    },
+                )?;
+                if merge_drag_ghost {
+                    continue;
+                }
+                let body_visible = pill_body_visible;
+                // M2 E-02 (2026-05-29) — Tauri's `PanelHeader` carries an item
+                // COUNT BADGE (`.panel-header__badge`), NOT a status dot. The
+                // V-14 green status dot was DELETED here (Tauri's expanded header
+                // has no dot). The badge mirrors the ZenCapsule badge style:
+                // radius `--radius-badge`, bg `var(--zone-accent, --badge-bg)`.
+                // GROUP-4 fix #4 — INTRINSIC width (sizes to the count text + 9px
+                // L/R padding) and placed BEFORE the search/close action group
+                // (8px gap), not flush-right. Count text painted at 11px / weight
+                // 600 (Tauri `.panel-header__badge { font-size: var(--font-size-xs);
+                // font-weight: var(--font-weight-semibold) }`).
+                // #4 (2026-06-02) — a focused stack member (incl. the anchor) now
+                // uses the NORMAL panel header, so the count badge + action buttons
+                // are no longer skipped for anchors (the "Stack ×N" badge that used
+                // to claim this slot was removed).
+                {
+                    let badge_rect = expanded_layout.header_badge;
+                    if badge_rect.width > 0.0 && badge_rect.height > 0.0 {
+                        // Prefer the zone's accent tint (Tauri `--zone-accent`),
+                        // falling back to the neutral `--badge-bg`.
+                        let badge_fill = zone
+                            .accent_color
+                            .as_deref()
+                            .or(theme_base_accent.as_deref())
+                            .and_then(parse_hex_color)
+                            .unwrap_or(pal.badge_bg);
+                        self.fill_rounded_rect(
+                            badge_rect,
+                            badge_fill,
+                            bento_nano_style::BorderRadius::all(
+                                app.active_theme_radius_tauri().badge,
+                            ),
+                        )?;
+                        let count_str = format_small_count(zone.items.len());
+                        // #1 step 13 (2026-06-02) — 9px L/R padding (Tauri `2px 9px`);
+                        // the count rect spans the FULL badge height and the run is
+                        // both horizontal- and paragraph-CENTERED by DWrite, dropping
+                        // the old manual `(h - 11*1.4)/2` baseline-0.82 approximation.
+                        let count_rect = bento_nano_style::Rect {
+                            x: badge_rect.x + expanded_zone_grid::HEADER_BADGE_PAD_X,
+                            y: badge_rect.y,
+                            width: (badge_rect.width
+                                - expanded_zone_grid::HEADER_BADGE_PAD_X * 2.0)
+                                .max(0.0),
+                            height: badge_rect.height,
+                        };
+                        self.draw_text_no_wrap_with_style(
+                            count_str.as_str(),
+                            count_rect,
+                            pal.text_primary,
+                            11.0,
+                            600,
+                            1.4,
+                            dwrite::TextAlign {
+                                h: dwrite::HAlign::Center,
+                                v: dwrite::VAlign::Center,
+                            },
+                        )?;
+                    }
+                    // GROUP-4 fix #2 — the search + close action buttons (Tauri
+                    // `.panel-header__actions`). Previously MISSING entirely. Each
+                    // is a 28×28 rounded-rect (radius 6) with a 14×14 line-art
+                    // glyph: search = magnifier (`IconKind::Search`), close = X
+                    // (`IconKind::X`) — the exact glyphs nano already uses for the
+                    // search bar + settings/dialog close. Hover bg (`--surface-hover`
+                    // / close-red) is DEFERRED: no per-button hover signal exists
+                    // for the panel header yet, so only the base (transparent)
+                    // state is painted — the glyph reads at the muted colour. (When
+                    // a header-button hover channel lands, lerp the fill + glyph
+                    // colour here.)
+                    let search_btn = expanded_layout.header_search_btn;
+                    let close_btn = expanded_layout.header_close_btn;
+                    let btn_glyph = expanded_zone_grid::HEADER_BTN_GLYPH_SIZE;
+                    let glyph_inset = |btn: bento_nano_style::Rect| bento_nano_style::Rect {
+                        x: btn.x + (btn.width - btn_glyph) * 0.5,
+                        y: btn.y + (btn.height - btn_glyph) * 0.5,
+                        width: btn_glyph,
+                        height: btn_glyph,
+                    };
+                    self.draw_icon_glyph(
+                        IconKind::Search.as_str(),
+                        glyph_inset(search_btn),
+                        pal.text_muted,
+                    )?;
+                    self.draw_icon_glyph(
+                        IconKind::X.as_str(),
+                        glyph_inset(close_btn),
+                        pal.text_muted,
+                    )?;
+                }
+                // V-11 (2026-05-21, round 2): the expanded-zone right-bottom
+                // display-mode chip ("Hover"/"Always"/"Click") was deleted.
+                // Tauri 1.2.4 baseline never paints a display-mode label on the
+                // zone surface — the mode is toggled exclusively through the
+                // Settings panel's ZoneDisplay row (SettingsHit::CycleZoneDisplayMode,
+                // dispatched at bento-nano-shell/src/main.rs:11465 and :12907).
+                // The `ZoneSurfaceChrome::display_chip_radius` token + the
+                // `effective_zone_display_mode` accessor on AppState are kept for
+                // log/test parity; M4 owns the K1 dead_code sweep for the now-
+                // unused chrome field.
+                // #4 (2026-06-02) — the "Stack ×N" badge + "Peek: <member>" sub-row
+                // were REMOVED. They have no Tauri reference counterpart and were
+                // part of the bug-screenshot pile-up. Stack membership is now
+                // conveyed by the collapsed pill's count badge; a focused member
+                // uses the normal expanded panel.
+                if !body_visible {
+                    continue;
+                }
+                // Wave I2 / M2 E-04 — divider hairline between the header band
+                // and the item grid. Tauri's `.panel-header` border-bottom is
+                // `rgba(255,255,255,0.05)` — pure WHITE at alpha 0.05, NOT the
+                // tinted `palette.text` at 0.10 (which read 2× too strong and
+                // slightly warm). Corrected to match exactly.
                 self.fill_rounded_rect(
-                    accent_edge,
-                    with_alpha(accent, 1.0),
+                    expanded_layout.divider,
+                    with_alpha(bento_nano_style::Color::WHITE, 0.05),
                     bento_nano_style::BorderRadius::ZERO,
                 )?;
-            }
-            // GROUP-4 (2026-06-01, 1:1) fix #1 — the zone icon is a bare 18×18
-            // glyph (Tauri `.panel-header__icon { font-size: 18px }`,
-            // PanelHeader.css:18-22). The bogus 68×18 background chip that
-            // M2③ painted here does not exist in Tauri and was REMOVED. The
-            // glyph slot is sourced from the layout SSoT so paint == future
-            // hit geometry, vertically centred in the 48-DIP band.
-            let icon_rect = expanded_layout.header_icon;
-            // RC-4 Gap 1 — render the zone icon as a line-art glyph rather
-            // than the raw wire-format name.
-            self.draw_icon_glyph(zone.icon.as_ref(), icon_rect, zone_icon_text)?;
-            // GROUP-4 fix #1 + #3 — title starts at `icon.right() + 8` (Tauri
-            // `gap: var(--spacing-sm)`), no longer the legacy `+82` chip
-            // compensation, and runs up to the badge/actions group. Painted at
-            // 14px / weight 500 (Tauri `.panel-header__title { font-size:
-            // var(--font-size-md); font-weight: var(--font-weight-medium) }`).
-            // Tauri's `letter-spacing: 0.3px` is NOT applied: nano's DWrite
-            // text path has no per-run character-spacing seam wired here, and
-            // at 14px the 0.3px tracking is sub-pixel — approximated without
-            // it (documented limitation, snap.md notes the deviation).
-            let title_x = icon_rect.right() + expanded_zone_grid::HEADER_GAP;
-            // The title slot stops 8px before the badge's left edge (Tauri
-            // `flex: 1` shrinks against the badge + actions group).
-            let title_right = (expanded_layout.header_badge.x
-                - expanded_zone_grid::HEADER_GAP)
-                .max(title_x);
-            // 14px line at 1.4 line-height, vertically centred in the 48 band.
-            let title_line_h = 14.0 * 1.4;
-            let title_rect = bento_nano_style::Rect {
-                x: title_x,
-                y: rect.y + ((expanded_zone_grid::HEADER_BAND_HEIGHT - title_line_h) * 0.5).max(0.0),
-                width: (title_right - title_x).max(0.0),
-                height: title_line_h,
-            };
-            self.draw_text_no_wrap_with_style(&zone.title, title_rect, zone_title, 14.0, 500, 1.4)?;
-            let body_visible = app.zone_body_visible_for_mode(zone) || Some(zone.id) == active_id;
-            // M2 E-02 (2026-05-29) — Tauri's `PanelHeader` carries an item
-            // COUNT BADGE (`.panel-header__badge`), NOT a status dot. The
-            // V-14 green status dot was DELETED here (Tauri's expanded header
-            // has no dot). The badge mirrors the ZenCapsule badge style:
-            // radius `--radius-badge`, bg `var(--zone-accent, --badge-bg)`.
-            // GROUP-4 fix #4 — INTRINSIC width (sizes to the count text + 9px
-            // L/R padding) and placed BEFORE the search/close action group
-            // (8px gap), not flush-right. Count text painted at 11px / weight
-            // 600 (Tauri `.panel-header__badge { font-size: var(--font-size-xs);
-            // font-weight: var(--font-weight-semibold) }`). Skipped for stack
-            // anchors — the "Stack ×N" badge below claims the top-right slot.
-            if !zone.is_stack_anchor() {
-                let badge_rect = expanded_layout.header_badge;
-                if badge_rect.width > 0.0 && badge_rect.height > 0.0 {
-                    // Prefer the zone's accent tint (Tauri `--zone-accent`),
-                    // falling back to the neutral `--badge-bg`.
-                    let badge_fill = zone
-                        .accent_color
-                        .as_deref()
-                        .or(theme_base_accent.as_deref())
-                        .and_then(parse_hex_color)
-                        .unwrap_or(pal.badge_bg);
-                    self.fill_rounded_rect(
-                        badge_rect,
-                        badge_fill,
-                        bento_nano_style::BorderRadius::all(
-                            app.active_theme_radius_tauri().badge,
-                        ),
-                    )?;
-                    let count_str = format_small_count(zone.items.len());
-                    // 9px L/R padding (Tauri `2px 9px`), text vertically
-                    // centred in the badge.
-                    let count_line_h = 11.0 * 1.4;
-                    let count_rect = bento_nano_style::Rect {
-                        x: badge_rect.x + expanded_zone_grid::HEADER_BADGE_PAD_X,
-                        y: badge_rect.y + ((badge_rect.height - count_line_h) * 0.5).max(0.0),
-                        width: (badge_rect.width
-                            - expanded_zone_grid::HEADER_BADGE_PAD_X * 2.0)
-                            .max(0.0),
-                        height: count_line_h.min(badge_rect.height),
+                // V-9 round 2 (2026-05-21) — expanded-body status dot removed.
+                // User flagged it as a stray blue ring above each pill ("4" / "10").
+                // Tauri 1.2.4 expanded panel has no top-right indicator; the
+                // collapsed pill keeps its Wave H2 dot since that one matches
+                // baseline.
+                if let Some(path) = zone.live_folder_path.as_deref() {
+                    let live_text = live_folder_badge_text(path);
+                    // M2③ cascade — live-folder badge sits just below the 48-DIP
+                    // header band (was y+34 under the legacy 30-DIP header).
+                    let live_rect = bento_nano_style::Rect {
+                        x: rect.x + 8.0,
+                        y: rect.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0,
+                        width: (rect.width - 16.0).max(0.0),
+                        height: 16.0,
                     };
-                    self.draw_text_no_wrap_with_style(
-                        count_str.as_str(),
-                        count_rect,
-                        pal.text_primary,
-                        11.0,
-                        600,
-                        1.4,
+                    self.fill_rounded_rect(
+                        live_rect,
+                        zone_icon_chip,
+                        zone_chrome.live_badge_radius,
+                    )?;
+                    self.draw_text(
+                        live_text.as_str(),
+                        bento_nano_style::Rect {
+                            x: live_rect.x + 6.0,
+                            y: live_rect.y + 2.0,
+                            width: (live_rect.width - 12.0).max(0.0),
+                            height: 12.0,
+                        },
+                        zone_live_folder_text,
                     )?;
                 }
-                // GROUP-4 fix #2 — the search + close action buttons (Tauri
-                // `.panel-header__actions`). Previously MISSING entirely. Each
-                // is a 28×28 rounded-rect (radius 6) with a 14×14 line-art
-                // glyph: search = magnifier (`IconKind::Search`), close = X
-                // (`IconKind::X`) — the exact glyphs nano already uses for the
-                // search bar + settings/dialog close. Hover bg (`--surface-hover`
-                // / close-red) is DEFERRED: no per-button hover signal exists
-                // for the panel header yet, so only the base (transparent)
-                // state is painted — the glyph reads at the muted colour. (When
-                // a header-button hover channel lands, lerp the fill + glyph
-                // colour here.)
-                let search_btn = expanded_layout.header_search_btn;
-                let close_btn = expanded_layout.header_close_btn;
-                let btn_glyph = expanded_zone_grid::HEADER_BTN_GLYPH_SIZE;
-                let glyph_inset = |btn: bento_nano_style::Rect| bento_nano_style::Rect {
-                    x: btn.x + (btn.width - btn_glyph) * 0.5,
-                    y: btn.y + (btn.height - btn_glyph) * 0.5,
-                    width: btn_glyph,
-                    height: btn_glyph,
-                };
-                self.draw_icon_glyph(
-                    IconKind::Search.as_str(),
-                    glyph_inset(search_btn),
-                    pal.text_muted,
-                )?;
-                self.draw_icon_glyph(
-                    IconKind::X.as_str(),
-                    glyph_inset(close_btn),
-                    pal.text_muted,
-                )?;
-            }
-            // V-11 (2026-05-21, round 2): the expanded-zone right-bottom
-            // display-mode chip ("Hover"/"Always"/"Click") was deleted.
-            // Tauri 1.2.4 baseline never paints a display-mode label on the
-            // zone surface — the mode is toggled exclusively through the
-            // Settings panel's ZoneDisplay row (SettingsHit::CycleZoneDisplayMode,
-            // dispatched at bento-nano-shell/src/main.rs:11465 and :12907).
-            // The `ZoneSurfaceChrome::display_chip_radius` token + the
-            // `effective_zone_display_mode` accessor on AppState are kept for
-            // log/test parity; M4 owns the K1 dead_code sweep for the now-
-            // unused chrome field.
-            if zone.is_stack_anchor() {
-                let member_ids = app.zones.stack_member_ids(zone.id);
-                let member_count = member_ids.as_ref().map(|ids| ids.len()).unwrap_or(1);
-                // M2③ cascade — the "Stack ×N" badge sits in the sub-row just
-                // below the header band; it tracks the header height so it
-                // stays clear of the taller 48-DIP header (was y+34 under the
-                // legacy 30-DIP band; now header bottom + 4 = 48 + 4 = 52).
-                let stack_subrow_y = item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0;
-                let badge_rect = bento_nano_style::Rect {
-                    x: rect.right() - 76.0,
-                    y: rect.y + stack_subrow_y,
-                    width: 68.0,
-                    height: 18.0,
-                };
-                self.fill_rounded_rect(
-                    badge_rect,
-                    stack_badge_fill,
-                    zone_chrome.stack_badge_radius,
-                )?;
-                let badge_label = format!("Stack ×{member_count}");
-                self.draw_text(
-                    badge_label.as_str(),
-                    bento_nano_style::Rect {
-                        x: badge_rect.x + 7.0,
-                        y: badge_rect.y + 2.0,
-                        width: badge_rect.width - 14.0,
-                        height: 12.0,
-                    },
-                    zone_icon_text,
-                )?;
-                if let Some(member_ids) = member_ids {
-                    if let Some(member) = member_ids
-                        .iter()
-                        .copied()
-                        .find(|member_id| *member_id != zone.id)
-                        .and_then(|member_id| app.zones.get(member_id))
+                for item in &zone.items {
+                    let card_rect = item_card_rect_for_item(zone, item);
+                    if card_rect.width <= 0.0 || card_rect.height <= 0.0 {
+                        continue;
+                    }
+                    let is_dragged_source = item_drag
+                        .map(|drag| drag.zone_id == zone.id && drag.item_id == item.id)
+                        .unwrap_or(false);
+                    let item_fill = if is_dragged_source {
+                        item_chrome.drag_source_background
+                    } else if item.file_missing {
+                        item_chrome.missing_background
+                    } else {
+                        item_chrome.normal_background
+                    };
+                    // M3-A2 — sample the live per-item hover/press ramp and compose
+                    // the Tauri scale(1.02)/scale(0.97). The dragged source card
+                    // never scales (it's the muted placeholder under the ghost),
+                    // so it stays at identity. `item_hover` is `Copy` in a `Cell`,
+                    // so this is a single read + a few muls per card (§10 hot path).
+                    //
+                    // M3-A3 — Tauri removes the entire `:hover` rule on a
+                    // `aria-disabled` (missing-file) card, and a drag-source card
+                    // shows its muted placeholder bg, never the hover chrome. So we
+                    // zero `hover_t` for both: only a present, non-dragged card
+                    // lifts / lerps its bg-border-shadow.
+                    let card_key = (zone.id, item.id);
+                    let item_hover = app.item_hover.get();
+                    let (hover_raw, press_t) = if is_dragged_source {
+                        (0.0, 0.0)
+                    } else {
+                        item_hover.sample(card_key, anim_now_ms)
+                    };
+                    let hover_t = if is_dragged_source || item.file_missing {
+                        0.0
+                    } else {
+                        hover_raw
+                    };
+                    let item_scale = if is_dragged_source {
+                        1.0
+                    } else {
+                        item_card::card_scale_for(hover_raw, press_t)
+                    };
+                    // FIX 1 — drop the translateY lift only while the pointer is
+                    // actively held (Tauri `:active` scale-only override). On
+                    // release the lift returns while the press scale ramps out.
+                    let press_held = !is_dragged_source && item_hover.press_held(card_key);
+                    self.draw_item_card(
+                        item,
+                        card_rect,
+                        item_fill,
+                        &item_chrome,
+                        hover_t,
+                        press_held,
+                        item_scale,
+                        1.0,
+                    )?;
+                }
+                if Some(zone.id) == drag_target_id {
+                    if let Some(preview) =
+                        drop_preview_rect_for_zone(zone, item_drag, dragged_item_wide)
                     {
-                        // M2③ cascade — peek row trails the Stack badge by the
-                        // same 20-DIP step it used under the legacy header.
-                        let peek_rect = bento_nano_style::Rect {
-                            x: rect.x + 8.0,
-                            y: rect.y + stack_subrow_y + 20.0,
-                            width: (rect.width - 16.0).max(0.0),
-                            height: 18.0,
-                        };
+                        // Drag preview is a target affordance, not card chrome. Paint it
+                        // after resident cards so occupied cells cannot cover the target core,
+                        // but before the floating ghost so the dragged item remains topmost.
                         self.fill_rounded_rect(
-                            peek_rect,
-                            stack_peek_fill,
-                            zone_chrome.stack_peek_radius,
+                            preview,
+                            drop_preview_fill,
+                            item_chrome.card_radius,
                         )?;
-                        let peek_label = format!("Peek: {}", member.title);
-                        self.draw_text(
-                            peek_label.as_str(),
-                            bento_nano_style::Rect {
-                                x: peek_rect.x + 7.0,
-                                y: peek_rect.y + 2.0,
-                                width: peek_rect.width - 14.0,
-                                height: 12.0,
-                            },
-                            zone_live_folder_text,
+                        let core = inset_rect(preview, 4.0);
+                        self.fill_rounded_rect(
+                            core,
+                            drop_preview_core,
+                            zone_chrome.drop_preview_core_radius,
                         )?;
                     }
                 }
+                // M2 E-01 (2026-05-29) — the 16×16 sub-zone footer thumbnail
+                // strip was DELETED. Tauri's `BentoPanel` renders header + grid
+                // only with no footer node; the strip was an additive nano
+                // divergence visible only on stack anchors. Removed for 1:1.
             }
-            if !body_visible {
-                continue;
-            }
-            // Wave I2 / M2 E-04 — divider hairline between the header band
-            // and the item grid. Tauri's `.panel-header` border-bottom is
-            // `rgba(255,255,255,0.05)` — pure WHITE at alpha 0.05, NOT the
-            // tinted `palette.text` at 0.10 (which read 2× too strong and
-            // slightly warm). Corrected to match exactly.
-            self.fill_rounded_rect(
-                expanded_layout.divider,
-                with_alpha(bento_nano_style::Color::WHITE, 0.05),
-                bento_nano_style::BorderRadius::ZERO,
-            )?;
-            // V-9 round 2 (2026-05-21) — expanded-body status dot removed.
-            // User flagged it as a stray blue ring above each pill ("4" / "10").
-            // Tauri 1.2.4 expanded panel has no top-right indicator; the
-            // collapsed pill keeps its Wave H2 dot since that one matches
-            // baseline.
-            if let Some(path) = zone.live_folder_path.as_deref() {
-                let live_text = live_folder_badge_text(path);
-                // M2③ cascade — live-folder badge sits just below the 48-DIP
-                // header band (was y+34 under the legacy 30-DIP header).
-                let live_rect = bento_nano_style::Rect {
-                    x: rect.x + 8.0,
-                    y: rect.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0,
-                    width: (rect.width - 16.0).max(0.0),
-                    height: 16.0,
-                };
-                self.fill_rounded_rect(live_rect, zone_icon_chip, zone_chrome.live_badge_radius)?;
-                self.draw_text(
-                    live_text.as_str(),
-                    bento_nano_style::Rect {
-                        x: live_rect.x + 6.0,
-                        y: live_rect.y + 2.0,
-                        width: (live_rect.width - 12.0).max(0.0),
-                        height: 12.0,
-                    },
-                    zone_live_folder_text,
-                )?;
-            }
-            if Some(zone.id) == drag_target_id {
-                if let Some(preview) =
-                    drop_preview_rect_for_zone(zone, item_drag, dragged_item_wide)
-                {
-                    self.fill_rounded_rect(preview, drop_preview_fill, item_chrome.card_radius)?;
-                    let core = inset_rect(preview, 4.0);
-                    self.fill_rounded_rect(
-                        core,
-                        drop_preview_core,
-                        zone_chrome.drop_preview_core_radius,
-                    )?;
-                }
-            }
-            for item in &zone.items {
-                let card_rect = item_card_rect_for_grid(zone, item.x, item.y, item.is_wide);
-                if card_rect.width <= 0.0 || card_rect.height <= 0.0 {
-                    continue;
-                }
-                let is_dragged_source = item_drag
-                    .map(|drag| drag.zone_id == zone.id && drag.item_id == item.id)
-                    .unwrap_or(false);
-                let item_fill = if is_dragged_source {
-                    item_chrome.drag_source_background
-                } else if item.file_missing {
-                    item_chrome.missing_background
-                } else {
-                    item_chrome.normal_background
-                };
-                // M3-A2 — sample the live per-item hover/press ramp and compose
-                // the Tauri scale(1.02)/scale(0.97). The dragged source card
-                // never scales (it's the muted placeholder under the ghost),
-                // so it stays at identity. `item_hover` is `Copy` in a `Cell`,
-                // so this is a single read + a few muls per card (§10 hot path).
-                //
-                // M3-A3 — Tauri removes the entire `:hover` rule on a
-                // `aria-disabled` (missing-file) card, and a drag-source card
-                // shows its muted placeholder bg, never the hover chrome. So we
-                // zero `hover_t` for both: only a present, non-dragged card
-                // lifts / lerps its bg-border-shadow.
-                let card_key = (zone.id, item.id);
-                let item_hover = app.item_hover.get();
-                let (hover_raw, press_t) = if is_dragged_source {
-                    (0.0, 0.0)
-                } else {
-                    item_hover.sample(card_key, anim_now_ms)
-                };
-                let hover_t = if is_dragged_source || item.file_missing {
-                    0.0
-                } else {
-                    hover_raw
-                };
-                let item_scale = if is_dragged_source {
-                    1.0
-                } else {
-                    item_card::card_scale_for(hover_raw, press_t)
-                };
-                // FIX 1 — drop the translateY lift only while the pointer is
-                // actively held (Tauri `:active` scale-only override). On
-                // release the lift returns while the press scale ramps out.
-                let press_held = !is_dragged_source && item_hover.press_held(card_key);
-                self.draw_item_card(
-                    item,
-                    card_rect,
-                    item_fill,
-                    &item_chrome,
-                    hover_t,
-                    press_held,
-                    item_scale,
-                )?;
-            }
-            // M2 E-01 (2026-05-29) — the 16×16 sub-zone footer thumbnail
-            // strip was DELETED. Tauri's `BentoPanel` renders header + grid
-            // only with no footer node; the strip was an additive nano
-            // divergence visible only on stack anchors. Removed for 1:1.
         }
+        // Z-order (2026-06-02) — the hover-bloom is drawn AFTER both layers, so
+        // it stays above every pill AND every panel. It is a hover affordance on
+        // a COLLAPSED stack anchor and is gated to frames where no zone is
+        // expanded/selected (so it never co-renders with a panel) — keeping it
+        // last preserves the current visual intent (top of the whole zone stack)
+        // and matches the hit side, where `push_stack_overlay_rects` is pushed
+        // before the per-zone rects so the bloom petals win the hit-test.
+        // #4 / R1 (2026-06-02) — the hover-bloom is a real Tauri feature
+        // (`StackWrapper.tsx` hover-bloom), so it is GATED, not deleted. It
+        // fans out ONLY when (a) the cursor hovers a stack anchor, (b) the
+        // explicit management tray is closed (`stack_tray` is None — they are
+        // mutually exclusive surfaces), and (c) no zone is expanded/selected
+        // (so it can never co-render with an expanded panel). Step 5 separately
+        // ensures the bloom trigger only arms for actual stack anchors.
+        // `selected_zone.is_none()` means no member is focused (no expanded
+        // anchor panel), so the bloom can never co-render with the focused-
+        // member panel. The anchor's own hover does NOT expand it (see the
+        // `pill_body_visible` anchor rule above), so the collapsed pill + bloom
+        // are the only surfaces shown while hovering.
+        let bloom_allowed = app.stack_tray.borrow().is_none() && app.selected_zone.get().is_none();
         if let Some(anchor_id) = app
             .hovered_zone
             .get()
+            .filter(|_| bloom_allowed)
             .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
         {
             if let Some(anchor) = app.zones.get(anchor_id) {
@@ -2216,9 +2426,8 @@ impl Renderer {
                             },
                             zone_icon_text,
                         )?;
-                        let label = format!("{} {}", member.icon, member.title);
-                        self.draw_text(
-                            label.as_str(),
+                        self.draw_text_no_wrap_with_style(
+                            member.title.as_ref(),
                             bento_nano_style::Rect {
                                 x: petal_rect.x + 34.0,
                                 y: petal_rect.y + 6.0,
@@ -2226,6 +2435,10 @@ impl Renderer {
                                 height: 14.0,
                             },
                             zone_title,
+                            14.0,
+                            500,
+                            1.0,
+                            dwrite::TextAlign::DEFAULT,
                         )?;
                     }
                     if member_ids.len() > stack_tray::BLOOM_VISIBLE_PETAL_LIMIT {
@@ -2250,7 +2463,7 @@ impl Renderer {
         }
         if let Some(drag) = item_drag {
             if let Some((zone, item)) = source_drag_item(app, drag) {
-                let source_rect = item_card_rect_for_grid(zone, item.x, item.y, item.is_wide);
+                let source_rect = item_card_rect_for_item(zone, item);
                 let ghost_rect = drag_ghost_rect(app, drag, source_rect);
                 let shadow_rect = bento_nano_style::Rect {
                     x: ghost_rect.x + 4.0,
@@ -2278,6 +2491,7 @@ impl Renderer {
                     // so hover/press chrome stays on the live grid.
                     0.0,
                     false,
+                    1.0,
                     1.0,
                 )?;
             }
@@ -2311,6 +2525,7 @@ impl Renderer {
         &mut self,
         zone: &Zone,
         layout: &ZonePillLayout,
+        display_count: usize,
         theme_base_accent: Option<&str>,
         hover_t: f32,
         press_t: f32,
@@ -2424,16 +2639,9 @@ impl Renderer {
         // `var(--zone-accent, --badge-bg)` (zone accent tint when set, else
         // the neutral `--badge-bg`), and the count text is `--text-primary`
         // (#f0f0f5) NOT the dimmer `--text-secondary` it used before.
-        let count = zone.items.len();
-        let badge_fill = accent_hex
-            .and_then(parse_hex_color)
-            .unwrap_or(pal.badge_bg);
-        self.fill_rounded_rect(
-            layout.badge,
-            badge_fill,
-            layout.badge_radius,
-        )?;
-        let count_str = format_small_count(count);
+        let badge_fill = accent_hex.and_then(parse_hex_color).unwrap_or(pal.badge_bg);
+        self.fill_rounded_rect(layout.badge, badge_fill, layout.badge_radius)?;
+        let count_str = format_small_count(display_count);
         // G5 (2026-06-01) — badge text at the PER-TIER font-size (small 10 /
         // medium 11 / large 13) and SEMIBOLD weight (600), Tauri
         // `.zen-capsule__badge { font-weight: 600 }`. The pre-G5 path drew it
@@ -2453,6 +2661,7 @@ impl Renderer {
             size.badge_font_px(),
             size.badge_font_weight(),
             1.4,
+            dwrite::TextAlign::DEFAULT,
         )?;
         // V-9 round 3 (2026-05-21) — Wave H2 top-right status dot removed.
         //
@@ -2481,6 +2690,12 @@ impl Renderer {
     /// rides the SEPARATE 0.3 s CSS-`ease` color curve, so neither can be
     /// derived from the other locally.
     #[allow(clippy::too_many_arguments)]
+    // #2 step 7 (2026-06-02) — `hover_t` (the V-8 PillHover channel sample, 0..1)
+    // is threaded in so the +8% surface brighten the collapsed pill carries is
+    // continuous across the pill→morph hand-off rather than snapping away. The
+    // params are independent paint primitives; bundling adds indirection on a
+    // hot per-zone call site, so allow the count.
+    #[allow(clippy::too_many_arguments)]
     fn draw_zone_pill_morph(
         &mut self,
         zone: &Zone,
@@ -2488,8 +2703,10 @@ impl Renderer {
         expanded_rect: bento_nano_style::Rect,
         morph: f32,
         color_t: f32,
+        hover_t: f32,
         theme_base_accent: Option<&str>,
         pal: bento_nano_style::tokens::PaletteTauri,
+        item_chrome: &item_card::ItemCardChrome,
         effect: bento_nano_style::tokens::EffectTauri,
     ) -> Result<(), RenderError> {
         // M6a — live theme palette passed in by `draw_zones` (§10).
@@ -2567,40 +2784,90 @@ impl Renderer {
         // `background` transition, killing the snap that the flat fill produced
         // at the morph→settled-panel hand-off. `fill_frosted_rect` degrades to
         // the single lerped tint when there is no backdrop.
-        let morph_tint = lerp_color(pal.surface_zen, pal.surface_dialog, color_t);
-        self.fill_frosted_rect(rect, morph_tint, border_radius)?;
-        // Accent stripe (matches expanded chrome accent dot above the icon
-        // band — drawn at the top of the morph so the eye picks up the zone
-        // identity even during the transition).
-        let accent_hex = zone
-            .accent_color
-            .as_deref()
-            .or(theme_base_accent);
-        if let Some(accent) = accent_hex.and_then(parse_hex_color) {
-            let accent_rect = bento_nano_style::Rect {
-                x: rect.x + 8.0,
-                y: rect.y + 4.0,
-                width: (rect.width - 16.0).max(0.0),
-                height: 3.0,
-            };
-            self.fill_rounded_rect(accent_rect, accent, BorderRadius::all(1.5))?;
-        }
-        // Title fades in along the morph. Use a thin top-band that scales
-        // toward the expanded title area — anchored to the rect top-left so
-        // it tracks the morph smoothly.
-        let title_height = (12.0 + 6.0 * morph_clamped).min(rect.height - 8.0).max(8.0);
-        let title_rect = bento_nano_style::Rect {
-            x: rect.x + 10.0,
-            y: rect.y + 6.0,
-            width: (rect.width - 20.0).max(0.0),
-            height: title_height,
+        // #2 step 7 (2026-06-02) — fold the V-8 +8% hover brighten into the
+        // morph's `surface_zen` endpoint so the tone is CONTINUOUS across the
+        // pill→morph hand-off (the collapsed pill paints `surface_zen *
+        // (1 + hover_t*0.08)`; without this the morph dropped that brighten and
+        // the surface visibly snapped). The brighten fades with the morph
+        // fraction (`1 - morph_clamped`) so the settled panel (`surface_dialog`,
+        // color_t→1) carries none of it. §10: stack-`f32`, no alloc.
+        let surface_brighten = 1.0 + hover_t.clamp(0.0, 1.0) * 0.08 * (1.0 - morph_clamped);
+        let surface_zen_hot = Color {
+            r: (pal.surface_zen.r * surface_brighten).min(1.0),
+            g: (pal.surface_zen.g * surface_brighten).min(1.0),
+            b: (pal.surface_zen.b * surface_brighten).min(1.0),
+            a: pal.surface_zen.a,
         };
-        // B2 — title-alpha rides the 0.3s CSS-`ease` color channel (`color_t`),
-        // NOT the 0.5s easeOutBack size curve, so the text fade completes in
-        // the first 300ms and matches Tauri's `background`/`border-color`
-        // timeline rather than the springy size morph.
-        let title_color = with_alpha(pal.text_primary, 0.6 + 0.4 * color_t);
-        self.draw_text(zone.title.as_ref(), title_rect, title_color)?;
+        let morph_tint = lerp_color(surface_zen_hot, pal.surface_dialog, color_t);
+        self.fill_frosted_rect(rect, morph_tint, border_radius)?;
+        // Expanded-only header content must not paint while the morph is still
+        // capsule-sized. The runtime proof showed the old always-on title +
+        // accent stripe floating across the shrinking pill, which read as
+        // overlapping animation states. Keep the surface morph continuous, but
+        // fade header chrome in only once the rect is large enough to read as an
+        // expanded panel.
+        let content_alpha = morph_expanded_content_alpha(morph_clamped, rect.height);
+        if content_alpha > 0.0 {
+            let accent_hex = zone.accent_color.as_deref().or(theme_base_accent);
+            if let Some(accent) = accent_hex.and_then(parse_hex_color) {
+                self.draw_expanded_panel_accent_edge(
+                    rect,
+                    border_radius,
+                    with_alpha(accent, accent.a * content_alpha),
+                )?;
+            }
+            // Title fades in with the same late-stage alpha, already occupying
+            // the settled PanelHeader title slot. The old morph-only path drew
+            // default 16px text in a thin top band, then snapped to the settled
+            // 14px/500 vertically-centred header at morph completion.
+            let title_rect = morph_header_title_rect(rect);
+            // B2 — title-alpha still rides the 0.3s CSS-`ease` color channel,
+            // multiplied by the late-stage content gate so the header doesn't
+            // appear on the capsule-sized part of the morph.
+            let title_color = with_alpha(pal.text_primary, (0.6 + 0.4 * color_t) * content_alpha);
+            self.draw_text_no_wrap_tracked_with_style(
+                zone.title.as_ref(),
+                title_rect,
+                title_color,
+                MORPH_HEADER_TITLE_FONT_PX,
+                MORPH_HEADER_TITLE_WEIGHT,
+                MORPH_HEADER_TITLE_LINE_HEIGHT,
+                PANEL_HEADER_TITLE_TRACKING_PX,
+                dwrite::TextAlign {
+                    h: dwrite::HAlign::Leading,
+                    v: dwrite::VAlign::Center,
+                },
+            )?;
+            let morph_layout =
+                expanded_zone_grid::expanded_zone_layout_for_rect(rect, zone.items.len());
+            self.fill_rounded_rect(
+                morph_layout.divider,
+                with_alpha(bento_nano_style::Color::WHITE, 0.05 * content_alpha),
+                bento_nano_style::BorderRadius::ZERO,
+            )?;
+            for item in &zone.items {
+                let card_rect =
+                    highlight_overlay::item_card_rect_for_item_in_panel(zone, item, rect);
+                if card_rect.width <= 0.0 || card_rect.height <= 0.0 {
+                    continue;
+                }
+                let item_fill = if item.file_missing {
+                    item_chrome.missing_background
+                } else {
+                    item_chrome.normal_background
+                };
+                self.draw_item_card(
+                    item,
+                    card_rect,
+                    item_fill,
+                    item_chrome,
+                    0.0,
+                    false,
+                    1.0,
+                    content_alpha,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -2618,10 +2885,21 @@ impl Renderer {
         hover_t: f32,
         press_held: bool,
         scale: f32,
+        alpha: f32,
     ) -> Result<(), RenderError> {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return Ok(());
+        }
         let radius = chrome.card_radius;
-        let text = chrome.text;
-        let icon_text = chrome.icon_text;
+        let fade = |color: Color| with_alpha(color, color.a * alpha);
+        let text = fade(chrome.text);
+        let icon_text = fade(chrome.icon_text);
+        let fill = fade(fill);
+        let hover_background = fade(chrome.hover_background);
+        let hover_border = fade(chrome.hover_border);
+        let hover_shadow_inner = fade(chrome.hover_shadow_inner);
+        let hover_shadow_outer = fade(chrome.hover_shadow_outer);
         // M3-A2 (2026-05-29) — apply the `item_card::card_scale_for` hover/press
         // multiplier as a Tauri-style centred `transform: scale()`. The card
         // surface AND its inner icon/label inset offsets all inflate/deflate
@@ -2656,7 +2934,10 @@ impl Renderer {
             };
             self.fill_rounded_rect(
                 ambient,
-                with_alpha(chrome.hover_shadow_inner, chrome.hover_shadow_inner.a * hover_clamped),
+                with_alpha(
+                    chrome.hover_shadow_inner,
+                    hover_shadow_inner.a * hover_clamped,
+                ),
                 radius,
             )?;
             // Contact: offset_y 2, blur 8.
@@ -2668,7 +2949,10 @@ impl Renderer {
             };
             self.fill_rounded_rect(
                 contact,
-                with_alpha(chrome.hover_shadow_outer, chrome.hover_shadow_outer.a * hover_clamped),
+                with_alpha(
+                    chrome.hover_shadow_outer,
+                    hover_shadow_outer.a * hover_clamped,
+                ),
                 radius,
             )?;
         }
@@ -2676,13 +2960,13 @@ impl Renderer {
         // base fill toward the hover surface by hover_t (premultiplied-alpha
         // lerp, §10 stack-only). At hover_t 0 this is `fill` exactly (idle /
         // missing / drag bg preserved); at 1.0 it is `--surface-hover`.
-        let card_fill = fill.lerp(chrome.hover_background, hover_clamped);
+        let card_fill = fill.lerp(hover_background, hover_clamped);
         self.fill_rounded_rect(card_rect, card_fill, radius)?;
         // FIX 2 (M3-A3) — `:hover { border-color: var(--border-hover) }`: a 1px
         // stroke whose alpha lerps transparent → `--border-hover` by hover_t.
         // The normal card strokes no border, so this only appears on hover.
         if hover_clamped > 0.0 {
-            let border = with_alpha(chrome.hover_border, chrome.hover_border.a * hover_clamped);
+            let border = with_alpha(hover_border, hover_border.a * hover_clamped);
             self.stroke_rounded_rect(card_rect, border, radius, 1.0)?;
         }
         // FIX 3 (M3-A3, DEFERRED) — Tauri `:focus-visible { outline: 2px solid
@@ -2693,33 +2977,44 @@ impl Renderer {
         // focus-tracking plumbing is out of scope for this parity pass — paint
         // the ring once an item keyboard-focus channel lands.
         // Wave I2 — horizontally centre the icon glyph inside the card
-        // (Tauri frame_010 reference). Vertical position keeps the existing
-        // 6-DIP top inset (scaled with the card) so the label still sits in
-        // the bottom band of the 80-DIP-tall card.
+        // (Tauri frame_010 reference). P3.4 — the vertical top inset is the
+        // declared `.item-card { padding: 8px 4px }` (8-DIP top), scaled with
+        // the card; the label then flows tightly below the icon (P3.3).
         let icon_side = item_icon::IconSize::Standard.container_px() * scale;
         let icon_rect = bento_nano_style::Rect {
             x: card_rect.x + ((card_rect.width - icon_side) * 0.5).max(0.0),
-            y: card_rect.y + 6.0 * scale,
+            y: card_rect.y + 8.0 * scale,
             width: icon_side,
             height: icon_side,
         };
-        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect)? {
-            // Wave I2 — prefer `draw_icon_glyph` so item icons that happen
-            // to name a built-in `IconKind` paint as line-art. When the
-            // path is not a known IconKind the helper falls through to
-            // `draw_text`, where we hand it the extension-keyed emoji
-            // fallback (the existing 1.x table) so unknown files still
-            // render a recognisable glyph.
-            let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
-            self.draw_icon_glyph(glyph.as_str(), icon_rect, icon_text)?;
+        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect, alpha)? {
+            // Wave I2 / R4 — cache misses still use selected-stack line-art
+            // icon families, never the old extension-keyed emoji text fallback.
+            let kind = item_icon::fallback_icon_kind_for(item.path.as_ref());
+            self.draw_icon_glyph(kind.as_str(), icon_rect, icon_text)?;
         }
+        // P3.3 — the label is the flex-column child directly under the icon:
+        // `icon.bottom() + 4px gap`, one 14px line (1.4 line-height), centred
+        // horizontally with the 4-DIP card padding either side. Replaces the
+        // legacy hard `y = +44 / height = 28` that left the label hanging ~8px
+        // above the card bottom. Offsets scale with the card transform.
+        let label_w = (card_rect.width - 8.0 * scale).max(0.0);
+        let label_font_px = item_label_font_size_for_width(item.name.as_ref(), label_w);
+        let label_h = label_font_px * 1.4 * scale;
         let label_rect = bento_nano_style::Rect {
             x: card_rect.x + 4.0 * scale,
-            y: card_rect.y + 44.0 * scale,
-            width: (card_rect.width - 8.0 * scale).max(0.0),
-            height: 28.0 * scale,
+            y: icon_rect.bottom() + 4.0 * scale,
+            width: label_w,
+            height: label_h,
         };
-        self.draw_text(item.name.as_ref(), label_rect, text)?;
+        // P3.1 — Tauri `.item-card__name { font-size: var(--font-size-md) }`
+        // = 14px / weight 400 / single line (was the default 16px `draw_text`).
+        // #1 step 13 (2026-06-02) — the label is horizontally CENTERED (Tauri
+        // `.item-card` column / align-items:center) so the run sits directly
+        // under the centred icon; vertical stays NEAR so it remains tight under
+        // the icon at `icon.bottom()+4` (the column-flow gap), NOT floated to
+        // the card's vertical middle.
+        self.draw_item_label_no_wrap(item.name.as_ref(), label_rect, text)?;
         Ok(())
     }
 
@@ -2729,7 +3024,12 @@ impl Renderer {
         &mut self,
         icon_hash: &str,
         rect: bento_nano_style::Rect,
+        opacity: f32,
     ) -> Result<bool, RenderError> {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return Ok(true);
+        }
         if icon_hash.is_empty() || self.icon_bitmap_failures.contains(icon_hash) {
             return Ok(false);
         }
@@ -2774,7 +3074,7 @@ impl Renderer {
         let Some(surface) = self.surface.as_ref() else {
             return Ok(false);
         };
-        d2d::draw_bitmap(&surface.ctx, &bitmap, d2d_rect, 1.0)?;
+        d2d::draw_bitmap(&surface.ctx, &bitmap, d2d_rect, opacity)?;
         Ok(true)
     }
 
@@ -2869,42 +3169,41 @@ impl Renderer {
     ///   3. Title + real settings rows + close button.
     fn draw_settings_panel(&mut self, app: &AppState) -> Result<(), RenderError> {
         use crate::settings_panel::{
-            SETTINGS_PANEL_RADIUS, SETTINGS_PANEL_SHADOW_ALPHA, SETTINGS_PERF_ROW_COUNT,
-            SETTINGS_RADIO_INNER_D, SETTINGS_RADIO_OUTER_D, SETTINGS_ROW_PAD_X,
-            SETTINGS_SLIDER_THUMB_D, SETTINGS_SOURCE_ROW_VISIBLE_MAX, SETTINGS_TOP_TOGGLE_COUNT,
-            SETTINGS_ZONE_DISPLAY_MODE_COUNT, settings_body_rect,
-            settings_cancel_button_rect, settings_close_button_rect_m1,
-            settings_crash_max_retries_row_rect, settings_crash_restart_row_rect,
-            settings_crash_window_row_rect, settings_desktop_path_input_rect,
-            settings_desktop_path_label_rect, settings_footer_rect, settings_header_rect,
-            settings_hibernate_slider_rect, settings_hibernate_slider_row_rect,
-            settings_language_chevron_rect, settings_language_chip_label_rect,
-            settings_language_chip_rect, settings_language_row_rect,
-            settings_performance_label_rect, settings_performance_slider_rect,
-            settings_performance_slider_row_rect, settings_panel_rect_m1, settings_safe_start_row_rect,
-            settings_save_button_rect, settings_source_row_rect,
+            SETTINGS_BACKUP_ROW_VISIBLE_MAX, SETTINGS_PANEL_RADIUS, SETTINGS_PANEL_SHADOW_ALPHA,
+            SETTINGS_PERF_ROW_COUNT, SETTINGS_RADIO_INNER_D, SETTINGS_RADIO_OUTER_D,
+            SETTINGS_ROW_PAD_X, SETTINGS_SLIDER_THUMB_D, SETTINGS_SOURCE_ROW_VISIBLE_MAX,
+            SETTINGS_TOP_TOGGLE_COUNT, SETTINGS_ZONE_DISPLAY_MODE_COUNT, SettingsBodyFlags,
+            UpdaterHeightKind, settings_backup_actions_row_rect,
+            settings_backup_create_button_rect, settings_backup_description_rect,
+            settings_backup_entry_row_rect, settings_backup_label_rect,
+            settings_backup_refresh_button_rect, settings_backup_restore_button_rect,
+            settings_backup_status_rect, settings_body_rect, settings_cancel_button_rect,
+            settings_close_button_rect_m1, settings_crash_max_retries_row_rect,
+            settings_crash_restart_row_rect, settings_crash_window_row_rect,
+            settings_desktop_path_input_rect, settings_desktop_path_label_rect,
+            settings_footer_rect, settings_header_rect, settings_hibernate_slider_rect,
+            settings_hibernate_slider_row_rect, settings_language_chevron_rect,
+            settings_language_chip_label_rect, settings_language_chip_rect,
+            settings_language_row_rect, settings_panel_rect_m1, settings_performance_label_rect,
+            settings_performance_slider_rect, settings_performance_slider_row_rect,
+            settings_safe_start_row_rect, settings_save_button_rect, settings_source_row_rect,
             settings_sources_label_rect, settings_sources_refresh_button_rect,
-            settings_sources_reserve_delta,
-            settings_startup_high_priority_row_rect,
+            settings_sources_reserve_delta, settings_startup_high_priority_row_rect,
             settings_startup_label_rect, settings_startup_toggle_hit_rect,
             settings_stealth_buttons_row_rect, settings_stealth_error_block_rect,
             settings_stealth_label_rect, settings_stealth_mirror_row_rect,
             settings_stealth_onedrive_block_rect, settings_stealth_pill_rect,
             settings_stealth_reapply_button_rect, settings_stealth_refresh_button_rect,
             settings_stealth_retry_row_rect, settings_stealth_schema_row_rect,
-            settings_stealth_status_row_rect, settings_stepper_minus_rect, settings_stepper_plus_rect,
-            settings_stepper_value_rect, settings_top_toggle_hit_rect, settings_top_toggle_row_rect,
-            settings_updater_auto_download_hit_rect, settings_updater_auto_download_row_rect,
-            settings_updater_button_rect, settings_updater_buttons_row_rect,
-            settings_updater_frequency_chip_rect, settings_updater_frequency_row_rect,
-            settings_updater_label_rect, settings_updater_middle_block_rect,
-            settings_updater_pill_rect, settings_updater_progress_track_rect,
-            settings_updater_status_row_rect, settings_watch_label_rect, settings_watch_textarea_rect,
-            settings_backup_actions_row_rect, settings_backup_create_button_rect,
-            settings_backup_description_rect, settings_backup_entry_row_rect,
-            settings_backup_label_rect, settings_backup_refresh_button_rect,
-            settings_backup_restore_button_rect, settings_backup_status_rect,
-            SETTINGS_BACKUP_ROW_VISIBLE_MAX, SettingsBodyFlags, UpdaterHeightKind,
+            settings_stealth_status_row_rect, settings_stepper_minus_rect,
+            settings_stepper_plus_rect, settings_stepper_value_rect, settings_top_toggle_hit_rect,
+            settings_top_toggle_row_rect, settings_updater_auto_download_hit_rect,
+            settings_updater_auto_download_row_rect, settings_updater_button_rect,
+            settings_updater_buttons_row_rect, settings_updater_frequency_chip_rect,
+            settings_updater_frequency_row_rect, settings_updater_label_rect,
+            settings_updater_middle_block_rect, settings_updater_pill_rect,
+            settings_updater_progress_track_rect, settings_updater_status_row_rect,
+            settings_watch_label_rect, settings_watch_textarea_rect,
             settings_zone_display_mode_picker_row_rect,
             settings_zone_display_mode_radio_inner_rect,
             settings_zone_display_mode_radio_label_rect,
@@ -3064,660 +3363,506 @@ impl Renderer {
         let body = settings_body_rect(viewport);
         self.push_clip(body)?;
         let body_paint = (|| -> Result<(), RenderError> {
-        let scroll = app.scroll_offset_y.get();
+            let scroll = app.scroll_offset_y.get();
 
-        // Helper: skip if row falls fully outside the body band.
-        let row_visible = |row: Rect, body: Rect| -> bool {
-            row.bottom() > body.y && row.y < body.bottom()
-        };
+            // Helper: skip if row falls fully outside the body band.
+            let row_visible =
+                |row: Rect, body: Rect| -> bool { row.bottom() > body.y && row.y < body.bottom() };
 
-        // Toggle row labels by index (0..=4). M1a 2026-05-29: row 4 text was
-        // retargeted to Tauri "智能自动分组" (still id 116, const name
-        // unchanged); row 5 swapped from the bespoke speed-mode id 117 to the
-        // new Tauri "便携模式" id 141 (`SETTING_PORTABLE_MODE`).
-        let toggle_labels: [u16; 5] = [
-            bento_nano_style::i18n_zh_cn::ids::SETTING_DESKTOP_EMBED.0,
-            bento_nano_style::i18n_zh_cn::ids::SETTING_AUTOSTART.0,
-            bento_nano_style::i18n_zh_cn::ids::SETTING_SHOW_IN_TASKBAR.0,
-            bento_nano_style::i18n_zh_cn::ids::SETTING_SMART_LAYOUT.0,
-            bento_nano_style::i18n_zh_cn::ids::SETTING_PORTABLE_MODE.0,
-        ];
+            // Toggle row labels by index (0..=4). M1a 2026-05-29: row 4 text was
+            // retargeted to Tauri "智能自动分组" (still id 116, const name
+            // unchanged); row 5 swapped from the bespoke speed-mode id 117 to the
+            // new Tauri "便携模式" id 141 (`SETTING_PORTABLE_MODE`).
+            let toggle_labels: [u16; 5] = [
+                bento_nano_style::i18n_zh_cn::ids::SETTING_DESKTOP_EMBED.0,
+                bento_nano_style::i18n_zh_cn::ids::SETTING_AUTOSTART.0,
+                bento_nano_style::i18n_zh_cn::ids::SETTING_SHOW_IN_TASKBAR.0,
+                bento_nano_style::i18n_zh_cn::ids::SETTING_SMART_LAYOUT.0,
+                bento_nano_style::i18n_zh_cn::ids::SETTING_PORTABLE_MODE.0,
+            ];
 
-        for index in 0..SETTINGS_TOP_TOGGLE_COUNT {
-            let row = settings_top_toggle_row_rect(viewport, scroll, index);
-            if !row_visible(row, body) {
-                continue;
+            for index in 0..SETTINGS_TOP_TOGGLE_COUNT {
+                let row = settings_top_toggle_row_rect(viewport, scroll, index);
+                if !row_visible(row, body) {
+                    continue;
+                }
+                // Row label.
+                let label_rect = bento_nano_style::Rect {
+                    x: row.x,
+                    y: row.y + (row.height - 16.0) * 0.5,
+                    width: row.width * 0.6,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::StringId(toggle_labels[index as usize])),
+                    label_rect,
+                    label_color,
+                )?;
+                // Toggle.
+                let hit = settings_top_toggle_hit_rect(viewport, scroll, index);
+                let on = match index {
+                    0 => app.setting_desktop_embed.get(),
+                    1 => app.setting_autostart.get(),
+                    2 => app.setting_show_in_taskbar.get(),
+                    3 => app.setting_smart_layout.get(),
+                    4 => app.setting_portable_mode.get(),
+                    _ => false,
+                };
+                let switch = toggle_switch_in_rect(hit);
+                self.fill_rounded_rect(
+                    switch.track,
+                    if on { accent_on } else { track_off },
+                    BorderRadius::all(switch.track_radius()),
+                )?;
+                self.fill_rounded_rect(
+                    switch.knob(on),
+                    knob_color,
+                    BorderRadius::all(switch.knob_radius()),
+                )?;
             }
-            // Row label.
-            let label_rect = bento_nano_style::Rect {
-                x: row.x,
-                y: row.y + (row.height - 16.0) * 0.5,
-                width: row.width * 0.6,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::StringId(
-                    toggle_labels[index as usize],
-                )),
-                label_rect,
-                label_color,
-            )?;
-            // Toggle.
-            let hit = settings_top_toggle_hit_rect(viewport, scroll, index);
-            let on = match index {
-                0 => app.setting_desktop_embed.get(),
-                1 => app.setting_autostart.get(),
-                2 => app.setting_show_in_taskbar.get(),
-                3 => app.setting_smart_layout.get(),
-                4 => app.setting_portable_mode.get(),
-                _ => false,
-            };
-            let switch = toggle_switch_in_rect(hit);
-            self.fill_rounded_rect(
-                switch.track,
-                if on { accent_on } else { track_off },
-                BorderRadius::all(switch.track_radius()),
-            )?;
-            self.fill_rounded_rect(
-                switch.knob(on),
-                knob_color,
-                BorderRadius::all(switch.knob_radius()),
-            )?;
-        }
 
-        // Language row.
-        let locale_row = settings_language_row_rect(viewport, scroll);
-        if row_visible(locale_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: locale_row.x,
-                y: locale_row.y + (locale_row.height - 16.0) * 0.5,
-                width: locale_row.width * 0.45,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_LANGUAGE),
-                label_rect,
-                label_color,
-            )?;
-            let chip = settings_language_chip_rect(viewport, scroll);
-            self.fill_rounded_rect(chip, chip_bg, chip_radius)?;
-            let chip_hairline = bento_nano_style::Rect {
-                x: chip.x,
-                y: chip.y,
-                width: chip.width,
-                height: 1.0,
-            };
-            self.fill_rounded_rect(chip_hairline, chip_border, BorderRadius::ZERO)?;
-            let locale_label =
-                if bento_nano_style::current_locale_is(&bento_nano_style::EN_US) {
+            // Language row.
+            let locale_row = settings_language_row_rect(viewport, scroll);
+            if row_visible(locale_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: locale_row.x,
+                    y: locale_row.y + (locale_row.height - 16.0) * 0.5,
+                    width: locale_row.width * 0.45,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_LANGUAGE),
+                    label_rect,
+                    label_color,
+                )?;
+                let chip = settings_language_chip_rect(viewport, scroll);
+                self.fill_rounded_rect(chip, chip_bg, chip_radius)?;
+                let chip_hairline = bento_nano_style::Rect {
+                    x: chip.x,
+                    y: chip.y,
+                    width: chip.width,
+                    height: 1.0,
+                };
+                self.fill_rounded_rect(chip_hairline, chip_border, BorderRadius::ZERO)?;
+                let locale_label = if bento_nano_style::current_locale_is(&bento_nano_style::EN_US)
+                {
                     bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::LOCALE_LABEL_EN_US)
                 } else {
                     bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::LOCALE_LABEL_ZH_CN)
                 };
-            self.draw_text_no_wrap(
-                locale_label,
-                settings_language_chip_label_rect(viewport, scroll),
-                title_color,
-            )?;
-            self.draw_text_no_wrap(
-                "▾",
-                settings_language_chevron_rect(viewport, scroll),
-                label_color,
-            )?;
-        }
-
-        // §4 DisplayMode group (G3 parity 2026-06-01) — promoted out of the
-        // General band into its own `settings-group` between §3 Appearance and
-        // §5 Performance. Because §4 roots at the FIXED source-reserve baseline
-        // (it anchors off §3 Appearance, like Performance §5), it must paint with
-        // the reserve-FOLDED `scroll` — so the paint block lives AFTER the fold,
-        // adjacent to the §3 Appearance block near the end of this closure (paint
-        // ==hit SSoT; see the `§4 DisplayMode` block below the Appearance grid).
-
-        // ── Round-2 M2 sections ──────────────────────────────────────────
-
-        // 桌面源 label (M1i fidelity — Tauri `.settings-row__label` ABOVE the
-        // `.desktop-source-list`; refresh button is now the list's LAST child,
-        // painted after the cards below, `SettingsPanel.tsx:317-361`).
-        let source_count = app.desktop_sources.borrow().len();
-        let sources_label = settings_sources_label_rect(viewport, scroll);
-        if row_visible(sources_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_SOURCES),
-                sources_label,
-                label_color,
-            )?;
-        }
-
-        // M1i fidelity — `.desktop-source-card` geometry/typography translated
-        // 1:1 from `SettingsPanel.css:665-770`:
-        //   card  : radius 8, bg white@4%, border 1px solid border_zen,
-        //           padding 8/10, icon→body gap 10, inter-card gap 6
-        //   icon  : 28×28 CIRCLE, white initial, font 12 semibold, per-kind bg
-        //           @0.75 (User=blue Public=green OneDrive=sky Custom=purple)
-        //   body  : label 13 medium text_primary, path 11 MONOSPACE text_muted
-        //           with ellipsis trim, internal gap 2
-        //   badge : green@0.18 bg, accent_green text, 9px semibold UPPERCASE,
-        //           padding 2/8, radius 10, AUTO width right-aligned, centred
-        // The list snapshot is owned by AppState and refreshed on open /
-        // RefreshDesktopSources, never built per-frame (architecture §10).
-        const CARD_PAD_X: f32 = 10.0;
-        const ICON_SIZE: f32 = 28.0;
-        const ICON_BODY_GAP: f32 = 10.0;
-        const BODY_GAP: f32 = 2.0;
-        const LABEL_LINE_H: f32 = 16.0;
-        const PATH_LINE_H: f32 = 14.0;
-        let card_radius = bento_nano_style::BorderRadius::all(8.0);
-        let card_bg = bento_nano_style::Color::from_u8(0xFF, 0xFF, 0xFF, 0x0A); // white @ ~4%
-        let card_border = palette.border_zen;
-        let sources = app.desktop_sources.borrow();
-        let visible_sources = sources.len().min(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
-        for index in 0..visible_sources {
-            let row = settings_source_row_rect(viewport, scroll, index as u8);
-            if !row_visible(row, body) {
-                continue;
-            }
-            let (kind, path_text, watched) = &sources[index];
-            // Card surface + 1px hairline border (Tauri `border: 1px solid
-            // var(--border-zen)` — the nano card previously had NO stroke).
-            self.fill_rounded_rect(row, card_bg, card_radius)?;
-            self.stroke_rounded_rect(row, card_border, card_radius, 1.0)?;
-            // 28×28 CIRCLE with the kind initial (was a 24×24 rounded square).
-            // A square fill_rounded_rect with radius = half-side is a true
-            // circle. Per-kind LITERAL rgba @0.75 (palette.accent_purple is
-            // 139,92,246 — NOT the 168,85,247 Tauri purple — so Custom uses a
-            // literal; OneDrive's sky 14,165,233 has no palette token either).
-            let icon_rect = bento_nano_style::Rect {
-                x: row.x + CARD_PAD_X,
-                y: row.y + (row.height - ICON_SIZE) * 0.5,
-                width: ICON_SIZE,
-                height: ICON_SIZE,
-            };
-            let (icon_bg, icon_glyph, kind_label_id) = match kind {
-                bento_nano_backend::desktop_sources::DesktopSourceKind::User => (
-                    bento_nano_style::Color::from_u8(59, 130, 246, 191), // 0.75
-                    "U",
-                    bento_nano_style::i18n_zh_cn::ids::SOURCE_PRIMARY_LABEL,
-                ),
-                bento_nano_backend::desktop_sources::DesktopSourceKind::Public => (
-                    bento_nano_style::Color::from_u8(34, 197, 94, 191),
-                    "P",
-                    bento_nano_style::i18n_zh_cn::ids::SOURCE_PUBLIC_LABEL,
-                ),
-                bento_nano_backend::desktop_sources::DesktopSourceKind::OneDrive => (
-                    bento_nano_style::Color::from_u8(14, 165, 233, 191), // sky (fixed)
-                    "O",
-                    bento_nano_style::i18n_zh_cn::ids::SOURCE_ONEDRIVE_LABEL,
-                ),
-                bento_nano_backend::desktop_sources::DesktopSourceKind::Custom => (
-                    bento_nano_style::Color::from_u8(168, 85, 247, 191), // purple (fixed)
-                    "C",
-                    bento_nano_style::i18n_zh_cn::ids::SOURCE_CUSTOM_LABEL,
-                ),
-            };
-            self.fill_rounded_rect(
-                icon_rect,
-                icon_bg,
-                bento_nano_style::BorderRadius::all(ICON_SIZE * 0.5),
-            )?;
-            self.draw_text_centered(
-                icon_glyph,
-                icon_rect,
-                bento_nano_style::Color::WHITE,
-                12.0,
-                600,
-            )?;
-            // Body column (flex:1, gap 2): label line on top, path line below,
-            // the pair vertically centred against the icon.
-            let body_x = icon_rect.right() + ICON_BODY_GAP;
-            // Reserve room on the right for the badge so the path never runs
-            // under it (Tauri's flex `min-width:0` body shrinks for the badge).
-            let badge_reserve: f32 = if *watched { 76.0 } else { 0.0 };
-            let body_w = (row.right() - CARD_PAD_X - badge_reserve - body_x).max(1.0);
-            let block_h = LABEL_LINE_H + BODY_GAP + PATH_LINE_H;
-            let body_top = row.y + (row.height - block_h) * 0.5;
-            let label_rect = bento_nano_style::Rect {
-                x: body_x,
-                y: body_top,
-                width: body_w,
-                height: LABEL_LINE_H,
-            };
-            self.draw_text_with_style(
-                bento_nano_style::t(kind_label_id),
-                label_rect,
-                title_color,
-                13.0,
-                500,
-                1.0,
-            )?;
-            // Path line — REAL resolved path, MONOSPACE, ellipsis-trimmed.
-            let path_rect = bento_nano_style::Rect {
-                x: body_x,
-                y: body_top + LABEL_LINE_H + BODY_GAP,
-                width: body_w,
-                height: PATH_LINE_H,
-            };
-            self.draw_text_monospace_ellipsis(
-                path_text.as_str(),
-                path_rect,
-                palette.text_muted,
-                11.0,
-            )?;
-            // Watched badge — translucent green tint, accent_green text, auto
-            // width right-aligned, vertically centred (was a solid-green fill
-            // with WHITE text in a fixed 56×22 rect).
-            if *watched {
-                let badge_text = bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SOURCE_WATCHED_BADGE,
-                );
-                let badge_upper = badge_text.to_uppercase();
-                // Auto width: shrink-to-fit the text + 8px padding each side.
-                // CJK glyphs ≈ font_size wide, Latin ≈ font_size*0.62, plus the
-                // 0.8px letter-spacing Tauri applies per glyph.
-                const BADGE_FONT: f32 = 9.0;
-                const BADGE_PAD_X: f32 = 8.0;
-                const BADGE_LETTER_SPACING: f32 = 0.8;
-                let glyph_count = badge_upper.chars().count() as f32;
-                let text_w: f32 = badge_upper
-                    .chars()
-                    .map(|c| {
-                        if (c as u32) > 0x2E80 {
-                            BADGE_FONT
-                        } else {
-                            BADGE_FONT * 0.62
-                        }
-                    })
-                    .sum::<f32>()
-                    + BADGE_LETTER_SPACING * glyph_count;
-                let badge_w = text_w + BADGE_PAD_X * 2.0;
-                let badge_h: f32 = 16.0; // 2px pad + ~12 line box
-                let badge_rect = bento_nano_style::Rect {
-                    x: row.right() - CARD_PAD_X - badge_w,
-                    y: row.y + (row.height - badge_h) * 0.5,
-                    width: badge_w,
-                    height: badge_h,
-                };
-                let badge_bg = with_alpha(palette.accent_green, 0.18);
-                self.fill_rounded_rect(
-                    badge_rect,
-                    badge_bg,
-                    bento_nano_style::BorderRadius::all(10.0),
+                self.draw_text_no_wrap(
+                    locale_label,
+                    settings_language_chip_label_rect(viewport, scroll),
+                    title_color,
                 )?;
-                self.draw_text_centered(
-                    badge_upper.as_str(),
-                    badge_rect,
-                    palette.accent_green,
-                    BADGE_FONT,
-                    600,
-                )?;
-            }
-        }
-        drop(sources);
-
-        // M1i fidelity — empty `.desktop-source-empty` placeholder (italic,
-        // 11px, text_muted) when no desktop sources resolve. nano's refresh is
-        // synchronous (no async loading frame), so Tauri's "…" loading glyph is
-        // N/A by construction — there is never a loading state to paint.
-        if visible_sources == 0 {
-            let label = settings_sources_label_rect(viewport, scroll);
-            let empty_rect = bento_nano_style::Rect {
-                x: label.x + 4.0,
-                y: label.bottom() + 6.0,
-                width: (label.width - 8.0).max(1.0),
-                height: 12.0,
-            };
-            if row_visible(empty_rect, body) {
-                // No italic system face is loaded; the muted tone + xs size
-                // reads as the de-emphasised placeholder Tauri renders italic.
-                self.draw_text_with_style(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::SOURCE_EMPTY_PLACEHOLDER,
-                    ),
-                    empty_rect,
-                    palette.text_muted,
-                    11.0,
-                    400,
-                    1.0,
-                )?;
-            }
-        }
-
-        // M1i fidelity — refresh (`↻`) button: LAST child of the list,
-        // right-anchored BELOW the cards / placeholder (`align-self:flex-end`).
-        // Secondary-button style: chip_bg fill, radius, centred 14px glyph.
-        let refresh_btn = settings_sources_refresh_button_rect(viewport, scroll, source_count);
-        if row_visible(refresh_btn, body) {
-            self.fill_rounded_rect(
-                refresh_btn,
-                chip_bg,
-                bento_nano_style::BorderRadius::all(6.0),
-            )?;
-            self.stroke_rounded_rect(
-                refresh_btn,
-                chip_border,
-                bento_nano_style::BorderRadius::all(6.0),
-                1.0,
-            )?;
-            // U+21BB CLOCKWISE OPEN CIRCLE ARROW — the refresh glyph, centred.
-            self.draw_text_centered("\u{21BB}", refresh_btn, title_color, 14.0, 400)?;
-        }
-
-        // 桌面路径 label + input (reflows below the live source stack).
-        let path_label = settings_desktop_path_label_rect(viewport, scroll, source_count);
-        if row_visible(path_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_PATH),
-                path_label,
-                label_color,
-            )?;
-        }
-        // Input/textarea boxes keep the radius-10 surface the M2 layout shipped.
-        let input_box_radius = bento_nano_style::BorderRadius::all(10.0);
-        let path_input = settings_desktop_path_input_rect(viewport, scroll, source_count);
-        if row_visible(path_input, body) {
-            self.fill_rounded_rect(path_input, chip_bg, input_box_radius)?;
-            let path_text = app.desktop_path_draft.borrow();
-            let text_rect = bento_nano_style::Rect {
-                x: path_input.x + 12.0,
-                y: path_input.y + (path_input.height - 16.0) * 0.5,
-                width: (path_input.width - 24.0).max(0.0),
-                height: 16.0,
-            };
-            self.draw_text_no_wrap(path_text.as_str(), text_rect, title_color)?;
-            drop(path_text);
-        }
-
-        // 监控值 label + textarea (reflows below the live source stack).
-        let watch_label = settings_watch_label_rect(viewport, scroll, source_count);
-        if row_visible(watch_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_WATCH_VALUES),
-                watch_label,
-                label_color,
-            )?;
-        }
-        let watch_area = settings_watch_textarea_rect(viewport, scroll, source_count);
-        if row_visible(watch_area, body) {
-            self.fill_rounded_rect(watch_area, chip_bg, input_box_radius)?;
-            let watch_text = app.watch_paths_draft.borrow();
-            if watch_text.is_empty() {
-                // Hint placeholder.
-                let hint_rect = bento_nano_style::Rect {
-                    x: watch_area.x + 12.0,
-                    y: watch_area.y + 10.0,
-                    width: (watch_area.width - 24.0).max(0.0),
-                    height: 16.0,
-                };
-                self.draw_text(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::WATCH_HINT_LINE_EACH,
-                    ),
-                    hint_rect,
+                self.draw_text_no_wrap(
+                    "▾",
+                    settings_language_chevron_rect(viewport, scroll),
                     label_color,
                 )?;
-            } else {
-                let text_rect = bento_nano_style::Rect {
-                    x: watch_area.x + 12.0,
-                    y: watch_area.y + 10.0,
-                    width: (watch_area.width - 24.0).max(0.0),
-                    height: (watch_area.height - 20.0).max(0.0),
-                };
-                self.draw_text(watch_text.as_str(), text_rect, title_color)?;
             }
-            drop(watch_text);
-        }
 
-        // ── M1d sections — Performance §5 + Startup management §6 ────────
-        //
-        // Replaces the deleted bespoke 高级 / 未来集成验证 blocks with the two
-        // genuine Tauri sections (`SettingsPanel.tsx:601-698`). Performance =
-        // 3 SliderRows (no conditionals). Startup = 2 toggles + 2 conditional
-        // steppers (crash_restart) + 1 toggle + 1 conditional slider
-        // (hibernation). The hit-tester in `bento-nano-shell::ui::settings_hit`
-        // + the dispatch arms in `main.rs` route every control fully through
-        // paint→hit→dispatch→persist→snapshot.
-        let num_btn_radius = bento_nano_style::BorderRadius::all(6.0);
-        let slider_track_radius = bento_nano_style::BorderRadius::all(2.0);
-        let slider_thumb_radius = bento_nano_style::BorderRadius::all(SETTINGS_SLIDER_THUMB_D * 0.5);
+            // §4 DisplayMode group (G3 parity 2026-06-01) — promoted out of the
+            // General band into its own `settings-group` between §3 Appearance and
+            // §5 Performance. Because §4 roots at the FIXED source-reserve baseline
+            // (it anchors off §3 Appearance, like Performance §5), it must paint with
+            // the reserve-FOLDED `scroll` — so the paint block lives AFTER the fold,
+            // adjacent to the §3 Appearance block near the end of this closure (paint
+            // ==hit SSoT; see the `§4 DisplayMode` block below the Appearance grid).
 
-        // Read the two gating bools once so paint matches geometry exactly.
-        let crash_restart_on = app.crash_restart_enabled.get();
-        let safe_start_on = app.safe_start_after_hibernation.get();
+            // ── Round-2 M2 sections ──────────────────────────────────────────
 
-        // M1i fidelity — single-base-offset reflow. The Performance §5 group and
-        // EVERY section below it (Startup/Stealth/Updater/Backup/Plugins) root
-        // at `settings_perf_origin_y_offset`, which is pinned at the fixed
-        // 4-card source reserve. Folding the live reserve delta into `scroll`
-        // shifts the whole lower body UP by the height of the missing source
-        // cards (Tauri's flex column) — shadowing `scroll` here propagates the
-        // shift to all perf-and-below geometry fns without touching their
-        // signatures. The hit-tester applies the identical fold (`ui.rs`).
-        let scroll = scroll + settings_sources_reserve_delta(source_count);
-
-        // Performance group title.
-        let perf_label = settings_performance_label_rect(viewport, scroll);
-        if row_visible(perf_label, body) {
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_PERFORMANCE,
-                ),
-                perf_label,
-                label_color,
-            )?;
-        }
-
-        // Performance SliderRows. Each: label + tabular "{v}{unit}" on the top
-        // line, full-width track band + filled segment + thumb on the lower
-        // line (matches Tauri `.slider-row`, `SettingsPanel.tsx:848-871`).
-        let perf_rows: [(u16, i32, i32, &'static str); 3] = [
-            (
-                bento_nano_style::i18n_zh_cn::ids::SETTING_EXPAND_DELAY.0,
-                crate::state::EXPAND_DELAY_MIN_MS,
-                crate::state::EXPAND_DELAY_MAX_MS,
-                "ms",
-            ),
-            (
-                bento_nano_style::i18n_zh_cn::ids::SETTING_COLLAPSE_DELAY.0,
-                crate::state::COLLAPSE_DELAY_MIN_MS,
-                crate::state::COLLAPSE_DELAY_MAX_MS,
-                "ms",
-            ),
-            (
-                bento_nano_style::i18n_zh_cn::ids::SETTING_ICON_CACHE_SIZE.0,
-                crate::state::ICON_CACHE_MIN,
-                crate::state::ICON_CACHE_MAX,
-                "",
-            ),
-        ];
-        for index in 0..SETTINGS_PERF_ROW_COUNT {
-            let row = settings_performance_slider_row_rect(viewport, scroll, index);
-            if !row_visible(row, body) {
-                continue;
+            // 桌面源 label (M1i fidelity — Tauri `.settings-row__label` ABOVE the
+            // `.desktop-source-list`; refresh button is now the list's LAST child,
+            // painted after the cards below, `SettingsPanel.tsx:317-361`).
+            let source_count = app.desktop_sources.borrow().len();
+            let sources_label = settings_sources_label_rect(viewport, scroll);
+            if row_visible(sources_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_SOURCES),
+                    sources_label,
+                    label_color,
+                )?;
             }
-            let (label_id, min, max, unit) = perf_rows[index as usize];
-            let raw = match index {
-                0 => app.expand_delay_ms.get(),
-                1 => app.collapse_delay_ms.get(),
-                _ => app.icon_cache_size.get(),
-            };
-            let value = raw.clamp(min, max);
-            // Top line: label (left) + value (right, tabular).
-            let label_rect = bento_nano_style::Rect {
-                x: row.x,
-                y: row.y + 4.0,
-                width: row.width * 0.6,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::StringId(label_id)),
-                label_rect,
-                label_color,
-            )?;
-            let value_text = if unit.is_empty() {
-                smol_str::SmolStr::new(value.to_string())
-            } else {
-                smol_str::SmolStr::new(format!("{value}{unit}"))
-            };
-            let value_rect = bento_nano_style::Rect {
-                x: row.x + row.width * 0.6,
-                y: row.y + 4.0,
-                width: row.width * 0.4,
-                height: 16.0,
-            };
-            self.draw_text_no_wrap(value_text.as_str(), value_rect, title_color)?;
-            // Lower line: slider track + filled segment + thumb.
-            let track = settings_performance_slider_rect(viewport, scroll, index);
-            let track_band = bento_nano_style::Rect {
-                x: track.x,
-                y: track.y + (track.height - 4.0) * 0.5,
-                width: track.width,
-                height: 4.0,
-            };
-            self.fill_rounded_rect(track_band, track_off, slider_track_radius)?;
-            let span = (max - min).max(1) as f32;
-            let frac = ((value - min) as f32 / span).clamp(0.0, 1.0);
-            let filled = bento_nano_style::Rect {
-                x: track_band.x,
-                y: track_band.y,
-                width: track_band.width * frac,
-                height: track_band.height,
-            };
-            self.fill_rounded_rect(filled, accent_on, slider_track_radius)?;
-            let thumb_d = track.height;
-            let thumb = bento_nano_style::Rect {
-                x: track.x + track.width * frac - thumb_d * 0.5,
-                y: track.y,
-                width: thumb_d,
-                height: thumb_d,
-            };
-            self.fill_rounded_rect(thumb, knob_color, slider_thumb_radius)?;
-        }
 
-        // Startup management group title.
-        let startup_label = settings_startup_label_rect(viewport, scroll);
-        if row_visible(startup_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_STARTUP),
-                startup_label,
-                label_color,
-            )?;
-        }
-
-        // Reusable toggle-row paint: label (left) + desc caption + rocker.
-        // Returns the toggle hit-box so the caller can drop it (unused here).
-        // We inline rather than closure to keep `self` borrows simple.
-        // Row 0 — 高优先级启动 (always).
-        let high_row = settings_startup_high_priority_row_rect(viewport, scroll);
-        if row_visible(high_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: high_row.x,
-                y: high_row.y + (high_row.height - 16.0) * 0.5,
-                width: high_row.width * 0.6,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_STARTUP_HIGH_PRIORITY,
-                ),
-                label_rect,
-                label_color,
-            )?;
-            let on = app.startup_high_priority.get();
-            let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(high_row));
-            self.fill_rounded_rect(
-                switch.track,
-                if on { accent_on } else { track_off },
-                BorderRadius::all(switch.track_radius()),
-            )?;
-            self.fill_rounded_rect(
-                switch.knob(on),
-                knob_color,
-                BorderRadius::all(switch.knob_radius()),
-            )?;
-        }
-        // Row 0 desc caption.
-        let high_desc = bento_nano_style::Rect {
-            x: high_row.x,
-            y: high_row.bottom() + 1.0,
-            width: high_row.width,
-            height: 14.0,
-        };
-        if row_visible(high_desc, body) {
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_STARTUP_HIGH_PRIORITY_DESC,
-                ),
-                high_desc,
-                with_alpha(label_color, 0.7),
-            )?;
-        }
-
-        // Row 1 — 崩溃自动重启 (always, gates the steppers).
-        let crash_row = settings_crash_restart_row_rect(viewport, scroll);
-        if row_visible(crash_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: crash_row.x,
-                y: crash_row.y + (crash_row.height - 16.0) * 0.5,
-                width: crash_row.width * 0.6,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_RESTART),
-                label_rect,
-                label_color,
-            )?;
-            let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(crash_row));
-            self.fill_rounded_rect(
-                switch.track,
-                if crash_restart_on { accent_on } else { track_off },
-                BorderRadius::all(switch.track_radius()),
-            )?;
-            self.fill_rounded_rect(
-                switch.knob(crash_restart_on),
-                knob_color,
-                BorderRadius::all(switch.knob_radius()),
-            )?;
-        }
-        let crash_desc = bento_nano_style::Rect {
-            x: crash_row.x,
-            y: crash_row.bottom() + 1.0,
-            width: crash_row.width,
-            height: 14.0,
-        };
-        if row_visible(crash_desc, body) {
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_RESTART_DESC,
-                ),
-                crash_desc,
-                with_alpha(label_color, 0.7),
-            )?;
-        }
-
-        // Rows 2/3 — crash steppers, ONLY when crash_restart_on. Each: label
-        // (left) + a "− value +" stepper (right). The − / + glyphs are drawn
-        // so the stepper reads as interactive (Tauri uses a native number
-        // input; nano keeps the stepper chrome).
-        if crash_restart_on {
-            let stepper_rows: [(u16, Rect, i32); 2] = [
-                (
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_MAX_RETRIES.0,
-                    settings_crash_max_retries_row_rect(viewport, scroll),
-                    app.crash_max_retries.get(),
-                ),
-                (
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_WINDOW_SECS.0,
-                    settings_crash_window_row_rect(viewport, scroll),
-                    app.crash_window_secs.get(),
-                ),
-            ];
-            for (label_id, row, value) in stepper_rows {
+            // M1i fidelity — `.desktop-source-card` geometry/typography translated
+            // 1:1 from `SettingsPanel.css:665-770`:
+            //   card  : radius 8, bg white@4%, border 1px solid border_zen,
+            //           padding 8/10, icon→body gap 10, inter-card gap 6
+            //   icon  : 28×28 CIRCLE, white initial, font 12 semibold, per-kind bg
+            //           @0.75 (User=blue Public=green OneDrive=sky Custom=purple)
+            //   body  : label 13 medium text_primary, path 11 MONOSPACE text_muted
+            //           with ellipsis trim, internal gap 2
+            //   badge : green@0.18 bg, accent_green text, 9px semibold UPPERCASE,
+            //           padding 2/8, radius 10, AUTO width right-aligned, centred
+            // The list snapshot is owned by AppState and refreshed on open /
+            // RefreshDesktopSources, never built per-frame (architecture §10).
+            const CARD_PAD_X: f32 = 10.0;
+            const ICON_SIZE: f32 = 28.0;
+            const ICON_BODY_GAP: f32 = 10.0;
+            const BODY_GAP: f32 = 2.0;
+            const LABEL_LINE_H: f32 = 16.0;
+            const PATH_LINE_H: f32 = 14.0;
+            let card_radius = bento_nano_style::BorderRadius::all(8.0);
+            let card_bg = bento_nano_style::Color::from_u8(0xFF, 0xFF, 0xFF, 0x0A); // white @ ~4%
+            let card_border = palette.border_zen;
+            let sources = app.desktop_sources.borrow();
+            let visible_sources = sources.len().min(SETTINGS_SOURCE_ROW_VISIBLE_MAX as usize);
+            for index in 0..visible_sources {
+                let row = settings_source_row_rect(viewport, scroll, index as u8);
                 if !row_visible(row, body) {
                     continue;
                 }
+                let (kind, path_text, watched) = &sources[index];
+                // Card surface + 1px hairline border (Tauri `border: 1px solid
+                // var(--border-zen)` — the nano card previously had NO stroke).
+                self.fill_rounded_rect(row, card_bg, card_radius)?;
+                self.stroke_rounded_rect(row, card_border, card_radius, 1.0)?;
+                // 28×28 CIRCLE with the kind initial (was a 24×24 rounded square).
+                // A square fill_rounded_rect with radius = half-side is a true
+                // circle. Per-kind LITERAL rgba @0.75 (palette.accent_purple is
+                // 139,92,246 — NOT the 168,85,247 Tauri purple — so Custom uses a
+                // literal; OneDrive's sky 14,165,233 has no palette token either).
+                let icon_rect = bento_nano_style::Rect {
+                    x: row.x + CARD_PAD_X,
+                    y: row.y + (row.height - ICON_SIZE) * 0.5,
+                    width: ICON_SIZE,
+                    height: ICON_SIZE,
+                };
+                let (icon_bg, icon_glyph, kind_label_id) = match kind {
+                    bento_nano_backend::desktop_sources::DesktopSourceKind::User => (
+                        bento_nano_style::Color::from_u8(59, 130, 246, 191), // 0.75
+                        "U",
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_PRIMARY_LABEL,
+                    ),
+                    bento_nano_backend::desktop_sources::DesktopSourceKind::Public => (
+                        bento_nano_style::Color::from_u8(34, 197, 94, 191),
+                        "P",
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_PUBLIC_LABEL,
+                    ),
+                    bento_nano_backend::desktop_sources::DesktopSourceKind::OneDrive => (
+                        bento_nano_style::Color::from_u8(14, 165, 233, 191), // sky (fixed)
+                        "O",
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_ONEDRIVE_LABEL,
+                    ),
+                    bento_nano_backend::desktop_sources::DesktopSourceKind::Custom => (
+                        bento_nano_style::Color::from_u8(168, 85, 247, 191), // purple (fixed)
+                        "C",
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_CUSTOM_LABEL,
+                    ),
+                };
+                self.fill_rounded_rect(
+                    icon_rect,
+                    icon_bg,
+                    bento_nano_style::BorderRadius::all(ICON_SIZE * 0.5),
+                )?;
+                self.draw_text_no_wrap_with_style(
+                    icon_glyph,
+                    icon_rect,
+                    bento_nano_style::Color::WHITE,
+                    12.0,
+                    600,
+                    1.0,
+                    dwrite::TextAlign {
+                        h: dwrite::HAlign::Center,
+                        v: dwrite::VAlign::Center,
+                    },
+                )?;
+                // Body column (flex:1, gap 2): label line on top, path line below,
+                // the pair vertically centred against the icon.
+                let body_x = icon_rect.right() + ICON_BODY_GAP;
+                // Reserve room on the right for the badge so the path never runs
+                // under it (Tauri's flex `min-width:0` body shrinks for the badge).
+                let badge_reserve: f32 = if *watched { 76.0 } else { 0.0 };
+                let body_w = (row.right() - CARD_PAD_X - badge_reserve - body_x).max(1.0);
+                let block_h = LABEL_LINE_H + BODY_GAP + PATH_LINE_H;
+                let body_top = row.y + (row.height - block_h) * 0.5;
+                let label_rect = bento_nano_style::Rect {
+                    x: body_x,
+                    y: body_top,
+                    width: body_w,
+                    height: LABEL_LINE_H,
+                };
+                self.draw_text_with_style(
+                    bento_nano_style::t(kind_label_id),
+                    label_rect,
+                    title_color,
+                    13.0,
+                    500,
+                    1.0,
+                )?;
+                // Path line — REAL resolved path, MONOSPACE, ellipsis-trimmed.
+                let path_rect = bento_nano_style::Rect {
+                    x: body_x,
+                    y: body_top + LABEL_LINE_H + BODY_GAP,
+                    width: body_w,
+                    height: PATH_LINE_H,
+                };
+                self.draw_text_monospace_ellipsis(
+                    path_text.as_str(),
+                    path_rect,
+                    palette.text_muted,
+                    11.0,
+                )?;
+                // Watched badge — translucent green tint, accent_green text, auto
+                // width right-aligned, vertically centred (was a solid-green fill
+                // with WHITE text in a fixed 56×22 rect).
+                if *watched {
+                    let badge_text = bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SOURCE_WATCHED_BADGE,
+                    );
+                    let badge_upper = badge_text.to_uppercase();
+                    // Auto width: shrink-to-fit the text + 8px padding each side.
+                    // CJK glyphs ≈ font_size wide, Latin ≈ font_size*0.62, plus the
+                    // 0.8px letter-spacing Tauri applies per glyph.
+                    const BADGE_FONT: f32 = 9.0;
+                    const BADGE_PAD_X: f32 = 8.0;
+                    const BADGE_LETTER_SPACING: f32 = 0.8;
+                    let glyph_count = badge_upper.chars().count() as f32;
+                    let text_w: f32 = badge_upper
+                        .chars()
+                        .map(|c| {
+                            if (c as u32) > 0x2E80 {
+                                BADGE_FONT
+                            } else {
+                                BADGE_FONT * 0.62
+                            }
+                        })
+                        .sum::<f32>()
+                        + BADGE_LETTER_SPACING * glyph_count;
+                    let badge_w = text_w + BADGE_PAD_X * 2.0;
+                    let badge_h: f32 = 16.0; // 2px pad + ~12 line box
+                    let badge_rect = bento_nano_style::Rect {
+                        x: row.right() - CARD_PAD_X - badge_w,
+                        y: row.y + (row.height - badge_h) * 0.5,
+                        width: badge_w,
+                        height: badge_h,
+                    };
+                    let badge_bg = with_alpha(palette.accent_green, 0.18);
+                    self.fill_rounded_rect(
+                        badge_rect,
+                        badge_bg,
+                        bento_nano_style::BorderRadius::all(10.0),
+                    )?;
+                    self.draw_text_no_wrap_with_style(
+                        badge_upper.as_str(),
+                        badge_rect,
+                        palette.accent_green,
+                        BADGE_FONT,
+                        600,
+                        1.0,
+                        dwrite::TextAlign {
+                            h: dwrite::HAlign::Center,
+                            v: dwrite::VAlign::Center,
+                        },
+                    )?;
+                }
+            }
+            drop(sources);
+
+            // M1i fidelity — empty `.desktop-source-empty` placeholder (italic,
+            // 11px, text_muted) when no desktop sources resolve. nano's refresh is
+            // synchronous (no async loading frame), so Tauri's "…" loading glyph is
+            // N/A by construction — there is never a loading state to paint.
+            if visible_sources == 0 {
+                let label = settings_sources_label_rect(viewport, scroll);
+                let empty_rect = bento_nano_style::Rect {
+                    x: label.x + 4.0,
+                    y: label.bottom() + 6.0,
+                    width: (label.width - 8.0).max(1.0),
+                    height: 12.0,
+                };
+                if row_visible(empty_rect, body) {
+                    // No italic system face is loaded; the muted tone + xs size
+                    // reads as the de-emphasised placeholder Tauri renders italic.
+                    self.draw_text_with_style(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::SOURCE_EMPTY_PLACEHOLDER,
+                        ),
+                        empty_rect,
+                        palette.text_muted,
+                        11.0,
+                        400,
+                        1.0,
+                    )?;
+                }
+            }
+
+            // M1i fidelity — refresh (`↻`) button: LAST child of the list,
+            // right-anchored BELOW the cards / placeholder (`align-self:flex-end`).
+            // Secondary-button style: chip_bg fill, radius, centred 14px glyph.
+            let refresh_btn = settings_sources_refresh_button_rect(viewport, scroll, source_count);
+            if row_visible(refresh_btn, body) {
+                self.fill_rounded_rect(
+                    refresh_btn,
+                    chip_bg,
+                    bento_nano_style::BorderRadius::all(6.0),
+                )?;
+                self.stroke_rounded_rect(
+                    refresh_btn,
+                    chip_border,
+                    bento_nano_style::BorderRadius::all(6.0),
+                    1.0,
+                )?;
+                // U+21BB CLOCKWISE OPEN CIRCLE ARROW — the refresh glyph, centred.
+                self.draw_text_no_wrap_with_style(
+                    "\u{21BB}",
+                    refresh_btn,
+                    title_color,
+                    14.0,
+                    400,
+                    1.0,
+                    dwrite::TextAlign {
+                        h: dwrite::HAlign::Center,
+                        v: dwrite::VAlign::Center,
+                    },
+                )?;
+            }
+
+            // 桌面路径 label + input (reflows below the live source stack).
+            let path_label = settings_desktop_path_label_rect(viewport, scroll, source_count);
+            if row_visible(path_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_DESKTOP_PATH),
+                    path_label,
+                    label_color,
+                )?;
+            }
+            // Input/textarea boxes keep the radius-10 surface the M2 layout shipped.
+            let input_box_radius = bento_nano_style::BorderRadius::all(10.0);
+            let path_input = settings_desktop_path_input_rect(viewport, scroll, source_count);
+            if row_visible(path_input, body) {
+                self.fill_rounded_rect(path_input, chip_bg, input_box_radius)?;
+                let path_text = app.desktop_path_draft.borrow();
+                let text_rect = bento_nano_style::Rect {
+                    x: path_input.x + 12.0,
+                    y: path_input.y + (path_input.height - 16.0) * 0.5,
+                    width: (path_input.width - 24.0).max(0.0),
+                    height: 16.0,
+                };
+                self.draw_text_no_wrap(path_text.as_str(), text_rect, title_color)?;
+                drop(path_text);
+            }
+
+            // 监控值 label + textarea (reflows below the live source stack).
+            let watch_label = settings_watch_label_rect(viewport, scroll, source_count);
+            if row_visible(watch_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SECTION_WATCH_VALUES),
+                    watch_label,
+                    label_color,
+                )?;
+            }
+            let watch_area = settings_watch_textarea_rect(viewport, scroll, source_count);
+            if row_visible(watch_area, body) {
+                self.fill_rounded_rect(watch_area, chip_bg, input_box_radius)?;
+                let watch_text = app.watch_paths_draft.borrow();
+                if watch_text.is_empty() {
+                    // Hint placeholder.
+                    let hint_rect = bento_nano_style::Rect {
+                        x: watch_area.x + 12.0,
+                        y: watch_area.y + 10.0,
+                        width: (watch_area.width - 24.0).max(0.0),
+                        height: 16.0,
+                    };
+                    self.draw_text(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::WATCH_HINT_LINE_EACH,
+                        ),
+                        hint_rect,
+                        label_color,
+                    )?;
+                } else {
+                    let text_rect = bento_nano_style::Rect {
+                        x: watch_area.x + 12.0,
+                        y: watch_area.y + 10.0,
+                        width: (watch_area.width - 24.0).max(0.0),
+                        height: (watch_area.height - 20.0).max(0.0),
+                    };
+                    self.draw_text(watch_text.as_str(), text_rect, title_color)?;
+                }
+                drop(watch_text);
+            }
+
+            // ── M1d sections — Performance §5 + Startup management §6 ────────
+            //
+            // Replaces the deleted bespoke 高级 / 未来集成验证 blocks with the two
+            // genuine Tauri sections (`SettingsPanel.tsx:601-698`). Performance =
+            // 3 SliderRows (no conditionals). Startup = 2 toggles + 2 conditional
+            // steppers (crash_restart) + 1 toggle + 1 conditional slider
+            // (hibernation). The hit-tester in `bento-nano-shell::ui::settings_hit`
+            // + the dispatch arms in `main.rs` route every control fully through
+            // paint→hit→dispatch→persist→snapshot.
+            let num_btn_radius = bento_nano_style::BorderRadius::all(6.0);
+            let slider_track_radius = bento_nano_style::BorderRadius::all(2.0);
+            let slider_thumb_radius =
+                bento_nano_style::BorderRadius::all(SETTINGS_SLIDER_THUMB_D * 0.5);
+
+            // Read the two gating bools once so paint matches geometry exactly.
+            let crash_restart_on = app.crash_restart_enabled.get();
+            let safe_start_on = app.safe_start_after_hibernation.get();
+
+            // M1i fidelity — single-base-offset reflow. The Performance §5 group and
+            // EVERY section below it (Startup/Stealth/Updater/Backup/Plugins) root
+            // at `settings_perf_origin_y_offset`, which is pinned at the fixed
+            // 4-card source reserve. Folding the live reserve delta into `scroll`
+            // shifts the whole lower body UP by the height of the missing source
+            // cards (Tauri's flex column) — shadowing `scroll` here propagates the
+            // shift to all perf-and-below geometry fns without touching their
+            // signatures. The hit-tester applies the identical fold (`ui.rs`).
+            let scroll = scroll + settings_sources_reserve_delta(source_count);
+
+            // Performance group title.
+            let perf_label = settings_performance_label_rect(viewport, scroll);
+            if row_visible(perf_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_PERFORMANCE,
+                    ),
+                    perf_label,
+                    label_color,
+                )?;
+            }
+
+            // Performance SliderRows. Each: label + tabular "{v}{unit}" on the top
+            // line, full-width track band + filled segment + thumb on the lower
+            // line (matches Tauri `.slider-row`, `SettingsPanel.tsx:848-871`).
+            let perf_rows: [(u16, i32, i32, &'static str); 3] = [
+                (
+                    bento_nano_style::i18n_zh_cn::ids::SETTING_EXPAND_DELAY.0,
+                    crate::state::EXPAND_DELAY_MIN_MS,
+                    crate::state::EXPAND_DELAY_MAX_MS,
+                    "ms",
+                ),
+                (
+                    bento_nano_style::i18n_zh_cn::ids::SETTING_COLLAPSE_DELAY.0,
+                    crate::state::COLLAPSE_DELAY_MIN_MS,
+                    crate::state::COLLAPSE_DELAY_MAX_MS,
+                    "ms",
+                ),
+                (
+                    bento_nano_style::i18n_zh_cn::ids::SETTING_ICON_CACHE_SIZE.0,
+                    crate::state::ICON_CACHE_MIN,
+                    crate::state::ICON_CACHE_MAX,
+                    "",
+                ),
+            ];
+            for index in 0..SETTINGS_PERF_ROW_COUNT {
+                let row = settings_performance_slider_row_rect(viewport, scroll, index);
+                if !row_visible(row, body) {
+                    continue;
+                }
+                let (label_id, min, max, unit) = perf_rows[index as usize];
+                let raw = match index {
+                    0 => app.expand_delay_ms.get(),
+                    1 => app.collapse_delay_ms.get(),
+                    _ => app.icon_cache_size.get(),
+                };
+                let value = raw.clamp(min, max);
+                // Top line: label (left) + value (right, tabular).
                 let label_rect = bento_nano_style::Rect {
                     x: row.x,
-                    y: row.y + (row.height - 16.0) * 0.5,
+                    y: row.y + 4.0,
                     width: row.width * 0.6,
                     height: 16.0,
                 };
@@ -3726,88 +3871,11 @@ impl Renderer {
                     label_rect,
                     label_color,
                 )?;
-                let minus = settings_stepper_minus_rect(row);
-                let val_rect = settings_stepper_value_rect(row);
-                let plus = settings_stepper_plus_rect(row);
-                self.fill_rounded_rect(minus, chip_bg, num_btn_radius)?;
-                self.draw_text_no_wrap("−", minus, title_color)?;
-                let buf = smol_str::SmolStr::new(value.to_string());
-                self.draw_text_no_wrap(buf.as_str(), val_rect, title_color)?;
-                self.fill_rounded_rect(plus, chip_bg, num_btn_radius)?;
-                self.draw_text_no_wrap("+", plus, title_color)?;
-            }
-        }
-
-        // Row 4 — 休眠安全恢复 (always, gates the hibernate slider). Its Y
-        // depends on whether the crash steppers are present.
-        let safe_row = settings_safe_start_row_rect(viewport, scroll, crash_restart_on);
-        if row_visible(safe_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: safe_row.x,
-                y: safe_row.y + (safe_row.height - 16.0) * 0.5,
-                width: safe_row.width * 0.6,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_SAFE_START_HIBERNATION,
-                ),
-                label_rect,
-                label_color,
-            )?;
-            let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(safe_row));
-            self.fill_rounded_rect(
-                switch.track,
-                if safe_start_on { accent_on } else { track_off },
-                BorderRadius::all(switch.track_radius()),
-            )?;
-            self.fill_rounded_rect(
-                switch.knob(safe_start_on),
-                knob_color,
-                BorderRadius::all(switch.knob_radius()),
-            )?;
-        }
-        let safe_desc = bento_nano_style::Rect {
-            x: safe_row.x,
-            y: safe_row.bottom() + 1.0,
-            width: safe_row.width,
-            height: 14.0,
-        };
-        if row_visible(safe_desc, body) {
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTING_SAFE_START_HIBERNATION_DESC,
-                ),
-                safe_desc,
-                with_alpha(label_color, 0.7),
-            )?;
-        }
-
-        // Row 5 — 恢复延迟 SliderRow, ONLY when safe_start_on.
-        if safe_start_on {
-            let row = settings_hibernate_slider_row_rect(viewport, scroll, crash_restart_on);
-            if row_visible(row, body) {
-                let value = app
-                    .hibernate_resume_delay_ms
-                    .get()
-                    .clamp(
-                        crate::state::HIBERNATE_DELAY_MIN_MS,
-                        crate::state::HIBERNATE_DELAY_MAX_MS,
-                    );
-                let label_rect = bento_nano_style::Rect {
-                    x: row.x,
-                    y: row.y + 4.0,
-                    width: row.width * 0.6,
-                    height: 16.0,
+                let value_text = if unit.is_empty() {
+                    smol_str::SmolStr::new(value.to_string())
+                } else {
+                    smol_str::SmolStr::new(format!("{value}{unit}"))
                 };
-                self.draw_text(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::SETTING_HIBERNATE_DELAY,
-                    ),
-                    label_rect,
-                    label_color,
-                )?;
-                let value_text = smol_str::SmolStr::new(format!("{value}ms"));
                 let value_rect = bento_nano_style::Rect {
                     x: row.x + row.width * 0.6,
                     y: row.y + 4.0,
@@ -3815,7 +3883,8 @@ impl Renderer {
                     height: 16.0,
                 };
                 self.draw_text_no_wrap(value_text.as_str(), value_rect, title_color)?;
-                let track = settings_hibernate_slider_rect(viewport, scroll, crash_restart_on);
+                // Lower line: slider track + filled segment + thumb.
+                let track = settings_performance_slider_rect(viewport, scroll, index);
                 let track_band = bento_nano_style::Rect {
                     x: track.x,
                     y: track.y + (track.height - 4.0) * 0.5,
@@ -3823,11 +3892,8 @@ impl Renderer {
                     height: 4.0,
                 };
                 self.fill_rounded_rect(track_band, track_off, slider_track_radius)?;
-                let span = (crate::state::HIBERNATE_DELAY_MAX_MS
-                    - crate::state::HIBERNATE_DELAY_MIN_MS)
-                    .max(1) as f32;
-                let frac =
-                    ((value - crate::state::HIBERNATE_DELAY_MIN_MS) as f32 / span).clamp(0.0, 1.0);
+                let span = (max - min).max(1) as f32;
+                let frac = ((value - min) as f32 / span).clamp(0.0, 1.0);
                 let filled = bento_nano_style::Rect {
                     x: track_band.x,
                     y: track_band.y,
@@ -3844,265 +3910,468 @@ impl Renderer {
                 };
                 self.fill_rounded_rect(thumb, knob_color, slider_thumb_radius)?;
             }
-        }
 
-        // ── M1e — Stealth §7 card (`StealthModeCard.tsx`) ───────────────
-        //
-        // Sits after Startup in the Tauri body order. Reads the cached
-        // `app.stealth_status` snapshot (refreshed by the shell on open +
-        // Refresh/Reapply). Status pill kind/label derive via
-        // `StatusLevel::from_status` (1:1 with Tauri `deriveLevel`). The
-        // retry/error/OneDrive rows are conditional; the geometry helpers take
-        // the same `has_retry`/`has_error` flags so paint matches hit-test.
-        use crate::business::settings::stealth_mode_card::StatusLevel;
-        let stealth_label = settings_stealth_label_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-        );
-        if row_visible(stealth_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_GROUP_TITLE),
-                stealth_label,
-                label_color,
-            )?;
-        }
-        // Snapshot the conditional flags + cloned fields out of the RefCell so
-        // the borrow does not span the fallible paint calls below.
-        let stealth_snapshot = app.stealth_status.borrow().clone();
-        let (has_retry, has_error) = match &stealth_snapshot {
-            Some(s) => (s.retry_count > 0, s.last_error.is_some()),
-            None => (false, false),
-        };
-        // Helper to paint a `label | value` row (label left, value right).
-        // Inlined per-row below to keep `self` borrows simple.
-        let stealth_value_x_frac = 0.5_f32;
-        // Row 0 — status (label + colored pill), always shown.
-        let status_row = settings_stealth_status_row_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-        );
-        if row_visible(status_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: status_row.x,
-                y: status_row.y + (status_row.height - 16.0) * 0.5,
-                width: status_row.width * stealth_value_x_frac,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_LABEL),
-                label_rect,
-                label_color,
-            )?;
-            let pill = settings_stealth_pill_rect(status_row);
-            let pill_radius = bento_nano_style::BorderRadius::all(pill.height * 0.5);
-            // Pill kind → colour. Applied = green (#36C86B, matching the
-            // source-card pill tone), Pending = amber (#F59E0B per the Tauri
-            // `--accent-amber`), Failed = red (accent_red token).
-            let (pill_bg, pill_label_id) = match stealth_snapshot.as_ref() {
-                Some(s) => {
-                    let level = StatusLevel::from_status(s);
-                    let bg = match level {
-                        StatusLevel::Applied => with_alpha(
-                            bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
-                            0.90,
-                        ),
-                        StatusLevel::Pending => with_alpha(
-                            bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
-                            0.90,
-                        ),
-                        StatusLevel::Failed => with_alpha(palette.accent_red, 0.90),
-                    };
-                    (bg, level.label_id())
-                }
-                None => (
-                    with_alpha(palette.surface_subtle, 0.85),
-                    bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_PENDING,
-                ),
-            };
-            self.fill_rounded_rect(pill, pill_bg, pill_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(pill_label_id),
-                pill,
-                bento_nano_style::Color::WHITE,
-            )?;
-        }
-        // Row 1 — schema version (label + value), always shown.
-        let schema_row = settings_stealth_schema_row_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-        );
-        if row_visible(schema_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: schema_row.x,
-                y: schema_row.y + (schema_row.height - 16.0) * 0.5,
-                width: schema_row.width * stealth_value_x_frac,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_SCHEMA_VERSION),
-                label_rect,
-                label_color,
-            )?;
-            let value_rect = bento_nano_style::Rect {
-                x: schema_row.x + schema_row.width * stealth_value_x_frac,
-                y: label_rect.y,
-                width: schema_row.width * (1.0 - stealth_value_x_frac),
-                height: 16.0,
-            };
-            let schema_text = match stealth_snapshot.as_ref() {
-                Some(s) => smol_str::SmolStr::new(s.schema_version.as_str()),
-                None => smol_str::SmolStr::new_static("—"),
-            };
-            self.draw_text_no_wrap(schema_text.as_str(), value_rect, title_color)?;
-        }
-        // Row 2 — mirror health (label + 健康/异常), always shown.
-        let mirror_row = settings_stealth_mirror_row_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-        );
-        if row_visible(mirror_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: mirror_row.x,
-                y: mirror_row.y + (mirror_row.height - 16.0) * 0.5,
-                width: mirror_row.width * stealth_value_x_frac,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY),
-                label_rect,
-                label_color,
-            )?;
-            let value_rect = bento_nano_style::Rect {
-                x: mirror_row.x + mirror_row.width * stealth_value_x_frac,
-                y: label_rect.y,
-                width: mirror_row.width * (1.0 - stealth_value_x_frac),
-                height: 16.0,
-            };
-            let healthy = stealth_snapshot
-                .as_ref()
-                .map(|s| s.mirror_healthy)
-                .unwrap_or(true);
-            let mirror_id = if healthy {
-                bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_YES
-            } else {
-                bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_NO
-            };
-            self.draw_text_no_wrap(
-                bento_nano_style::t(mirror_id),
-                value_rect,
-                title_color,
-            )?;
-        }
-        // Row 3 — retry count (label + value), ONLY when retry_count > 0.
-        if has_retry {
-            let retry_row = settings_stealth_retry_row_rect(
-                viewport,
-                scroll,
-                crash_restart_on,
-                safe_start_on,
-            );
-            if row_visible(retry_row, body) {
+            // Startup management group title.
+            let startup_label = settings_startup_label_rect(viewport, scroll);
+            if row_visible(startup_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_STARTUP),
+                    startup_label,
+                    label_color,
+                )?;
+            }
+
+            // Reusable toggle-row paint: label (left) + desc caption + rocker.
+            // Returns the toggle hit-box so the caller can drop it (unused here).
+            // We inline rather than closure to keep `self` borrows simple.
+            // Row 0 — 高优先级启动 (always).
+            let high_row = settings_startup_high_priority_row_rect(viewport, scroll);
+            if row_visible(high_row, body) {
                 let label_rect = bento_nano_style::Rect {
-                    x: retry_row.x,
-                    y: retry_row.y + (retry_row.height - 16.0) * 0.5,
-                    width: retry_row.width * stealth_value_x_frac,
+                    x: high_row.x,
+                    y: high_row.y + (high_row.height - 16.0) * 0.5,
+                    width: high_row.width * 0.6,
                     height: 16.0,
                 };
                 self.draw_text(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_RETRY_COUNT),
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_STARTUP_HIGH_PRIORITY,
+                    ),
+                    label_rect,
+                    label_color,
+                )?;
+                let on = app.startup_high_priority.get();
+                let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(high_row));
+                self.fill_rounded_rect(
+                    switch.track,
+                    if on { accent_on } else { track_off },
+                    BorderRadius::all(switch.track_radius()),
+                )?;
+                self.fill_rounded_rect(
+                    switch.knob(on),
+                    knob_color,
+                    BorderRadius::all(switch.knob_radius()),
+                )?;
+            }
+            // Row 0 desc caption.
+            let high_desc = bento_nano_style::Rect {
+                x: high_row.x,
+                y: high_row.bottom() + 1.0,
+                width: high_row.width,
+                height: 14.0,
+            };
+            if row_visible(high_desc, body) {
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_STARTUP_HIGH_PRIORITY_DESC,
+                    ),
+                    high_desc,
+                    with_alpha(label_color, 0.7),
+                )?;
+            }
+
+            // Row 1 — 崩溃自动重启 (always, gates the steppers).
+            let crash_row = settings_crash_restart_row_rect(viewport, scroll);
+            if row_visible(crash_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: crash_row.x,
+                    y: crash_row.y + (crash_row.height - 16.0) * 0.5,
+                    width: crash_row.width * 0.6,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_RESTART),
+                    label_rect,
+                    label_color,
+                )?;
+                let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(crash_row));
+                self.fill_rounded_rect(
+                    switch.track,
+                    if crash_restart_on {
+                        accent_on
+                    } else {
+                        track_off
+                    },
+                    BorderRadius::all(switch.track_radius()),
+                )?;
+                self.fill_rounded_rect(
+                    switch.knob(crash_restart_on),
+                    knob_color,
+                    BorderRadius::all(switch.knob_radius()),
+                )?;
+            }
+            let crash_desc = bento_nano_style::Rect {
+                x: crash_row.x,
+                y: crash_row.bottom() + 1.0,
+                width: crash_row.width,
+                height: 14.0,
+            };
+            if row_visible(crash_desc, body) {
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_RESTART_DESC,
+                    ),
+                    crash_desc,
+                    with_alpha(label_color, 0.7),
+                )?;
+            }
+
+            // Rows 2/3 — crash steppers, ONLY when crash_restart_on. Each: label
+            // (left) + a "− value +" stepper (right). The − / + glyphs are drawn
+            // so the stepper reads as interactive (Tauri uses a native number
+            // input; nano keeps the stepper chrome).
+            if crash_restart_on {
+                let stepper_rows: [(u16, Rect, i32); 2] = [
+                    (
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_MAX_RETRIES.0,
+                        settings_crash_max_retries_row_rect(viewport, scroll),
+                        app.crash_max_retries.get(),
+                    ),
+                    (
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_CRASH_WINDOW_SECS.0,
+                        settings_crash_window_row_rect(viewport, scroll),
+                        app.crash_window_secs.get(),
+                    ),
+                ];
+                for (label_id, row, value) in stepper_rows {
+                    if !row_visible(row, body) {
+                        continue;
+                    }
+                    let label_rect = bento_nano_style::Rect {
+                        x: row.x,
+                        y: row.y + (row.height - 16.0) * 0.5,
+                        width: row.width * 0.6,
+                        height: 16.0,
+                    };
+                    self.draw_text(
+                        bento_nano_style::t(bento_nano_style::StringId(label_id)),
+                        label_rect,
+                        label_color,
+                    )?;
+                    let minus = settings_stepper_minus_rect(row);
+                    let val_rect = settings_stepper_value_rect(row);
+                    let plus = settings_stepper_plus_rect(row);
+                    self.fill_rounded_rect(minus, chip_bg, num_btn_radius)?;
+                    self.draw_text_no_wrap("−", minus, title_color)?;
+                    let buf = smol_str::SmolStr::new(value.to_string());
+                    self.draw_text_no_wrap(buf.as_str(), val_rect, title_color)?;
+                    self.fill_rounded_rect(plus, chip_bg, num_btn_radius)?;
+                    self.draw_text_no_wrap("+", plus, title_color)?;
+                }
+            }
+
+            // Row 4 — 休眠安全恢复 (always, gates the hibernate slider). Its Y
+            // depends on whether the crash steppers are present.
+            let safe_row = settings_safe_start_row_rect(viewport, scroll, crash_restart_on);
+            if row_visible(safe_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: safe_row.x,
+                    y: safe_row.y + (safe_row.height - 16.0) * 0.5,
+                    width: safe_row.width * 0.6,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_SAFE_START_HIBERNATION,
+                    ),
+                    label_rect,
+                    label_color,
+                )?;
+                let switch = toggle_switch_in_rect(settings_startup_toggle_hit_rect(safe_row));
+                self.fill_rounded_rect(
+                    switch.track,
+                    if safe_start_on { accent_on } else { track_off },
+                    BorderRadius::all(switch.track_radius()),
+                )?;
+                self.fill_rounded_rect(
+                    switch.knob(safe_start_on),
+                    knob_color,
+                    BorderRadius::all(switch.knob_radius()),
+                )?;
+            }
+            let safe_desc = bento_nano_style::Rect {
+                x: safe_row.x,
+                y: safe_row.bottom() + 1.0,
+                width: safe_row.width,
+                height: 14.0,
+            };
+            if row_visible(safe_desc, body) {
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTING_SAFE_START_HIBERNATION_DESC,
+                    ),
+                    safe_desc,
+                    with_alpha(label_color, 0.7),
+                )?;
+            }
+
+            // Row 5 — 恢复延迟 SliderRow, ONLY when safe_start_on.
+            if safe_start_on {
+                let row = settings_hibernate_slider_row_rect(viewport, scroll, crash_restart_on);
+                if row_visible(row, body) {
+                    let value = app.hibernate_resume_delay_ms.get().clamp(
+                        crate::state::HIBERNATE_DELAY_MIN_MS,
+                        crate::state::HIBERNATE_DELAY_MAX_MS,
+                    );
+                    let label_rect = bento_nano_style::Rect {
+                        x: row.x,
+                        y: row.y + 4.0,
+                        width: row.width * 0.6,
+                        height: 16.0,
+                    };
+                    self.draw_text(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::SETTING_HIBERNATE_DELAY,
+                        ),
+                        label_rect,
+                        label_color,
+                    )?;
+                    let value_text = smol_str::SmolStr::new(format!("{value}ms"));
+                    let value_rect = bento_nano_style::Rect {
+                        x: row.x + row.width * 0.6,
+                        y: row.y + 4.0,
+                        width: row.width * 0.4,
+                        height: 16.0,
+                    };
+                    self.draw_text_no_wrap(value_text.as_str(), value_rect, title_color)?;
+                    let track = settings_hibernate_slider_rect(viewport, scroll, crash_restart_on);
+                    let track_band = bento_nano_style::Rect {
+                        x: track.x,
+                        y: track.y + (track.height - 4.0) * 0.5,
+                        width: track.width,
+                        height: 4.0,
+                    };
+                    self.fill_rounded_rect(track_band, track_off, slider_track_radius)?;
+                    let span = (crate::state::HIBERNATE_DELAY_MAX_MS
+                        - crate::state::HIBERNATE_DELAY_MIN_MS)
+                        .max(1) as f32;
+                    let frac = ((value - crate::state::HIBERNATE_DELAY_MIN_MS) as f32 / span)
+                        .clamp(0.0, 1.0);
+                    let filled = bento_nano_style::Rect {
+                        x: track_band.x,
+                        y: track_band.y,
+                        width: track_band.width * frac,
+                        height: track_band.height,
+                    };
+                    self.fill_rounded_rect(filled, accent_on, slider_track_radius)?;
+                    let thumb_d = track.height;
+                    let thumb = bento_nano_style::Rect {
+                        x: track.x + track.width * frac - thumb_d * 0.5,
+                        y: track.y,
+                        width: thumb_d,
+                        height: thumb_d,
+                    };
+                    self.fill_rounded_rect(thumb, knob_color, slider_thumb_radius)?;
+                }
+            }
+
+            // ── M1e — Stealth §7 card (`StealthModeCard.tsx`) ───────────────
+            //
+            // Sits after Startup in the Tauri body order. Reads the cached
+            // `app.stealth_status` snapshot (refreshed by the shell on open +
+            // Refresh/Reapply). Status pill kind/label derive via
+            // `StatusLevel::from_status` (1:1 with Tauri `deriveLevel`). The
+            // retry/error/OneDrive rows are conditional; the geometry helpers take
+            // the same `has_retry`/`has_error` flags so paint matches hit-test.
+            use crate::business::settings::stealth_mode_card::StatusLevel;
+            let stealth_label =
+                settings_stealth_label_rect(viewport, scroll, crash_restart_on, safe_start_on);
+            if row_visible(stealth_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_GROUP_TITLE),
+                    stealth_label,
+                    label_color,
+                )?;
+            }
+            // Snapshot the conditional flags + cloned fields out of the RefCell so
+            // the borrow does not span the fallible paint calls below.
+            let stealth_snapshot = app.stealth_status.borrow().clone();
+            let (has_retry, has_error) = match &stealth_snapshot {
+                Some(s) => (s.retry_count > 0, s.last_error.is_some()),
+                None => (false, false),
+            };
+            // Helper to paint a `label | value` row (label left, value right).
+            // Inlined per-row below to keep `self` borrows simple.
+            let stealth_value_x_frac = 0.5_f32;
+            // Row 0 — status (label + colored pill), always shown.
+            let status_row =
+                settings_stealth_status_row_rect(viewport, scroll, crash_restart_on, safe_start_on);
+            if row_visible(status_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: status_row.x,
+                    y: status_row.y + (status_row.height - 16.0) * 0.5,
+                    width: status_row.width * stealth_value_x_frac,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_LABEL),
+                    label_rect,
+                    label_color,
+                )?;
+                let pill = settings_stealth_pill_rect(status_row);
+                let pill_radius = bento_nano_style::BorderRadius::all(pill.height * 0.5);
+                // Pill kind → colour. Applied = green (#36C86B, matching the
+                // source-card pill tone), Pending = amber (#F59E0B per the Tauri
+                // `--accent-amber`), Failed = red (accent_red token).
+                let (pill_bg, pill_label_id) = match stealth_snapshot.as_ref() {
+                    Some(s) => {
+                        let level = StatusLevel::from_status(s);
+                        let bg = match level {
+                            StatusLevel::Applied => with_alpha(
+                                bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+                                0.90,
+                            ),
+                            StatusLevel::Pending => with_alpha(
+                                bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
+                                0.90,
+                            ),
+                            StatusLevel::Failed => with_alpha(palette.accent_red, 0.90),
+                        };
+                        (bg, level.label_id())
+                    }
+                    None => (
+                        with_alpha(palette.surface_subtle, 0.85),
+                        bento_nano_style::i18n_zh_cn::ids::STEALTH_STATUS_PENDING,
+                    ),
+                };
+                self.fill_rounded_rect(pill, pill_bg, pill_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(pill_label_id),
+                    pill,
+                    bento_nano_style::Color::WHITE,
+                )?;
+            }
+            // Row 1 — schema version (label + value), always shown.
+            let schema_row =
+                settings_stealth_schema_row_rect(viewport, scroll, crash_restart_on, safe_start_on);
+            if row_visible(schema_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: schema_row.x,
+                    y: schema_row.y + (schema_row.height - 16.0) * 0.5,
+                    width: schema_row.width * stealth_value_x_frac,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_SCHEMA_VERSION),
                     label_rect,
                     label_color,
                 )?;
                 let value_rect = bento_nano_style::Rect {
-                    x: retry_row.x + retry_row.width * stealth_value_x_frac,
+                    x: schema_row.x + schema_row.width * stealth_value_x_frac,
                     y: label_rect.y,
-                    width: retry_row.width * (1.0 - stealth_value_x_frac),
+                    width: schema_row.width * (1.0 - stealth_value_x_frac),
                     height: 16.0,
                 };
-                let retry_text = smol_str::SmolStr::new(
-                    stealth_snapshot
-                        .as_ref()
-                        .map(|s| s.retry_count)
-                        .unwrap_or(0)
-                        .to_string(),
-                );
-                self.draw_text_no_wrap(retry_text.as_str(), value_rect, title_color)?;
+                let schema_text = match stealth_snapshot.as_ref() {
+                    Some(s) => smol_str::SmolStr::new(s.schema_version.as_str()),
+                    None => smol_str::SmolStr::new_static("—"),
+                };
+                self.draw_text_no_wrap(schema_text.as_str(), value_rect, title_color)?;
             }
-        }
-        // Row 4 — last-error block (label line + wrapped code), ONLY when set.
-        if has_error {
-            let err_block = settings_stealth_error_block_rect(
-                viewport,
-                scroll,
-                crash_restart_on,
-                safe_start_on,
-                has_retry,
-            );
-            if row_visible(err_block, body) {
+            // Row 2 — mirror health (label + 健康/异常), always shown.
+            let mirror_row =
+                settings_stealth_mirror_row_rect(viewport, scroll, crash_restart_on, safe_start_on);
+            if row_visible(mirror_row, body) {
                 let label_rect = bento_nano_style::Rect {
-                    x: err_block.x,
-                    y: err_block.y,
-                    width: err_block.width,
+                    x: mirror_row.x,
+                    y: mirror_row.y + (mirror_row.height - 16.0) * 0.5,
+                    width: mirror_row.width * stealth_value_x_frac,
                     height: 16.0,
                 };
                 self.draw_text(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_LAST_ERROR),
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY),
                     label_rect,
                     label_color,
                 )?;
-                let err_rect = bento_nano_style::Rect {
-                    x: err_block.x,
-                    y: err_block.y + 18.0,
-                    width: err_block.width,
-                    height: err_block.height - 18.0,
+                let value_rect = bento_nano_style::Rect {
+                    x: mirror_row.x + mirror_row.width * stealth_value_x_frac,
+                    y: label_rect.y,
+                    width: mirror_row.width * (1.0 - stealth_value_x_frac),
+                    height: 16.0,
                 };
-                if let Some(s) = stealth_snapshot.as_ref() {
-                    if let Some(err) = s.last_error.as_deref() {
-                        self.draw_text(err, err_rect, with_alpha(palette.accent_red, 0.9))?;
+                let healthy = stealth_snapshot
+                    .as_ref()
+                    .map(|s| s.mirror_healthy)
+                    .unwrap_or(true);
+                let mirror_id = if healthy {
+                    bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_YES
+                } else {
+                    bento_nano_style::i18n_zh_cn::ids::STEALTH_MIRROR_HEALTHY_NO
+                };
+                self.draw_text_no_wrap(bento_nano_style::t(mirror_id), value_rect, title_color)?;
+            }
+            // Row 3 — retry count (label + value), ONLY when retry_count > 0.
+            if has_retry {
+                let retry_row = settings_stealth_retry_row_rect(
+                    viewport,
+                    scroll,
+                    crash_restart_on,
+                    safe_start_on,
+                );
+                if row_visible(retry_row, body) {
+                    let label_rect = bento_nano_style::Rect {
+                        x: retry_row.x,
+                        y: retry_row.y + (retry_row.height - 16.0) * 0.5,
+                        width: retry_row.width * stealth_value_x_frac,
+                        height: 16.0,
+                    };
+                    self.draw_text(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_RETRY_COUNT),
+                        label_rect,
+                        label_color,
+                    )?;
+                    let value_rect = bento_nano_style::Rect {
+                        x: retry_row.x + retry_row.width * stealth_value_x_frac,
+                        y: label_rect.y,
+                        width: retry_row.width * (1.0 - stealth_value_x_frac),
+                        height: 16.0,
+                    };
+                    let retry_text = smol_str::SmolStr::new(
+                        stealth_snapshot
+                            .as_ref()
+                            .map(|s| s.retry_count)
+                            .unwrap_or(0)
+                            .to_string(),
+                    );
+                    self.draw_text_no_wrap(retry_text.as_str(), value_rect, title_color)?;
+                }
+            }
+            // Row 4 — last-error block (label line + wrapped code), ONLY when set.
+            if has_error {
+                let err_block = settings_stealth_error_block_rect(
+                    viewport,
+                    scroll,
+                    crash_restart_on,
+                    safe_start_on,
+                    has_retry,
+                );
+                if row_visible(err_block, body) {
+                    let label_rect = bento_nano_style::Rect {
+                        x: err_block.x,
+                        y: err_block.y,
+                        width: err_block.width,
+                        height: 16.0,
+                    };
+                    self.draw_text(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_LAST_ERROR),
+                        label_rect,
+                        label_color,
+                    )?;
+                    let err_rect = bento_nano_style::Rect {
+                        x: err_block.x,
+                        y: err_block.y + 18.0,
+                        width: err_block.width,
+                        height: err_block.height - 18.0,
+                    };
+                    if let Some(s) = stealth_snapshot.as_ref() {
+                        if let Some(err) = s.last_error.as_deref() {
+                            self.draw_text(err, err_rect, with_alpha(palette.accent_red, 0.9))?;
+                        }
                     }
                 }
             }
-        }
-        // Buttons row — [Refresh][Reapply], always shown.
-        let stealth_btn_row = settings_stealth_buttons_row_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-            has_retry,
-            has_error,
-        );
-        if row_visible(stealth_btn_row, body) {
-            let refresh_btn = settings_stealth_refresh_button_rect(stealth_btn_row);
-            self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REFRESH_BTN),
-                refresh_btn,
-                title_color,
-            )?;
-            let reapply_btn = settings_stealth_reapply_button_rect(stealth_btn_row);
-            self.fill_rounded_rect(reapply_btn, accent_on, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REAPPLY_BTN),
-                reapply_btn,
-                bento_nano_style::Color::WHITE,
-            )?;
-        }
-        // OneDrive warning block — informational text only, ONLY when
-        // retry_count > 0 (the backend notes OneDrive typically holds the
-        // lock). No button: there is no OneDrive-exclusion probe / guide URL
-        // in the nano backend, so per §17 this stays text-only rather than a
-        // dead button.
-        if has_retry {
-            let od_block = settings_stealth_onedrive_block_rect(
+            // Buttons row — [Refresh][Reapply], always shown.
+            let stealth_btn_row = settings_stealth_buttons_row_rect(
                 viewport,
                 scroll,
                 crash_restart_on,
@@ -4110,1198 +4379,1279 @@ impl Renderer {
                 has_retry,
                 has_error,
             );
-            if row_visible(od_block, body) {
-                let od_bg = with_alpha(
-                    bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
-                    0.12,
-                );
-                self.fill_rounded_rect(od_block, od_bg, chip_radius)?;
-                let text_rect = bento_nano_style::Rect {
-                    x: od_block.x + 10.0,
-                    y: od_block.y + 8.0,
-                    width: (od_block.width - 20.0).max(0.0),
-                    height: (od_block.height - 16.0).max(0.0),
-                };
-                self.draw_text(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::STEALTH_ONEDRIVE_WARNING,
-                    ),
-                    text_rect,
-                    with_alpha(title_color, 0.92),
+            if row_visible(stealth_btn_row, body) {
+                let refresh_btn = settings_stealth_refresh_button_rect(stealth_btn_row);
+                self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REFRESH_BTN),
+                    refresh_btn,
+                    title_color,
+                )?;
+                let reapply_btn = settings_stealth_reapply_button_rect(stealth_btn_row);
+                self.fill_rounded_rect(reapply_btn, accent_on, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::STEALTH_REAPPLY_BTN),
+                    reapply_btn,
+                    bento_nano_style::Color::WHITE,
                 )?;
             }
-        }
-
-        // ── M1f — Updater §8 card (`UpdaterCard.tsx`) ───────────────────
-        //
-        // Sits after Stealth in the Tauri body order. Reads the live
-        // `app.settings_updater_status` snapshot (drained from the
-        // UpdateEvent channel by the shell event loop). Status → pill kind +
-        // label, version-block / progress-bar / error-line visibility, and
-        // action-button visibility all derive from the lib helpers in
-        // `business::settings::updater_card` (1:1 with Tauri `statusPillLabel`
-        // + the three `<Show when=…>` gates). The conditional middle block's
-        // height is captured as `UpdaterHeightKind`, threaded through the same
-        // `SettingsBodyFlags` the hit-tester + scroll-clamp use so paint and
-        // hit geometry agree.
-        use crate::business::settings::updater_card as upd;
-        let updater_status = app.settings_updater_status.borrow();
-        let updater_flags = SettingsBodyFlags::new(
-            crash_restart_on,
-            safe_start_on,
-            has_retry,
-            has_error,
-            upd::updater_height_kind(&updater_status),
-        );
-        let updater_label = settings_updater_label_rect(
-            viewport,
-            scroll,
-            crash_restart_on,
-            safe_start_on,
-            has_retry,
-            has_error,
-        );
-        if row_visible(updater_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_CARD_TITLE),
-                updater_label,
-                label_color,
-            )?;
-        }
-        // Row 0 — status (label + colored pill), always shown.
-        let upd_value_x_frac = 0.5_f32;
-        let upd_status_row = settings_updater_status_row_rect(viewport, scroll, &updater_flags);
-        if row_visible(upd_status_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: upd_status_row.x,
-                y: upd_status_row.y + (upd_status_row.height - 16.0) * 0.5,
-                width: upd_status_row.width * upd_value_x_frac,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_STATUS_LABEL),
-                label_rect,
-                label_color,
-            )?;
-            // Pill kind → colour: UpToDate/Ready = green, Busy/Skipped = grey,
-            // Active (available/downloading/installing) = blue, Error = red.
-            let pill = settings_updater_pill_rect(upd_status_row);
-            let pill_radius = bento_nano_style::BorderRadius::all(pill.height * 0.5);
-            let pill_bg = match upd::UpdaterPillKind::from_status(&updater_status) {
-                upd::UpdaterPillKind::UpToDate | upd::UpdaterPillKind::Ready => {
-                    with_alpha(bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF), 0.90)
-                }
-                upd::UpdaterPillKind::Active => with_alpha(accent_on, 0.90),
-                upd::UpdaterPillKind::Busy | upd::UpdaterPillKind::Skipped => {
-                    with_alpha(palette.surface_subtle, 0.85)
-                }
-                upd::UpdaterPillKind::Error => with_alpha(palette.accent_red, 0.90),
-            };
-            self.fill_rounded_rect(pill, pill_bg, pill_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(upd::updater_status_label_id(&updater_status)),
-                pill,
-                bento_nano_style::Color::WHITE,
-            )?;
-        }
-        // Middle block — version line (Available/Ready/Installing/Skipped),
-        // progress bar (Downloading), or error line (Error). Mutually
-        // exclusive; StatusOnly paints nothing (zero-height block).
-        let upd_middle = settings_updater_middle_block_rect(viewport, scroll, &updater_flags);
-        if upd_middle.height > 0.0 && row_visible(upd_middle, body) {
-            match updater_flags.updater_kind {
-                UpdaterHeightKind::Versioned => {
-                    let label_rect = bento_nano_style::Rect {
-                        x: upd_middle.x,
-                        y: upd_middle.y + (upd_middle.height - 16.0) * 0.5,
-                        width: upd_middle.width * upd_value_x_frac,
-                        height: 16.0,
+            // OneDrive warning block — informational text only, ONLY when
+            // retry_count > 0 (the backend notes OneDrive typically holds the
+            // lock). No button: there is no OneDrive-exclusion probe / guide URL
+            // in the nano backend, so per §17 this stays text-only rather than a
+            // dead button.
+            if has_retry {
+                let od_block = settings_stealth_onedrive_block_rect(
+                    viewport,
+                    scroll,
+                    crash_restart_on,
+                    safe_start_on,
+                    has_retry,
+                    has_error,
+                );
+                if row_visible(od_block, body) {
+                    let od_bg = with_alpha(
+                        bento_nano_style::Color::from_u8(0xF5, 0x9E, 0x0B, 0xFF),
+                        0.12,
+                    );
+                    self.fill_rounded_rect(od_block, od_bg, chip_radius)?;
+                    let text_rect = bento_nano_style::Rect {
+                        x: od_block.x + 10.0,
+                        y: od_block.y + 8.0,
+                        width: (od_block.width - 20.0).max(0.0),
+                        height: (od_block.height - 16.0).max(0.0),
                     };
                     self.draw_text(
                         bento_nano_style::t(
-                            bento_nano_style::i18n_zh_cn::ids::UPDATER_AVAILABLE_VERSION,
+                            bento_nano_style::i18n_zh_cn::ids::STEALTH_ONEDRIVE_WARNING,
                         ),
-                        label_rect,
-                        label_color,
+                        text_rect,
+                        with_alpha(title_color, 0.92),
                     )?;
-                    let value_rect = bento_nano_style::Rect {
-                        x: upd_middle.x + upd_middle.width * upd_value_x_frac,
-                        y: label_rect.y,
-                        width: upd_middle.width * (1.0 - upd_value_x_frac),
-                        height: 16.0,
-                    };
-                    if let Some(version) = upd::updater_visible_version(&updater_status) {
-                        self.draw_text_no_wrap(version.as_str(), value_rect, title_color)?;
-                    }
                 }
-                UpdaterHeightKind::Downloading => {
-                    // Track + filled portion. When the total is unknown the
-                    // fraction is None → paint a muted full-width track only
-                    // (indeterminate cue), never a panic / divide-by-zero.
-                    let track = settings_updater_progress_track_rect(viewport, scroll, &updater_flags);
-                    let track_radius =
-                        bento_nano_style::BorderRadius::all(track.height * 0.5);
-                    self.fill_rounded_rect(
-                        track,
-                        with_alpha(palette.surface_subtle, 0.85),
-                        track_radius,
-                    )?;
-                    if let Some(frac) = upd::updater_progress_fraction(&updater_status) {
-                        let fill = bento_nano_style::Rect {
-                            x: track.x,
-                            y: track.y,
-                            width: (track.width * frac).max(0.0),
-                            height: track.height,
-                        };
-                        self.fill_rounded_rect(fill, accent_on, track_radius)?;
-                    }
-                }
-                UpdaterHeightKind::Error => {
-                    if let SettingsUpdaterStatus::Error(message) = &*updater_status {
-                        self.draw_text(
-                            message.as_str(),
-                            upd_middle,
-                            with_alpha(palette.accent_red, 0.9),
-                        )?;
-                    }
-                }
-                UpdaterHeightKind::StatusOnly => {}
             }
-        }
-        // Action buttons row — 检查更新 (always, col 0), then state-gated
-        // 下载 / 安装并重启 (col 1) + 跳过此版本 (col 2). The column indices match
-        // the hit-tester so paint and hit agree.
-        let upd_btn_row = settings_updater_buttons_row_rect(viewport, scroll, &updater_flags);
-        if row_visible(upd_btn_row, body) {
-            // Col 0 — 检查更新 (always).
-            let check_btn = settings_updater_button_rect(upd_btn_row, 0);
-            self.fill_rounded_rect(check_btn, chip_bg, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_CHECK_NOW),
-                check_btn,
-                title_color,
-            )?;
-            // Col 1 — 下载 (Available) or 安装并重启 (Ready), accent-filled.
-            if upd::updater_show_download(&updater_status) {
-                let dl_btn = settings_updater_button_rect(upd_btn_row, 1);
-                self.fill_rounded_rect(dl_btn, accent_on, btn_radius)?;
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_DOWNLOAD),
-                    dl_btn,
-                    bento_nano_style::Color::WHITE,
-                )?;
-            } else if upd::updater_show_install(&updater_status) {
-                let install_btn = settings_updater_button_rect(upd_btn_row, 1);
-                self.fill_rounded_rect(install_btn, accent_on, btn_radius)?;
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::UPDATER_INSTALL_RESTART,
-                    ),
-                    install_btn,
-                    bento_nano_style::Color::WHITE,
-                )?;
-            }
-            // Col 2 — 跳过此版本 (Available/Ready), neutral chip.
-            if upd::updater_show_skip(&updater_status) {
-                let skip_btn = settings_updater_button_rect(upd_btn_row, 2);
-                self.fill_rounded_rect(skip_btn, chip_bg, btn_radius)?;
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_SKIP_VERSION),
-                    skip_btn,
-                    title_color,
-                )?;
-            }
-        }
-        // Prefs row — 检查频率 cycling chip (Daily/Weekly/Manual).
-        let upd_freq_row = settings_updater_frequency_row_rect(viewport, scroll, &updater_flags);
-        if row_visible(upd_freq_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: upd_freq_row.x,
-                y: upd_freq_row.y + (upd_freq_row.height - 16.0) * 0.5,
-                width: upd_freq_row.width * upd_value_x_frac,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQUENCY),
-                label_rect,
-                label_color,
-            )?;
-            let chip = settings_updater_frequency_chip_rect(upd_freq_row);
-            self.fill_rounded_rect(chip, chip_bg, chip_radius)?;
-            let freq_id = match app.update_check_frequency.get() {
-                bento_nano_backend::updater::UpdateCheckFrequency::Daily => {
-                    bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_DAILY
-                }
-                bento_nano_backend::updater::UpdateCheckFrequency::Weekly => {
-                    bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_WEEKLY
-                }
-                bento_nano_backend::updater::UpdateCheckFrequency::Manual => {
-                    bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_MANUAL
-                }
-            };
-            self.draw_text_no_wrap(bento_nano_style::t(freq_id), chip, title_color)?;
-        }
-        // Prefs row — 后台静默下载 toggle.
-        let upd_auto_row = settings_updater_auto_download_row_rect(viewport, scroll, &updater_flags);
-        if row_visible(upd_auto_row, body) {
-            let label_rect = bento_nano_style::Rect {
-                x: upd_auto_row.x,
-                y: upd_auto_row.y + (upd_auto_row.height - 16.0) * 0.5,
-                width: upd_auto_row.width * 0.7,
-                height: 16.0,
-            };
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_AUTO_DOWNLOAD),
-                label_rect,
-                label_color,
-            )?;
-            let auto_on = app.update_auto_download.get();
-            let hit = settings_updater_auto_download_hit_rect(upd_auto_row);
-            let switch = toggle_switch_in_rect(hit);
-            self.fill_rounded_rect(
-                switch.track,
-                if auto_on { accent_on } else { track_off },
-                BorderRadius::all(switch.track_radius()),
-            )?;
-            self.fill_rounded_rect(
-                switch.knob(auto_on),
-                knob_color,
-                BorderRadius::all(switch.knob_radius()),
-            )?;
-        }
-        drop(updater_status);
 
-        // ── M1g — Backup §9 card (`BackupCard.tsx`) ─────────────────────
-        //
-        // Sits after Updater in the Tauri body order. Reads the live
-        // `app.settings_backup_entries` snapshot (populated on Settings open +
-        // after every create/restore by the shell). The list is
-        // variable-length, capped at SETTINGS_BACKUP_ROW_VISIBLE_MAX; the
-        // capped count threads through the same `SettingsBodyFlags` the
-        // hit-tester + scroll-clamp use (via `with_backup_rows`) so paint and
-        // hit geometry agree. Size + empty-state + the capped count come from
-        // the lib helpers in `business::settings::backup_card`.
-        use crate::business::settings::backup_card as bkp;
-        // Snapshot the entries + status text out of the RefCells BEFORE the
-        // fallible paint calls so no borrow spans them (mirrors the Stealth
-        // snapshot pattern above).
-        let backup_entries = app.settings_backup_entries.borrow().clone();
-        let backup_status_snapshot = app.settings_backup_status.borrow().clone();
-        let backup_visible = bkp::backup_visible_row_count(&backup_entries);
-        let backup_flags = updater_flags.with_backup_rows(backup_visible);
-        let backup_label = settings_backup_label_rect(viewport, scroll, &backup_flags);
-        if row_visible(backup_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_TITLE),
-                backup_label,
-                label_color,
-            )?;
-        }
-        // Description line — always shown.
-        let backup_desc = settings_backup_description_rect(viewport, scroll, &backup_flags);
-        if row_visible(backup_desc, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_DESCRIPTION),
-                backup_desc,
-                label_color,
-            )?;
-        }
-        // Actions row — [立即备份 (accent)] [刷新 (neutral)].
-        let backup_actions = settings_backup_actions_row_rect(viewport, scroll, &backup_flags);
-        if row_visible(backup_actions, body) {
-            let create_btn = settings_backup_create_button_rect(backup_actions);
-            self.fill_rounded_rect(create_btn, accent_on, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CREATE_NOW),
-                create_btn,
-                bento_nano_style::Color::WHITE,
-            )?;
-            let refresh_btn = settings_backup_refresh_button_rect(backup_actions);
-            self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_REFRESH),
-                refresh_btn,
-                title_color,
-            )?;
-        }
-        // Info/error line — only when a status is set. Success → green, error
-        // → red (mirrors the widget-tree card's status colours).
-        if let Some(status) = backup_status_snapshot.as_ref() {
-            let backup_status_row = settings_backup_status_rect(viewport, scroll, &backup_flags);
-            if row_visible(backup_status_row, body) {
-                let is_error = matches!(status, crate::state::SettingsBackupStatus::Error(_));
-                let status_color = if is_error {
-                    with_alpha(palette.accent_red, 0.9)
-                } else {
-                    with_alpha(bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF), 0.9)
-                };
-                self.draw_text(bkp::backup_status_text(status), backup_status_row, status_color)?;
-            }
-        }
-        // Backup list — N entry rows (file·size + 恢复) or one backupEmpty
-        // placeholder. Both branches anchor off the reserved status slot so the
-        // list lines up whether or not a status line painted.
-        if bkp::backup_list_is_empty(&backup_entries) {
-            let empty_row = settings_backup_entry_row_rect(viewport, scroll, &backup_flags, 0);
-            if row_visible(empty_row, body) {
+            // ── M1f — Updater §8 card (`UpdaterCard.tsx`) ───────────────────
+            //
+            // Sits after Stealth in the Tauri body order. Reads the live
+            // `app.settings_updater_status` snapshot (drained from the
+            // UpdateEvent channel by the shell event loop). Status → pill kind +
+            // label, version-block / progress-bar / error-line visibility, and
+            // action-button visibility all derive from the lib helpers in
+            // `business::settings::updater_card` (1:1 with Tauri `statusPillLabel`
+            // + the three `<Show when=…>` gates). The conditional middle block's
+            // height is captured as `UpdaterHeightKind`, threaded through the same
+            // `SettingsBodyFlags` the hit-tester + scroll-clamp use so paint and
+            // hit geometry agree.
+            use crate::business::settings::updater_card as upd;
+            let updater_status = app.settings_updater_status.borrow();
+            let updater_flags = SettingsBodyFlags::new(
+                crash_restart_on,
+                safe_start_on,
+                has_retry,
+                has_error,
+                upd::updater_height_kind(&updater_status),
+            );
+            let updater_label = settings_updater_label_rect(
+                viewport,
+                scroll,
+                crash_restart_on,
+                safe_start_on,
+                has_retry,
+                has_error,
+            );
+            if row_visible(updater_label, body) {
                 self.draw_text(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_EMPTY),
-                    empty_row,
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_CARD_TITLE),
+                    updater_label,
                     label_color,
                 )?;
             }
-        } else {
-            for (entry_index, entry) in backup_entries
-                .iter()
-                .take(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
-                .enumerate()
-            {
-                let entry_row =
-                    settings_backup_entry_row_rect(viewport, scroll, &backup_flags, entry_index);
-                if !row_visible(entry_row, body) {
-                    continue;
-                }
-                // Left — "id · size" (the backend chose the stable id over a
-                // parsed timestamp; reuse the same label the widget card uses).
-                // Format the size once per visible row (§10 — no redundant
-                // per-frame formatting beyond the visible rows).
-                let restore_btn = settings_backup_restore_button_rect(entry_row);
-                let info_rect = bento_nano_style::Rect {
-                    x: entry_row.x,
-                    y: entry_row.y + (entry_row.height - 16.0) * 0.5,
-                    width: (restore_btn.x - entry_row.x - 8.0).max(0.0),
+            // Row 0 — status (label + colored pill), always shown.
+            let upd_value_x_frac = 0.5_f32;
+            let upd_status_row = settings_updater_status_row_rect(viewport, scroll, &updater_flags);
+            if row_visible(upd_status_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: upd_status_row.x,
+                    y: upd_status_row.y + (upd_status_row.height - 16.0) * 0.5,
+                    width: upd_status_row.width * upd_value_x_frac,
                     height: 16.0,
                 };
-                self.draw_text_no_wrap(
-                    bkp::format_entry_label(entry).as_str(),
-                    info_rect,
-                    title_color,
-                )?;
-                // Right — 恢复 button (neutral chip).
-                self.fill_rounded_rect(restore_btn, chip_bg, btn_radius)?;
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_RESTORE),
-                    restore_btn,
-                    title_color,
-                )?;
-            }
-        }
-
-        // ── M7 — Encryption §10 card (`EncryptionCard.tsx`) ─────────────
-        //
-        // Slots BETWEEN Backup §9 and Plugins §11, matching the Tauri
-        // `<BackupCard/><EncryptionCard/>` adjacency. Fixed-height card (no
-        // variable rows) painted on top of the already-wired passphrase backend.
-        // Controls (top→bottom): section label / OneDrive description / current-
-        // mode row / 3-button mode grid (active button accent-highlighted) /
-        // passphrase row (LEFT label cell + RIGHT masked input box — P4) / hint
-        // line / status banner (error red / success green). The mode-button
-        // geometry + the passphrase label/input rects come from the
-        // `settings_encryption_*_rect` helpers (paint==hit SSoT).
-        //
-        // #7 fix wave 2026-06-01 — Tauri `EncryptionCard.tsx`/`.css` 1:1 parity:
-        //   P1  caret BLINKS at ~530ms (`settings_now_ms` threaded in; the prior
-        //       "no per-frame clock" claim was false — the shell pump keeps
-        //       redrawing while a field is focused), still allocation-free (§10);
-        //   P2  current-mode VALUE uses the SAME label source as the mode-button
-        //       TITLES (`encryption_mode_button_title_id` → Passphrase = id 236);
-        //   P3  literal ':' after the current-mode label;
-        //   P4  passphrase LABEL painted left of the input;
-        //   P5  inactive buttons ALWAYS stroke rgba(255,255,255,0.08) + fill
-        //       rgba(255,255,255,0.04); active fill rgba(96,165,250,0.18) + #60a5fa;
-        //   P6  unfocused input ALWAYS strokes rgba(255,255,255,0.12) + fills
-        //       rgba(255,255,255,0.06);
-        //   P7  active button TITLE stays text_primary (NOT recolored blue);
-        //   P8  current-mode VALUE is bold (weight 700, `<strong>`);
-        //   P11 description = text_secondary (not text_muted);
-        //   P16 placeholder = text_primary @ 0.45 alpha.
-        // The mask string is built once per paint into the reusable `mask_scratch`
-        // buffer + the caret glyph is appended only when `caret_on` (no per-frame
-        // heap alloc — §10). NEVER paints the literal passphrase.
-        use crate::settings_panel::{
-            settings_encryption_current_mode_rect, settings_encryption_desc_rect,
-            settings_encryption_hint_rect, settings_encryption_label_rect,
-            settings_encryption_mode_button_rect, settings_encryption_passphrase_input_rect,
-            settings_encryption_passphrase_label_rect, settings_encryption_status_rect,
-            SETTINGS_ENCRYPTION_MODE_COUNT,
-        };
-        use crate::state::SettingsTextField;
-        // Live encryption state, read once (Copy / cheap clones) so no RefCell
-        // borrow spans the fallible paint calls below (mirrors the Backup/Stealth
-        // snapshot pattern).
-        let enc_mode = app.encryption_mode.get();
-        let enc_status_snapshot = app.settings_encryption_status.borrow().clone();
-        let enc_passphrase_focused = app.passphrase_entry_active.get()
-            && matches!(app.settings_focused_field.get(), SettingsTextField::Passphrase);
-        // Masked passphrase: number of dots = scalar count of the draft. Built
-        // into a reusable scratch String (cleared, never freed) so the paint
-        // path stays allocation-light (§10). NEVER the literal passphrase.
-        let enc_pass_len = app.passphrase_draft.borrow().chars().count().min(128);
-        // P5/P6 — Tauri base surface tokens (white-overlay rgba). These are
-        // theme-independent literals straight from `EncryptionCard.css` so the
-        // card reads identically to the reference regardless of active palette.
-        // Active button: fill rgba(96,165,250,0.18) + border #60a5fa (CSS:44-46).
-        let enc_active_border = bento_nano_style::Color::from_u8(0x60, 0xA5, 0xFA, 0xFF);
-        let enc_active_fill = with_alpha(enc_active_border, 0.18);
-        // Inactive button base: fill rgba(255,255,255,0.04) + border 0.08 (CSS:31-32).
-        let enc_btn_base_fill = with_alpha(bento_nano_style::Color::WHITE, 0.04);
-        let enc_btn_base_border = with_alpha(bento_nano_style::Color::WHITE, 0.08);
-        // Input base: fill rgba(255,255,255,0.06) + border 0.12 (CSS:74-76).
-        let enc_input_fill = with_alpha(bento_nano_style::Color::WHITE, 0.06);
-        let enc_input_border = with_alpha(bento_nano_style::Color::WHITE, 0.12);
-        // P11 — `.encryption-card-description` is text_secondary (#a0a0b0), 12px;
-        // the 11px `.encryption-mode-sub` / `.encryption-hint` stay text_muted.
-        let enc_desc_color = palette.text_secondary;
-        // #7 §10 item 8 (2026-06-01) — Tauri renders `var(--color-text-muted)`
-        // at FULL opacity (EncryptionCard.css:60,83); pass `text_muted` directly.
-        // The prior `with_alpha(.., 0.95)` faded the mode-sub + hint ~5% extra.
-        let enc_muted = palette.text_muted;
-
-        // Section label — 设置加密 / Settings Encryption.
-        let enc_label = settings_encryption_label_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_TITLE),
-                enc_label,
-                label_color,
-            )?;
-        }
-        // Description line (OneDrive sentence) — P11: 12px text_secondary.
-        let enc_desc = settings_encryption_desc_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_desc, body) {
-            self.draw_text_with_style(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_DESC),
-                enc_desc,
-                enc_desc_color,
-                12.0,
-                400,
-                1.0,
-            )?;
-        }
-        // Current-mode row — 当前模式: <mode label>. Two draws (label + value).
-        // P3 — literal ':' after the label (Tauri JSX `{...}:`); built into the
-        // reusable `mask_scratch` (cleared before the passphrase mask reuses it)
-        // so the colon append stays allocation-free (§10). P8 — the VALUE is bold
-        // (weight 700, Tauri `<strong>`). P2 — the value uses the button-title
-        // label source so it equals the active button TITLE (e.g. 自定义口令).
-        let enc_current = settings_encryption_current_mode_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_current, body) {
-            let label_w = (enc_current.width * 0.42).max(0.0);
-            let label_part = bento_nano_style::Rect {
-                x: enc_current.x,
-                y: enc_current.y,
-                width: label_w,
-                height: enc_current.height,
-            };
-            // P3 — append ':' to the localized label without a per-frame heap
-            // alloc by composing into the reusable scratch buffer.
-            self.mask_scratch.clear();
-            self.mask_scratch.push_str(bento_nano_style::t(
-                bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CURRENT_MODE,
-            ));
-            self.mask_scratch.push(':');
-            let label_buf = core::mem::take(&mut self.mask_scratch);
-            // #7 §10 item 3 (2026-06-01) — `.encryption-current` is 13px/400
-            // (EncryptionCard.css:14); the colon-suffixed label half previously
-            // inherited the default 16px no-wrap format. The VALUE half below
-            // already paints at 13/700.
-            let label_result = self.draw_text_no_wrap_with_style(
-                label_buf.as_str(),
-                label_part,
-                label_color,
-                13.0,
-                400,
-                1.0,
-            );
-            self.mask_scratch = label_buf;
-            label_result?;
-            let value_part = bento_nano_style::Rect {
-                x: label_part.right() + 6.0,
-                y: enc_current.y,
-                width: (enc_current.right() - label_part.right() - 6.0).max(0.0),
-                height: enc_current.height,
-            };
-            // P8 — bold value (weight 700, 13px). Uses the button-title source
-            // (P2) so it matches the active mode button's title exactly.
-            self.draw_text_with_style(
-                localized_encryption_mode_button_label(enc_mode),
-                value_part,
-                title_color,
-                13.0,
-                700,
-                1.0,
-            )?;
-        }
-        // 3-button mode grid — None / DPAPI / Passphrase. Active button gets the
-        // accent fill + border; inactive buttons get the neutral chip fill. Each
-        // button paints a bold title + an 11px muted sub-label.
-        for index in 0..SETTINGS_ENCRYPTION_MODE_COUNT {
-            let btn = settings_encryption_mode_button_rect(viewport, scroll, &backup_flags, index);
-            if !row_visible(btn, body) {
-                continue;
-            }
-            let this_mode = match index {
-                0 => crate::state::SettingsEncryptionMode::None,
-                1 => crate::state::SettingsEncryptionMode::Dpapi,
-                _ => crate::state::SettingsEncryptionMode::Passphrase,
-            };
-            let is_active = this_mode == enc_mode;
-            // #7 §10 item 9 (2026-06-01) DEFERRED — Tauri `.encryption-mode-btn:
-            // hover:not(:disabled)` paints `rgba(96,165,250,0.12)` (CSS:39-41).
-            // No settings button in `draw_settings_panel` receives a hovered-
-            // widget signal today (Cancel/Save/mode buttons all paint state from
-            // `app`, never hover), so this would require building new hover-
-            // tracking. Per the task brief ("don't over-build"), deferred until a
-            // settings-wide hover-id is threaded through the paint path.
-            // P5 — ALWAYS fill (base rgba(255,255,255,0.04) / active 96,165,250,0.18)
-            // and ALWAYS stroke a 1px border (base rgba(255,255,255,0.08) / active
-            // #60a5fa). #7 §10 item 6 (2026-06-01) — Tauri `.encryption-mode-btn
-            // .active` only changes the border COLOR (#60a5fa); the WIDTH stays the
-            // base 1px (EncryptionCard.css:32,44-46). The prior 1.5px active stroke
-            // read ~50% heavier than the inactive chips — the visible delta this fixes.
-            self.fill_rounded_rect(
-                btn,
-                if is_active { enc_active_fill } else { enc_btn_base_fill },
-                btn_radius,
-            )?;
-            if is_active {
-                self.stroke_rounded_rect(btn, enc_active_border, btn_radius, 1.0)?;
-            } else {
-                self.stroke_rounded_rect(btn, enc_btn_base_border, btn_radius, 1.0)?;
-            }
-            // Title (top line) + sub-label (bottom line) stacked inside the btn.
-            let (title_id, sub_id) = match index {
-                0 => (
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE,
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE_SUB,
-                ),
-                1 => (
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI,
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI_SUB,
-                ),
-                _ => (
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_FULL,
-                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_SUB,
-                ),
-            };
-            // #7 §10 item 7 (2026-06-01) — Tauri `.encryption-mode-btn` is
-            // `padding: 10px 12px` with `gap: 4px` (EncryptionCard.css:29,36).
-            // Title sits 12px from the left / 10px from the top; the sub-label
-            // follows 4px below the title. The prior btn.x+6 / btn.y+4 packed the
-            // text too tight to the chip edges. `SETTINGS_ENCRYPTION_BTN_ROW_H`
-            // was bumped 44→52 to fit (10 + 13 + 4 + 11 + 10 ≈ 48 with rounding).
-            let title_rect = bento_nano_style::Rect {
-                x: btn.x + 12.0,
-                y: btn.y + 10.0,
-                width: (btn.width - 24.0).max(0.0),
-                height: 16.0,
-            };
-            // P7 — the title is ALWAYS text_primary (Tauri `.encryption-mode-title`
-            // has `color: inherit`, no active recolor). Activation is conveyed by
-            // the fill + border only. The prior accent-blue active title was the
-            // visible delta this fixes. #7 §10 item 1 — `.encryption-mode-title`
-            // is `font-weight: 600; font-size: 13px` (EncryptionCard.css:53-56);
-            // no explicit line-height on the title (1.0).
-            self.draw_text_no_wrap_with_style(
-                bento_nano_style::t(title_id),
-                title_rect,
-                title_color,
-                13.0,
-                600,
-                1.0,
-            )?;
-            let sub_rect = bento_nano_style::Rect {
-                x: btn.x + 12.0,
-                y: title_rect.bottom() + 4.0,
-                width: (btn.width - 24.0).max(0.0),
-                height: 16.0,
-            };
-            // #7 §10 item 2 — `.encryption-mode-sub` is `font-size: 11px;
-            // line-height: 1.3` at text_muted (EncryptionCard.css:58-62).
-            self.draw_text_no_wrap_with_style(
-                bento_nano_style::t(sub_id),
-                sub_rect,
-                enc_muted,
-                11.0,
-                400,
-                1.3,
-            )?;
-        }
-        // P4 — passphrase ROW left label cell (口令 / Passphrase). Tauri puts a
-        // `<span>` to the LEFT of the input (`justify-content: space-between`);
-        // the token (id 238) existed but was never painted. 13px title color.
-        let enc_pass_label = settings_encryption_passphrase_label_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_pass_label, body) {
-            let label_text_rect = bento_nano_style::Rect {
-                x: enc_pass_label.x,
-                y: enc_pass_label.y + (enc_pass_label.height - 16.0) * 0.5,
-                width: enc_pass_label.width,
-                height: 16.0,
-            };
-            // #7 §10 item 4 (2026-06-01) — `.encryption-passphrase-row` is
-            // `font-size: 13px` (EncryptionCard.css:64-70); the `<span>` label
-            // inherits it. Previously drawn at the default 16px no-wrap format.
-            self.draw_text_no_wrap_with_style(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_LABEL),
-                label_text_rect,
-                title_color,
-                13.0,
-                400,
-                1.0,
-            )?;
-        }
-        // Masked passphrase input box (RIGHT sub-rect of the row — P4). Paints
-        // '•' × draft-char-count (or the placeholder when empty + not focused),
-        // plus a BLINKING caret bar (P1) at the text end when focused. Never the
-        // literal draft. P6 — ALWAYS stroke a 1px base border + fill; focus
-        // re-strokes the accent on top.
-        let enc_input = settings_encryption_passphrase_input_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_input, body) {
-            self.fill_rounded_rect(enc_input, enc_input_fill, input_box_radius)?;
-            // P6 — base 1px border always; P1/focus — accent re-stroke on top.
-            self.stroke_rounded_rect(enc_input, enc_input_border, input_box_radius, 1.0)?;
-            if enc_passphrase_focused {
-                self.stroke_rounded_rect(enc_input, enc_active_border, input_box_radius, 1.0)?;
-            }
-            // #7 §10 item 5 (2026-06-01) — Tauri input `padding: 6px 10px`
-            // (EncryptionCard.css:78); the L/R inset is 10px (was 12px here).
-            let text_rect = bento_nano_style::Rect {
-                x: enc_input.x + 10.0,
-                y: enc_input.y + (enc_input.height - 16.0) * 0.5,
-                width: (enc_input.width - 20.0).max(0.0),
-                height: 16.0,
-            };
-            if enc_pass_len == 0 && !enc_passphrase_focused {
-                // P16 — placeholder at ~45% of the primary text color (Tauri
-                // ::placeholder default), distinct from the live-text color.
-                // #7 §10 item 5 — input text is `font-size: 12px`
-                // (EncryptionCard.css:79); placeholder shares it.
-                self.draw_text_no_wrap_with_style(
-                    bento_nano_style::t(
-                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_PLACEHOLDER,
-                    ),
-                    text_rect,
-                    with_alpha(palette.text_primary, 0.45),
-                    12.0,
-                    400,
-                    1.0,
-                )?;
-            } else {
-                // Build the mask once into the reusable scratch buffer (cleared,
-                // not freed → allocation-light per §10). U+2022 BULLET.
-                self.mask_scratch.clear();
-                for _ in 0..enc_pass_len {
-                    self.mask_scratch.push('\u{2022}');
-                }
-                // P1 — append the caret glyph ONLY on the ON half of the blink
-                // (gated by `caret_on`); on the OFF half it's omitted so the caret
-                // visibly blinks at the Windows ~530ms cadence.
-                if enc_passphrase_focused && caret_on {
-                    self.mask_scratch.push('\u{2502}'); // U+2502 BOX DRAWINGS LIGHT VERTICAL
-                }
-                // Clone-free: pass a &str slice of the scratch buffer. The draw
-                // call copies into its own utf16 scratch, so the borrow is short.
-                // #7 §10 item 5 — masked text is the input's 12px/400 (CSS:79).
-                let masked = core::mem::take(&mut self.mask_scratch);
-                let draw_result = self.draw_text_no_wrap_with_style(
-                    masked.as_str(),
-                    text_rect,
-                    title_color,
-                    12.0,
-                    400,
-                    1.0,
-                );
-                self.mask_scratch = masked;
-                draw_result?;
-            }
-        }
-        // Hint line — never-stored sentence, 11px muted.
-        let enc_hint = settings_encryption_hint_rect(viewport, scroll, &backup_flags);
-        if row_visible(enc_hint, body) {
-            self.draw_text_with_style(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_HINT),
-                enc_hint,
-                enc_muted,
-                11.0,
-                400,
-                1.0,
-            )?;
-        }
-        // Status banner — painted only when a status is set. Error → red,
-        // Success → green (Tauri `#f87171` / `#34d399`).
-        if let Some(status) = enc_status_snapshot.as_ref() {
-            let enc_status_row = settings_encryption_status_rect(viewport, scroll, &backup_flags);
-            if row_visible(enc_status_row, body) {
-                let (text, color) = match status {
-                    crate::state::SettingsBackupStatus::Error(msg) => (
-                        msg.as_str(),
-                        with_alpha(bento_nano_style::Color::from_u8(0xF8, 0x71, 0x71, 0xFF), 0.95),
-                    ),
-                    crate::state::SettingsBackupStatus::Success(msg) => (
-                        msg.as_str(),
-                        with_alpha(bento_nano_style::Color::from_u8(0x34, 0xD3, 0x99, 0xFF), 0.95),
-                    ),
-                };
-                self.draw_text(text, enc_status_row, color)?;
-            }
-        }
-
-        // ── M1h — Plugins §11 section (`SettingsPanel.tsx:709-781`) ──────
-        //
-        // Sits after the Encryption §10 card in the Tauri body order
-        // (…→Backup→**Encryption**→Plugins→footer). M7 (2026-06-01) re-anchored
-        // `settings_plugins_label_rect` off the encryption card's status row, so
-        // this paint follows the encryption block automatically. Reads the live
-        // `app.settings_plugin_entries` snapshot (populated on Settings open +
-        // after every install/toggle/uninstall by the shell). The list is
-        // variable-length, capped at SETTINGS_PLUGINS_ROW_VISIBLE_MAX; the
-        // capped count threads through the same `SettingsBodyFlags` the
-        // hit-tester + scroll-clamp use (via `with_plugin_rows`) so paint and
-        // hit geometry agree. PURE view-model helpers (badge id, visible cap,
-        // empty predicate, header text) come from
-        // `business::settings::plugins_section`. Dark dialog tokens only — the
-        // old modal's light `active_theme_palette()` was dropped.
-        use crate::business::settings::plugins_section as plg;
-        use crate::settings_panel::{
-            settings_plugin_author_rect, settings_plugin_badge_rect, settings_plugin_card_rect,
-            settings_plugin_desc_rect, settings_plugin_empty_row_rect, settings_plugin_name_rect,
-            settings_plugin_toggle_hit_rect, settings_plugin_uninstall_button_rect,
-            settings_plugins_install_button_rect, settings_plugins_label_rect,
-            SETTINGS_PLUGINS_ROW_VISIBLE_MAX,
-        };
-        // Snapshot the entries out of the RefCell BEFORE the fallible paint
-        // calls so no borrow spans them (mirrors the Backup/Stealth pattern).
-        let plugin_entries = app.settings_plugin_entries.borrow().clone();
-        let plugin_visible = plg::plugin_visible_row_count(&plugin_entries);
-        let plugin_flags = backup_flags.with_plugin_rows(plugin_visible);
-        // Group title — 插件 / Plugins (reuses SETTINGS_PLUGINS id 36).
-        let plugin_label = settings_plugins_label_rect(viewport, scroll, &plugin_flags);
-        if row_visible(plugin_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_PLUGINS),
-                plugin_label,
-                label_color,
-            )?;
-        }
-        // Full-width 安装插件... button (neutral chip) → InstallPlugin.
-        let plugin_install = settings_plugins_install_button_rect(viewport, scroll, &plugin_flags);
-        if row_visible(plugin_install, body) {
-            self.fill_rounded_rect(plugin_install, chip_bg, btn_radius)?;
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_INSTALL),
-                plugin_install,
-                title_color,
-            )?;
-        }
-        // plugin-list — N plugin cards or one pluginEmpty placeholder.
-        if plg::plugin_list_is_empty(&plugin_entries) {
-            let empty_row = settings_plugin_empty_row_rect(viewport, scroll, &plugin_flags);
-            if row_visible(empty_row, body) {
                 self.draw_text(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_EMPTY),
-                    empty_row,
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_STATUS_LABEL),
+                    label_rect,
+                    label_color,
+                )?;
+                // Pill kind → colour: UpToDate/Ready = green, Busy/Skipped = grey,
+                // Active (available/downloading/installing) = blue, Error = red.
+                let pill = settings_updater_pill_rect(upd_status_row);
+                let pill_radius = bento_nano_style::BorderRadius::all(pill.height * 0.5);
+                let pill_bg = match upd::UpdaterPillKind::from_status(&updater_status) {
+                    upd::UpdaterPillKind::UpToDate | upd::UpdaterPillKind::Ready => with_alpha(
+                        bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+                        0.90,
+                    ),
+                    upd::UpdaterPillKind::Active => with_alpha(accent_on, 0.90),
+                    upd::UpdaterPillKind::Busy | upd::UpdaterPillKind::Skipped => {
+                        with_alpha(palette.surface_subtle, 0.85)
+                    }
+                    upd::UpdaterPillKind::Error => with_alpha(palette.accent_red, 0.90),
+                };
+                self.fill_rounded_rect(pill, pill_bg, pill_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(upd::updater_status_label_id(&updater_status)),
+                    pill,
+                    bento_nano_style::Color::WHITE,
+                )?;
+            }
+            // Middle block — version line (Available/Ready/Installing/Skipped),
+            // progress bar (Downloading), or error line (Error). Mutually
+            // exclusive; StatusOnly paints nothing (zero-height block).
+            let upd_middle = settings_updater_middle_block_rect(viewport, scroll, &updater_flags);
+            if upd_middle.height > 0.0 && row_visible(upd_middle, body) {
+                match updater_flags.updater_kind {
+                    UpdaterHeightKind::Versioned => {
+                        let label_rect = bento_nano_style::Rect {
+                            x: upd_middle.x,
+                            y: upd_middle.y + (upd_middle.height - 16.0) * 0.5,
+                            width: upd_middle.width * upd_value_x_frac,
+                            height: 16.0,
+                        };
+                        self.draw_text(
+                            bento_nano_style::t(
+                                bento_nano_style::i18n_zh_cn::ids::UPDATER_AVAILABLE_VERSION,
+                            ),
+                            label_rect,
+                            label_color,
+                        )?;
+                        let value_rect = bento_nano_style::Rect {
+                            x: upd_middle.x + upd_middle.width * upd_value_x_frac,
+                            y: label_rect.y,
+                            width: upd_middle.width * (1.0 - upd_value_x_frac),
+                            height: 16.0,
+                        };
+                        if let Some(version) = upd::updater_visible_version(&updater_status) {
+                            self.draw_text_no_wrap(version.as_str(), value_rect, title_color)?;
+                        }
+                    }
+                    UpdaterHeightKind::Downloading => {
+                        // Track + filled portion. When the total is unknown the
+                        // fraction is None → paint a muted full-width track only
+                        // (indeterminate cue), never a panic / divide-by-zero.
+                        let track =
+                            settings_updater_progress_track_rect(viewport, scroll, &updater_flags);
+                        let track_radius = bento_nano_style::BorderRadius::all(track.height * 0.5);
+                        self.fill_rounded_rect(
+                            track,
+                            with_alpha(palette.surface_subtle, 0.85),
+                            track_radius,
+                        )?;
+                        if let Some(frac) = upd::updater_progress_fraction(&updater_status) {
+                            let fill = bento_nano_style::Rect {
+                                x: track.x,
+                                y: track.y,
+                                width: (track.width * frac).max(0.0),
+                                height: track.height,
+                            };
+                            self.fill_rounded_rect(fill, accent_on, track_radius)?;
+                        }
+                    }
+                    UpdaterHeightKind::Error => {
+                        if let SettingsUpdaterStatus::Error(message) = &*updater_status {
+                            self.draw_text(
+                                message.as_str(),
+                                upd_middle,
+                                with_alpha(palette.accent_red, 0.9),
+                            )?;
+                        }
+                    }
+                    UpdaterHeightKind::StatusOnly => {}
+                }
+            }
+            // Action buttons row — 检查更新 (always, col 0), then state-gated
+            // 下载 / 安装并重启 (col 1) + 跳过此版本 (col 2). The column indices match
+            // the hit-tester so paint and hit agree.
+            let upd_btn_row = settings_updater_buttons_row_rect(viewport, scroll, &updater_flags);
+            if row_visible(upd_btn_row, body) {
+                // Col 0 — 检查更新 (always).
+                let check_btn = settings_updater_button_rect(upd_btn_row, 0);
+                self.fill_rounded_rect(check_btn, chip_bg, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_CHECK_NOW),
+                    check_btn,
+                    title_color,
+                )?;
+                // Col 1 — 下载 (Available) or 安装并重启 (Ready), accent-filled.
+                if upd::updater_show_download(&updater_status) {
+                    let dl_btn = settings_updater_button_rect(upd_btn_row, 1);
+                    self.fill_rounded_rect(dl_btn, accent_on, btn_radius)?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_DOWNLOAD),
+                        dl_btn,
+                        bento_nano_style::Color::WHITE,
+                    )?;
+                } else if upd::updater_show_install(&updater_status) {
+                    let install_btn = settings_updater_button_rect(upd_btn_row, 1);
+                    self.fill_rounded_rect(install_btn, accent_on, btn_radius)?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::UPDATER_INSTALL_RESTART,
+                        ),
+                        install_btn,
+                        bento_nano_style::Color::WHITE,
+                    )?;
+                }
+                // Col 2 — 跳过此版本 (Available/Ready), neutral chip.
+                if upd::updater_show_skip(&updater_status) {
+                    let skip_btn = settings_updater_button_rect(upd_btn_row, 2);
+                    self.fill_rounded_rect(skip_btn, chip_bg, btn_radius)?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::UPDATER_SKIP_VERSION,
+                        ),
+                        skip_btn,
+                        title_color,
+                    )?;
+                }
+            }
+            // Prefs row — 检查频率 cycling chip (Daily/Weekly/Manual).
+            let upd_freq_row =
+                settings_updater_frequency_row_rect(viewport, scroll, &updater_flags);
+            if row_visible(upd_freq_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: upd_freq_row.x,
+                    y: upd_freq_row.y + (upd_freq_row.height - 16.0) * 0.5,
+                    width: upd_freq_row.width * upd_value_x_frac,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQUENCY),
+                    label_rect,
+                    label_color,
+                )?;
+                let chip = settings_updater_frequency_chip_rect(upd_freq_row);
+                self.fill_rounded_rect(chip, chip_bg, chip_radius)?;
+                let freq_id = match app.update_check_frequency.get() {
+                    bento_nano_backend::updater::UpdateCheckFrequency::Daily => {
+                        bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_DAILY
+                    }
+                    bento_nano_backend::updater::UpdateCheckFrequency::Weekly => {
+                        bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_WEEKLY
+                    }
+                    bento_nano_backend::updater::UpdateCheckFrequency::Manual => {
+                        bento_nano_style::i18n_zh_cn::ids::UPDATER_FREQ_MANUAL
+                    }
+                };
+                self.draw_text_no_wrap(bento_nano_style::t(freq_id), chip, title_color)?;
+            }
+            // Prefs row — 后台静默下载 toggle.
+            let upd_auto_row =
+                settings_updater_auto_download_row_rect(viewport, scroll, &updater_flags);
+            if row_visible(upd_auto_row, body) {
+                let label_rect = bento_nano_style::Rect {
+                    x: upd_auto_row.x,
+                    y: upd_auto_row.y + (upd_auto_row.height - 16.0) * 0.5,
+                    width: upd_auto_row.width * 0.7,
+                    height: 16.0,
+                };
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::UPDATER_AUTO_DOWNLOAD),
+                    label_rect,
+                    label_color,
+                )?;
+                let auto_on = app.update_auto_download.get();
+                let hit = settings_updater_auto_download_hit_rect(upd_auto_row);
+                let switch = toggle_switch_in_rect(hit);
+                self.fill_rounded_rect(
+                    switch.track,
+                    if auto_on { accent_on } else { track_off },
+                    BorderRadius::all(switch.track_radius()),
+                )?;
+                self.fill_rounded_rect(
+                    switch.knob(auto_on),
+                    knob_color,
+                    BorderRadius::all(switch.knob_radius()),
+                )?;
+            }
+            drop(updater_status);
+
+            // ── M1g — Backup §9 card (`BackupCard.tsx`) ─────────────────────
+            //
+            // Sits after Updater in the Tauri body order. Reads the live
+            // `app.settings_backup_entries` snapshot (populated on Settings open +
+            // after every create/restore by the shell). The list is
+            // variable-length, capped at SETTINGS_BACKUP_ROW_VISIBLE_MAX; the
+            // capped count threads through the same `SettingsBodyFlags` the
+            // hit-tester + scroll-clamp use (via `with_backup_rows`) so paint and
+            // hit geometry agree. Size + empty-state + the capped count come from
+            // the lib helpers in `business::settings::backup_card`.
+            use crate::business::settings::backup_card as bkp;
+            // Snapshot the entries + status text out of the RefCells BEFORE the
+            // fallible paint calls so no borrow spans them (mirrors the Stealth
+            // snapshot pattern above).
+            let backup_entries = app.settings_backup_entries.borrow().clone();
+            let backup_status_snapshot = app.settings_backup_status.borrow().clone();
+            let backup_visible = bkp::backup_visible_row_count(&backup_entries);
+            let backup_flags = updater_flags.with_backup_rows(backup_visible);
+            let backup_label = settings_backup_label_rect(viewport, scroll, &backup_flags);
+            if row_visible(backup_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_TITLE),
+                    backup_label,
                     label_color,
                 )?;
             }
-        } else {
-            for (card_index, plugin) in plugin_entries
-                .iter()
-                .take(SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
-                .enumerate()
-            {
-                let card = settings_plugin_card_rect(viewport, scroll, &plugin_flags, card_index);
+            // Description line — always shown.
+            let backup_desc = settings_backup_description_rect(viewport, scroll, &backup_flags);
+            if row_visible(backup_desc, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CARD_DESCRIPTION),
+                    backup_desc,
+                    label_color,
+                )?;
+            }
+            // Actions row — [立即备份 (accent)] [刷新 (neutral)].
+            let backup_actions = settings_backup_actions_row_rect(viewport, scroll, &backup_flags);
+            if row_visible(backup_actions, body) {
+                let create_btn = settings_backup_create_button_rect(backup_actions);
+                self.fill_rounded_rect(create_btn, accent_on, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_CREATE_NOW),
+                    create_btn,
+                    bento_nano_style::Color::WHITE,
+                )?;
+                let refresh_btn = settings_backup_refresh_button_rect(backup_actions);
+                self.fill_rounded_rect(refresh_btn, chip_bg, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_REFRESH),
+                    refresh_btn,
+                    title_color,
+                )?;
+            }
+            // Info/error line — only when a status is set. Success → green, error
+            // → red (mirrors the widget-tree card's status colours).
+            if let Some(status) = backup_status_snapshot.as_ref() {
+                let backup_status_row =
+                    settings_backup_status_rect(viewport, scroll, &backup_flags);
+                if row_visible(backup_status_row, body) {
+                    let is_error = matches!(status, crate::state::SettingsBackupStatus::Error(_));
+                    let status_color = if is_error {
+                        with_alpha(palette.accent_red, 0.9)
+                    } else {
+                        with_alpha(
+                            bento_nano_style::Color::from_u8(0x36, 0xC8, 0x6B, 0xFF),
+                            0.9,
+                        )
+                    };
+                    self.draw_text(
+                        bkp::backup_status_text(status),
+                        backup_status_row,
+                        status_color,
+                    )?;
+                }
+            }
+            // Backup list — N entry rows (file·size + 恢复) or one backupEmpty
+            // placeholder. Both branches anchor off the reserved status slot so the
+            // list lines up whether or not a status line painted.
+            if bkp::backup_list_is_empty(&backup_entries) {
+                let empty_row = settings_backup_entry_row_rect(viewport, scroll, &backup_flags, 0);
+                if row_visible(empty_row, body) {
+                    self.draw_text(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_EMPTY),
+                        empty_row,
+                        label_color,
+                    )?;
+                }
+            } else {
+                for (entry_index, entry) in backup_entries
+                    .iter()
+                    .take(SETTINGS_BACKUP_ROW_VISIBLE_MAX)
+                    .enumerate()
+                {
+                    let entry_row = settings_backup_entry_row_rect(
+                        viewport,
+                        scroll,
+                        &backup_flags,
+                        entry_index,
+                    );
+                    if !row_visible(entry_row, body) {
+                        continue;
+                    }
+                    // Left — "id · size" (the backend chose the stable id over a
+                    // parsed timestamp; reuse the same label the widget card uses).
+                    // Format the size once per visible row (§10 — no redundant
+                    // per-frame formatting beyond the visible rows).
+                    let restore_btn = settings_backup_restore_button_rect(entry_row);
+                    let info_rect = bento_nano_style::Rect {
+                        x: entry_row.x,
+                        y: entry_row.y + (entry_row.height - 16.0) * 0.5,
+                        width: (restore_btn.x - entry_row.x - 8.0).max(0.0),
+                        height: 16.0,
+                    };
+                    self.draw_text_no_wrap(
+                        bkp::format_entry_label(entry).as_str(),
+                        info_rect,
+                        title_color,
+                    )?;
+                    // Right — 恢复 button (neutral chip).
+                    self.fill_rounded_rect(restore_btn, chip_bg, btn_radius)?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BACKUP_RESTORE),
+                        restore_btn,
+                        title_color,
+                    )?;
+                }
+            }
+
+            // ── M7 — Encryption §10 card (`EncryptionCard.tsx`) ─────────────
+            //
+            // Slots BETWEEN Backup §9 and Plugins §11, matching the Tauri
+            // `<BackupCard/><EncryptionCard/>` adjacency. Fixed-height card (no
+            // variable rows) painted on top of the already-wired passphrase backend.
+            // Controls (top→bottom): section label / OneDrive description / current-
+            // mode row / 3-button mode grid (active button accent-highlighted) /
+            // passphrase row (LEFT label cell + RIGHT masked input box — P4) / hint
+            // line / status banner (error red / success green). The mode-button
+            // geometry + the passphrase label/input rects come from the
+            // `settings_encryption_*_rect` helpers (paint==hit SSoT).
+            //
+            // #7 fix wave 2026-06-01 — Tauri `EncryptionCard.tsx`/`.css` 1:1 parity:
+            //   P1  caret BLINKS at ~530ms (`settings_now_ms` threaded in; the prior
+            //       "no per-frame clock" claim was false — the shell pump keeps
+            //       redrawing while a field is focused), still allocation-free (§10);
+            //   P2  current-mode VALUE uses the SAME label source as the mode-button
+            //       TITLES (`encryption_mode_button_title_id` → Passphrase = id 236);
+            //   P3  literal ':' after the current-mode label;
+            //   P4  passphrase LABEL painted left of the input;
+            //   P5  inactive buttons ALWAYS stroke rgba(255,255,255,0.08) + fill
+            //       rgba(255,255,255,0.04); active fill rgba(96,165,250,0.18) + #60a5fa;
+            //   P6  unfocused input ALWAYS strokes rgba(255,255,255,0.12) + fills
+            //       rgba(255,255,255,0.06);
+            //   P7  active button TITLE stays text_primary (NOT recolored blue);
+            //   P8  current-mode VALUE is bold (weight 700, `<strong>`);
+            //   P11 description = text_secondary (not text_muted);
+            //   P16 placeholder = text_primary @ 0.45 alpha.
+            // The mask string is built once per paint into the reusable `mask_scratch`
+            // buffer + the caret glyph is appended only when `caret_on` (no per-frame
+            // heap alloc — §10). NEVER paints the literal passphrase.
+            use crate::settings_panel::{
+                SETTINGS_ENCRYPTION_MODE_COUNT, settings_encryption_current_mode_rect,
+                settings_encryption_desc_rect, settings_encryption_hint_rect,
+                settings_encryption_label_rect, settings_encryption_mode_button_rect,
+                settings_encryption_passphrase_input_rect,
+                settings_encryption_passphrase_label_rect, settings_encryption_status_rect,
+            };
+            use crate::state::SettingsTextField;
+            // Live encryption state, read once (Copy / cheap clones) so no RefCell
+            // borrow spans the fallible paint calls below (mirrors the Backup/Stealth
+            // snapshot pattern).
+            let enc_mode = app.encryption_mode.get();
+            let enc_status_snapshot = app.settings_encryption_status.borrow().clone();
+            let enc_passphrase_focused = app.passphrase_entry_active.get()
+                && matches!(
+                    app.settings_focused_field.get(),
+                    SettingsTextField::Passphrase
+                );
+            // Masked passphrase: number of dots = scalar count of the draft. Built
+            // into a reusable scratch String (cleared, never freed) so the paint
+            // path stays allocation-light (§10). NEVER the literal passphrase.
+            let enc_pass_len = app.passphrase_draft.borrow().chars().count().min(128);
+            // P5/P6 — Tauri base surface tokens (white-overlay rgba). These are
+            // theme-independent literals straight from `EncryptionCard.css` so the
+            // card reads identically to the reference regardless of active palette.
+            // Active button: fill rgba(96,165,250,0.18) + border #60a5fa (CSS:44-46).
+            let enc_active_border = bento_nano_style::Color::from_u8(0x60, 0xA5, 0xFA, 0xFF);
+            let enc_active_fill = with_alpha(enc_active_border, 0.18);
+            // Inactive button base: fill rgba(255,255,255,0.04) + border 0.08 (CSS:31-32).
+            let enc_btn_base_fill = with_alpha(bento_nano_style::Color::WHITE, 0.04);
+            let enc_btn_base_border = with_alpha(bento_nano_style::Color::WHITE, 0.08);
+            // Input base: fill rgba(255,255,255,0.06) + border 0.12 (CSS:74-76).
+            let enc_input_fill = with_alpha(bento_nano_style::Color::WHITE, 0.06);
+            let enc_input_border = with_alpha(bento_nano_style::Color::WHITE, 0.12);
+            // P11 — `.encryption-card-description` is text_secondary (#a0a0b0), 12px;
+            // the 11px `.encryption-mode-sub` / `.encryption-hint` stay text_muted.
+            let enc_desc_color = palette.text_secondary;
+            // #7 §10 item 8 (2026-06-01) — Tauri renders `var(--color-text-muted)`
+            // at FULL opacity (EncryptionCard.css:60,83); pass `text_muted` directly.
+            // The prior `with_alpha(.., 0.95)` faded the mode-sub + hint ~5% extra.
+            let enc_muted = palette.text_muted;
+
+            // Section label — 设置加密 / Settings Encryption.
+            let enc_label = settings_encryption_label_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_TITLE),
+                    enc_label,
+                    label_color,
+                )?;
+            }
+            // Description line (OneDrive sentence) — P11: 12px text_secondary.
+            let enc_desc = settings_encryption_desc_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_desc, body) {
+                self.draw_text_with_style(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CARD_DESC),
+                    enc_desc,
+                    enc_desc_color,
+                    12.0,
+                    400,
+                    1.0,
+                )?;
+            }
+            // Current-mode row — 当前模式: <mode label>. Two draws (label + value).
+            // P3 — literal ':' after the label (Tauri JSX `{...}:`); built into the
+            // reusable `mask_scratch` (cleared before the passphrase mask reuses it)
+            // so the colon append stays allocation-free (§10). P8 — the VALUE is bold
+            // (weight 700, Tauri `<strong>`). P2 — the value uses the button-title
+            // label source so it equals the active button TITLE (e.g. 自定义口令).
+            let enc_current =
+                settings_encryption_current_mode_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_current, body) {
+                let label_w = (enc_current.width * 0.42).max(0.0);
+                let label_part = bento_nano_style::Rect {
+                    x: enc_current.x,
+                    y: enc_current.y,
+                    width: label_w,
+                    height: enc_current.height,
+                };
+                // P3 — append ':' to the localized label without a per-frame heap
+                // alloc by composing into the reusable scratch buffer.
+                self.mask_scratch.clear();
+                self.mask_scratch.push_str(bento_nano_style::t(
+                    bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_CURRENT_MODE,
+                ));
+                self.mask_scratch.push(':');
+                let label_buf = core::mem::take(&mut self.mask_scratch);
+                // #7 §10 item 3 (2026-06-01) — `.encryption-current` is 13px/400
+                // (EncryptionCard.css:14); the colon-suffixed label half previously
+                // inherited the default 16px no-wrap format. The VALUE half below
+                // already paints at 13/700.
+                let label_result = self.draw_text_no_wrap_with_style(
+                    label_buf.as_str(),
+                    label_part,
+                    label_color,
+                    13.0,
+                    400,
+                    1.0,
+                    dwrite::TextAlign::DEFAULT,
+                );
+                self.mask_scratch = label_buf;
+                label_result?;
+                let value_part = bento_nano_style::Rect {
+                    x: label_part.right() + 6.0,
+                    y: enc_current.y,
+                    width: (enc_current.right() - label_part.right() - 6.0).max(0.0),
+                    height: enc_current.height,
+                };
+                // P8 — bold value (weight 700, 13px). Uses the button-title source
+                // (P2) so it matches the active mode button's title exactly.
+                self.draw_text_with_style(
+                    localized_encryption_mode_button_label(enc_mode),
+                    value_part,
+                    title_color,
+                    13.0,
+                    700,
+                    1.0,
+                )?;
+            }
+            // 3-button mode grid — None / DPAPI / Passphrase. Active button gets the
+            // accent fill + border; inactive buttons get the neutral chip fill. Each
+            // button paints a bold title + an 11px muted sub-label.
+            for index in 0..SETTINGS_ENCRYPTION_MODE_COUNT {
+                let btn =
+                    settings_encryption_mode_button_rect(viewport, scroll, &backup_flags, index);
+                if !row_visible(btn, body) {
+                    continue;
+                }
+                let this_mode = match index {
+                    0 => crate::state::SettingsEncryptionMode::None,
+                    1 => crate::state::SettingsEncryptionMode::Dpapi,
+                    _ => crate::state::SettingsEncryptionMode::Passphrase,
+                };
+                let is_active = this_mode == enc_mode;
+                // #7 §10 item 9 (2026-06-01) DEFERRED — Tauri `.encryption-mode-btn:
+                // hover:not(:disabled)` paints `rgba(96,165,250,0.12)` (CSS:39-41).
+                // No settings button in `draw_settings_panel` receives a hovered-
+                // widget signal today (Cancel/Save/mode buttons all paint state from
+                // `app`, never hover), so this would require building new hover-
+                // tracking. Per the task brief ("don't over-build"), deferred until a
+                // settings-wide hover-id is threaded through the paint path.
+                // P5 — ALWAYS fill (base rgba(255,255,255,0.04) / active 96,165,250,0.18)
+                // and ALWAYS stroke a 1px border (base rgba(255,255,255,0.08) / active
+                // #60a5fa). #7 §10 item 6 (2026-06-01) — Tauri `.encryption-mode-btn
+                // .active` only changes the border COLOR (#60a5fa); the WIDTH stays the
+                // base 1px (EncryptionCard.css:32,44-46). The prior 1.5px active stroke
+                // read ~50% heavier than the inactive chips — the visible delta this fixes.
+                self.fill_rounded_rect(
+                    btn,
+                    if is_active {
+                        enc_active_fill
+                    } else {
+                        enc_btn_base_fill
+                    },
+                    btn_radius,
+                )?;
+                if is_active {
+                    self.stroke_rounded_rect(btn, enc_active_border, btn_radius, 1.0)?;
+                } else {
+                    self.stroke_rounded_rect(btn, enc_btn_base_border, btn_radius, 1.0)?;
+                }
+                // Title (top line) + sub-label (bottom line) stacked inside the btn.
+                let (title_id, sub_id) = match index {
+                    0 => (
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE,
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_NONE_SUB,
+                    ),
+                    1 => (
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI,
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_DPAPI_SUB,
+                    ),
+                    _ => (
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_FULL,
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_MODE_PASSPHRASE_SUB,
+                    ),
+                };
+                // #7 §10 item 7 (2026-06-01) — Tauri `.encryption-mode-btn` is
+                // `padding: 10px 12px` with `gap: 4px` (EncryptionCard.css:29,36).
+                // Title sits 12px from the left / 10px from the top; the sub-label
+                // follows 4px below the title. The prior btn.x+6 / btn.y+4 packed the
+                // text too tight to the chip edges. `SETTINGS_ENCRYPTION_BTN_ROW_H`
+                // was bumped 44→52 to fit (10 + 13 + 4 + 11 + 10 ≈ 48 with rounding).
+                let title_rect = bento_nano_style::Rect {
+                    x: btn.x + 12.0,
+                    y: btn.y + 10.0,
+                    width: (btn.width - 24.0).max(0.0),
+                    height: 16.0,
+                };
+                // P7 — the title is ALWAYS text_primary (Tauri `.encryption-mode-title`
+                // has `color: inherit`, no active recolor). Activation is conveyed by
+                // the fill + border only. The prior accent-blue active title was the
+                // visible delta this fixes. #7 §10 item 1 — `.encryption-mode-title`
+                // is `font-weight: 600; font-size: 13px` (EncryptionCard.css:53-56);
+                // no explicit line-height on the title (1.0).
+                self.draw_text_no_wrap_with_style(
+                    bento_nano_style::t(title_id),
+                    title_rect,
+                    title_color,
+                    13.0,
+                    600,
+                    1.0,
+                    dwrite::TextAlign::DEFAULT,
+                )?;
+                let sub_rect = bento_nano_style::Rect {
+                    x: btn.x + 12.0,
+                    y: title_rect.bottom() + 4.0,
+                    width: (btn.width - 24.0).max(0.0),
+                    height: 16.0,
+                };
+                // #7 §10 item 2 — `.encryption-mode-sub` is `font-size: 11px;
+                // line-height: 1.3` at text_muted (EncryptionCard.css:58-62).
+                self.draw_text_no_wrap_with_style(
+                    bento_nano_style::t(sub_id),
+                    sub_rect,
+                    enc_muted,
+                    11.0,
+                    400,
+                    1.3,
+                    dwrite::TextAlign::DEFAULT,
+                )?;
+            }
+            // P4 — passphrase ROW left label cell (口令 / Passphrase). Tauri puts a
+            // `<span>` to the LEFT of the input (`justify-content: space-between`);
+            // the token (id 238) existed but was never painted. 13px title color.
+            let enc_pass_label =
+                settings_encryption_passphrase_label_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_pass_label, body) {
+                let label_text_rect = bento_nano_style::Rect {
+                    x: enc_pass_label.x,
+                    y: enc_pass_label.y + (enc_pass_label.height - 16.0) * 0.5,
+                    width: enc_pass_label.width,
+                    height: 16.0,
+                };
+                // #7 §10 item 4 (2026-06-01) — `.encryption-passphrase-row` is
+                // `font-size: 13px` (EncryptionCard.css:64-70); the `<span>` label
+                // inherits it. Previously drawn at the default 16px no-wrap format.
+                self.draw_text_no_wrap_with_style(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_LABEL,
+                    ),
+                    label_text_rect,
+                    title_color,
+                    13.0,
+                    400,
+                    1.0,
+                    dwrite::TextAlign::DEFAULT,
+                )?;
+            }
+            // Masked passphrase input box (RIGHT sub-rect of the row — P4). Paints
+            // '•' × draft-char-count (or the placeholder when empty + not focused),
+            // plus a BLINKING caret bar (P1) at the text end when focused. Never the
+            // literal draft. P6 — ALWAYS stroke a 1px base border + fill; focus
+            // re-strokes the accent on top.
+            let enc_input =
+                settings_encryption_passphrase_input_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_input, body) {
+                self.fill_rounded_rect(enc_input, enc_input_fill, input_box_radius)?;
+                // P6 — base 1px border always; P1/focus — accent re-stroke on top.
+                self.stroke_rounded_rect(enc_input, enc_input_border, input_box_radius, 1.0)?;
+                if enc_passphrase_focused {
+                    self.stroke_rounded_rect(enc_input, enc_active_border, input_box_radius, 1.0)?;
+                }
+                // #7 §10 item 5 (2026-06-01) — Tauri input `padding: 6px 10px`
+                // (EncryptionCard.css:78); the L/R inset is 10px (was 12px here).
+                let text_rect = bento_nano_style::Rect {
+                    x: enc_input.x + 10.0,
+                    y: enc_input.y + (enc_input.height - 16.0) * 0.5,
+                    width: (enc_input.width - 20.0).max(0.0),
+                    height: 16.0,
+                };
+                if enc_pass_len == 0 && !enc_passphrase_focused {
+                    // P16 — placeholder at ~45% of the primary text color (Tauri
+                    // ::placeholder default), distinct from the live-text color.
+                    // #7 §10 item 5 — input text is `font-size: 12px`
+                    // (EncryptionCard.css:79); placeholder shares it.
+                    self.draw_text_no_wrap_with_style(
+                        bento_nano_style::t(
+                            bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_PLACEHOLDER,
+                        ),
+                        text_rect,
+                        with_alpha(palette.text_primary, 0.45),
+                        12.0,
+                        400,
+                        1.0,
+                        dwrite::TextAlign::DEFAULT,
+                    )?;
+                } else {
+                    // Build the mask once into the reusable scratch buffer (cleared,
+                    // not freed → allocation-light per §10). U+2022 BULLET.
+                    self.mask_scratch.clear();
+                    for _ in 0..enc_pass_len {
+                        self.mask_scratch.push('\u{2022}');
+                    }
+                    // P1 — append the caret glyph ONLY on the ON half of the blink
+                    // (gated by `caret_on`); on the OFF half it's omitted so the caret
+                    // visibly blinks at the Windows ~530ms cadence.
+                    if enc_passphrase_focused && caret_on {
+                        self.mask_scratch.push('\u{2502}'); // U+2502 BOX DRAWINGS LIGHT VERTICAL
+                    }
+                    // Clone-free: pass a &str slice of the scratch buffer. The draw
+                    // call copies into its own utf16 scratch, so the borrow is short.
+                    // #7 §10 item 5 — masked text is the input's 12px/400 (CSS:79).
+                    let masked = core::mem::take(&mut self.mask_scratch);
+                    let draw_result = self.draw_text_no_wrap_with_style(
+                        masked.as_str(),
+                        text_rect,
+                        title_color,
+                        12.0,
+                        400,
+                        1.0,
+                        dwrite::TextAlign::DEFAULT,
+                    );
+                    self.mask_scratch = masked;
+                    draw_result?;
+                }
+            }
+            // Hint line — never-stored sentence, 11px muted.
+            let enc_hint = settings_encryption_hint_rect(viewport, scroll, &backup_flags);
+            if row_visible(enc_hint, body) {
+                self.draw_text_with_style(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::ENCRYPTION_PASSPHRASE_HINT,
+                    ),
+                    enc_hint,
+                    enc_muted,
+                    11.0,
+                    400,
+                    1.0,
+                )?;
+            }
+            // Status banner — painted only when a status is set. Error → red,
+            // Success → green (Tauri `#f87171` / `#34d399`).
+            if let Some(status) = enc_status_snapshot.as_ref() {
+                let enc_status_row =
+                    settings_encryption_status_rect(viewport, scroll, &backup_flags);
+                if row_visible(enc_status_row, body) {
+                    let (text, color) = match status {
+                        crate::state::SettingsBackupStatus::Error(msg) => (
+                            msg.as_str(),
+                            with_alpha(
+                                bento_nano_style::Color::from_u8(0xF8, 0x71, 0x71, 0xFF),
+                                0.95,
+                            ),
+                        ),
+                        crate::state::SettingsBackupStatus::Success(msg) => (
+                            msg.as_str(),
+                            with_alpha(
+                                bento_nano_style::Color::from_u8(0x34, 0xD3, 0x99, 0xFF),
+                                0.95,
+                            ),
+                        ),
+                    };
+                    self.draw_text(text, enc_status_row, color)?;
+                }
+            }
+
+            // ── M1h — Plugins §11 section (`SettingsPanel.tsx:709-781`) ──────
+            //
+            // Sits after the Encryption §10 card in the Tauri body order
+            // (…→Backup→**Encryption**→Plugins→footer). M7 (2026-06-01) re-anchored
+            // `settings_plugins_label_rect` off the encryption card's status row, so
+            // this paint follows the encryption block automatically. Reads the live
+            // `app.settings_plugin_entries` snapshot (populated on Settings open +
+            // after every install/toggle/uninstall by the shell). The list is
+            // variable-length, capped at SETTINGS_PLUGINS_ROW_VISIBLE_MAX; the
+            // capped count threads through the same `SettingsBodyFlags` the
+            // hit-tester + scroll-clamp use (via `with_plugin_rows`) so paint and
+            // hit geometry agree. PURE view-model helpers (badge id, visible cap,
+            // empty predicate, header text) come from
+            // `business::settings::plugins_section`. Dark dialog tokens only — the
+            // old modal's light `active_theme_palette()` was dropped.
+            use crate::business::settings::plugins_section as plg;
+            use crate::settings_panel::{
+                SETTINGS_PLUGINS_ROW_VISIBLE_MAX, settings_plugin_author_rect,
+                settings_plugin_badge_rect, settings_plugin_card_rect, settings_plugin_desc_rect,
+                settings_plugin_empty_row_rect, settings_plugin_name_rect,
+                settings_plugin_toggle_hit_rect, settings_plugin_uninstall_button_rect,
+                settings_plugins_install_button_rect, settings_plugins_label_rect,
+            };
+            // Snapshot the entries out of the RefCell BEFORE the fallible paint
+            // calls so no borrow spans them (mirrors the Backup/Stealth pattern).
+            let plugin_entries = app.settings_plugin_entries.borrow().clone();
+            let plugin_visible = plg::plugin_visible_row_count(&plugin_entries);
+            let plugin_flags = backup_flags.with_plugin_rows(plugin_visible);
+            // Group title — 插件 / Plugins (reuses SETTINGS_PLUGINS id 36).
+            let plugin_label = settings_plugins_label_rect(viewport, scroll, &plugin_flags);
+            if row_visible(plugin_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_PLUGINS),
+                    plugin_label,
+                    label_color,
+                )?;
+            }
+            // Full-width 安装插件... button (neutral chip) → InstallPlugin.
+            let plugin_install =
+                settings_plugins_install_button_rect(viewport, scroll, &plugin_flags);
+            if row_visible(plugin_install, body) {
+                self.fill_rounded_rect(plugin_install, chip_bg, btn_radius)?;
+                self.draw_text_no_wrap(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_INSTALL),
+                    plugin_install,
+                    title_color,
+                )?;
+            }
+            // plugin-list — N plugin cards or one pluginEmpty placeholder.
+            if plg::plugin_list_is_empty(&plugin_entries) {
+                let empty_row = settings_plugin_empty_row_rect(viewport, scroll, &plugin_flags);
+                if row_visible(empty_row, body) {
+                    self.draw_text(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_EMPTY),
+                        empty_row,
+                        label_color,
+                    )?;
+                }
+            } else {
+                for (card_index, plugin) in plugin_entries
+                    .iter()
+                    .take(SETTINGS_PLUGINS_ROW_VISIBLE_MAX)
+                    .enumerate()
+                {
+                    let card =
+                        settings_plugin_card_rect(viewport, scroll, &plugin_flags, card_index);
+                    if !row_visible(card, body) {
+                        continue;
+                    }
+                    // Card surface — raised chip behind the whole card.
+                    self.fill_rounded_rect(card, chip_bg, chip_radius)?;
+                    // Header — name · v{version} (left), type badge + enable toggle
+                    // (right). The header text is formatted once per visible card.
+                    let name_rect = settings_plugin_name_rect(card);
+                    self.draw_text_no_wrap(
+                        plg::format_plugin_header(plugin).as_str(),
+                        name_rect,
+                        title_color,
+                    )?;
+                    // Type badge — accent-tinted chip (theme=purple, widget=blue,
+                    // organizer=green; `SettingsPanel.css:612-625`).
+                    let badge_rect = settings_plugin_badge_rect(card);
+                    let badge_accent = match plugin.plugin_type.as_str() {
+                        "widget" => palette.accent_blue,
+                        "organizer" => palette.accent_green,
+                        _ => palette.accent_purple,
+                    };
+                    self.fill_rounded_rect(
+                        badge_rect,
+                        with_alpha(badge_accent, 0.20),
+                        bento_nano_style::BorderRadius::all(badge_rect.height * 0.5),
+                    )?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(plg::plugin_type_label_id(plugin.plugin_type.as_str())),
+                        badge_rect,
+                        with_alpha(badge_accent, 1.0),
+                    )?;
+                    // Enable toggle — accent when on, neutral track when off →
+                    // TogglePlugin(card_index).
+                    let toggle_rect = settings_plugin_toggle_hit_rect(card);
+                    let toggle_radius =
+                        bento_nano_style::BorderRadius::all(toggle_rect.height * 0.5);
+                    self.fill_rounded_rect(
+                        toggle_rect,
+                        if plugin.enabled { accent_on } else { track_off },
+                        toggle_radius,
+                    )?;
+                    self.draw_text_no_wrap(
+                        if plugin.enabled {
+                            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_ON)
+                        } else {
+                            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_OFF)
+                        },
+                        toggle_rect,
+                        bento_nano_style::Color::WHITE,
+                    )?;
+                    // Author line (muted).
+                    let author_rect = settings_plugin_author_rect(card);
+                    self.draw_text_no_wrap(
+                        plugin.author.as_str(),
+                        author_rect,
+                        with_alpha(palette.text_muted, 0.95),
+                    )?;
+                    // Description line (muted).
+                    let desc_rect = settings_plugin_desc_rect(card);
+                    self.draw_text_no_wrap(
+                        plugin.description.as_str(),
+                        desc_rect,
+                        with_alpha(palette.text_muted, 0.95),
+                    )?;
+                    // Actions — 卸载 / Uninstall (danger chip) → UninstallPlugin(idx).
+                    let uninstall_btn = settings_plugin_uninstall_button_rect(card);
+                    self.fill_rounded_rect(
+                        uninstall_btn,
+                        with_alpha(palette.accent_red, 0.85),
+                        btn_radius,
+                    )?;
+                    self.draw_text_no_wrap(
+                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_UNINSTALL),
+                        uninstall_btn,
+                        bento_nano_style::Color::WHITE,
+                    )?;
+                }
+            }
+
+            // ── M6-UI / G3 parity — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
+            //
+            // G3 parity (2026-06-01): §3 Appearance now flows between §2 Paths and
+            // §4 DisplayMode (Tauri body order General → Paths → **Appearance** →
+            // DisplayMode → Performance), no longer LAST after Plugins. The geometry
+            // helpers (`settings_appearance_label_rect` et al.) re-anchor off the §2
+            // 监控值 textarea bottom, so this paint block lands at its new position
+            // automatically (paint==hit SSoT) even though it stays here in source
+            // order. The grid geometry (group headings + 17 ThemeCards + accent
+            // swatch row) is owned by `theme_picker::appearance_layout`; the section
+            // anchor + content width come from `settings_panel`. Selecting a card re-skins
+            // the app live (the active card draws a 2-DIP accent-blue border + a
+            // 10%-blue fill tint, compared against `app.active_theme_id`). The
+            // accent swatch row is the editable accent picker (Control B MVP).
+            //
+            // Developer Options (custom-theme textarea + Import/Export) is DEFERRED
+            // (no nano keyboard/text-input infra + no JSON theme parser) — see the
+            // M6-UI carve-out note; no dead toggle is painted.
+            use crate::settings_panel::{
+                settings_appearance_grid_origin, settings_appearance_inner_width,
+                settings_appearance_label_rect, settings_appearance_picker_label_rect,
+            };
+            use crate::theme_picker::{
+                self as tp, AppearanceLayout, BUILTIN_THEMES, SWATCH_BLOCK_RADIUS,
+                SWATCH_INNER_GAP, THEME_CARD_BORDER, THEME_CARD_RADIUS, THEME_GROUP_ORDER,
+            };
+            // Live theme id (the active card highlight) — borrowed once.
+            let active_theme_id = app.active_theme_id.borrow().clone();
+            // Live accent (the ringed accent swatch) — the in-flight draft wins,
+            // else the persisted theme-base accent. Owned snapshot so no RefCell
+            // borrow spans the fallible paint calls below.
+            let active_accent: Option<smol_str::SmolStr> = app
+                .settings_draft_accent_color
+                .borrow()
+                .clone()
+                .or_else(|| app.theme_base_accent.borrow().clone());
+            // Group title — 外观 / Appearance.
+            let appearance_label = settings_appearance_label_rect(viewport, scroll, &plugin_flags);
+            if row_visible(appearance_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_APPEARANCE,
+                    ),
+                    appearance_label,
+                    label_color,
+                )?;
+            }
+            // "选择主题 / Choose Theme" picker label.
+            let picker_label =
+                settings_appearance_picker_label_rect(viewport, scroll, &plugin_flags);
+            if row_visible(picker_label, body) {
+                self.draw_text(
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::THEME_PICKER_LABEL),
+                    picker_label,
+                    label_color,
+                )?;
+            }
+            // Grid layout — body-width-driven, Copy, allocation-free.
+            let appearance_origin =
+                settings_appearance_grid_origin(viewport, scroll, &plugin_flags);
+            let appearance_inner_w = settings_appearance_inner_width(viewport);
+            let appearance: AppearanceLayout =
+                tp::appearance_layout(appearance_origin, appearance_inner_w);
+            // surface_subtle = rgba(white, 0.04) card bg (live theme). Active card
+            // overrides to accent-blue@0.10 + a 2-DIP accent-blue rounded border.
+            let card_bg = palette.surface_subtle;
+            let active_card_bg = with_alpha(palette.accent_blue, 0.10);
+            let card_radius = bento_nano_style::BorderRadius::all(THEME_CARD_RADIUS);
+            let swatch_radius = bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS);
+            // Group headings — Tauri `.theme-group__title`: UPPERCASE,
+            // letter-spacing 1px, font-size 10px, weight 600, color text-muted.
+            // `draw_text_tracked` upper-cases (no-op for CJK) + applies the 1-DIP
+            // per-glyph tracking via DWrite SetCharacterSpacing (both locales).
+            for (group_pos, group) in THEME_GROUP_ORDER.iter().enumerate() {
+                let heading = appearance.group_headings[group_pos];
+                if row_visible(heading, body) {
+                    self.draw_text_tracked(
+                        bento_nano_style::t(group.heading_id()),
+                        heading,
+                        palette.text_muted,
+                        10.0,
+                        600,
+                        1.0,
+                    )?;
+                }
+            }
+            // 17 ThemeCards (walk the preset table; rects indexed by preset id).
+            for preset in BUILTIN_THEMES.iter() {
+                let i = preset.id as usize;
+                let card = appearance.cards[i];
                 if !row_visible(card, body) {
                     continue;
                 }
-                // Card surface — raised chip behind the whole card.
-                self.fill_rounded_rect(card, chip_bg, chip_radius)?;
-                // Header — name · v{version} (left), type badge + enable toggle
-                // (right). The header text is formatted once per visible card.
-                let name_rect = settings_plugin_name_rect(card);
-                self.draw_text_no_wrap(
-                    plg::format_plugin_header(plugin).as_str(),
-                    name_rect,
-                    title_color,
+                let is_active = preset.theme_id == active_theme_id.as_str();
+                // Card surface.
+                self.fill_rounded_rect(
+                    card,
+                    if is_active { active_card_bg } else { card_bg },
+                    card_radius,
                 )?;
-                // Type badge — accent-tinted chip (theme=purple, widget=blue,
-                // organizer=green; `SettingsPanel.css:612-625`).
-                let badge_rect = settings_plugin_badge_rect(card);
-                let badge_accent = match plugin.plugin_type.as_str() {
-                    "widget" => palette.accent_blue,
-                    "organizer" => palette.accent_green,
-                    _ => palette.accent_purple,
+                // Active card border — 2-DIP accent-blue. Tauri's CSS `border` is a
+                // fully-inset border-box; D2D strokes centred on the geometric edge,
+                // so the rect is inset by half the stroke width (1 DIP) on all sides
+                // and the radius shrinks to stay concentric — no bleed past the card.
+                if is_active {
+                    let inset = THEME_CARD_BORDER * 0.5;
+                    let border_rect = bento_nano_style::Rect {
+                        x: card.x + inset,
+                        y: card.y + inset,
+                        width: (card.width - THEME_CARD_BORDER).max(0.0),
+                        height: (card.height - THEME_CARD_BORDER).max(0.0),
+                    };
+                    let border_radius =
+                        bento_nano_style::BorderRadius::all((THEME_CARD_RADIUS - inset).max(0.0));
+                    self.stroke_rounded_rect(
+                        border_rect,
+                        palette.accent_blue,
+                        border_radius,
+                        THEME_CARD_BORDER,
+                    )?;
+                }
+                // 40×40 swatch block — 4 quadrant fills (3-DIP gutter == gap:3px).
+                let block = appearance.swatch_blocks[i];
+                // Drop shadow behind the block — Tauri `.theme-card__swatches`
+                // `box-shadow: 0 1px 3px rgba(0,0,0,0.15)`. Simulated (as elsewhere
+                // in this renderer) by a translucent rounded fill offset +1 DIP in Y
+                // and spread the 3-DIP blur on every side, painted before the block.
+                const SWATCH_SHADOW_OFFSET_Y: f32 = 1.0;
+                const SWATCH_SHADOW_BLUR: f32 = 3.0;
+                let block_shadow = bento_nano_style::Rect {
+                    x: block.x - SWATCH_SHADOW_BLUR,
+                    y: block.y + SWATCH_SHADOW_OFFSET_Y - SWATCH_SHADOW_BLUR,
+                    width: block.width + SWATCH_SHADOW_BLUR * 2.0,
+                    height: block.height + SWATCH_SHADOW_BLUR * 2.0,
                 };
                 self.fill_rounded_rect(
-                    badge_rect,
-                    with_alpha(badge_accent, 0.20),
-                    bento_nano_style::BorderRadius::all(badge_rect.height * 0.5),
+                    block_shadow,
+                    with_alpha(Color::BLACK, 0.15),
+                    bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS + SWATCH_SHADOW_BLUR),
                 )?;
+                // Block pad behind the quadrants (rounded clip silhouette).
+                self.fill_rounded_rect(block, palette.surface_subtle, swatch_radius)?;
+                // Quadrants — Tauri `.theme-card__swatches { border-radius:8;
+                // overflow:hidden }` masks SHARP-cornered quadrants behind an 8-DIP
+                // rounded square. No rounded-clip primitive exists (PushAxisAlignedClip
+                // is rectangular), so each corner quadrant rounds ONLY its single
+                // OUTER corner to 8 (TL→top-left, TR→top-right, BL→bottom-left,
+                // BR→bottom-right) and stays square at the inner centre cross — the
+                // visible-correct per-corner approximation via `fill_partial_rounded_rect`.
+                const QUADRANT_OUTER_CORNER: [[bool; 4]; 4] = [
+                    [true, false, false, false], // 0 = TL
+                    [false, true, false, false], // 1 = TR
+                    [false, false, false, true], // 2 = BL
+                    [false, false, true, false], // 3 = BR
+                ];
+                let quads = tp::thumbnail_swatch_quadrants(block, SWATCH_INNER_GAP);
+                let mut q = 0usize;
+                while q < 4 {
+                    self.fill_partial_rounded_rect(
+                        quads[q],
+                        preset.swatch_colors[q],
+                        SWATCH_BLOCK_RADIUS,
+                        QUADRANT_OUTER_CORNER[q],
+                    )?;
+                    q += 1;
+                }
+                // Name label below the swatch — Tauri `.theme-card__label`:
+                // text-align:center, 10px, color text-secondary, single line.
+                let label_rect = bento_nano_style::Rect {
+                    x: card.x,
+                    y: block.bottom() + crate::theme_picker::THEME_CARD_SWATCH_LABEL_GAP,
+                    width: card.width,
+                    height: crate::theme_picker::CARD_LABEL_HEIGHT,
+                };
+                // #1 step 13 (2026-06-02) — was the lone `draw_text_centered` helper;
+                // now folded into the unified styled path with explicit center/center.
+                self.draw_text_no_wrap_with_style(
+                    bento_nano_style::t(preset.name_id),
+                    label_rect,
+                    palette.text_secondary,
+                    10.0,
+                    400,
+                    1.0,
+                    dwrite::TextAlign {
+                        h: dwrite::HAlign::Center,
+                        v: dwrite::VAlign::Center,
+                    },
+                )?;
+            }
+            // Accent row (Control B) — label + 12-swatch VIBRANT strip + value ring.
+            if row_visible(appearance.accent_row, body) {
+                let accent_label_rect = bento_nano_style::Rect {
+                    x: appearance.accent_row.x,
+                    y: appearance.accent_row.y,
+                    width: appearance.accent_row.width * 0.5,
+                    height: appearance.accent_row.height,
+                };
                 self.draw_text_no_wrap(
-                    bento_nano_style::t(plg::plugin_type_label_id(plugin.plugin_type.as_str())),
-                    badge_rect,
-                    with_alpha(badge_accent, 1.0),
+                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_ACCENT_COLOR),
+                    accent_label_rect,
+                    label_color,
                 )?;
-                // Enable toggle — accent when on, neutral track when off →
-                // TogglePlugin(card_index).
-                let toggle_rect = settings_plugin_toggle_hit_rect(card);
-                let toggle_radius = bento_nano_style::BorderRadius::all(toggle_rect.height * 0.5);
-                self.fill_rounded_rect(
-                    toggle_rect,
-                    if plugin.enabled {
+            }
+            for s in 0..crate::theme_picker::ACCENT_SWATCH_COUNT {
+                let dot = appearance.accent_swatches[s];
+                if !row_visible(dot, body) {
+                    continue;
+                }
+                let dot_radius = bento_nano_style::BorderRadius::all(dot.height * 0.5);
+                self.fill_rounded_rect(dot, crate::theme_picker::ACCENT_SWATCHES[s], dot_radius)?;
+                // Current-value ring on the active accent swatch.
+                let is_active_accent = active_accent
+                    .as_deref()
+                    .map(|hex| crate::theme_picker::accent_swatch_hex(s) == Some(hex))
+                    .unwrap_or(false);
+                if is_active_accent {
+                    let ring = bento_nano_style::Rect {
+                        x: dot.x - 2.0,
+                        y: dot.y - 2.0,
+                        width: dot.width + 4.0,
+                        height: dot.height + 4.0,
+                    };
+                    self.stroke_rounded_rect(
+                        ring,
+                        palette.text_primary,
+                        bento_nano_style::BorderRadius::all(ring.height * 0.5),
+                        2.0,
+                    )?;
+                }
+            }
+
+            // ── §4 DisplayMode group (G3 parity 2026-06-01) — zone-display-mode
+            //    3-radio picker, now a standalone `settings-group` between §3
+            //    Appearance and §5 Performance (Tauri `SettingsPanel.tsx:538-598`).
+            //
+            // Pre-G3 this picker lived inside the General band (right under the
+            // Language row) with an in-row "默认显示模式" caption on the left. G3
+            // promotes it to its own §4 group: a group TITLE on top (reusing the
+            // same bilingual StringId 140) and the 3 radios below — matching Tauri's
+            // `<section class="settings-group"><h3>显示模式</h3>…`. Painted here,
+            // after the §3 Appearance grid and AFTER the reserve-delta fold of
+            // `scroll`, because §4 roots at the same fixed source-reserve baseline as
+            // §3/§5 (it anchors off the §3 Appearance bottom). paint==hit SSoT: the
+            // hit-tester (`ui::settings_hit`) routes the same radios automatically.
+            let display_mode_label =
+                crate::settings_panel::settings_display_mode_label_rect(viewport, scroll);
+            if row_visible(display_mode_label, body) {
+                // Group title — reuses StringId 140 ("默认显示模式" / "Default
+                // display mode") as the §4 group heading (no new StringId per §8).
+                self.draw_text(
+                    bento_nano_style::t(
+                        bento_nano_style::i18n_zh_cn::ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
+                    ),
+                    display_mode_label,
+                    label_color,
+                )?;
+            }
+            let picker_row = settings_zone_display_mode_picker_row_rect(viewport, scroll);
+            if row_visible(picker_row, body) {
+                let modes = [
+                    ZoneDisplayMode::Hover,
+                    ZoneDisplayMode::Always,
+                    ZoneDisplayMode::Click,
+                ];
+                let current = app.zone_display_mode.get();
+                let radius_outer = BorderRadius::all(SETTINGS_RADIO_OUTER_D * 0.5);
+                let radius_inner = BorderRadius::all(SETTINGS_RADIO_INNER_D * 0.5);
+                for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
+                    let mode = modes[index as usize];
+                    let outer =
+                        settings_zone_display_mode_radio_outer_rect(viewport, scroll, index);
+                    // Selected radios use the accent hue; unselected keep the
+                    // chip_border tone. v1.3.0 SettingsPanel.tsx ring pattern:
+                    // fill the outer disc with ring_color, then carve out the
+                    // interior with the panel surface — leaves a 1-DIP ring on
+                    // ALL four edges (top/bottom/left/right) at once, no
+                    // per-edge band stitching (R14 fix — prior 2-band version
+                    // read as `(== ==)` not `○`).
+                    let ring_color = if mode == current {
                         accent_on
                     } else {
-                        track_off
-                    },
-                    toggle_radius,
-                )?;
-                self.draw_text_no_wrap(
-                    if plugin.enabled {
-                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_ON)
-                    } else {
-                        bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::BTN_OFF)
-                    },
-                    toggle_rect,
-                    bento_nano_style::Color::WHITE,
-                )?;
-                // Author line (muted).
-                let author_rect = settings_plugin_author_rect(card);
-                self.draw_text_no_wrap(
-                    plugin.author.as_str(),
-                    author_rect,
-                    with_alpha(palette.text_muted, 0.95),
-                )?;
-                // Description line (muted).
-                let desc_rect = settings_plugin_desc_rect(card);
-                self.draw_text_no_wrap(
-                    plugin.description.as_str(),
-                    desc_rect,
-                    with_alpha(palette.text_muted, 0.95),
-                )?;
-                // Actions — 卸载 / Uninstall (danger chip) → UninstallPlugin(idx).
-                let uninstall_btn = settings_plugin_uninstall_button_rect(card);
-                self.fill_rounded_rect(
-                    uninstall_btn,
-                    with_alpha(palette.accent_red, 0.85),
-                    btn_radius,
-                )?;
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::PLUGIN_UNINSTALL),
-                    uninstall_btn,
-                    bento_nano_style::Color::WHITE,
-                )?;
-            }
-        }
-
-        // ── M6-UI / G3 parity — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
-        //
-        // G3 parity (2026-06-01): §3 Appearance now flows between §2 Paths and
-        // §4 DisplayMode (Tauri body order General → Paths → **Appearance** →
-        // DisplayMode → Performance), no longer LAST after Plugins. The geometry
-        // helpers (`settings_appearance_label_rect` et al.) re-anchor off the §2
-        // 监控值 textarea bottom, so this paint block lands at its new position
-        // automatically (paint==hit SSoT) even though it stays here in source
-        // order. The grid geometry (group headings + 17 ThemeCards + accent
-        // swatch row) is owned by `theme_picker::appearance_layout`; the section
-        // anchor + content width come from `settings_panel`. Selecting a card re-skins
-        // the app live (the active card draws a 2-DIP accent-blue border + a
-        // 10%-blue fill tint, compared against `app.active_theme_id`). The
-        // accent swatch row is the editable accent picker (Control B MVP).
-        //
-        // Developer Options (custom-theme textarea + Import/Export) is DEFERRED
-        // (no nano keyboard/text-input infra + no JSON theme parser) — see the
-        // M6-UI carve-out note; no dead toggle is painted.
-        use crate::settings_panel::{
-            settings_appearance_grid_origin, settings_appearance_inner_width,
-            settings_appearance_label_rect, settings_appearance_picker_label_rect,
-        };
-        use crate::theme_picker::{
-            self as tp, AppearanceLayout, BUILTIN_THEMES, SWATCH_BLOCK_RADIUS, SWATCH_INNER_GAP,
-            THEME_CARD_BORDER, THEME_CARD_RADIUS, THEME_GROUP_ORDER,
-        };
-        // Live theme id (the active card highlight) — borrowed once.
-        let active_theme_id = app.active_theme_id.borrow().clone();
-        // Live accent (the ringed accent swatch) — the in-flight draft wins,
-        // else the persisted theme-base accent. Owned snapshot so no RefCell
-        // borrow spans the fallible paint calls below.
-        let active_accent: Option<smol_str::SmolStr> = app
-            .settings_draft_accent_color
-            .borrow()
-            .clone()
-            .or_else(|| app.theme_base_accent.borrow().clone());
-        // Group title — 外观 / Appearance.
-        let appearance_label = settings_appearance_label_rect(viewport, scroll, &plugin_flags);
-        if row_visible(appearance_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_GROUP_APPEARANCE),
-                appearance_label,
-                label_color,
-            )?;
-        }
-        // "选择主题 / Choose Theme" picker label.
-        let picker_label = settings_appearance_picker_label_rect(viewport, scroll, &plugin_flags);
-        if row_visible(picker_label, body) {
-            self.draw_text(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::THEME_PICKER_LABEL),
-                picker_label,
-                label_color,
-            )?;
-        }
-        // Grid layout — body-width-driven, Copy, allocation-free.
-        let appearance_origin = settings_appearance_grid_origin(viewport, scroll, &plugin_flags);
-        let appearance_inner_w = settings_appearance_inner_width(viewport);
-        let appearance: AppearanceLayout = tp::appearance_layout(appearance_origin, appearance_inner_w);
-        // surface_subtle = rgba(white, 0.04) card bg (live theme). Active card
-        // overrides to accent-blue@0.10 + a 2-DIP accent-blue rounded border.
-        let card_bg = palette.surface_subtle;
-        let active_card_bg = with_alpha(palette.accent_blue, 0.10);
-        let card_radius = bento_nano_style::BorderRadius::all(THEME_CARD_RADIUS);
-        let swatch_radius = bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS);
-        // Group headings — Tauri `.theme-group__title`: UPPERCASE,
-        // letter-spacing 1px, font-size 10px, weight 600, color text-muted.
-        // `draw_text_tracked` upper-cases (no-op for CJK) + applies the 1-DIP
-        // per-glyph tracking via DWrite SetCharacterSpacing (both locales).
-        for (group_pos, group) in THEME_GROUP_ORDER.iter().enumerate() {
-            let heading = appearance.group_headings[group_pos];
-            if row_visible(heading, body) {
-                self.draw_text_tracked(
-                    bento_nano_style::t(group.heading_id()),
-                    heading,
-                    palette.text_muted,
-                    10.0,
-                    600,
-                    1.0,
-                )?;
-            }
-        }
-        // 17 ThemeCards (walk the preset table; rects indexed by preset id).
-        for preset in BUILTIN_THEMES.iter() {
-            let i = preset.id as usize;
-            let card = appearance.cards[i];
-            if !row_visible(card, body) {
-                continue;
-            }
-            let is_active = preset.theme_id == active_theme_id.as_str();
-            // Card surface.
-            self.fill_rounded_rect(card, if is_active { active_card_bg } else { card_bg }, card_radius)?;
-            // Active card border — 2-DIP accent-blue. Tauri's CSS `border` is a
-            // fully-inset border-box; D2D strokes centred on the geometric edge,
-            // so the rect is inset by half the stroke width (1 DIP) on all sides
-            // and the radius shrinks to stay concentric — no bleed past the card.
-            if is_active {
-                let inset = THEME_CARD_BORDER * 0.5;
-                let border_rect = bento_nano_style::Rect {
-                    x: card.x + inset,
-                    y: card.y + inset,
-                    width: (card.width - THEME_CARD_BORDER).max(0.0),
-                    height: (card.height - THEME_CARD_BORDER).max(0.0),
-                };
-                let border_radius =
-                    bento_nano_style::BorderRadius::all((THEME_CARD_RADIUS - inset).max(0.0));
-                self.stroke_rounded_rect(
-                    border_rect,
-                    palette.accent_blue,
-                    border_radius,
-                    THEME_CARD_BORDER,
-                )?;
-            }
-            // 40×40 swatch block — 4 quadrant fills (3-DIP gutter == gap:3px).
-            let block = appearance.swatch_blocks[i];
-            // Drop shadow behind the block — Tauri `.theme-card__swatches`
-            // `box-shadow: 0 1px 3px rgba(0,0,0,0.15)`. Simulated (as elsewhere
-            // in this renderer) by a translucent rounded fill offset +1 DIP in Y
-            // and spread the 3-DIP blur on every side, painted before the block.
-            const SWATCH_SHADOW_OFFSET_Y: f32 = 1.0;
-            const SWATCH_SHADOW_BLUR: f32 = 3.0;
-            let block_shadow = bento_nano_style::Rect {
-                x: block.x - SWATCH_SHADOW_BLUR,
-                y: block.y + SWATCH_SHADOW_OFFSET_Y - SWATCH_SHADOW_BLUR,
-                width: block.width + SWATCH_SHADOW_BLUR * 2.0,
-                height: block.height + SWATCH_SHADOW_BLUR * 2.0,
-            };
-            self.fill_rounded_rect(
-                block_shadow,
-                with_alpha(Color::BLACK, 0.15),
-                bento_nano_style::BorderRadius::all(SWATCH_BLOCK_RADIUS + SWATCH_SHADOW_BLUR),
-            )?;
-            // Block pad behind the quadrants (rounded clip silhouette).
-            self.fill_rounded_rect(block, palette.surface_subtle, swatch_radius)?;
-            // Quadrants — Tauri `.theme-card__swatches { border-radius:8;
-            // overflow:hidden }` masks SHARP-cornered quadrants behind an 8-DIP
-            // rounded square. No rounded-clip primitive exists (PushAxisAlignedClip
-            // is rectangular), so each corner quadrant rounds ONLY its single
-            // OUTER corner to 8 (TL→top-left, TR→top-right, BL→bottom-left,
-            // BR→bottom-right) and stays square at the inner centre cross — the
-            // visible-correct per-corner approximation via `fill_partial_rounded_rect`.
-            const QUADRANT_OUTER_CORNER: [[bool; 4]; 4] = [
-                [true, false, false, false],  // 0 = TL
-                [false, true, false, false],  // 1 = TR
-                [false, false, false, true],  // 2 = BL
-                [false, false, true, false],  // 3 = BR
-            ];
-            let quads = tp::thumbnail_swatch_quadrants(block, SWATCH_INNER_GAP);
-            let mut q = 0usize;
-            while q < 4 {
-                self.fill_partial_rounded_rect(
-                    quads[q],
-                    preset.swatch_colors[q],
-                    SWATCH_BLOCK_RADIUS,
-                    QUADRANT_OUTER_CORNER[q],
-                )?;
-                q += 1;
-            }
-            // Name label below the swatch — Tauri `.theme-card__label`:
-            // text-align:center, 10px, color text-secondary, single line.
-            let label_rect = bento_nano_style::Rect {
-                x: card.x,
-                y: block.bottom() + crate::theme_picker::THEME_CARD_SWATCH_LABEL_GAP,
-                width: card.width,
-                height: crate::theme_picker::CARD_LABEL_HEIGHT,
-            };
-            self.draw_text_centered(
-                bento_nano_style::t(preset.name_id),
-                label_rect,
-                palette.text_secondary,
-                10.0,
-                400,
-            )?;
-        }
-        // Accent row (Control B) — label + 12-swatch VIBRANT strip + value ring.
-        if row_visible(appearance.accent_row, body) {
-            let accent_label_rect = bento_nano_style::Rect {
-                x: appearance.accent_row.x,
-                y: appearance.accent_row.y,
-                width: appearance.accent_row.width * 0.5,
-                height: appearance.accent_row.height,
-            };
-            self.draw_text_no_wrap(
-                bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_ACCENT_COLOR),
-                accent_label_rect,
-                label_color,
-            )?;
-        }
-        for s in 0..crate::theme_picker::ACCENT_SWATCH_COUNT {
-            let dot = appearance.accent_swatches[s];
-            if !row_visible(dot, body) {
-                continue;
-            }
-            let dot_radius = bento_nano_style::BorderRadius::all(dot.height * 0.5);
-            self.fill_rounded_rect(dot, crate::theme_picker::ACCENT_SWATCHES[s], dot_radius)?;
-            // Current-value ring on the active accent swatch.
-            let is_active_accent = active_accent
-                .as_deref()
-                .map(|hex| crate::theme_picker::accent_swatch_hex(s) == Some(hex))
-                .unwrap_or(false);
-            if is_active_accent {
-                let ring = bento_nano_style::Rect {
-                    x: dot.x - 2.0,
-                    y: dot.y - 2.0,
-                    width: dot.width + 4.0,
-                    height: dot.height + 4.0,
-                };
-                self.stroke_rounded_rect(
-                    ring,
-                    palette.text_primary,
-                    bento_nano_style::BorderRadius::all(ring.height * 0.5),
-                    2.0,
-                )?;
-            }
-        }
-
-        // ── §4 DisplayMode group (G3 parity 2026-06-01) — zone-display-mode
-        //    3-radio picker, now a standalone `settings-group` between §3
-        //    Appearance and §5 Performance (Tauri `SettingsPanel.tsx:538-598`).
-        //
-        // Pre-G3 this picker lived inside the General band (right under the
-        // Language row) with an in-row "默认显示模式" caption on the left. G3
-        // promotes it to its own §4 group: a group TITLE on top (reusing the
-        // same bilingual StringId 140) and the 3 radios below — matching Tauri's
-        // `<section class="settings-group"><h3>显示模式</h3>…`. Painted here,
-        // after the §3 Appearance grid and AFTER the reserve-delta fold of
-        // `scroll`, because §4 roots at the same fixed source-reserve baseline as
-        // §3/§5 (it anchors off the §3 Appearance bottom). paint==hit SSoT: the
-        // hit-tester (`ui::settings_hit`) routes the same radios automatically.
-        let display_mode_label = crate::settings_panel::settings_display_mode_label_rect(
-            viewport, scroll,
-        );
-        if row_visible(display_mode_label, body) {
-            // Group title — reuses StringId 140 ("默认显示模式" / "Default
-            // display mode") as the §4 group heading (no new StringId per §8).
-            self.draw_text(
-                bento_nano_style::t(
-                    bento_nano_style::i18n_zh_cn::ids::SETTINGS_ZONE_DISPLAY_MODE_LABEL,
-                ),
-                display_mode_label,
-                label_color,
-            )?;
-        }
-        let picker_row = settings_zone_display_mode_picker_row_rect(viewport, scroll);
-        if row_visible(picker_row, body) {
-            let modes = [
-                ZoneDisplayMode::Hover,
-                ZoneDisplayMode::Always,
-                ZoneDisplayMode::Click,
-            ];
-            let current = app.zone_display_mode.get();
-            let radius_outer = BorderRadius::all(SETTINGS_RADIO_OUTER_D * 0.5);
-            let radius_inner = BorderRadius::all(SETTINGS_RADIO_INNER_D * 0.5);
-            for index in 0..SETTINGS_ZONE_DISPLAY_MODE_COUNT {
-                let mode = modes[index as usize];
-                let outer = settings_zone_display_mode_radio_outer_rect(
-                    viewport, scroll, index,
-                );
-                // Selected radios use the accent hue; unselected keep the
-                // chip_border tone. v1.3.0 SettingsPanel.tsx ring pattern:
-                // fill the outer disc with ring_color, then carve out the
-                // interior with the panel surface — leaves a 1-DIP ring on
-                // ALL four edges (top/bottom/left/right) at once, no
-                // per-edge band stitching (R14 fix — prior 2-band version
-                // read as `(== ==)` not `○`).
-                let ring_color = if mode == current {
-                    accent_on
-                } else {
-                    chip_border
-                };
-                self.fill_rounded_rect(outer, ring_color, radius_outer)?;
-                let ring_hairline: f32 = 1.0;
-                let interior = bento_nano_style::Rect {
-                    x: outer.x + ring_hairline,
-                    y: outer.y + ring_hairline,
-                    width: (outer.width - 2.0 * ring_hairline).max(0.0),
-                    height: (outer.height - 2.0 * ring_hairline).max(0.0),
-                };
-                let radius_interior = BorderRadius::all(
-                    (SETTINGS_RADIO_OUTER_D * 0.5 - ring_hairline).max(0.0),
-                );
-                self.fill_rounded_rect(interior, chip_bg, radius_interior)?;
-                if mode == current {
-                    let inner = settings_zone_display_mode_radio_inner_rect(
-                        viewport, scroll, index,
-                    );
-                    self.fill_rounded_rect(inner, accent_on, radius_inner)?;
+                        chip_border
+                    };
+                    self.fill_rounded_rect(outer, ring_color, radius_outer)?;
+                    let ring_hairline: f32 = 1.0;
+                    let interior = bento_nano_style::Rect {
+                        x: outer.x + ring_hairline,
+                        y: outer.y + ring_hairline,
+                        width: (outer.width - 2.0 * ring_hairline).max(0.0),
+                        height: (outer.height - 2.0 * ring_hairline).max(0.0),
+                    };
+                    let radius_interior =
+                        BorderRadius::all((SETTINGS_RADIO_OUTER_D * 0.5 - ring_hairline).max(0.0));
+                    self.fill_rounded_rect(interior, chip_bg, radius_interior)?;
+                    if mode == current {
+                        let inner =
+                            settings_zone_display_mode_radio_inner_rect(viewport, scroll, index);
+                        self.fill_rounded_rect(inner, accent_on, radius_inner)?;
+                    }
+                    // Radio label — bilingual via StringId 77/78/79 (R14 fix —
+                    // prior `mode.label()` returned English-only literals).
+                    let label_id = match mode {
+                        ZoneDisplayMode::Hover => {
+                            bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_HOVER
+                        }
+                        ZoneDisplayMode::Always => {
+                            bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_ALWAYS
+                        }
+                        ZoneDisplayMode::Click => {
+                            bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_CLICK
+                        }
+                    };
+                    let label =
+                        settings_zone_display_mode_radio_label_rect(viewport, scroll, index);
+                    self.draw_text_no_wrap(bento_nano_style::t(label_id), label, title_color)?;
                 }
-                // Radio label — bilingual via StringId 77/78/79 (R14 fix —
-                // prior `mode.label()` returned English-only literals).
-                let label_id = match mode {
-                    ZoneDisplayMode::Hover => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_HOVER
-                    }
-                    ZoneDisplayMode::Always => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_ALWAYS
-                    }
-                    ZoneDisplayMode::Click => {
-                        bento_nano_style::i18n_zh_cn::ids::ZONE_MODE_CLICK
-                    }
-                };
-                let label = settings_zone_display_mode_radio_label_rect(
-                    viewport, scroll, index,
-                );
-                self.draw_text_no_wrap(
-                    bento_nano_style::t(label_id),
-                    label,
-                    title_color,
-                )?;
             }
-        }
 
             Ok(())
         })();
@@ -5704,9 +6054,9 @@ impl Renderer {
                             BorderRadius::all(8.0),
                         )?;
                         // M2 R4 (2026-05-29) — try the REAL extracted icon
-                        // bitmap first (mirrors `draw_item_card`'s branch at
-                        // ~2025). Only when the cache misses / decode fails do
-                        // we fall back to the extension-derived emoji glyph.
+                        // bitmap first (mirrors `draw_item_card`). Only when
+                        // the cache misses / decode fails do we fall back to
+                        // the extension-derived selected-stack line-art glyph.
                         // RC-4 Gap 1 — the 32×32 capsule is far too narrow for
                         // a full file name (the old "ite ite ite" symptom);
                         // the capsule is a glance affordance, the full name
@@ -5717,9 +6067,9 @@ impl Renderer {
                             width: (item_rect.width - 8.0).max(0.0),
                             height: (item_rect.height - 8.0).max(0.0),
                         };
-                        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect)? {
-                            let glyph = item_icon::fallback_emoji_for(item.path.as_ref());
-                            self.draw_text(glyph.as_str(), icon_rect, bar.unpin_button.tint)?;
+                        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect, 1.0)? {
+                            let kind = item_icon::fallback_icon_kind_for(item.path.as_ref());
+                            self.draw_icon_glyph(kind.as_str(), icon_rect, bar.unpin_button.tint)?;
                         }
                     }
                 }
@@ -6343,8 +6693,8 @@ impl Renderer {
         // version overflowed `panel.width - 36` at any reasonable font
         // size, wrapped to 2 visual rows, and clashed with the status
         // text at `panel.y + 80`.
-        let bulk_line_height = style_tokens::TYPOGRAPHY.sm.size_px
-            * style_tokens::TYPOGRAPHY.sm.line_height;
+        let bulk_line_height =
+            style_tokens::TYPOGRAPHY.sm.size_px * style_tokens::TYPOGRAPHY.sm.line_height;
         self.draw_text(
             "F/click Search then type to filter · Up/Down cursor · Space select · A all · I invert",
             bento_nano_style::Rect {
@@ -6410,10 +6760,7 @@ impl Renderer {
         // RC-4 Gap 3 — status row sits below the 2 helper lines (52 +
         // 2*line_height + xs gap). The legacy `panel.y + 80.0` baseline
         // pre-dated the helper split and now clashes with helper line 2.
-        let status_top = (panel.y
-            + 52.0
-            + bulk_line_height * 2.0
-            + style_tokens::SPACING.xs * 2.0)
+        let status_top = (panel.y + 52.0 + bulk_line_height * 2.0 + style_tokens::SPACING.xs * 2.0)
             .max(panel.y + 80.0);
         self.draw_text(
             status_text.as_str(),
@@ -6681,17 +7028,28 @@ impl Renderer {
                 chrome.row_background
             };
             self.fill_rounded_rect(row, bg, chrome.row_radius)?;
-            let pin = if entry.pinned { "★" } else { " " };
             let line = smol_str::SmolStr::new(format!(
-                "{pin} {}  zones={} items={}",
+                "{}  zones={} items={}",
                 entry.captured_at, entry.zone_count, entry.item_count
             ));
+            if entry.pinned {
+                self.draw_icon_glyph(
+                    IconKind::Pin.as_str(),
+                    bento_nano_style::Rect {
+                        x: row.x + 10.0,
+                        y: row.y + 5.0,
+                        width: 12.0,
+                        height: 12.0,
+                    },
+                    chrome.body_color,
+                )?;
+            }
             self.draw_text(
                 line.as_str(),
                 bento_nano_style::Rect {
-                    x: row.x + 10.0,
+                    x: row.x + 28.0,
                     y: row.y + 4.0,
-                    width: row.width - 20.0,
+                    width: row.width - 38.0,
                     height: 17.0,
                 },
                 chrome.body_color,
@@ -6771,8 +7129,8 @@ impl Renderer {
             chrome.title_color,
             app.active_theme_effect_tauri(),
         )?;
-        let helper_line_h = style_tokens::TYPOGRAPHY.sm.size_px
-            * style_tokens::TYPOGRAPHY.sm.line_height;
+        let helper_line_h =
+            style_tokens::TYPOGRAPHY.sm.size_px * style_tokens::TYPOGRAPHY.sm.line_height;
         self.draw_text(
             "Click rows to select. Buttons save/load/delete/open Timeline.",
             bento_nano_style::Rect {
@@ -7365,16 +7723,13 @@ impl Renderer {
                 chrome.row_background
             };
             self.fill_rounded_rect(row, row_bg, chrome.row_radius)?;
-            self.draw_text(
-                hit.icon.as_str(),
-                bento_nano_style::Rect {
-                    x: row.x + 12.0,
-                    y: row.y + 12.0,
-                    width: 44.0,
-                    height: 20.0,
-                },
-                chrome.body_color,
-            )?;
+            let icon_rect = bento_nano_style::Rect {
+                x: row.x + 12.0,
+                y: row.y + 9.0,
+                width: 28.0,
+                height: 28.0,
+            };
+            self.draw_icon_glyph(hit.icon.as_str(), icon_rect, chrome.body_color)?;
             self.draw_text(
                 hit.name.as_str(),
                 bento_nano_style::Rect {
@@ -7465,8 +7820,8 @@ impl Renderer {
         // Result: helper line 2 overpaints the status row. Split the
         // helper into two short lines, advance each by one line_height +
         // SPACING.xs, and push the status row below the second helper line.
-        let line_height = style_tokens::TYPOGRAPHY.sm.size_px
-            * style_tokens::TYPOGRAPHY.sm.line_height;
+        let line_height =
+            style_tokens::TYPOGRAPHY.sm.size_px * style_tokens::TYPOGRAPHY.sm.line_height;
         let helper_row_advance = line_height + style_tokens::SPACING.xs;
         let helper_top = panel.y + 50.0;
         self.draw_text(
@@ -7536,16 +7891,13 @@ impl Renderer {
                 chrome.row_background
             };
             self.fill_rounded_rect(row, row_bg, chrome.row_radius)?;
-            self.draw_text(
-                entry.suggestion.icon.as_str(),
-                bento_nano_style::Rect {
-                    x: row.x + 12.0,
-                    y: row.y + 15.0,
-                    width: smart_group_suggestor::ROW_ICON_SIZE_PX,
-                    height: 22.0,
-                },
-                chrome.body_color,
-            )?;
+            let icon_rect = bento_nano_style::Rect {
+                x: row.x + 12.0,
+                y: row.y + ((row.height - smart_group_suggestor::ROW_ICON_SIZE_PX) * 0.5),
+                width: smart_group_suggestor::ROW_ICON_SIZE_PX,
+                height: smart_group_suggestor::ROW_ICON_SIZE_PX,
+            };
+            self.draw_icon_glyph(entry.suggestion.icon.as_str(), icon_rect, chrome.body_color)?;
             let apply = smart_group_suggestor::suggestor_apply_rect(viewport, index);
             let dismiss = smart_group_suggestor::suggestor_dismiss_rect(viewport, index);
             let badge = bento_nano_style::Rect {
@@ -7893,28 +8245,95 @@ impl Renderer {
     }
 
     /// M6b — paint a multi-layer [`ShadowStack`] under `base` as a simulated
-    /// soft fill (the existing grow-and-fill idiom, one fill per layer, no D2D
-    /// blur effect on the hot path). Layers draw back-to-front so the inner
-    /// surface lift sits under the dominant outer drop. Each layer grows the
-    /// rect by `blur + spread`, so `terminal`'s `0 0 0 1px` ring (spread=1,
-    /// blur=0) paints a 1-DIP outline and `neo`'s `-6 -6` light extrude shifts
-    /// up-left (negative offsets are honoured — the rect simply translates).
-    /// An empty stack (`flat`/`brutalism`/`editorial`) is a no-op.
+    /// soft fill (the grow-and-fill idiom, no D2D blur effect on the hot path).
+    /// Layers draw back-to-front so the inner surface lift sits under the
+    /// dominant outer drop.
+    ///
+    /// #3 step 10 (2026-06-02) — each layer is FEATHERED instead of stamped as
+    /// one crisp full-alpha rounded rect. A real CSS `box-shadow: 0 4px 16px ...`
+    /// spreads its alpha across a 16–48px Gaussian gradient that is near-zero at
+    /// the panel edge; the old single grow-and-fill put the full token alpha
+    /// right up to a sharp rectangle boundary, so the expanded zone's 2-layer
+    /// shadow read as a hard "extra border" ring ~16px outside the 1px hairline.
+    /// We now paint `FEATHER_BANDS` concentric rects per layer, from the full
+    /// grow (faint) inward toward the panel (denser): each band carries
+    /// `per_band_alpha = 1 - (1 - A)^(1/N)`, so the N bands that overlap nearest
+    /// the panel composite back UP to the token alpha `A` (0x33 / 0x66 kept
+    /// EXACTLY), while the outer edge — covered by only the first band — fades to
+    /// `per_band_alpha`, giving the soft blur falloff. A spread-only ring
+    /// (`blur == 0`, e.g. `terminal`'s `0 0 0 1px`) keeps its single crisp fill.
+    /// Allocation-free: a fixed stack-`f32` loop, reusing `fill_rounded_rect`
+    /// (§10). An empty stack (`flat`/`brutalism`/`editorial`) is a no-op.
     fn draw_shadow_stack(
         &self,
         base: bento_nano_style::Rect,
         stack: bento_nano_style::ShadowStack,
         radius: BorderRadius,
     ) -> Result<(), RenderError> {
+        /// Concentric feather bands per shadow layer (§10: fixed, stack-only).
+        ///
+        /// #3 / Bug B (2026-06-02) — raised 4 → 20. At 4 bands the ~`blur/4`
+        /// spacing left visible nested rings (Tauri's `box-shadow: blur(16/48)`
+        /// is a smooth gaussian — ref f09/f11 show an edgeless soft shadow, no
+        /// rings). 20 closely-spaced bands integrate to a smooth falloff.
+        const FEATHER_BANDS: usize = 20;
         for layer in stack.layers() {
-            let grow = layer.blur.max(0.0) + layer.spread.max(0.0);
-            let rect = bento_nano_style::Rect {
-                x: base.x + layer.offset_x - grow,
-                y: base.y + layer.offset_y - grow,
-                width: base.width + grow * 2.0,
-                height: base.height + grow * 2.0,
-            };
-            self.fill_rounded_rect(rect, layer.color, radius)?;
+            let blur = layer.blur.max(0.0);
+            let spread = layer.spread.max(0.0);
+            let grow = blur + spread;
+            // Spread-only / zero-blur layer (e.g. a 1px ring): no falloff to
+            // model, keep the single crisp fill at the token alpha.
+            if blur <= 0.5 {
+                let rect = bento_nano_style::Rect {
+                    x: base.x + layer.offset_x - grow,
+                    y: base.y + layer.offset_y - grow,
+                    width: base.width + grow * 2.0,
+                    height: base.height + grow * 2.0,
+                };
+                self.fill_rounded_rect(rect, layer.color, radius)?;
+                continue;
+            }
+            // Per-band alpha such that N overlapping bands composite (over) back
+            // to the token alpha A near the panel: A = 1 - (1 - a)^N  ⇒
+            // a = 1 - (1 - A)^(1/N). The outer band alone reads `a` (the soft
+            // edge); each step inward adds another `over` layer toward `A`.
+            let a = layer.color.a.clamp(0.0, 1.0);
+            let per_band_alpha = 1.0 - (1.0 - a).powf(1.0 / FEATHER_BANDS as f32);
+            // Bands span the full grow (outer, faint) down to spread (the solid
+            // core just outside the panel), so the densest overlap hugs the
+            // panel edge and the alpha integrates outward to zero.
+            for band in 0..FEATHER_BANDS {
+                // t = 1.0 at the outermost band → grow; 1/N at the innermost.
+                let t = (FEATHER_BANDS - band) as f32 / FEATHER_BANDS as f32;
+                let band_grow = spread + blur * t;
+                let rect = bento_nano_style::Rect {
+                    x: base.x + layer.offset_x - band_grow,
+                    y: base.y + layer.offset_y - band_grow,
+                    width: base.width + band_grow * 2.0,
+                    height: base.height + band_grow * 2.0,
+                };
+                // #3 / Bug B (2026-06-02) — GROW the corner radius by `band_grow`
+                // so every band is a TRUE uniform offset of the panel (genuine
+                // concentric arcs). Reusing the panel's fixed `radius` at each
+                // larger size made the corners non-concentric (same arc radius
+                // on differently-sized rects → the nested-ring corner artifact);
+                // a parallel curve at `r + band_grow` removes it, leaving one
+                // smooth rounded falloff.
+                let band_radius = bento_nano_style::BorderRadius {
+                    top_left: radius.top_left + band_grow,
+                    top_right: radius.top_right + band_grow,
+                    bottom_right: radius.bottom_right + band_grow,
+                    bottom_left: radius.bottom_left + band_grow,
+                };
+                self.fill_rounded_rect(
+                    rect,
+                    bento_nano_style::Color {
+                        a: per_band_alpha,
+                        ..layer.color
+                    },
+                    band_radius,
+                )?;
+            }
         }
         Ok(())
     }
@@ -8086,6 +8505,29 @@ impl Renderer {
         Ok(())
     }
 
+    /// Paint the selected-stack expanded panel `border-top` as CSS does: stroke
+    /// the full rounded border, then clip that stroke to the top 2-DIP strip.
+    /// The old inner filled slab was inset by the full corner radius, so it read
+    /// like a second border inside the panel instead of the panel's own top edge.
+    fn draw_expanded_panel_accent_edge(
+        &self,
+        rect: bento_nano_style::Rect,
+        radius: BorderRadius,
+        accent: Color,
+    ) -> Result<(), RenderError> {
+        if accent.a <= 0.0 || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let clip = expanded_panel_accent_clip_rect(rect);
+        if clip.width <= 0.0 || clip.height <= 0.0 {
+            return Ok(());
+        }
+        self.push_clip(clip)?;
+        let result = self.stroke_rounded_rect(rect, accent, radius, PANEL_ACCENT_EDGE_THICKNESS_PX);
+        let pop_result = self.pop_clip();
+        result.and(pop_result)
+    }
+
     /// G5 (2026-06-01) — stroke a rounded-rect outline with a DASHED hairline.
     /// Used for the collapsed `minimal`-shape capsule, whose Tauri chrome is
     /// `border: 1px dashed rgba(255,255,255,0.2)` over a transparent body
@@ -8124,8 +8566,7 @@ impl Renderer {
             // so `CreateStrokeStyle` resolves to the base overload that takes
             // `D2D1_STROKE_STYLE_PROPERTIES` and returns `ID2D1StrokeStyle`
             // (the `Factory1` overload wants `..._PROPERTIES1`/`...Style1`).
-            let factory: ID2D1Factory =
-                ok("Factory1::cast<Factory>", d2d.factory.cast())?;
+            let factory: ID2D1Factory = ok("Factory1::cast<Factory>", d2d.factory.cast())?;
             let props = D2D1_STROKE_STYLE_PROPERTIES {
                 startCap: D2D1_CAP_STYLE_FLAT,
                 endCap: D2D1_CAP_STYLE_FLAT,
@@ -8184,7 +8625,7 @@ impl Renderer {
         corners: [bool; 4],
     ) -> Result<(), RenderError> {
         use windows::Win32::Graphics::Direct2D::Common::{
-            D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_SIZE_F,
+            D2D_SIZE_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
         };
         use windows::Win32::Graphics::Direct2D::{
             D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_SWEEP_DIRECTION_CLOCKWISE,
@@ -8211,7 +8652,10 @@ impl Renderer {
         let bl = if corners[3] { r } else { 0.0 };
         let arc = |to_x: f32, to_y: f32| D2D1_ARC_SEGMENT {
             point: D2D_POINT_2F { x: to_x, y: to_y },
-            size: D2D_SIZE_F { width: r, height: r },
+            size: D2D_SIZE_F {
+                width: r,
+                height: r,
+            },
             rotationAngle: 90.0,
             sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
             arcSize: D2D1_ARC_SIZE_SMALL,
@@ -8223,16 +8667,15 @@ impl Renderer {
         let factory = &d2d_fac.factory;
         // SAFETY: factory valid; geometry + sink are freshly created and the
         // sink is closed before this fn returns (mirrors svg::to_d2d_geometry).
-        let geom = ok("CreatePathGeometry", unsafe { factory.CreatePathGeometry() })?;
+        let geom = ok("CreatePathGeometry", unsafe {
+            factory.CreatePathGeometry()
+        })?;
         let sink: ID2D1GeometrySink = ok("PathGeometry::Open", unsafe { geom.Open() })?;
         // Walk the perimeter clockwise from the top edge, arcing rounded
         // corners and cutting straight to the geometric corner on square ones.
         // SAFETY: sink valid until Close() below; all points live on the stack.
         unsafe {
-            sink.BeginFigure(
-                D2D_POINT_2F { x: l + tl, y: t },
-                D2D1_FIGURE_BEGIN_FILLED,
-            );
+            sink.BeginFigure(D2D_POINT_2F { x: l + tl, y: t }, D2D1_FIGURE_BEGIN_FILLED);
             // Top edge → top-right corner.
             sink.AddLine(D2D_POINT_2F { x: rt_x - tr, y: t });
             if corners[1] {
@@ -8272,8 +8715,23 @@ impl Renderer {
         rect: bento_nano_style::Rect,
         color: Color,
     ) -> Result<(), RenderError> {
+        self.draw_text_aligned(text, rect, color, dwrite::TextAlign::DEFAULT)
+    }
+
+    /// #1 step 13 (2026-06-02) — single text drawing entry point with explicit
+    /// DWrite alignment. Default text still flows through [`draw_text`], while
+    /// icon/glyph fallbacks and other centred chips pass a non-default
+    /// [`dwrite::TextAlign`]. This keeps the old isolated `draw_text_centered`
+    /// path folded into the same layout builder as every other text run.
+    fn draw_text_aligned(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        align: dwrite::TextAlign,
+    ) -> Result<(), RenderError> {
         let format = self.text_format.clone();
-        self.draw_text_with_format(text, rect, color, &format)
+        self.draw_text_with_format(text, rect, color, &format, align)
     }
 
     /// RC-4 Gap 3 — single-line variant of `draw_text` that disables DWrite
@@ -8307,6 +8765,7 @@ impl Renderer {
             rect.width.max(1.0),
             rect.height.max(1.0),
             self.ellipsis_sign.as_ref(),
+            dwrite::TextAlign::DEFAULT,
         )?;
         let brush = self.solid_brush(color)?;
         let origin = D2D_POINT_2F {
@@ -8316,7 +8775,7 @@ impl Renderer {
         let ctx = self.ctx()?;
         // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
         unsafe {
-            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
         Ok(())
     }
@@ -8344,6 +8803,14 @@ impl Renderer {
     ///
     /// §10: reuses `utf16_scratch` (cleared, never freed) and the format LRU —
     /// no per-frame heap allocation. §11: no panic/unwrap (`?`-propagated).
+    /// #1 step 12/13 (2026-06-02) — `align` sets the DWrite text/paragraph
+    /// alignment for the run. The origin stays the rect's top-left, so a
+    /// `Center` horizontal alignment centres the run WITHIN `rect.width` (the
+    /// item-card label centring under its icon) and a `Center` vertical
+    /// alignment centres WITHIN `rect.height` (the header title / count badge,
+    /// exact instead of the old `(band - size*1.4)/2` baseline approximation).
+    /// Pass [`dwrite::TextAlign::DEFAULT`] for the legacy Leading/Near top-left.
+    #[allow(clippy::too_many_arguments)]
     fn draw_text_no_wrap_with_style(
         &mut self,
         text: &str,
@@ -8352,6 +8819,7 @@ impl Renderer {
         size_pt: f32,
         weight: u16,
         line_height: f32,
+        align: dwrite::TextAlign,
     ) -> Result<(), RenderError> {
         if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
@@ -8367,6 +8835,7 @@ impl Renderer {
             rect.width.max(1.0),
             rect.height.max(1.0),
             None,
+            align,
         )?;
         let brush = self.solid_brush(color)?;
         let origin = D2D_POINT_2F {
@@ -8376,7 +8845,121 @@ impl Renderer {
         let ctx = self.ctx()?;
         // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
         unsafe {
-            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+        Ok(())
+    }
+
+    /// Draw a single-line styled run with CSS-like letter-spacing.
+    ///
+    /// This is the non-uppercase sibling of [`draw_text_tracked`]. It keeps the
+    /// caller's text casing and alignment while applying DWrite character
+    /// spacing over the full UTF-16 run, which is what settled and in-flight
+    /// expanded panel titles need for Tauri `.panel-header__title` parity.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_no_wrap_tracked_with_style(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+        size_pt: f32,
+        weight: u16,
+        line_height: f32,
+        tracking: f32,
+        align: dwrite::TextAlign,
+    ) -> Result<(), RenderError> {
+        use windows::Win32::Graphics::DirectWrite::{DWRITE_TEXT_RANGE, IDWriteTextLayout1};
+        if tracking.abs() <= f32::EPSILON {
+            return self.draw_text_no_wrap_with_style(
+                text,
+                rect,
+                color,
+                size_pt,
+                weight,
+                line_height,
+                align,
+            );
+        }
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.text_format_for_style(size_pt, weight, line_height)?;
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            None,
+            align,
+        )?;
+        let layout1: IDWriteTextLayout1 = ok("TextLayout::cast<TextLayout1>", layout.cast())?;
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: 0,
+            length: u32::try_from(self.utf16_scratch.len()).unwrap_or(u32::MAX),
+        };
+        // SAFETY: layout1 is freshly created; SetCharacterSpacing only mutates
+        // per-instance spacing over the full text range owned by this layout.
+        unsafe {
+            let _ = layout1.SetCharacterSpacing(0.0, tracking, 0.0, range);
+        }
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout1, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+        Ok(())
+    }
+
+    /// Draw fixed-token item labels with no wrapping and a visible ellipsis.
+    /// Tauri item cards keep one label size across narrow and wide cards;
+    /// overflow is handled by the layout box, not by per-card font shrinking.
+    fn draw_item_label_no_wrap(
+        &mut self,
+        text: &str,
+        rect: bento_nano_style::Rect,
+        color: Color,
+    ) -> Result<(), RenderError> {
+        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
+            return Ok(());
+        }
+        let format = self.text_format_for_style(ITEM_LABEL_BASE_FONT_PX, 400, 1.4)?;
+        if self.item_label_ellipsis_sign.is_none() {
+            self.item_label_ellipsis_sign = Some(dwrite::create_ellipsis_sign(&format)?);
+        }
+        let trim_sign = self.item_label_ellipsis_sign.clone();
+        self.utf16_scratch.clear();
+        for u in text.encode_utf16() {
+            self.utf16_scratch.push(u);
+        }
+        let layout = dwrite::create_layout_no_wrap(
+            &self.utf16_scratch,
+            &format,
+            rect.width.max(1.0),
+            rect.height.max(1.0),
+            trim_sign.as_ref(),
+            dwrite::TextAlign {
+                h: dwrite::HAlign::Center,
+                v: dwrite::VAlign::Near,
+            },
+        )?;
+        let brush = self.solid_brush(color)?;
+        let origin = D2D_POINT_2F {
+            x: rect.x,
+            y: rect.y,
+        };
+        let ctx = self.ctx()?;
+        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
+        unsafe {
+            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
         Ok(())
     }
@@ -8401,12 +8984,14 @@ impl Renderer {
             self.utf16_scratch.push(u);
         }
         // Large max_w so NO_WRAP measurement returns the intrinsic run width.
+        // Alignment is irrelevant to width measurement → DEFAULT.
         let layout = dwrite::create_layout_no_wrap(
             &self.utf16_scratch,
             &format,
             f32::MAX,
             64.0,
             None,
+            dwrite::TextAlign::DEFAULT,
         )?;
         let mut metrics = DWRITE_TEXT_METRICS::default();
         // SAFETY: layout is a freshly-created COM interface; GetMetrics writes
@@ -8445,9 +9030,7 @@ impl Renderer {
         color: Color,
         base_px: f32,
     ) -> Result<(), RenderError> {
-        use windows::Win32::Graphics::DirectWrite::{
-            IDWriteTextLayout1, DWRITE_TEXT_RANGE,
-        };
+        use windows::Win32::Graphics::DirectWrite::{DWRITE_TEXT_RANGE, IDWriteTextLayout1};
         if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
         }
@@ -8512,10 +9095,10 @@ impl Renderer {
             rect.width.max(1.0),
             rect.height.max(1.0),
             trim_sign.as_ref(),
+            dwrite::TextAlign::DEFAULT,
         )?;
         // Letter-spacing 0.3px via IDWriteTextLayout1 (§15.1 canonical cast).
-        let layout1: IDWriteTextLayout1 =
-            ok("TextLayout::cast<TextLayout1>", layout.cast())?;
+        let layout1: IDWriteTextLayout1 = ok("TextLayout::cast<TextLayout1>", layout.cast())?;
         let range = DWRITE_TEXT_RANGE {
             startPosition: 0,
             length: self.utf16_scratch.len() as u32,
@@ -8548,7 +9131,7 @@ impl Renderer {
         line_height: f32,
     ) -> Result<(), RenderError> {
         let format = self.text_format_for_style(size_pt, weight, line_height)?;
-        self.draw_text_with_format(text, rect, color, &format)
+        self.draw_text_with_format(text, rect, color, &format, dwrite::TextAlign::DEFAULT)
     }
 
     fn draw_text_with_format(
@@ -8557,6 +9140,7 @@ impl Renderer {
         rect: bento_nano_style::Rect,
         color: Color,
         format: &IDWriteTextFormat,
+        align: dwrite::TextAlign,
     ) -> Result<(), RenderError> {
         if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
@@ -8571,6 +9155,7 @@ impl Renderer {
             format,
             rect.width.max(1.0),
             rect.height.max(1.0),
+            align,
         )?;
         let brush = self.solid_brush(color)?;
         let origin = D2D_POINT_2F {
@@ -8639,10 +9224,7 @@ impl Renderer {
     /// `size_pt` is the path font size in DIP (11). Cached against the size so
     /// a theme swap (which only touches the proportional body font) never
     /// invalidates it. One COM allocation per recreate, zero per frame.
-    fn ensure_monospace_format(
-        &mut self,
-        size_pt: f32,
-    ) -> Result<IDWriteTextFormat, RenderError> {
+    fn ensure_monospace_format(&mut self, size_pt: f32) -> Result<IDWriteTextFormat, RenderError> {
         let size_pt = size_pt.max(1.0);
         if let Some(cached) = self.monospace_format.as_ref() {
             if (cached.size_pt - size_pt).abs() < f32::EPSILON {
@@ -8711,56 +9293,8 @@ impl Renderer {
             rect.width.max(1.0),
             rect.height.max(1.0),
             self.monospace_ellipsis_sign.as_ref(),
+            dwrite::TextAlign::DEFAULT,
         )?;
-        let brush = self.solid_brush(color)?;
-        let origin = D2D_POINT_2F {
-            x: rect.x,
-            y: rect.y,
-        };
-        let ctx = self.ctx()?;
-        // SAFETY: ctx valid; layout owned for the call; brush COM-ref-counted.
-        unsafe {
-            ctx.DrawTextLayout(origin, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-        }
-        Ok(())
-    }
-
-    /// M1i fidelity — draw a short single-line label centred horizontally AND
-    /// vertically inside `rect`. Used for the 28-DIP icon-circle initial glyph,
-    /// the `↻` refresh glyph, and the watched badge text so they read as
-    /// optically centred chips (Tauri uses `display:flex; align-items:center;
-    /// justify-content:center`). Reuses the active body format; no wrap.
-    fn draw_text_centered(
-        &mut self,
-        text: &str,
-        rect: bento_nano_style::Rect,
-        color: Color,
-        size_pt: f32,
-        weight: u16,
-    ) -> Result<(), RenderError> {
-        use windows::Win32::Graphics::DirectWrite::{
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-        };
-        if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
-            return Ok(());
-        }
-        let format = self.text_format_for_style(size_pt, weight, 1.0)?;
-        self.utf16_scratch.clear();
-        for u in text.encode_utf16() {
-            self.utf16_scratch.push(u);
-        }
-        let layout = dwrite::create_layout(
-            &self.utf16_scratch,
-            &format,
-            rect.width.max(1.0),
-            rect.height.max(1.0),
-        )?;
-        // SAFETY: freshly-created layout; both Set* calls only mutate per-layout
-        // alignment state and take canonical enum values.
-        unsafe {
-            let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        }
         let brush = self.solid_brush(color)?;
         let origin = D2D_POINT_2F {
             x: rect.x,
@@ -8794,7 +9328,7 @@ impl Renderer {
         weight: u16,
         tracking: f32,
     ) -> Result<(), RenderError> {
-        use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout1, DWRITE_TEXT_RANGE};
+        use windows::Win32::Graphics::DirectWrite::{DWRITE_TEXT_RANGE, IDWriteTextLayout1};
         if text.is_empty() || rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(());
         }
@@ -8809,12 +9343,12 @@ impl Renderer {
             &format,
             rect.width.max(1.0),
             rect.height.max(1.0),
+            dwrite::TextAlign::DEFAULT,
         )?;
         // SetCharacterSpacing lives on IDWriteTextLayout1 — cross-cast per
         // spec §15.1 (canonical Interface::cast). Apply `tracking` as the
         // trailing advance over the entire glyph run; leading + min-advance 0.
-        let layout1: IDWriteTextLayout1 =
-            ok("TextLayout::cast<TextLayout1>", layout.cast())?;
+        let layout1: IDWriteTextLayout1 = ok("TextLayout::cast<TextLayout1>", layout.cast())?;
         let range = DWRITE_TEXT_RANGE {
             startPosition: 0,
             length: self.utf16_scratch.len() as u32,
@@ -8934,9 +9468,9 @@ impl Renderer {
     /// `name` is the wire-format icon string from `Zone.icon` (e.g. "folder",
     /// "settings", "search"). When it resolves to a built-in `IconKind`, the
     /// matching 24×24 source SVG document is drawn via
-    /// `draw_svg_document_stroke_fit` (cached geometry). When it doesn't,
-    /// we fall back to the legacy text path so unknown / emoji / lucide
-    /// names keep rendering as a single text run.
+    /// `draw_svg_document_stroke_fit` (cached geometry). Unknown or legacy text
+    /// payloads deliberately render as a neutral built-in glyph instead of
+    /// visible emoji/text placeholders.
     fn draw_icon_glyph(
         &mut self,
         name: &str,
@@ -8946,9 +9480,14 @@ impl Renderer {
         if let Some(kind) = IconKind::from_str_opt(name) {
             // 24-unit viewbox per `IconKind::source_svg` — every built-in is
             // hand-rolled around 0–24 just like the 1.x Tauri sources.
+            // `draw_svg_document_stroke_fit` already h+v-centres the glyph in
+            // `rect` (scale-to-fit + 0.5 offset).
             return self.draw_svg_document_stroke_fit(kind.source_svg(), rect, color, 24.0);
         }
-        self.draw_text(name, rect, color)
+        // No-emoji runtime policy (2026-06-18): keep wire compatibility for
+        // old layouts that store arbitrary text/emoji icon payloads, but never
+        // paint those payloads as UI icons.
+        self.draw_svg_document_stroke_fit(IconKind::Document.source_svg(), rect, color, 24.0)
     }
 
     fn draw_svg_document_stroke_fit(
@@ -9104,7 +9643,7 @@ fn chrome_region_rects(app: &AppState) -> SmallVec<[bento_nano_style::Rect; 16]>
 
     // Stack overlay (open tray + focused preview, or a hovered-anchor bloom).
     // Mirrors `ui::stack_overlay_contains`.
-    push_stack_overlay_rects(app, &mut out);
+    push_stack_overlay_rects(app, &mut out, full);
 
     // Per-zone painted surface — pill / in-flight morph / expanded body.
     // Mirrors `ui::effective_zone_hit_rect` + the `hit_test_zone` visibility
@@ -9114,10 +9653,56 @@ fn chrome_region_rects(app: &AppState) -> SmallVec<[bento_nano_style::Rect; 16]>
             continue;
         }
         let rect = effective_zone_chrome_rect(app, zone);
-        push_inflated(&mut out, rect, CHROME_REGION_SHADOW_MARGIN_DIP);
+        // Belt-and-suspenders (ROOT-CAUSE-corrupt-zone-geometry.md): clamp the
+        // ZONE BODY rect to the viewport BEFORE inflating so an oversized /
+        // corrupt zone can never make the whole window catch clicks. The
+        // shadow-margin inflate may then extend slightly past the viewport —
+        // that's fine (only the painted soft shadow), but the body itself can
+        // never exceed the window region.
+        push_clamped_inflated(&mut out, rect, full, CHROME_REGION_SHADOW_MARGIN_DIP);
     }
 
     out
+}
+
+/// Intersect `rect` with `bounds` (both DIP). Returns the overlapping rectangle,
+/// or `None` when they do not overlap (or the intersection is degenerate). Pure /
+/// allocation-free — the click-through region clamp depends on this so an
+/// oversized zone can never push a rect beyond the window.
+#[inline]
+fn intersect_with_viewport(
+    rect: bento_nano_style::Rect,
+    bounds: bento_nano_style::Rect,
+) -> Option<bento_nano_style::Rect> {
+    let left = rect.x.max(bounds.x);
+    let top = rect.y.max(bounds.y);
+    let right = rect.right().min(bounds.right());
+    let bottom = rect.bottom().min(bounds.bottom());
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(bento_nano_style::Rect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
+}
+
+/// Clamp `rect` to the viewport `bounds`, THEN inflate by `margin` and push it
+/// (mirrors [`push_inflated`] but with the pre-inflate viewport clamp). A rect
+/// fully outside the viewport is dropped entirely. The skip-degenerate guard in
+/// `push_inflated` still applies because the clamped rect is forwarded through it.
+#[inline]
+fn push_clamped_inflated(
+    out: &mut SmallVec<[bento_nano_style::Rect; 16]>,
+    rect: bento_nano_style::Rect,
+    bounds: bento_nano_style::Rect,
+    margin: f32,
+) {
+    if let Some(clamped) = intersect_with_viewport(rect, bounds) {
+        push_inflated(out, clamped, margin);
+    }
 }
 
 /// Painted chrome rect for one zone — the DIP rectangle the renderer is
@@ -9128,8 +9713,22 @@ fn chrome_region_rects(app: &AppState) -> SmallVec<[bento_nano_style::Rect; 16]>
 /// pill, expanded body. Pure / allocation-free.
 fn effective_zone_chrome_rect(app: &AppState, zone: &Zone) -> bento_nano_style::Rect {
     use bento_nano_style::Rect;
-    let body_visible = app.zone_body_visible_for_mode(zone);
-    let count = zone.items.len();
+    // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
+    // explicitly selected (a focused member), NOT on hover (hover shows the
+    // bloom). #5 (2026-06-02) — only a RESIZE (armable solely on an already-
+    // expanded panel) may force the expanded body; a DRAG keeps a collapsed pill
+    // a pill. Both rules now live in the shared `AppState::zone_pill_body_visible`
+    // SSoT, the SAME predicate the paint side (`draw_zones`) and the z-layering
+    // (`zone_on_top`) key off, so paint == hit geometry can't drift.
+    let body_visible = app.zone_pill_body_visible(zone);
+    // #4 (2026-06-02) — a collapsed stack anchor renders as the compact pill
+    // with the stack-MEMBER count as the badge value; mirror the paint side
+    // (draw_zones) so paint == hit geometry for the anchor pill.
+    let count = app
+        .zones
+        .stack_member_ids(zone.id)
+        .map(|m| m.len())
+        .unwrap_or_else(|| zone.items.len());
     let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
     let expanded_rect = Rect {
         x: zone.x as f32,
@@ -9139,32 +9738,39 @@ fn effective_zone_chrome_rect(app: &AppState, zone: &Zone) -> bento_nano_style::
     };
 
     // Case 1 — pill morph in flight (mirrors effective_zone_hit_rect case 1).
+    // Anchors don't morph (the paint-side pill_anim_active also excludes them).
+    // #2 step 8 (2026-06-02) — shared `current_morph_rect` SSoT so paint == hit.
     if app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() {
         let raw = app.zone_pill_anim_progress.get();
         if raw > 0.0 && raw < 1.0 {
-            let eased = zone_pill_geometry::ease_out_back_progress(raw);
-            let morph = if app.zone_pill_anim_expanding.get() {
-                eased
-            } else {
-                1.0 - eased
-            };
-            return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
+            let (_morph, rect) = zone_pill_geometry::current_morph_rect(
+                pill_layout.rect,
+                expanded_rect,
+                raw,
+                app.zone_pill_anim_expanding.get(),
+            );
+            return rect;
         }
     }
 
-    // Case 2 — collapsed pill (body hidden, not a stack anchor).
-    if !body_visible && !zone.is_stack_anchor() {
+    // Case 2 — collapsed pill (body hidden). #4: a collapsed stack anchor now
+    // ALSO renders as the compact pill, so it reaches this branch too.
+    if !body_visible {
         return pill_layout.rect;
     }
 
-    // Case 3 — expanded body (or stack-anchor chrome).
+    // Case 3 — expanded body (focused stack member uses the normal panel).
     expanded_rect
 }
 
 /// Push the stack-overlay chrome rects (open tray + focused preview, or a
 /// hovered-anchor bloom) into `out`. Mirrors `ui::stack_overlay_contains` so
 /// the region covers exactly the points that function returns `Client` for.
-fn push_stack_overlay_rects(app: &AppState, out: &mut SmallVec<[bento_nano_style::Rect; 16]>) {
+fn push_stack_overlay_rects(
+    app: &AppState,
+    out: &mut SmallVec<[bento_nano_style::Rect; 16]>,
+    full: bento_nano_style::Rect,
+) {
     let vp = app.viewport;
     // Open tray — tray body + (always) the focused preview pane beside it.
     if let Some(state) = app.stack_tray.borrow().clone() {
@@ -9172,10 +9778,11 @@ fn push_stack_overlay_rects(app: &AppState, out: &mut SmallVec<[bento_nano_style
             if let Some(members) = app.zones.stack_member_ids(anchor.id) {
                 let member_count = members.len();
                 let tray = stack_tray::stack_tray_rect(vp, anchor, member_count);
-                push_inflated(out, tray, CHROME_REGION_SHADOW_MARGIN_DIP);
-                push_inflated(
+                push_clamped_inflated(out, tray, full, CHROME_REGION_SHADOW_MARGIN_DIP);
+                push_clamped_inflated(
                     out,
                     stack_tray::focused_preview_rect(vp, tray),
+                    full,
                     CHROME_REGION_SHADOW_MARGIN_DIP,
                 );
             }
@@ -9183,16 +9790,21 @@ fn push_stack_overlay_rects(app: &AppState, out: &mut SmallVec<[bento_nano_style
     }
 
     // Hovered-anchor bloom — the fan of petal rects shown while the cursor is
-    // over a (non-expanded) stack anchor.
+    // over a stack anchor. #4 / R1 (2026-06-02): mirror the render-side gate so
+    // the click-through region never registers petal hit targets on a frame
+    // where the bloom is NOT painted (tray open or a member focused/selected) —
+    // no invisible dead click targets.
+    let bloom_allowed = app.stack_tray.borrow().is_none() && app.selected_zone.get().is_none();
     if let Some(anchor_id) = app
         .hovered_zone
         .get()
+        .filter(|_| bloom_allowed)
         .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
     {
         if let Some(anchor) = app.zones.get(anchor_id) {
             if let Some(members) = app.zones.stack_member_ids(anchor.id) {
                 for petal in stack_tray::stack_bloom_petal_rects(vp, anchor, members.len()) {
-                    push_inflated(out, petal, CHROME_REGION_SHADOW_MARGIN_DIP);
+                    push_clamped_inflated(out, petal, full, CHROME_REGION_SHADOW_MARGIN_DIP);
                 }
             }
         }
@@ -9256,16 +9868,27 @@ fn active_item_drag_visual(app: &AppState) -> Option<ActiveItemDragVisual> {
 }
 
 fn hit_test_render_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
-    for zone in app.zones.iter().rev() {
-        if !zone.is_visible() || zone.is_stacked_child() {
-            continue;
-        }
-        let left = zone.x as f32;
-        let top = zone.y as f32;
-        let right = left + zone.w as f32;
-        let bottom = top + zone.h as f32;
-        if x >= left && x < right && y >= top && y < bottom {
-            return Some(zone.id);
+    // Z-order (2026-06-02) — mirror the two-layer draw stack: test `on_top`
+    // (expanded/morphing) zones BEFORE `!on_top` (pills) so a point inside an
+    // expanded panel resolves to the panel, never a pill drawn behind it. Within
+    // each layer keep the existing reverse/topmost order. Uses the shared
+    // `AppState::zone_on_top` SSoT so this drag-drop targeting can't drift from
+    // the painted stack. (Drop targeting keys off the full stored zone rect.)
+    for on_top_layer in [true, false] {
+        for zone in app.zones.iter().rev() {
+            if !zone.is_visible() || zone.is_stacked_child() {
+                continue;
+            }
+            if app.zone_on_top(zone) != on_top_layer {
+                continue;
+            }
+            let left = zone.x as f32;
+            let top = zone.y as f32;
+            let right = left + zone.w as f32;
+            let bottom = top + zone.h as f32;
+            if x >= left && x < right && y >= top && y < bottom {
+                return Some(zone.id);
+            }
         }
     }
     None
@@ -9283,14 +9906,21 @@ fn drop_preview_rect_for_zone(
 }
 
 fn item_grid_position_for_zone(zone: &Zone, x: f32, y: f32) -> (i32, i32) {
-    let columns = zone.grid_columns.max(1) as i32;
-    let columns_f = columns as f32;
     let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
-    let cell_w = ((zone.w as f32 - 16.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
+    // P3.5 (1:1) — mirror the paint-side horizontal grid inset (`HEADER_INSET_X`
+    // = 16 per side) so the drag-position hit math stays in lockstep with the
+    // painted card rects (`highlight_overlay::item_card_rect_for_grid`).
+    let inset_x = expanded_zone_grid::HEADER_INSET_X;
+    let columns =
+        item_grid::effective_column_count(zone.w as f32, zone.grid_columns.max(1), inset_x).max(1)
+            as i32;
+    let columns_f = columns as f32;
+    let cell_w = ((zone.w as f32 - inset_x * 2.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
     let col_stride = cell_w + gap;
     let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
-    let raw_col = ((x - zone.x as f32 - 8.0) / col_stride).floor() as i32;
-    let raw_row = ((y - zone.y as f32 - 30.0) / row_stride).floor() as i32;
+    let raw_col = ((x - zone.x as f32 - inset_x) / col_stride).floor() as i32;
+    let raw_row =
+        ((y - zone.y as f32 - item_grid::ITEM_GRID_TOP_OFFSET_PX) / row_stride).floor() as i32;
     (raw_col.clamp(0, columns - 1), raw_row.max(0))
 }
 
@@ -9301,6 +9931,10 @@ fn item_card_rect_for_grid(
     is_wide: bool,
 ) -> bento_nano_style::Rect {
     highlight_overlay::item_card_rect_for_grid(zone, grid_x, grid_y, is_wide)
+}
+
+fn item_card_rect_for_item(zone: &Zone, item: &ZoneItem) -> bento_nano_style::Rect {
+    highlight_overlay::item_card_rect_for_item(zone, item)
 }
 
 fn source_drag_item(app: &AppState, drag: ActiveItemDragVisual) -> Option<(&Zone, &ZoneItem)> {
@@ -9595,7 +10229,9 @@ pub fn settings_caret_on(now_ms: u32) -> bool {
 /// active button TITLE, and the P9 applied banner all read identically (the
 /// parity invariant). Replaces the old `localized_encryption_mode` short-label
 /// helper, which had no remaining call site after this fix.
-fn localized_encryption_mode_button_label(mode: crate::state::SettingsEncryptionMode) -> &'static str {
+fn localized_encryption_mode_button_label(
+    mode: crate::state::SettingsEncryptionMode,
+) -> &'static str {
     use crate::state::SettingsEncryptionMode;
     use bento_nano_style::i18n_zh_cn::ids;
     match mode {
@@ -9749,10 +10385,177 @@ mod device_loss_tests {
 }
 
 #[cfg(test)]
-mod g5_pill_title_shrink_tests {
+mod morph_content_tests {
     use super::{
-        pill_title_shrink_signature, shrink_font_to_fit, PILL_TITLE_MIN_FONT_PX,
+        MORPH_EXPANDED_CONTENT_MIN_HEIGHT_PX, MORPH_HEADER_TITLE_FONT_PX,
+        MORPH_HEADER_TITLE_LINE_HEIGHT, MORPH_HEADER_TITLE_WEIGHT, PANEL_ACCENT_EDGE_THICKNESS_PX,
+        PANEL_HEADER_TITLE_TRACKING_PX, expanded_panel_accent_clip_rect,
+        morph_expanded_content_alpha, morph_header_title_rect,
     };
+    use crate::expanded_zone_grid;
+    use bento_nano_style::Rect;
+
+    #[test]
+    fn capsule_sized_morph_suppresses_expanded_header_content() {
+        assert_eq!(
+            morph_expanded_content_alpha(0.95, MORPH_EXPANDED_CONTENT_MIN_HEIGHT_PX - 1.0),
+            0.0
+        );
+        assert_eq!(morph_expanded_content_alpha(0.20, 180.0), 0.0);
+        assert_eq!(morph_expanded_content_alpha(0.28, 180.0), 0.0);
+    }
+
+    #[test]
+    fn panel_sized_morph_follows_tauri_content_reveal_phase() {
+        let early = morph_expanded_content_alpha(0.40, 180.0);
+        let mid = morph_expanded_content_alpha(0.60, 180.0);
+        let complete = morph_expanded_content_alpha(0.80, 180.0);
+
+        assert!(early > 0.0 && early < mid);
+        assert!(mid > 0.0 && mid < 1.0);
+        assert!((complete - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn expanded_panel_accent_clip_stays_on_panel_top_edge() {
+        let panel = Rect {
+            x: 64.0,
+            y: 332.0,
+            width: 320.0,
+            height: 220.0,
+        };
+        let clip = expanded_panel_accent_clip_rect(panel);
+        assert_eq!(clip.x, panel.x);
+        assert_eq!(clip.y, panel.y);
+        assert_eq!(clip.width, panel.width);
+        assert_eq!(clip.height, PANEL_ACCENT_EDGE_THICKNESS_PX);
+    }
+
+    #[test]
+    fn expanded_panel_accent_clip_does_not_overflow_short_panel() {
+        let panel = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 1.0,
+        };
+        let clip = expanded_panel_accent_clip_rect(panel);
+        assert_eq!(clip.height, panel.height);
+    }
+
+    #[test]
+    fn morph_header_title_slot_matches_panel_header_typography() {
+        assert_eq!(MORPH_HEADER_TITLE_FONT_PX, 14.0);
+        assert_eq!(MORPH_HEADER_TITLE_WEIGHT, 500);
+        assert_eq!(MORPH_HEADER_TITLE_LINE_HEIGHT, 1.4);
+        assert_eq!(PANEL_HEADER_TITLE_TRACKING_PX, 0.3);
+    }
+
+    #[test]
+    fn morph_header_title_rect_uses_settled_panel_header_slot() {
+        let panel = Rect {
+            x: 64.0,
+            y: 72.0,
+            width: 320.0,
+            height: 220.0,
+        };
+        let title = morph_header_title_rect(panel);
+
+        let expected_x = panel.x
+            + expanded_zone_grid::HEADER_INSET_X
+            + expanded_zone_grid::HEADER_ICON_SIZE
+            + expanded_zone_grid::HEADER_GAP;
+        assert_eq!(title.x, expected_x);
+        assert_eq!(title.y, panel.y);
+        assert_eq!(title.height, expanded_zone_grid::HEADER_BAND_HEIGHT);
+        assert_eq!(
+            title.right(),
+            panel.right() - expanded_zone_grid::HEADER_INSET_X
+        );
+    }
+}
+
+#[cfg(test)]
+mod collapsed_pill_badge_count_tests {
+    use super::{collapsed_pill_display_count, format_small_count};
+    use crate::{AppState, zone_pill_geometry};
+    use bento_nano_zone::{Zone, ZoneId};
+
+    fn zone_with_items(id: u64, item_count: usize) -> Zone {
+        let mut zone = Zone::new(ZoneId(id), format!("Zone {id}"), 40, 40, 220, 140);
+        for index in 0..item_count {
+            let _ = zone.add_item(format!("C:/proof/zone-{id}/item-{index}.txt"), "");
+        }
+        zone
+    }
+
+    #[test]
+    fn normal_collapsed_pill_uses_item_count() {
+        let mut app = AppState::new();
+        app.zones.add(zone_with_items(1, 3));
+        let zone = app.zones.get(ZoneId(1)).expect("zone");
+
+        assert_eq!(collapsed_pill_display_count(&app, zone), 3);
+        assert_eq!(
+            format_small_count(collapsed_pill_display_count(&app, zone)),
+            "3"
+        );
+    }
+
+    #[test]
+    fn stack_anchor_collapsed_pill_uses_stack_member_count_for_layout_and_text() {
+        let mut app = AppState::new();
+        app.zones.add(zone_with_items(1, 10));
+        app.zones.add(zone_with_items(2, 1));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+
+        let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+        let display_count = collapsed_pill_display_count(&app, anchor);
+        let layout = zone_pill_geometry::pill_layout_for_zone(anchor, display_count);
+        let count_text = format_small_count(display_count);
+
+        assert_eq!(display_count, 2);
+        assert_eq!(count_text, "2");
+        assert_ne!(format_small_count(anchor.items.len()), count_text);
+        assert!(
+            layout.badge.width >= zone_pill_geometry::PILL_BADGE_MIN_WIDTH,
+            "badge layout must be generated from the same display count"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_label_fit_tests {
+    use super::{ITEM_LABEL_BASE_FONT_PX, item_label_font_size_for_width};
+
+    #[test]
+    fn short_item_label_keeps_base_font_size() {
+        assert_eq!(
+            item_label_font_size_for_width("Docs", 80.0),
+            ITEM_LABEL_BASE_FONT_PX
+        );
+    }
+
+    #[test]
+    fn long_item_label_keeps_base_font_size_and_trims_in_layout() {
+        assert_eq!(
+            item_label_font_size_for_width("item-01.txt", 58.0),
+            ITEM_LABEL_BASE_FONT_PX
+        );
+    }
+
+    #[test]
+    fn extremely_narrow_item_label_keeps_grid_typography_token() {
+        assert_eq!(
+            item_label_font_size_for_width("very-long-file-name.txt", 20.0),
+            ITEM_LABEL_BASE_FONT_PX
+        );
+    }
+}
+
+#[cfg(test)]
+mod g5_pill_title_shrink_tests {
+    use super::{PILL_TITLE_MIN_FONT_PX, pill_title_shrink_signature, shrink_font_to_fit};
 
     /// Linear width model: each glyph is `0.6 * font_px` wide, `len` glyphs.
     /// Monotone in font size, matching the `shrink_font_to_fit` contract.
@@ -9776,7 +10579,10 @@ mod g5_pill_title_shrink_tests {
         let mut m = measure(len);
         let got = shrink_font_to_fit(16.0, avail, measure(len));
         assert!(got < 16.0, "must have shrunk from base, got {got}");
-        assert!(got > PILL_TITLE_MIN_FONT_PX, "must not bottom out, got {got}");
+        assert!(
+            got > PILL_TITLE_MIN_FONT_PX,
+            "must not bottom out, got {got}"
+        );
         // The resolved size genuinely fits and 1px larger would not (the
         // stepper's contract: largest fitting whole-px size).
         assert!(m(got) <= avail, "resolved must fit: {} > {avail}", m(got));
@@ -10037,10 +10843,48 @@ mod item_drag_visual_tests {
 
         let rect = drop_preview_rect_for_zone(&zone, Some(drag), false).expect("preview");
 
-        assert!(rect.x >= 10.0);
-        assert!(rect.y >= 20.0);
-        assert!(rect.right() <= 250.0);
-        assert!(rect.bottom() <= 200.0);
+        // P3.8 paint-hit parity: drag-preview placement uses the same grid SSoTs
+        // as painted cards. For a 240px zone, the 64-DIP readable-card floor
+        // reflows the requested 4 columns into 3 effective columns:
+        // cell_w = (240 - 16*2 - 8*2) / 3 = 64; col stride = 72.
+        // last_x=130 lands in col 1, last_y=116 lands in row 0 because row 0
+        // starts at zone_top(20) + ITEM_GRID_TOP_OFFSET_PX(56) = 76.
+        assert!((rect.x - 98.0).abs() < 0.01);
+        assert!((rect.y - 76.0).abs() < 0.01);
+        assert!((rect.width - 64.0).abs() < 0.01);
+        assert!((rect.height - item_grid::ITEM_GRID_ROW_HEIGHT_PX).abs() < 0.01);
+    }
+
+    #[test]
+    fn drop_preview_targets_occupied_non_source_cell() {
+        let mut zone = Zone::new(ZoneId(7), Cow::Borrowed("z"), 10, 20, 240, 180);
+        zone.items.push(ZoneItem::new(
+            ZoneItemId(8),
+            "C:/Users/HP/Desktop/source-neighbor.lnk",
+            "",
+            0,
+            0,
+        ));
+        zone.items.push(ZoneItem::new(
+            ZoneItemId(9),
+            "C:/Users/HP/Desktop/target.lnk",
+            "",
+            0,
+            0,
+        ));
+        let drag = ActiveItemDragVisual {
+            zone_id: ZoneId(8),
+            item_id: ZoneItemId(1),
+            last_x: 130.0,
+            last_y: 116.0,
+        };
+
+        let preview = drop_preview_rect_for_zone(&zone, Some(drag), false).expect("preview");
+        let resident_card = item_card_rect_for_item(&zone, &zone.items[1]);
+
+        assert_eq!(preview, resident_card);
+        assert_ne!(drag.zone_id, zone.id);
+        assert_ne!(drag.item_id, zone.items[1].id);
     }
 
     #[test]
@@ -10139,15 +10983,74 @@ mod item_drag_visual_tests {
 }
 
 #[cfg(test)]
+mod zone_drag_merge_visual_tests {
+    use super::{moved_zone_drag_source, zone_drag_merge_ghost_source};
+    use crate::AppState;
+    use bento_nano_style::Size;
+    use bento_nano_zone::{Zone, ZoneId};
+
+    fn app_with_source_and_target(source_x: i32, source_y: i32) -> AppState {
+        let mut app = AppState::new();
+        app.viewport = Size {
+            width: 1280.0,
+            height: 720.0,
+        };
+        app.zones
+            .add(Zone::new(ZoneId(1), "Source", source_x, source_y, 160, 120));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Target", 240, 80, 160, 120));
+        app
+    }
+
+    #[test]
+    fn zone_drag_merge_ghost_is_false_without_drag() {
+        let app = app_with_source_and_target(240, 80);
+
+        assert!(!moved_zone_drag_source(&app, ZoneId(1)));
+        assert!(!zone_drag_merge_ghost_source(&app, ZoneId(1)));
+    }
+
+    #[test]
+    fn zone_drag_merge_ghost_is_false_before_drag_threshold_latches() {
+        let app = app_with_source_and_target(240, 80);
+        app.zone_drag.set(Some((ZoneId(1), 0, 0)));
+        app.zone_drag_origin.set(Some((10, 10, false)));
+
+        assert!(!moved_zone_drag_source(&app, ZoneId(1)));
+        assert!(!zone_drag_merge_ghost_source(&app, ZoneId(1)));
+    }
+
+    #[test]
+    fn zone_drag_merge_ghost_is_false_when_dragged_zone_has_no_stack_target() {
+        let app = app_with_source_and_target(20, 20);
+        app.zone_drag.set(Some((ZoneId(1), 0, 0)));
+        app.zone_drag_origin.set(Some((10, 10, true)));
+
+        assert!(moved_zone_drag_source(&app, ZoneId(1)));
+        assert!(!zone_drag_merge_ghost_source(&app, ZoneId(1)));
+    }
+
+    #[test]
+    fn zone_drag_merge_ghost_is_true_only_for_moved_drag_source_over_stack_target() {
+        let app = app_with_source_and_target(250, 90);
+        app.zone_drag.set(Some((ZoneId(1), 0, 0)));
+        app.zone_drag_origin.set(Some((10, 10, true)));
+
+        assert!(zone_drag_merge_ghost_source(&app, ZoneId(1)));
+        assert!(!zone_drag_merge_ghost_source(&app, ZoneId(2)));
+    }
+}
+
+#[cfg(test)]
 mod p0_click_through_region_tests {
     //! P0 desktop click-through (CLICKTHROUGH-FIX-VALIDATED.md) — pure-CPU
     //! geometry tests for [`chrome_region_rects`]. The GDI `SetWindowRgn`
     //! application is not headless-testable (needs a live HWND), same exemption
     //! as the GPU/window draw paths; these tests pin the DIP rect set the region
     //! is built from. No GPU / window / Argon2 → runs under the min-RSS suite.
-    use super::{chrome_region_rects, CHROME_REGION_SHADOW_MARGIN_DIP};
-    use crate::state::ZoneDisplayMode;
+    use super::{CHROME_REGION_SHADOW_MARGIN_DIP, chrome_region_rects};
     use crate::AppState;
+    use crate::state::ZoneDisplayMode;
     use bento_nano_style::{Rect, Size};
     use bento_nano_zone::{Zone, ZoneId};
 
@@ -10270,11 +11173,76 @@ mod p0_click_through_region_tests {
         // Each pill centre is interactive…
         let z1 = app.zones.get(ZoneId(1)).expect("z1");
         let p1 = crate::zone_pill_geometry::pill_layout_for_zone(z1, z1.items.len()).rect;
-        assert!(covered(&rects, p1.x + p1.width / 2.0, p1.y + p1.height / 2.0));
+        assert!(covered(
+            &rects,
+            p1.x + p1.width / 2.0,
+            p1.y + p1.height / 2.0
+        ));
         // …and the empty space between the two pills is click-through.
         assert!(
             !covered(&rects, 600.0, 450.0),
             "gap between pills must reach the desktop"
         );
+    }
+
+    #[test]
+    fn oversized_zone_chrome_is_clamped_to_viewport() {
+        // ROOT-CAUSE-corrupt-zone-geometry.md belt-and-suspenders: even if a
+        // zone is sized FAR beyond the viewport (the legacy
+        // `w=170667 h=91200` corruption), every returned region rect must stay
+        // within the viewport + shadow margin so the whole window can never
+        // catch every click.
+        let mut app = app_with_viewport();
+        // Expanded body sized many times the 1920×1080 viewport.
+        app.zones
+            .add(Zone::new(ZoneId(9), "Huge", 0, 0, 170_667, 91_200));
+        app.selected_zone.set(Some(ZoneId(9)));
+
+        let rects = chrome_region_rects(&app);
+        assert!(!rects.is_empty(), "expanded zone must paint a body rect");
+
+        let vp = app.viewport;
+        let m = CHROME_REGION_SHADOW_MARGIN_DIP;
+        for r in rects.iter() {
+            // After clamping-then-inflating, no rect may extend past the
+            // viewport by more than a single shadow margin on any edge.
+            assert!(r.x >= -m - 0.5, "left within margin: {r:?}");
+            assert!(r.y >= -m - 0.5, "top within margin: {r:?}");
+            assert!(
+                r.right() <= vp.width + m + 0.5,
+                "right within viewport+margin: {r:?}"
+            );
+            assert!(
+                r.bottom() <= vp.height + m + 0.5,
+                "bottom within viewport+margin: {r:?}"
+            );
+        }
+
+        // The viewport interior (the body) is still interactive…
+        assert!(covered(&rects, 960.0, 540.0), "body interior in region");
+        // …but a point BEYOND the real screen (where the corrupt body would
+        // otherwise have stretched) is NOT covered — the desktop is alive.
+        assert!(
+            !covered(&rects, 5000.0, 5000.0),
+            "far-offscreen point must be click-through"
+        );
+    }
+
+    #[test]
+    fn zone_fully_offscreen_yields_no_region_rect() {
+        // A zone whose body lies entirely past the viewport contributes nothing
+        // to the region (its clamp-intersection is empty), so the area stays
+        // click-through.
+        let mut app = app_with_viewport();
+        app.zones
+            .add(Zone::new(ZoneId(3), "Gone", 5000, 5000, 160, 120));
+        app.selected_zone.set(Some(ZoneId(3)));
+
+        let rects = chrome_region_rects(&app);
+        assert!(
+            rects.is_empty(),
+            "fully-offscreen zone must add no region rect, got {rects:?}"
+        );
+        assert!(!covered(&rects, 960.0, 540.0));
     }
 }

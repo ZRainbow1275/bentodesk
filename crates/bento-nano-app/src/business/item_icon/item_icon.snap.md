@@ -2,7 +2,7 @@
 
 Per-card icon. Resolves to a backend-supplied PNG (via the protocol
 `bentodesk://icon/{hash}`) for the standard case, and falls back to an
-emoji glyph keyed off the file extension when extraction fails.
+extension-keyed selected-stack line-art glyph when extraction fails.
 
 | token             | value                                |
 |-------------------|--------------------------------------|
@@ -22,8 +22,10 @@ Locked behaviour:
 - `IconRenderState` tracks the four lifecycle states
   (`Idle` → `Loading` → `Ready` | `Error`) so the renderer can pick the
   right brush without a string check.
-- `fallback_emoji_for(extension)` lifts the 1.x extension→emoji table into
-  Rust. Returns `📁` (folder) for unknown extensions. Lookup is
-  ASCII-case-insensitive.
+- `fallback_icon_kind_for(extension)` maps the old 1.x extension categories
+  onto selected-stack `IconKind` glyphs. Unknown extensions return
+  `IconKind::Folder`. Lookup is ASCII-case-insensitive.
+- `fallback_emoji_for(extension)` is retained only as a legacy compatibility
+  helper for the old 1.x table; runtime item cards must not paint it.
 - `IconSize` exposes Standard / Wide variants; wire-format-locked via
   serde unit tests.

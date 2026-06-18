@@ -7,35 +7,35 @@ use std::time::SystemTime;
 
 /// Predefined extension groups.
 ///
-/// Each tuple is `(group_name, emoji_icon, list_of_extensions)`.
+/// Each tuple is `(group_name, selected-stack icon wire name, list_of_extensions)`.
 pub const EXTENSION_GROUPS: &[(&str, &str, &[&str])] = &[
     (
         "Documents",
-        "\u{1F4C4}",
+        "document",
         &[
             "doc", "docx", "pdf", "txt", "md", "rtf", "odt", "xlsx", "xls", "pptx", "ppt", "csv",
         ],
     ),
     (
         "Images",
-        "\u{1F5BC}\u{FE0F}",
+        "image",
         &[
             "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico", "tiff",
         ],
     ),
     (
         "Videos",
-        "\u{1F3AC}",
+        "video",
         &["mp4", "avi", "mkv", "mov", "wmv", "flv", "webm"],
     ),
     (
         "Audio",
-        "\u{1F3B5}",
+        "music",
         &["mp3", "wav", "flac", "aac", "ogg", "wma", "m4a"],
     ),
     (
         "Code",
-        "\u{1F4BB}",
+        "code",
         &[
             "rs", "js", "ts", "tsx", "jsx", "py", "go", "java", "cpp", "c", "h", "cs", "rb", "php",
             "html", "css",
@@ -43,15 +43,15 @@ pub const EXTENSION_GROUPS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "Archives",
-        "\u{1F4E6}",
+        "archive",
         &["zip", "rar", "7z", "tar", "gz", "bz2"],
     ),
     (
         "Executables",
-        "\u{2699}\u{FE0F}",
+        "settings",
         &["exe", "msi", "bat", "cmd", "ps1", "sh"],
     ),
-    ("Shortcuts", "\u{1F517}", &["lnk", "url"]),
+    ("Shortcuts", "external_link", &["lnk", "url"]),
 ];
 
 /// Return a human-readable date group name based on the file's modification
@@ -85,6 +85,11 @@ mod tests {
         for (name, icon, exts) in EXTENSION_GROUPS {
             assert!(!name.is_empty(), "Group name should not be empty");
             assert!(!icon.is_empty(), "Group icon should not be empty");
+            assert!(icon.is_ascii(), "Group icon must be an ASCII slug: {icon}");
+            assert!(
+                icon.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_'),
+                "Group icon must use selected-stack lower_snake_case: {icon}"
+            );
             assert!(!exts.is_empty(), "Group extensions should not be empty");
             for ext in *exts {
                 assert!(

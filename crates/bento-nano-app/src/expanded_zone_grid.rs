@@ -26,16 +26,18 @@ use bento_nano_style::Rect;
 use bento_nano_style::tokens::{SHADOW, SPACING, TYPOGRAPHY};
 use bento_nano_zone::Zone;
 
-/// Header band height in DIPs — bound to the single grid-top SSoT
-/// (`item_grid::ITEM_GRID_TOP_OFFSET_PX`) so the divider line lands exactly
-/// on the seam between the header band and the first item row.
+/// Header band height in DIPs — Tauri's `.panel-header { height: 48px }`
+/// (PanelHeader.css:6). The divider line lands on the band's bottom edge, the
+/// seam at `panel.y + 48`.
 ///
-/// M2③ (05-31, ruling = A / 1:1): realigned from the legacy 30 to Tauri's
-/// `.panel-header { height: 48px }` (PanelHeader.css:6). Because the band
-/// height and the grid-top offset are now the same constant, every
-/// header-derived offset (divider Y, badge centring, item-grid top, and the
-/// shell hit-rects) cascades from this one change automatically.
-pub const HEADER_BAND_HEIGHT: f32 = crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX;
+/// P3.6 (2026-06-02, 1:1): the band height and the grid-top offset were SPLIT.
+/// They were briefly one constant (both 48), but Tauri's grid host follows the
+/// header with an extra `--spacing-sm` (8px) content pad, so the first item row
+/// begins at `48 + 8 = 56`. The header band / divider seam stays at 48 here;
+/// `item_grid::ITEM_GRID_TOP_OFFSET_PX` carries the 56 grid-top. Keeping them
+/// distinct constants means the divider seam (48) and the first-row top (56)
+/// can no longer be conflated.
+pub const HEADER_BAND_HEIGHT: f32 = 48.0;
 
 /// Horizontal inset applied to the header band content (icon start, actions
 /// right edge). GROUP-4 1:1 fix #6: realigned from the legacy 8 to Tauri's
@@ -256,8 +258,8 @@ pub fn expanded_zone_layout_for_rect(panel: Rect, count: usize) -> ExpandedZoneL
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::borrow::Cow;
     use bento_nano_zone::ZoneId;
+    use std::borrow::Cow;
 
     fn fixture(x: i32, y: i32, w: i32, h: i32) -> Zone {
         Zone::new(ZoneId(1), Cow::Borrowed("Compiler"), x, y, w, h)
@@ -322,10 +324,7 @@ mod tests {
         let zone = fixture(0, 0, 300, 200);
         let layout = expanded_zone_layout(&zone);
         assert!(
-            (layout.header_badge.right()
-                - (layout.header_search_btn.x - HEADER_GAP))
-                .abs()
-                < 0.01
+            (layout.header_badge.right() - (layout.header_search_btn.x - HEADER_GAP)).abs() < 0.01
         );
         // Intrinsic width — "Compiler" fixture has 0 items → 1-glyph count.
         assert!((layout.header_badge.width - header_badge_width_for_count(0)).abs() < 0.01);
@@ -363,9 +362,7 @@ mod tests {
         assert_eq!(layout.header_close_btn.height, HEADER_BTN_SIZE);
         assert_eq!(layout.header_search_btn.width, HEADER_BTN_SIZE);
         // Close button right edge sits at the header band right (panel - 16).
-        assert!(
-            (layout.header_close_btn.right() - layout.header_band.right()).abs() < 0.01
-        );
+        assert!((layout.header_close_btn.right() - layout.header_band.right()).abs() < 0.01);
         assert!(
             (layout.header_close_btn.right() - (layout.panel.right() - HEADER_INSET_X)).abs()
                 < 0.01
@@ -421,18 +418,20 @@ mod tests {
     }
 
     #[test]
-    fn header_band_height_is_tauri_48_and_bound_to_grid_top_ssot() {
+    fn header_band_height_is_tauri_48_and_grid_top_is_header_plus_content_pad() {
         // M2③ (1:1): Tauri `.panel-header { height: 48px }` (PanelHeader.css:6).
         assert!((HEADER_BAND_HEIGHT - 48.0).abs() < 0.01);
-        // The band height MUST equal the single grid-top offset SSoT so the
-        // divider lands exactly on the seam where the first item row begins —
-        // and so the renderer + both shell hit-tests can never drift (V-13).
+        // P3.6 (1:1): the SSoTs are now SPLIT. The grid-top offset is the header
+        // band height PLUS the `--spacing-sm` (8px) content pad of the grid host
+        // that follows the header in Tauri's column flex — so the first item row
+        // begins 8px below the divider seam, not on it. The renderer + shell
+        // hit-tests all read `ITEM_GRID_TOP_OFFSET_PX`, so they cannot drift.
         assert!(
-            (HEADER_BAND_HEIGHT
-                - crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX)
+            (crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX - (HEADER_BAND_HEIGHT + 8.0))
                 .abs()
                 < 0.01
         );
+        assert!((crate::business::item_grid::ITEM_GRID_TOP_OFFSET_PX - 56.0).abs() < 0.01);
     }
 
     #[test]

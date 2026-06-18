@@ -6,10 +6,11 @@
 //! deprecated `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)`
 //! is forbidden by spec §3.2. So we render the frost ourselves: BitBlt the
 //! primary work area into a downsampled GDI DIB, hand the pixels to D2D as a
-//! bitmap, run `CLSID_D2D1GaussianBlur` (the same `CreateEffect`/`SetValue`
-//! machinery already exercised for `CLSID_D2D1Shadow` under the `shadow`
-//! feature), and bake the effect output into an offscreen `ID2D1Bitmap1` that
-//! Pass 2 wraps in a bitmap brush behind every Main-overlay zone surface.
+//! bitmap, run `CLSID_D2D1GaussianBlur` then `CLSID_D2D1Saturation` (the same
+//! `CreateEffect`/`SetValue` machinery already exercised for `CLSID_D2D1Shadow`
+//! under the `shadow` feature) to match Tauri's `backdrop-filter: blur(24px)
+//! saturate(1.7)`, and bake the effect output into an offscreen `ID2D1Bitmap1`
+//! that Pass 2 wraps in a bitmap brush behind every Main-overlay zone surface.
 //!
 //! §11 discipline: every COM / GDI failure degrades to `Err(PlatformError::…)`
 //! via `ok(...)` — no `unwrap` / `expect` / `panic`. The renderer (Pass 2)
@@ -29,18 +30,20 @@
 
 use windows::Win32::Foundation::{HWND, TRUE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+    D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_BORDER_MODE_HARD, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1GaussianBlur, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT, ID2D1Bitmap1, ID2D1DeviceContext,
-    ID2D1Image,
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT, D2D1_SATURATION_PROP_SATURATION,
+    ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Image,
 };
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, HALFTONE, HBITMAP, HDC, HGDIOBJ, ReleaseDC, SRCCOPY,
     SelectObject, SetStretchBltMode, StretchBlt,
 };
@@ -80,8 +83,13 @@ unsafe impl Sync for Backdrop {}
 ///
 /// `downsample` (≥ 1, forced) trades resolution for memory: at `2` the source
 /// DIB and the baked bitmap are each `~(workarea / 4)` px. `stddev` is the
-/// gaussian standard deviation in DOWNSAMPLED px (Tauri's `blur(20px)` at
-/// full-res ≈ `stddev ~10` at `downsample = 2`; Pass 2 tunes by eye).
+/// gaussian standard deviation in DOWNSAMPLED px and `saturation` is the
+/// post-blur colour-matrix saturation factor.
+///
+/// Tauri spec: `backdrop-filter: blur(24px) saturate(1.7)` under
+/// `surface-expanded rgba(12,12,18,0.82)`. At `downsample = 2` the half-res
+/// stddev is `24 / 2 = 12.0` and saturation is `1.7` (a `D2D1Saturation`
+/// effect chained after `D2D1GaussianBlur`).
 ///
 /// Steps (frosted-backdrop spec "New platform module"):
 ///  1. `region = primary_monitor().rect_work`.
@@ -94,7 +102,11 @@ unsafe impl Sync for Backdrop {}
 ///     desktop has no real alpha, so treating it as opaque avoids premultiply
 ///     darkening).
 ///  5. `CreateEffect(CLSID_D2D1GaussianBlur)` + `SetInput` +
-///     `SetValue(STANDARD_DEVIATION, stddev)`.
+///     `SetValue(STANDARD_DEVIATION, stddev)` + `SetValue(BORDER_MODE, HARD)`
+///     (HARD clamps beyond-bitmap samples, killing the dark edge halo `SOFT`
+///     produces), then chain `CreateEffect(CLSID_D2D1Saturation)` +
+///     `SetValue(SATURATION, saturation)` to re-saturate the blurred output
+///     (Tauri's `saturate(1.7)`).
 ///  6. Bake the effect output to an offscreen `ID2D1Bitmap1` TARGET via
 ///     save-target → `SetTarget` → `BeginDraw`/`Clear`/`DrawImage`/`EndDraw` →
 ///     restore the original target. (A brush needs an `ID2D1Bitmap`, not a raw
@@ -112,6 +124,7 @@ pub fn capture_primary_workarea_blurred(
     main_hwnd: HWND,
     downsample: u32,
     stddev: f32,
+    saturation: f32,
 ) -> Result<Backdrop, PlatformError> {
     // 1. Primary work-area rect (screen px). Degenerate work areas (the
     //    `FALLBACK_NO_MONITOR` sentinel) collapse to a 1×1 capture via
@@ -189,8 +202,51 @@ pub fn capture_primary_workarea_blurred(
             &stddev_bytes,
         )
     })?;
-    // SAFETY: effect valid; GetOutput returns the effect's output image.
-    let blurred: ID2D1Image = ok("D2D/Effect.GetOutput", unsafe { effect.GetOutput() })?;
+    // P1.4 — clamp beyond-bitmap samples to the bitmap edge (HARD), preventing
+    // the dark halo the default SOFT mode draws within ~`stddev` device-px of
+    // the capture edge (counterintuitively HARD *prevents* the halo). Mirrors
+    // CSS `backdrop-filter`'s effectively edge-clamped sampling.
+    let border_mode_bytes = (D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes();
+    // SAFETY: effect valid; BORDER_MODE is an enum-typed gaussian prop; the
+    //         data slice is exactly one u32 (the enum discriminant).
+    ok("D2D/Effect.SetValue(BORDER_MODE)", unsafe {
+        effect.SetValue(
+            D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,
+            D2D1_PROPERTY_TYPE_ENUM,
+            &border_mode_bytes,
+        )
+    })?;
+
+    // P1.1 — chain a saturation colour-matrix effect after the gaussian so the
+    // frost reads with Tauri's `saturate(1.7)` vibrancy (a plain blur of the
+    // desktop is noticeably greyer than the CSS reference). The saturation
+    // effect takes the gaussian's output as its input; `blurred` is then
+    // rebound from the saturation output for the bake below.
+    // SAFETY: ctx valid; CLSID is the documented saturation effect (same
+    //         CreateEffect machinery as the gaussian above).
+    let sat = ok("D2D/CreateEffect(Saturation)", unsafe {
+        ctx.CreateEffect(&CLSID_D2D1Saturation)
+    })?;
+    // SAFETY: effect valid; GetOutput returns the gaussian's output image,
+    //         which is in the ID2D1Image hierarchy (a valid SetInput source).
+    let blurred_in: ID2D1Image = ok("D2D/GaussianBlur.GetOutput", unsafe { effect.GetOutput() })?;
+    // SAFETY: sat + blurred_in valid; SetInput borrows neither past the call.
+    //         `TRUE` = invalidate (re-evaluate the graph).
+    unsafe {
+        sat.SetInput(0, &blurred_in, TRUE);
+    }
+    let sat_bytes = saturation.to_ne_bytes();
+    // SAFETY: sat valid; SATURATION is a float-typed prop on the saturation
+    //         effect's ID2D1Properties base; the data slice is exactly one f32.
+    ok("D2D/Effect.SetValue(SATURATION)", unsafe {
+        sat.SetValue(
+            D2D1_SATURATION_PROP_SATURATION.0 as u32,
+            D2D1_PROPERTY_TYPE_FLOAT,
+            &sat_bytes,
+        )
+    })?;
+    // SAFETY: sat valid; GetOutput returns the saturated (final) output image.
+    let blurred: ID2D1Image = ok("D2D/Saturation.GetOutput", unsafe { sat.GetOutput() })?;
 
     // 6. Bake the effect output into an offscreen TARGET bitmap. A brush needs
     //    a concrete `ID2D1Bitmap`, not a live effect graph, so we render once
@@ -404,22 +460,21 @@ impl DibCapture {
         let mut bits: *mut core::ffi::c_void = core::ptr::null_mut();
         // SAFETY: mem_dc valid; `bmi` lives on the stack for the call; `bits`
         //         receives the DIB pixel pointer (owned by the DIB section).
-        let dib = match unsafe {
-            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-        } {
-            Ok(h) if !h.0.is_null() && !bits.is_null() => h,
-            _ => {
-                // SAFETY: free the DCs acquired above before bailing.
-                unsafe {
-                    let _ = DeleteDC(mem_dc);
-                    ReleaseDC(None, screen_dc);
+        let dib =
+            match unsafe { CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) } {
+                Ok(h) if !h.0.is_null() && !bits.is_null() => h,
+                _ => {
+                    // SAFETY: free the DCs acquired above before bailing.
+                    unsafe {
+                        let _ = DeleteDC(mem_dc);
+                        ReleaseDC(None, screen_dc);
+                    }
+                    return Err(PlatformError::Win32 {
+                        ctx: "CreateDIBSection",
+                        code: 0,
+                    });
                 }
-                return Err(PlatformError::Win32 {
-                    ctx: "CreateDIBSection",
-                    code: 0,
-                });
-            }
-        };
+            };
 
         // Select the DIB into the memory DC so StretchBlt targets it.
         // SAFETY: mem_dc + dib valid; SelectObject returns the displaced object.
@@ -434,7 +489,16 @@ impl DibCapture {
         // SAFETY: dest = mem_dc (DIB), src = screen_dc; all rects in-range.
         let blit = unsafe {
             StretchBlt(
-                mem_dc, 0, 0, dst_w as i32, dst_h as i32, screen_dc, src_x, src_y, src_w, src_h,
+                mem_dc,
+                0,
+                0,
+                dst_w as i32,
+                dst_h as i32,
+                screen_dc,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
                 SRCCOPY,
             )
         };

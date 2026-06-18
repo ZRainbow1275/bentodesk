@@ -90,7 +90,7 @@ pub fn suggest_groups(files: &[FileInfo]) -> Vec<SuggestedGroup> {
             let confidence = matching_paths.len() as f64 / total;
             suggestions.push(SuggestedGroup {
                 name: format!("{prefix}..."),
-                icon: "\u{1F4C1}".to_string(),
+                icon: "folder".to_string(),
                 rule: AutoGroupRule {
                     rule_type: GroupRuleType::NamePattern,
                     pattern: Some(prefix.clone()), // Q2: bare prefix, no `^` anchor
@@ -233,6 +233,7 @@ mod tests {
             .find(|g| g.name == "Documents")
             .expect("docs group");
         assert_eq!(doc.matching_files.len(), 4);
+        assert_eq!(doc.icon, "document");
     }
 
     #[test]
@@ -297,6 +298,11 @@ mod tests {
             .iter()
             .find(|g| g.rule.rule_type == GroupRuleType::NamePattern)
             .expect("prefix group");
+        assert_eq!(prefix_group.icon, "folder");
+        assert!(
+            result.iter().all(|group| group.icon.is_ascii()),
+            "all visible suggestion icons must be ASCII selected-stack slugs: {result:?}"
+        );
         // Q2: emitted pattern carries no `^` anchor.
         assert!(
             !prefix_group

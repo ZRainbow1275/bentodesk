@@ -14,9 +14,12 @@ use windows::Win32::Foundation::BOOL;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
-    IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
+    IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject, IDWriteTextFormat,
+    IDWriteTextLayout,
 };
 use windows::core::{PCWSTR, w};
 
@@ -114,12 +117,7 @@ pub fn family_is_available(family: &str) -> bool {
     // SAFETY: out-pointer is a valid `Option<IDWriteFontCollection>` slot;
     // `false` = don't force a font-collection refresh (the shared collection
     // is fine for an availability probe).
-    if unsafe {
-        f.factory
-            .GetSystemFontCollection(&mut collection, BOOL(0))
-    }
-    .is_err()
-    {
+    if unsafe { f.factory.GetSystemFontCollection(&mut collection, BOOL(0)) }.is_err() {
         return false;
     }
     let Some(collection) = collection else {
@@ -131,9 +129,8 @@ pub fn family_is_available(family: &str) -> bool {
     let mut exists = BOOL(0);
     // SAFETY: `family_wide` is NUL-terminated and outlives the call; `index`
     // and `exists` are valid out-pointers.
-    let hr = unsafe {
-        collection.FindFamilyName(PCWSTR(family_wide.as_ptr()), &mut index, &mut exists)
-    };
+    let hr =
+        unsafe { collection.FindFamilyName(PCWSTR(family_wide.as_ptr()), &mut index, &mut exists) };
     hr.is_ok() && exists.as_bool()
 }
 
@@ -282,18 +279,96 @@ pub fn locale_zh_cn() -> windows::core::PCWSTR {
     w!("zh-CN")
 }
 
+/// #1 step 12 (2026-06-02) — horizontal text alignment within the layout box.
+/// Maps 1:1 onto `DWRITE_TEXT_ALIGNMENT_*`. Default is `Leading` (left for
+/// LTR), DWrite's own default, so existing callers stay behaviour-neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HAlign {
+    #[default]
+    Leading,
+    Center,
+    Trailing,
+}
+
+/// #1 step 12 (2026-06-02) — vertical (paragraph) alignment within the layout
+/// box. Maps 1:1 onto `DWRITE_PARAGRAPH_ALIGNMENT_*`. Default is `Near` (top),
+/// DWrite's own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VAlign {
+    #[default]
+    Near,
+    Center,
+    Far,
+}
+
+/// #1 step 12 (2026-06-02) — the single alignment descriptor threaded into the
+/// shared layout builders so EVERY `draw_text*` helper sets DWrite alignment
+/// deterministically instead of inheriting the implicit Leading/Near default.
+/// This collapses the old "LEADING-by-default family vs the lone
+/// `draw_text_centered`" split into one code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextAlign {
+    pub h: HAlign,
+    pub v: VAlign,
+}
+
+impl TextAlign {
+    /// Leading / Near — DWrite's own default; a behaviour-neutral value for
+    /// callers that have not opted into explicit alignment.
+    pub const DEFAULT: Self = Self {
+        h: HAlign::Leading,
+        v: VAlign::Near,
+    };
+
+    fn dwrite_h(self) -> DWRITE_TEXT_ALIGNMENT {
+        match self.h {
+            HAlign::Leading => DWRITE_TEXT_ALIGNMENT_LEADING,
+            HAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+            HAlign::Trailing => DWRITE_TEXT_ALIGNMENT_TRAILING,
+        }
+    }
+
+    fn dwrite_v(self) -> DWRITE_PARAGRAPH_ALIGNMENT {
+        match self.v {
+            VAlign::Near => DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+            VAlign::Center => DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            VAlign::Far => DWRITE_PARAGRAPH_ALIGNMENT_FAR,
+        }
+    }
+}
+
 /// Build a layout for the given UTF-16 buffer with the given format.
+///
+/// #1 step 12 (2026-06-02) — `align` sets `SetTextAlignment` /
+/// `SetParagraphAlignment` unconditionally so the alignment is deterministic
+/// at every call site (no implicit LEADING/NEAR inheritance). Pass
+/// [`TextAlign::DEFAULT`] to preserve the legacy top-left behaviour.
 pub fn create_layout(
     text_utf16: &[u16],
     fmt: &IDWriteTextFormat,
     max_w: f32,
     max_h: f32,
+    align: TextAlign,
 ) -> Result<IDWriteTextLayout, PlatformError> {
     let f = factory()?;
     // SAFETY: factory + fmt valid; text buffer covers `text_utf16.len()` units.
-    ok("CreateTextLayout", unsafe {
+    let layout: IDWriteTextLayout = ok("CreateTextLayout", unsafe {
         f.factory.CreateTextLayout(text_utf16, fmt, max_w, max_h)
-    })
+    })?;
+    // SAFETY: layout is a freshly-created COM interface; both Set* calls mutate
+    // per-instance state and only return HRESULT on catastrophic argument
+    // errors (we feed canonical enum values).
+    unsafe {
+        ok(
+            "SetTextAlignment",
+            layout.SetTextAlignment(align.dwrite_h()),
+        )?;
+        ok(
+            "SetParagraphAlignment",
+            layout.SetParagraphAlignment(align.dwrite_v()),
+        )?;
+    }
+    Ok(layout)
 }
 
 /// RC-5 Gap A — build a DWrite ellipsis trimming sign tied to `format`.
@@ -334,8 +409,9 @@ pub fn create_layout_no_wrap(
     max_w: f32,
     max_h: f32,
     sign: Option<&IDWriteInlineObject>,
+    align: TextAlign,
 ) -> Result<IDWriteTextLayout, PlatformError> {
-    let layout = create_layout(text_utf16, fmt, max_w, max_h)?;
+    let layout = create_layout(text_utf16, fmt, max_w, max_h, align)?;
     // SAFETY: layout is a freshly-created COM interface; both Set* calls
     // mutate the layout's per-instance state and return HRESULT only on
     // catastrophic argument errors (we feed canonical enum values).
@@ -379,7 +455,10 @@ mod tests {
         // Whatever the host has, the resolved family must be installed (the
         // tail is universal) — never the bogus input.
         assert_ne!(ui, "NoSuchFamily-zzz-Ui");
-        assert!(family_is_available(ui), "resolved UI family must be present");
+        assert!(
+            family_is_available(ui),
+            "resolved UI family must be present"
+        );
     }
 
     #[test]
