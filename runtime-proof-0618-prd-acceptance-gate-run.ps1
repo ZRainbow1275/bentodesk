@@ -2,7 +2,19 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $workspaceRoot = Split-Path -Parent $repoRoot
-$taskDir = Join-Path $workspaceRoot '.trellis\tasks\05-29-nano-tauri-parity-plan'
+$taskName = '05-29-nano-tauri-parity-plan'
+$activeTaskDir = Join-Path $workspaceRoot ".trellis\tasks\$taskName"
+$taskDir = $activeTaskDir
+if (-not (Test-Path -LiteralPath $taskDir)) {
+    $archivedTaskDir = Get-ChildItem -LiteralPath (Join-Path $workspaceRoot '.trellis\tasks\archive') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName $taskName } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Sort-Object -Descending |
+        Select-Object -First 1
+    if ($archivedTaskDir) {
+        $taskDir = $archivedTaskDir
+    }
+}
 $outDir = Join-Path $repoRoot 'runtime-proof-0618-prd-acceptance-gate-try'
 $wsAuditCsv = Join-Path $taskDir 'ws-acceptance-audit-2026-06-18-results.csv'
 $fiveIssueSummaryPath = Join-Path $repoRoot 'runtime-proof-0618-five-issue-closure-try\summary.json'
@@ -950,7 +962,7 @@ $summary = [pscustomobject]@{
     status = $status
     stage = 'completed'
     generated_at_utc = [DateTime]::UtcNow.ToString('o')
-    task = '.trellis/tasks/05-29-nano-tauri-parity-plan'
+    task = $taskDir
     repo = 'bentodesk-nano'
     proof_dir = $outDir
     goal_complete = $false
