@@ -4058,7 +4058,7 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
         VK_S_KEY => {
             root.dispatcher.push(Command::SaveCheckpoint {
                 id: None,
-                label: Some(SmolStr::new_static("manual save")),
+                label: Some(localized_current("手动保存", "manual save")),
             });
             request_redraw(hwnd);
             0
@@ -5277,7 +5277,7 @@ fn handle_search_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                     .borrow_mut()
                     .replace(SmolStr::new_static(context_menu_text(
                         "尚未选择搜索结果",
-                        "No Search result selected",
+                        "No search result selected",
                     )));
                 request_redraw(hwnd);
             }
@@ -6583,7 +6583,10 @@ fn handle_settings_passphrase_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
                 let draft = app.passphrase_draft.borrow().trim().to_owned();
                 if draft.is_empty() {
                     app.settings_encryption_status.borrow_mut().replace(
-                        SettingsBackupStatus::Error(SmolStr::new_static("Passphrase required")),
+                        SettingsBackupStatus::Error(localized_current(
+                            "请输入口令",
+                            "Passphrase required",
+                        )),
                     );
                     request_redraw(hwnd);
                     return Some(0);
@@ -6611,8 +6614,9 @@ fn handle_settings_passphrase_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
             app.passphrase_draft.borrow_mut().clear();
             app.settings_encryption_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new_static(
-                    "Passphrase cancelled",
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    "已取消口令输入",
+                    "Passphrase entry cancelled",
                 )));
             request_redraw(hwnd);
             Some(0)
@@ -6647,7 +6651,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
         set_keybinding_feedback(
             &app,
             action.as_str(),
-            SmolStr::new_static("Recording cancelled"),
+            localized_current("已取消快捷键录制", "Shortcut recording cancelled"),
             false,
         );
         request_redraw(hwnd);
@@ -6663,7 +6667,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
         set_keybinding_feedback(
             &app,
             action.as_str(),
-            SmolStr::new_static("Reserved by Windows"),
+            localized_current("该组合键由 Windows 保留", "Reserved by Windows"),
             true,
         );
         request_redraw(hwnd);
@@ -6675,7 +6679,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
                 set_keybinding_feedback(
                     &app,
                     action.as_str(),
-                    SmolStr::new_static("Unsupported action"),
+                    localized_current("不支持此操作", "Unsupported action"),
                     true,
                 );
                 request_redraw(hwnd);
@@ -6684,7 +6688,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
             set_keybinding_feedback(
                 &app,
                 action.as_str(),
-                SmolStr::new(format!("Saving {chord}")),
+                localized_current(format!("正在保存 {chord}"), format!("Saving {chord}")),
                 false,
             );
             drop(app);
@@ -6697,7 +6701,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
             set_keybinding_feedback(
                 &app,
                 action.as_str(),
-                SmolStr::new_static("Unsupported shortcut"),
+                localized_current("不支持此快捷键", "Unsupported shortcut"),
                 true,
             );
         }
@@ -6705,7 +6709,7 @@ fn handle_settings_keybinding_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Op
             set_keybinding_feedback(
                 &app,
                 action.as_str(),
-                SmolStr::new_static("Already in use"),
+                localized_current("该快捷键已被使用", "Already in use"),
                 true,
             );
         }
@@ -7768,6 +7772,14 @@ fn settings_save_failure(root: &AppRoot, message: impl Into<SmolStr>) -> bool {
     false
 }
 
+fn localized_message(
+    zh: bool,
+    zh_text: impl Into<SmolStr>,
+    en_text: impl Into<SmolStr>,
+) -> SmolStr {
+    if zh { zh_text.into() } else { en_text.into() }
+}
+
 fn strip_windows_extended_path(path: &str) -> &str {
     path.strip_prefix(r"\\?\").unwrap_or(path)
 }
@@ -7779,20 +7791,42 @@ fn settings_path_is_within_prefix(path: &str, prefix: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('\\'))
 }
 
-fn validate_settings_directory(raw: &str, label: &str) -> Result<PathBuf, SmolStr> {
+fn validate_settings_directory(
+    raw: &str,
+    label_zh: &str,
+    label_en: &str,
+    zh: bool,
+) -> Result<PathBuf, SmolStr> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err(SmolStr::new(format!("{label}不能为空")));
+        return Err(localized_message(
+            zh,
+            format!("{label_zh}不能为空"),
+            format!("{label_en} cannot be empty"),
+        ));
     }
     let path = Path::new(raw);
     if !path.exists() {
-        return Err(SmolStr::new(format!("{label}不存在：{raw}")));
+        return Err(localized_message(
+            zh,
+            format!("{label_zh}不存在：{raw}"),
+            format!("{label_en} does not exist: {raw}"),
+        ));
     }
     if !path.is_dir() {
-        return Err(SmolStr::new(format!("{label}不是文件夹：{raw}")));
+        return Err(localized_message(
+            zh,
+            format!("{label_zh}不是文件夹：{raw}"),
+            format!("{label_en} is not a folder: {raw}"),
+        ));
     }
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|error| SmolStr::new(format!("{label}无法解析：{error}")))?;
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        localized_message(
+            zh,
+            format!("{label_zh}无法解析：{error}"),
+            format!("{label_en} could not be resolved: {error}"),
+        )
+    })?;
     let canonical_lower = strip_windows_extended_path(canonical.to_string_lossy().as_ref())
         .replace('/', "\\")
         .to_lowercase();
@@ -7800,7 +7834,11 @@ fn validate_settings_directory(raw: &str, label: &str) -> Result<PathBuf, SmolSt
         .iter()
         .find(|prefix| settings_path_is_within_prefix(&canonical_lower, prefix))
     {
-        return Err(SmolStr::new(format!("{label}不能位于系统目录 {prefix} 内")));
+        return Err(localized_message(
+            zh,
+            format!("{label_zh}不能位于系统目录 {prefix} 内"),
+            format!("{label_en} cannot be inside the system directory {prefix}"),
+        ));
     }
     Ok(canonical)
 }
@@ -7819,8 +7857,16 @@ fn push_unique_settings_source(sources: &mut Vec<PathBuf>, candidate: PathBuf) {
     sources.push(candidate);
 }
 
-fn validate_settings_sources(snapshot: &SettingsSnapshot) -> Result<Vec<PathBuf>, SmolStr> {
-    let desktop = validate_settings_directory(snapshot.desktop_path_draft.as_str(), "桌面路径")?;
+fn validate_settings_sources_for_locale(
+    snapshot: &SettingsSnapshot,
+    zh: bool,
+) -> Result<Vec<PathBuf>, SmolStr> {
+    let desktop = validate_settings_directory(
+        snapshot.desktop_path_draft.as_str(),
+        "桌面路径",
+        "Desktop path",
+        zh,
+    )?;
     let desktop_text = desktop.to_string_lossy();
     let mut sources = Vec::new();
     for source in bento_nano_backend::desktop_sources::all_desktop_dirs(Some(&desktop_text)) {
@@ -7840,14 +7886,26 @@ fn validate_settings_sources(snapshot: &SettingsSnapshot) -> Result<Vec<PathBuf>
         if raw.is_empty() {
             continue;
         }
-        let label = format!("监控路径第 {} 行", index + 1);
-        let path = validate_settings_directory(raw, label.as_str())?;
+        let label_zh = format!("监控路径第 {} 行", index + 1);
+        let label_en = format!("Watch path line {}", index + 1);
+        let path = validate_settings_directory(raw, label_zh.as_str(), label_en.as_str(), zh)?;
         push_unique_settings_source(&mut sources, path);
     }
     if sources.is_empty() {
-        return Err(SmolStr::new_static("没有可用的桌面监控路径"));
+        return Err(localized_message(
+            zh,
+            "没有可用的桌面监控路径",
+            "No usable desktop watch path",
+        ));
     }
     Ok(sources)
+}
+
+fn validate_settings_sources(snapshot: &SettingsSnapshot) -> Result<Vec<PathBuf>, SmolStr> {
+    validate_settings_sources_for_locale(
+        snapshot,
+        bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+    )
 }
 
 fn rebuild_desktop_watcher(root: &AppRoot, sources: &[PathBuf]) -> Result<(), SmolStr> {
@@ -7858,9 +7916,16 @@ fn rebuild_desktop_watcher(root: &AppRoot, sources: &[PathBuf]) -> Result<(), Sm
         );
         return Ok(());
     }
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     let replacement =
         bento_nano_backend::watcher::setup_file_watcher(sources, root.desktop_event_tx.clone())
-            .map_err(|error| SmolStr::new(format!("无法监控桌面路径：{error}")))?;
+            .map_err(|error| {
+                localized_message(
+                    zh,
+                    format!("无法监控桌面路径：{error}"),
+                    format!("Unable to watch desktop paths: {error}"),
+                )
+            })?;
     let previous = root.desktop_watcher.replace(Some(replacement));
     drop(previous);
     tracing::info!(
@@ -7871,34 +7936,62 @@ fn rebuild_desktop_watcher(root: &AppRoot, sources: &[PathBuf]) -> Result<(), Sm
     Ok(())
 }
 
-fn copy_state_dir_recursive(source: &Path, target: &Path) -> Result<(), SmolStr> {
+fn copy_state_dir_recursive(source: &Path, target: &Path, zh: bool) -> Result<(), SmolStr> {
     if source == target || !source.exists() {
         return Ok(());
     }
-    std::fs::create_dir_all(target)
-        .map_err(|error| SmolStr::new(format!("无法创建便携数据目录：{error}")))?;
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| SmolStr::new(format!("无法读取当前数据目录：{error}")))?;
+    std::fs::create_dir_all(target).map_err(|error| {
+        localized_message(
+            zh,
+            format!("无法创建便携数据目录：{error}"),
+            format!("Unable to create the portable data directory: {error}"),
+        )
+    })?;
+    let entries = std::fs::read_dir(source).map_err(|error| {
+        localized_message(
+            zh,
+            format!("无法读取当前数据目录：{error}"),
+            format!("Unable to read the current data directory: {error}"),
+        )
+    })?;
     for entry in entries {
-        let entry = entry.map_err(|error| SmolStr::new(format!("无法读取数据目录项：{error}")))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| SmolStr::new(format!("无法读取数据目录项类型：{error}")))?;
+        let entry = entry.map_err(|error| {
+            localized_message(
+                zh,
+                format!("无法读取数据目录项：{error}"),
+                format!("Unable to read a data-directory entry: {error}"),
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            localized_message(
+                zh,
+                format!("无法读取数据目录项类型：{error}"),
+                format!("Unable to read a data-directory entry type: {error}"),
+            )
+        })?;
         let destination = target.join(entry.file_name());
         if file_type.is_symlink() {
-            return Err(SmolStr::new(format!(
-                "便携迁移拒绝符号链接：{}",
-                entry.path().display()
-            )));
+            return Err(localized_message(
+                zh,
+                format!("便携迁移拒绝符号链接：{}", entry.path().display()),
+                format!(
+                    "Portable migration rejected a symbolic link: {}",
+                    entry.path().display()
+                ),
+            ));
         }
         if file_type.is_dir() {
-            copy_state_dir_recursive(entry.path().as_path(), destination.as_path())?;
+            copy_state_dir_recursive(entry.path().as_path(), destination.as_path(), zh)?;
         } else if file_type.is_file() {
             std::fs::copy(entry.path(), &destination).map_err(|error| {
-                SmolStr::new(format!(
-                    "无法复制便携数据 {}：{error}",
-                    entry.path().display()
-                ))
+                localized_message(
+                    zh,
+                    format!("无法复制便携数据 {}：{error}", entry.path().display()),
+                    format!(
+                        "Unable to copy portable data {}: {error}",
+                        entry.path().display()
+                    ),
+                )
             })?;
         }
     }
@@ -7909,13 +8002,29 @@ fn sync_portable_state(previous: bool, desired: bool) -> Result<(), SmolStr> {
     if previous == desired {
         return Ok(());
     }
-    let source = storage::state_dir_for_portable_mode(previous)
-        .map_err(|error| SmolStr::new(format!("无法定位当前数据目录：{error}")))?;
-    let target = storage::state_dir_for_portable_mode(desired)
-        .map_err(|error| SmolStr::new(format!("无法定位目标数据目录：{error}")))?;
-    copy_state_dir_recursive(source.as_path(), target.as_path())?;
-    storage::set_portable_mode_enabled(desired)
-        .map_err(|error| SmolStr::new(format!("无法切换便携模式：{error}")))?;
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
+    let source = storage::state_dir_for_portable_mode(previous).map_err(|error| {
+        localized_message(
+            zh,
+            format!("无法定位当前数据目录：{error}"),
+            format!("Unable to locate the current data directory: {error}"),
+        )
+    })?;
+    let target = storage::state_dir_for_portable_mode(desired).map_err(|error| {
+        localized_message(
+            zh,
+            format!("无法定位目标数据目录：{error}"),
+            format!("Unable to locate the target data directory: {error}"),
+        )
+    })?;
+    copy_state_dir_recursive(source.as_path(), target.as_path(), zh)?;
+    storage::set_portable_mode_enabled(desired).map_err(|error| {
+        localized_message(
+            zh,
+            format!("无法切换便携模式：{error}"),
+            format!("Unable to switch portable mode: {error}"),
+        )
+    })?;
     tracing::info!(
         target: "bentodesk::settings",
         previous,
@@ -7928,8 +8037,13 @@ fn sync_portable_state(previous: bool, desired: bool) -> Result<(), SmolStr> {
 }
 
 fn apply_show_in_taskbar(hwnd: HWND, show: bool) -> Result<(), SmolStr> {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     if hwnd.is_null() {
-        return Err(SmolStr::new_static("主窗口不存在，无法更新任务栏状态"));
+        return Err(localized_message(
+            zh,
+            "主窗口不存在，无法更新任务栏状态",
+            "The main window is unavailable; taskbar state was not changed",
+        ));
     }
     let _guard = bento_nano_backend::ghost_layer::bypass_subclass_guard();
     // SAFETY: `hwnd` is the live Main HWND. The hide/style/frame/show sequence
@@ -7960,7 +8074,11 @@ fn apply_show_in_taskbar(hwnd: HWND, show: bool) -> Result<(), SmolStr> {
             applied & WS_EX_TOOLWINDOW as isize != 0 && applied & WS_EX_APPWINDOW as isize == 0
         };
         if !correct {
-            return Err(SmolStr::new_static("Windows 未接受任务栏窗口样式"));
+            return Err(localized_message(
+                zh,
+                "Windows 未接受任务栏窗口样式",
+                "Windows did not accept the requested taskbar window style",
+            ));
         }
     }
     Ok(())
@@ -7972,7 +8090,14 @@ fn apply_desktop_embed(hwnd: HWND, enabled: bool) -> Result<(), SmolStr> {
     } else {
         bento_nano_backend::ghost_layer::detach(hwnd)
     };
-    result.map_err(|error| SmolStr::new(format!("桌面嵌入切换失败：{error}")))
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
+    result.map_err(|error| {
+        localized_message(
+            zh,
+            format!("桌面嵌入切换失败：{error}"),
+            format!("Desktop embedding could not be changed: {error}"),
+        )
+    })
 }
 
 fn apply_process_priority(high_priority: bool) -> Result<(), SmolStr> {
@@ -7984,10 +8109,12 @@ fn apply_process_priority(high_priority: bool) -> Result<(), SmolStr> {
     // SAFETY: GetCurrentProcess returns a process pseudo-handle valid for
     // SetPriorityClass. No ownership is transferred.
     if unsafe { SetPriorityClass(GetCurrentProcess(), priority) } == 0 {
-        return Err(SmolStr::new(format!(
-            "进程优先级切换失败：Win32 {}",
-            unsafe { GetLastError() }
-        )));
+        let code = unsafe { GetLastError() };
+        return Err(localized_message(
+            bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+            format!("进程优先级切换失败：Win32 {code}"),
+            format!("Unable to change process priority: Win32 {code}"),
+        ));
     }
     Ok(())
 }
@@ -8052,10 +8179,14 @@ fn configure_application_restart(snapshot: &SettingsSnapshot) -> Result<(), Smol
         }
     };
     if hr < 0 {
-        return Err(SmolStr::new(format!(
-            "崩溃自动重启配置失败：HRESULT 0x{:08X}",
-            hr as u32
-        )));
+        return Err(localized_message(
+            bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+            format!("崩溃自动重启配置失败：HRESULT 0x{:08X}", hr as u32),
+            format!(
+                "Unable to configure automatic crash restart: HRESULT 0x{:08X}",
+                hr as u32
+            ),
+        ));
     }
     Ok(())
 }
@@ -8071,30 +8202,48 @@ fn apply_runtime_settings(
     desired: &SettingsSnapshot,
     desired_sources: &[PathBuf],
 ) -> Result<(), SmolStr> {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     if previous.launch_at_startup != desired.launch_at_startup {
-        bento_nano_backend::autostart::set_enabled(desired.launch_at_startup)
-            .map_err(|error| SmolStr::new(format!("开机启动配置失败：{error}")))?;
+        bento_nano_backend::autostart::set_enabled(desired.launch_at_startup).map_err(|error| {
+            localized_message(
+                zh,
+                format!("开机启动配置失败：{error}"),
+                format!("Unable to configure launch at startup: {error}"),
+            )
+        })?;
         if bento_nano_backend::autostart::is_enabled() != desired.launch_at_startup {
-            return Err(SmolStr::new_static("开机启动注册表状态校验失败"));
+            return Err(localized_message(
+                zh,
+                "开机启动注册表状态校验失败",
+                "Launch-at-startup registry verification failed",
+            ));
         }
     }
 
     let main_hwnd = find_main_hwnd(root);
     if previous.show_in_taskbar != desired.show_in_taskbar {
         apply_show_in_taskbar(
-            main_hwnd.ok_or_else(|| SmolStr::new_static("主窗口尚未创建"))?,
+            main_hwnd.ok_or_else(|| {
+                localized_message(zh, "主窗口尚未创建", "The main window is not available")
+            })?,
             desired.show_in_taskbar,
         )?;
     }
     if previous.icon_cache_size != desired.icon_cache_size {
         let Some(cache) = bento_nano_backend::icon::cache_handle() else {
-            return Err(SmolStr::new_static("图标缓存尚未初始化"));
+            return Err(localized_message(
+                zh,
+                "图标缓存尚未初始化",
+                "The icon cache is not initialized",
+            ));
         };
         cache.resize(desired.icon_cache_size.max(1) as usize);
     }
     if previous.ghost_layer_enabled != desired.ghost_layer_enabled {
         apply_desktop_embed(
-            main_hwnd.ok_or_else(|| SmolStr::new_static("主窗口尚未创建"))?,
+            main_hwnd.ok_or_else(|| {
+                localized_message(zh, "主窗口尚未创建", "The main window is not available")
+            })?,
             desired.ghost_layer_enabled,
         )?;
     }
@@ -8141,6 +8290,14 @@ fn restore_vault_settings(
             }
         }
     }
+}
+
+fn localized_current(zh_text: impl Into<SmolStr>, en_text: impl Into<SmolStr>) -> SmolStr {
+    localized_message(
+        bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+        zh_text,
+        en_text,
+    )
 }
 
 fn persist_settings_snapshot_to_vault(
@@ -8245,6 +8402,7 @@ fn save_settings_general(root: &AppRoot, _settings_hwnd: HWND) -> bool {
     if !dirty {
         return false;
     }
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     {
         let app = root.app.borrow();
         app.settings_save_error.borrow_mut().take();
@@ -8259,14 +8417,35 @@ fn save_settings_general(root: &AppRoot, _settings_hwnd: HWND) -> bool {
             target: "bentodesk::vault",
             "settings: SaveSettings rejected — vault global not installed"
         );
-        return settings_save_failure(root, "设置存储尚未初始化");
+        return settings_save_failure(
+            root,
+            localized_message(
+                zh,
+                "设置存储尚未初始化",
+                "Settings storage is not initialized",
+            ),
+        );
     };
     let original_values = {
         let Ok(mut vault) = mtx.lock() else {
-            return settings_save_failure(root, "设置存储锁已损坏");
+            return settings_save_failure(
+                root,
+                localized_message(
+                    zh,
+                    "设置存储锁已损坏",
+                    "Settings storage lock is unavailable",
+                ),
+            );
         };
         if vault.is_locked_passphrase() {
-            return settings_save_failure(root, "请先解锁设置加密，再保存");
+            return settings_save_failure(
+                root,
+                localized_message(
+                    zh,
+                    "请先解锁设置加密，再保存",
+                    "Unlock encrypted settings before saving",
+                ),
+            );
         }
         let original_values = snapshot_vault_settings(&vault);
         persist_settings_snapshot_to_vault(
@@ -8278,7 +8457,14 @@ fn save_settings_general(root: &AppRoot, _settings_hwnd: HWND) -> bool {
         if let Err(error) = vault.flush() {
             restore_vault_settings(&mut vault, &original_values);
             let _ = vault.flush();
-            return settings_save_failure(root, format!("设置写入失败：{error}"));
+            return settings_save_failure(
+                root,
+                localized_message(
+                    zh,
+                    format!("设置写入失败：{error}"),
+                    format!("Unable to write settings: {error}"),
+                ),
+            );
         }
         original_values
     };
@@ -8645,8 +8831,9 @@ fn queue_update_action(root: &AppRoot) {
         root.dispatcher.push(command);
     } else {
         let app = root.app.borrow();
-        *app.settings_updater_status.borrow_mut() =
-            SettingsUpdaterStatus::Error(SmolStr::new_static("No update action is available"));
+        *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(
+            localized_current("当前没有可执行的更新操作", "No update action is available"),
+        );
     }
 }
 
@@ -8661,9 +8848,11 @@ fn queue_update_skip(root: &AppRoot, hwnd: HWND) {
         }
         None => {
             let app = root.app.borrow();
-            *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(
-                SmolStr::new_static("No update version is available to skip"),
-            );
+            *app.settings_updater_status.borrow_mut() =
+                SettingsUpdaterStatus::Error(localized_current(
+                    "当前没有可跳过的更新版本",
+                    "No update version is available to skip",
+                ));
             request_redraw(hwnd);
         }
     }
@@ -8698,7 +8887,13 @@ fn queue_active_theme_cycle(root: &AppRoot, hwnd: HWND) {
             }
         }
         Err(error) => {
-            set_theme_setting_error(root, SmolStr::new(format!("Theme list failed: {error}")));
+            set_theme_setting_error(
+                root,
+                localized_current(
+                    format!("无法读取主题列表：{error}"),
+                    format!("Theme list failed: {error}"),
+                ),
+            );
             if !hwnd.is_null() {
                 request_redraw(hwnd);
             }
@@ -9397,11 +9592,14 @@ fn list_pinned_minibar_labels(
 fn show_pinned_minibar_list_status(root: &AppRoot) {
     let labels = list_pinned_minibar_labels(root);
     if labels.is_empty() {
-        set_item_operation_status(root, SmolStr::new_static("No pinned minibars"));
+        set_item_operation_status(
+            root,
+            localized_current("暂无固定迷你栏", "No pinned minibars"),
+        );
         log_static("minibar: ListPinnedMinibars status=No pinned minibars\n");
         return;
     }
-    let mut status = String::from("Pinned minibars: ");
+    let mut status = localized_current("已固定迷你栏：", "Pinned minibars: ").to_string();
     for (index, label) in labels.iter().enumerate() {
         if index > 0 {
             status.push_str(", ");
@@ -9535,7 +9733,10 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
     if let Err(error) = apply_available_themes_to_app(root) {
         set_theme_setting_error(
             root,
-            SmolStr::new(format!("Theme list restore failed: {error}")),
+            localized_current(
+                format!("无法恢复主题列表：{error}"),
+                format!("Theme list restore failed: {error}"),
+            ),
         );
     }
     let Some(mtx) = bento_nano_backend::config_vault::Vault::global() else {
@@ -9587,7 +9788,8 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
         app.passphrase_unlock_required.set(true);
         app.settings_encryption_status
             .borrow_mut()
-            .replace(SettingsBackupStatus::Error(SmolStr::new_static(
+            .replace(SettingsBackupStatus::Error(localized_current(
+                "需要输入口令解锁设置",
                 "Passphrase unlock required",
             )));
         return;
@@ -9746,9 +9948,10 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
                 );
                 app.settings_theme_status
                     .borrow_mut()
-                    .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                        "Display mode ignored: {mode}"
-                    ))));
+                    .replace(SettingsBackupStatus::Error(localized_current(
+                        format!("已忽略无效的显示模式：{mode}"),
+                        format!("Display mode ignored: {mode}"),
+                    )));
             }
         }
         Some(_) => {
@@ -9769,7 +9972,13 @@ fn apply_persisted_settings_from_vault(root: &AppRoot) {
                     error = %error,
                     "active_theme restore skipped"
                 );
-                set_theme_setting_error(root, SmolStr::new(format!("Theme ignored: {theme_id}")));
+                set_theme_setting_error(
+                    root,
+                    localized_current(
+                        format!("已忽略无效主题：{theme_id}"),
+                        format!("Theme ignored: {theme_id}"),
+                    ),
+                );
             }
         }
         Some(_) => {
@@ -9867,18 +10076,19 @@ fn apply_setting_value_to_app(
                 );
                 app.settings_theme_status
                     .borrow_mut()
-                    .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                        "Display mode rejected: {mode}"
-                    ))));
+                    .replace(SettingsBackupStatus::Error(localized_current(
+                        format!("不支持的显示模式：{mode}"),
+                        format!("Display mode rejected: {mode}"),
+                    )));
                 return false;
             };
             let changed = app.set_zone_display_mode(parsed);
             app.settings_theme_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Mode {}",
-                    parsed.label()
-                ))));
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    format!("显示模式：{}", parsed.label()),
+                    format!("Display mode: {}", parsed.label()),
+                )));
             changed
         }
         _ => false,
@@ -9900,9 +10110,10 @@ fn apply_update_event_to_app(app: &AppState, event: UpdateEvent) {
         UpdateEvent::Installing { info } => SettingsUpdaterStatus::Installing {
             version: info.version,
         },
-        UpdateEvent::Error { kind, message } => {
-            SettingsUpdaterStatus::Error(SmolStr::new(format!("{kind}: {message}")))
-        }
+        UpdateEvent::Error { kind, message } => SettingsUpdaterStatus::Error(localized_current(
+            format!("更新失败（{kind}）：{message}"),
+            format!("{kind}: {message}"),
+        )),
     };
     *app.settings_updater_status.borrow_mut() = next_status;
 }
@@ -9911,9 +10122,16 @@ fn updater_event_should_auto_download(app: &AppState, event: &UpdateEvent) -> bo
     app.update_auto_download.get() && matches!(event, UpdateEvent::Available { .. })
 }
 
-fn set_update_error(app: &AppState, action: &str, error: &dyn core::fmt::Display) {
-    *app.settings_updater_status.borrow_mut() =
-        SettingsUpdaterStatus::Error(SmolStr::new(format!("{action}: {error}")));
+fn set_update_error(
+    app: &AppState,
+    action_zh: &str,
+    action_en: &str,
+    error: &dyn core::fmt::Display,
+) {
+    *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(localized_current(
+        format!("{action_zh}：{error}"),
+        format!("{action_en}: {error}"),
+    ));
 }
 
 fn persist_setting_to_vault(
@@ -10938,7 +11156,13 @@ fn select_timeline_checkpoint(root: &AppRoot, index: usize) {
     };
     if changed {
         if let Err(error) = load_selected_timeline_checkpoint(root) {
-            set_timeline_error(root, SmolStr::new(format!("Preview failed: {error}")));
+            set_timeline_error(
+                root,
+                localized_current(
+                    format!("预览失败：{error}"),
+                    format!("Preview failed: {error}"),
+                ),
+            );
         }
     }
 }
@@ -10949,7 +11173,13 @@ fn select_prev_timeline_checkpoint(root: &AppRoot) {
         app.timeline_panel.borrow_mut().select_prev();
     }
     if let Err(error) = load_selected_timeline_checkpoint(root) {
-        set_timeline_error(root, SmolStr::new(format!("Preview failed: {error}")));
+        set_timeline_error(
+            root,
+            localized_current(
+                format!("预览失败：{error}"),
+                format!("Preview failed: {error}"),
+            ),
+        );
     }
 }
 
@@ -10959,7 +11189,13 @@ fn select_next_timeline_checkpoint(root: &AppRoot) {
         app.timeline_panel.borrow_mut().select_next();
     }
     if let Err(error) = load_selected_timeline_checkpoint(root) {
-        set_timeline_error(root, SmolStr::new(format!("Preview failed: {error}")));
+        set_timeline_error(
+            root,
+            localized_current(
+                format!("预览失败：{error}"),
+                format!("Preview failed: {error}"),
+            ),
+        );
     }
 }
 
@@ -11000,7 +11236,13 @@ fn open_timeline(root: &AppRoot) {
             error = %error,
             "OpenTimeline: checkpoint list refresh failed"
         );
-        set_timeline_error(root, SmolStr::new(format!("Timeline list failed: {error}")));
+        set_timeline_error(
+            root,
+            localized_current(
+                format!("时间线列表载入失败：{error}"),
+                format!("Timeline list failed: {error}"),
+            ),
+        );
     }
 
     let Some(host) = ensure_aux_window(root, WindowKind::Timeline) else {
@@ -11041,7 +11283,13 @@ fn open_snapshot_picker(root: &AppRoot) {
             error = %error,
             "OpenSnapshotPicker: snapshot list refresh failed"
         );
-        set_snapshot_picker_error(root, SmolStr::new(format!("Snapshot list failed: {error}")));
+        set_snapshot_picker_error(
+            root,
+            localized_current(
+                format!("布局快照列表载入失败：{error}"),
+                format!("Snapshot list failed: {error}"),
+            ),
+        );
     }
 
     let Some(host) = ensure_aux_window(root, WindowKind::SnapshotPicker) else {
@@ -11065,10 +11313,16 @@ fn open_snapshot_picker(root: &AppRoot) {
 
 fn snapshot_capture_name(root: &AppRoot) -> SmolStr {
     let zone_count = root.app.borrow().zones.len();
-    SmolStr::new(format!(
-        "Manual snapshot {zone_count} zones {}",
-        bento_nano_backend::time::now_rfc3339()
-    ))
+    localized_current(
+        format!(
+            "手动快照 · {zone_count} 个区域 · {}",
+            bento_nano_backend::time::now_rfc3339()
+        ),
+        format!(
+            "Manual snapshot · {zone_count} zones · {}",
+            bento_nano_backend::time::now_rfc3339()
+        ),
+    )
 }
 
 fn resolve_snapshot_id(
@@ -11187,7 +11441,7 @@ fn save_timeline_checkpoint(
     } else {
         let summary = label
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| SmolStr::new_static("manual save"));
+            .unwrap_or_else(|| localized_current("手动保存", "manual save"));
         let checkpoint = Checkpoint {
             id: timeline::new_checkpoint_id(),
             snapshot: capture_current_timeline_snapshot(root, summary.as_str()),
@@ -11217,11 +11471,12 @@ fn save_timeline_checkpoint(
 }
 
 fn save_pre_restore_checkpoint(root: &AppRoot, store: &CheckpointStore) {
+    let summary = localized_current("恢复前布局", "Pre-restore layout");
     let checkpoint = Checkpoint {
         id: timeline::new_checkpoint_id(),
-        snapshot: capture_current_timeline_snapshot(root, "pre-restore"),
+        snapshot: capture_current_timeline_snapshot(root, summary.as_str()),
         delta: DeltaSummary::default(),
-        delta_summary: "pre-restore".to_owned(),
+        delta_summary: summary.to_string(),
         trigger: SmolStr::new_static("pre_restore"),
         coalesce_key: None,
         pinned: false,
@@ -11287,9 +11542,9 @@ fn record_coalesced_mutation_timeline_pair(
     pre_trigger: &str,
     post_trigger: &str,
     coalesce_scope: &str,
-    status: &'static str,
+    status: SmolStr,
 ) {
-    let after_snapshot = capture_current_timeline_snapshot(root, status);
+    let after_snapshot = capture_current_timeline_snapshot(root, status.as_str());
     let current_delta = timeline::compute_delta(Some(&before_snapshot), &after_snapshot.zones);
     if current_delta == DeltaSummary::default() {
         return;
@@ -11334,7 +11589,7 @@ fn record_coalesced_mutation_timeline_pair(
             "Mutation post-checkpoint failed"
         );
     } else {
-        set_timeline_status(root, SmolStr::new_static(status));
+        set_timeline_status(root, status);
     }
 }
 
@@ -11832,8 +12087,8 @@ fn live_folder_path_for_zone(root: &AppRoot, zone_id: ZoneId) -> Option<PathBuf>
         .map(PathBuf::from)
 }
 
-fn set_live_folder_status_for_app(app: &AppState, message: impl Into<String>) {
-    let message = SmolStr::new(message.into());
+fn set_live_folder_status_for_app(app: &AppState, message: impl Into<SmolStr>) {
+    let message = message.into();
     app.rules_wizard_status
         .borrow_mut()
         .replace(message.clone());
@@ -11843,7 +12098,7 @@ fn set_live_folder_status_for_app(app: &AppState, message: impl Into<String>) {
     log_static(format!("live-folder: {message}\n").as_str());
 }
 
-fn set_live_folder_status(root: &AppRoot, message: impl Into<String>) {
+fn set_live_folder_status(root: &AppRoot, message: impl Into<SmolStr>) {
     let app = root.app.borrow();
     set_live_folder_status_for_app(&app, message);
 }
@@ -11877,9 +12132,12 @@ fn refresh_live_folder_zone(root: &AppRoot, zone_id: ZoneId) -> Result<bool, Str
         if zone.live_folder_path.as_deref() != Some(folder.to_string_lossy().as_ref()) {
             set_live_folder_status_for_app(
                 &app,
-                format!(
-                    "Live folder skipped zone {} because its binding changed",
-                    zone_id.0
+                localized_current(
+                    format!("区域 {} 的文件夹绑定已变化，已跳过刷新", zone_id.0),
+                    format!(
+                        "Live folder skipped zone {} because its binding changed",
+                        zone_id.0
+                    ),
                 ),
             );
             return Ok(true);
@@ -11887,10 +12145,17 @@ fn refresh_live_folder_zone(root: &AppRoot, zone_id: ZoneId) -> Result<bool, Str
         if zone.items == next_items {
             set_live_folder_status_for_app(
                 &app,
-                format!(
-                    "Live folder checked zone {} from {}; items={item_count}; no changes",
-                    zone_id.0,
-                    folder.display()
+                localized_current(
+                    format!(
+                        "区域 {} 的绑定文件夹已检查：{}，共 {item_count} 个项目，无变化",
+                        zone_id.0,
+                        folder.display()
+                    ),
+                    format!(
+                        "Live folder checked zone {} from {}; items={item_count}; no changes",
+                        zone_id.0,
+                        folder.display()
+                    ),
                 ),
             );
             return Ok(true);
@@ -11899,17 +12164,24 @@ fn refresh_live_folder_zone(root: &AppRoot, zone_id: ZoneId) -> Result<bool, Str
     }
     set_live_folder_status_for_app(
         &app,
-        format!(
-            "Live folder refreshed zone {} from {}; items={item_count}",
-            zone_id.0,
-            folder.display()
+        localized_current(
+            format!(
+                "区域 {} 的绑定文件夹已刷新：{}，共 {item_count} 个项目",
+                zone_id.0,
+                folder.display()
+            ),
+            format!(
+                "Live folder refreshed zone {} from {}; items={item_count}",
+                zone_id.0,
+                folder.display()
+            ),
         ),
     );
     app.mark_dirty();
     Ok(true)
 }
 
-fn set_live_folder_error(root: &AppRoot, message: impl Into<String>) {
+fn set_live_folder_error(root: &AppRoot, message: impl Into<SmolStr>) {
     set_live_folder_status(root, message);
 }
 
@@ -12165,8 +12437,18 @@ unsafe fn select_live_folder_from_file_open_dialog(
     owner: HWND,
     zone_id: ZoneId,
 ) -> Result<Option<SmolStr>, String> {
-    let title = widen_dynamic(&format!("Bind live folder to zone {}", zone_id.0));
-    let ok_label = widen_static::<24>("Select folder");
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
+    let title_text = localized_message(
+        zh,
+        format!("为区域 {} 绑定文件夹", zone_id.0),
+        format!("Bind live folder to zone {}", zone_id.0),
+    );
+    let title = widen_dynamic(title_text.as_str());
+    let ok_label = widen_dynamic(if zh {
+        "选择文件夹"
+    } else {
+        "Select folder"
+    });
     log_static("live-folder: picker showing file-open folder dialog\n");
     let dialog: IFileOpenDialog =
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }.map_err(
@@ -12242,9 +12524,12 @@ fn open_live_folder_picker(root: &AppRoot, zone_id: ZoneId) -> bool {
     let Some(owner) = owner else {
         set_live_folder_error(
             root,
-            format!(
-                "Bind live folder picker failed for zone {}: owner window unavailable",
-                zone_id.0
+            localized_current(
+                format!("区域 {} 绑定文件夹失败：窗口不可用", zone_id.0),
+                format!(
+                    "Bind live folder picker failed for zone {}: owner window unavailable",
+                    zone_id.0
+                ),
             ),
         );
         return true;
@@ -12276,9 +12561,12 @@ fn open_live_folder_picker(root: &AppRoot, zone_id: ZoneId) -> bool {
             );
             set_live_folder_error(
                 root,
-                format!(
-                    "Bind live folder picker failed for zone {}: {error}",
-                    zone_id.0
+                localized_current(
+                    format!("区域 {} 绑定文件夹失败：{error}", zone_id.0),
+                    format!(
+                        "Bind live folder picker failed for zone {}: {error}",
+                        zone_id.0
+                    ),
                 ),
             );
             request_redraw(owner);
@@ -12288,11 +12576,20 @@ fn open_live_folder_picker(root: &AppRoot, zone_id: ZoneId) -> bool {
 }
 
 unsafe fn select_theme_file_from_dialog(owner: HWND) -> Result<Option<PathBuf>, String> {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     unsafe {
         select_file_from_dialog(
             owner,
-            "BentoDesk theme JSON (*.json)\0*.json\0All files (*.*)\0*.*\0",
-            "Import BentoDesk theme JSON",
+            if zh {
+                "BentoDesk 主题 JSON (*.json)\0*.json\0所有文件 (*.*)\0*.*\0"
+            } else {
+                "BentoDesk theme JSON (*.json)\0*.json\0All files (*.*)\0*.*\0"
+            },
+            if zh {
+                "导入 BentoDesk 主题 JSON"
+            } else {
+                "Import BentoDesk theme JSON"
+            },
             "json",
             "theme",
         )
@@ -12404,11 +12701,18 @@ fn bind_zone_to_folder(root: &AppRoot, zone_id: ZoneId, folder: &str) -> Result<
         .borrow()
         .rules_wizard_status
         .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Live folder bound zone {} to {}; items={item_count}",
-            zone_id.0,
-            folder.display()
-        )));
+        .replace(localized_current(
+            format!(
+                "区域 {} 已绑定文件夹 {}，共 {item_count} 个项目",
+                zone_id.0,
+                folder.display()
+            ),
+            format!(
+                "Live folder bound zone {} to {}; items={item_count}",
+                zone_id.0,
+                folder.display()
+            ),
+        ));
     Ok(changed || refreshed)
 }
 
@@ -12425,10 +12729,10 @@ fn unbind_zone_folder(root: &AppRoot, zone_id: ZoneId) -> Result<bool, String> {
     }
     app.rules_wizard_status
         .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Live folder unbound from zone {}",
-            zone_id.0
-        )));
+        .replace(localized_current(
+            format!("区域 {} 已解除文件夹绑定", zone_id.0),
+            format!("Live folder unbound from zone {}", zone_id.0),
+        ));
     Ok(changed)
 }
 
@@ -12480,9 +12784,12 @@ where
                 );
                 set_live_folder_error(
                     root,
-                    format!(
-                        "Live folder rehydrate failed for zone {}: {error}",
-                        zone_id.0
+                    localized_current(
+                        format!("区域 {} 恢复文件夹绑定失败：{error}", zone_id.0),
+                        format!(
+                            "Live folder rehydrate failed for zone {}: {error}",
+                            zone_id.0
+                        ),
                     ),
                 );
                 changed = true;
@@ -12995,16 +13302,28 @@ fn file_change_rules_status(
     outcome: FileChangeRulesOutcome,
     persisted_count: usize,
 ) -> SmolStr {
-    SmolStr::new(format!(
-        "File change {} ran {}/{} OnFileChange rules; matched {}; actions={}; errors={}; persisted rules={persisted_count}; path={}",
-        event.event_type,
-        outcome.triggered_rules,
-        outcome.eligible_rules,
-        outcome.matched_files,
-        outcome.action_count,
-        outcome.error_count,
-        event.path
-    ))
+    localized_current(
+        format!(
+            "文件变更 {}：运行 {}/{} 条规则，匹配 {} 个文件，执行 {} 项，错误 {} 项；已保存 {persisted_count} 条规则；路径：{}",
+            event.event_type,
+            outcome.triggered_rules,
+            outcome.eligible_rules,
+            outcome.matched_files,
+            outcome.action_count,
+            outcome.error_count,
+            event.path
+        ),
+        format!(
+            "File change {} ran {}/{} OnFileChange rules; matched {}; actions={}; errors={}; persisted rules={persisted_count}; path={}",
+            event.event_type,
+            outcome.triggered_rules,
+            outcome.eligible_rules,
+            outcome.matched_files,
+            outcome.action_count,
+            outcome.error_count,
+            event.path
+        ),
+    )
 }
 
 fn refresh_file_change_rules_status(
@@ -13106,14 +13425,24 @@ fn interval_rules_status(
     outcome: ScheduledRulesOutcome,
     persisted_count: usize,
 ) -> SmolStr {
-    SmolStr::new(format!(
-        "Interval scheduler ran {}/{} Interval rules; matched {}; actions={}; errors={}; persisted rules={persisted_count}; rule={rule_id}",
-        outcome.triggered_rules,
-        outcome.eligible_rules,
-        outcome.matched_files,
-        outcome.action_count,
-        outcome.error_count
-    ))
+    localized_current(
+        format!(
+            "定时任务：运行 {}/{} 条规则，匹配 {} 个文件，执行 {} 项，错误 {} 项；已保存 {persisted_count} 条规则；规则：{rule_id}",
+            outcome.triggered_rules,
+            outcome.eligible_rules,
+            outcome.matched_files,
+            outcome.action_count,
+            outcome.error_count
+        ),
+        format!(
+            "Interval scheduler ran {}/{} Interval rules; matched {}; actions={}; errors={}; persisted rules={persisted_count}; rule={rule_id}",
+            outcome.triggered_rules,
+            outcome.eligible_rules,
+            outcome.matched_files,
+            outcome.action_count,
+            outcome.error_count
+        ),
+    )
 }
 
 fn refresh_interval_rules_status(
@@ -13234,10 +13563,16 @@ fn persist_rule_run_stats(state_dir: &Path, rule_id: &str) -> Result<(), RulesWi
 fn rules_execution_status(report: &ExecutionReport, persisted_count: usize) -> SmolStr {
     let action_count = report.actions_taken.len();
     let error_count = report.errors.len();
-    SmolStr::new(format!(
-        "Run matched {} files; actions={action_count}; errors={error_count}; persisted rules={persisted_count}",
-        report.matched
-    ))
+    localized_current(
+        format!(
+            "运行匹配 {} 个文件，执行 {action_count} 项，错误 {error_count} 项；已保存 {persisted_count} 条规则",
+            report.matched
+        ),
+        format!(
+            "Run matched {} files; actions={action_count}; errors={error_count}; persisted rules={persisted_count}",
+            report.matched
+        ),
+    )
 }
 
 fn apply_rules_execution_plan(root: &AppRoot, plan: &ExecutionPlan) -> ExecutionReport {
@@ -13917,6 +14252,26 @@ impl RecoveryIconRestoreOutcome {
             Self::Failed(error) => (true, 0, 0, 0, false, error.clone()),
         }
     }
+
+    fn localized_status_suffix(&self) -> SmolStr {
+        match self {
+            Self::NotIncluded => SmolStr::new_static(""),
+            Self::Restored(result) => localized_current(
+                format!(
+                    " + 图标 {}/{}/{}",
+                    result.restored, result.skipped, result.failed
+                ),
+                format!(
+                    " + icons live {}/{}/{}",
+                    result.restored, result.skipped, result.failed
+                ),
+            ),
+            Self::Failed(error) => localized_current(
+                format!(" + 图标恢复失败：{error}"),
+                format!(" + icon restore failed: {error}"),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -13936,6 +14291,25 @@ fn recovery_user_data_status_suffix(
             " + user data {}/{} B",
             report.restored_files, report.restored_bytes
         ))
+    }
+}
+
+fn localized_recovery_user_data_status_suffix(
+    report: bento_nano_backend::recovery_bundle::RecoveryUserDataRestoreReport,
+) -> SmolStr {
+    if report.restored_files == 0 {
+        SmolStr::new_static("")
+    } else {
+        localized_current(
+            format!(
+                " + 用户数据 {}/{} B",
+                report.restored_files, report.restored_bytes
+            ),
+            format!(
+                " + user data {}/{} B",
+                report.restored_files, report.restored_bytes
+            ),
+        )
     }
 }
 
@@ -14750,12 +15124,20 @@ fn run_startup_recovery_bundle_heal(root: &AppRoot, zones_path: &Path) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Startup recovery restored: {} zone(s){}{}",
-                    summary.zone_count,
-                    recovery_user_data_status_suffix(outcome.user_data_restore),
-                    outcome.icon_restore.status_suffix()
-                ))));
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    format!(
+                        "启动恢复已完成：{} 个区域{}{}",
+                        summary.zone_count,
+                        localized_recovery_user_data_status_suffix(outcome.user_data_restore),
+                        outcome.icon_restore.localized_status_suffix()
+                    ),
+                    format!(
+                        "Startup recovery restored: {} zone(s){}{}",
+                        summary.zone_count,
+                        localized_recovery_user_data_status_suffix(outcome.user_data_restore),
+                        outcome.icon_restore.localized_status_suffix()
+                    ),
+                )));
         }
         Ok(None) => {}
         Err(error) => {
@@ -14767,9 +15149,10 @@ fn run_startup_recovery_bundle_heal(root: &AppRoot, zones_path: &Path) {
             log_static(format!("recovery: startup heal failed error={error}\n").as_str());
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Startup recovery failed: {error}"
-                ))));
+                .replace(SettingsBackupStatus::Error(localized_current(
+                    format!("启动恢复失败：{error}"),
+                    format!("Startup recovery failed: {error}"),
+                )));
         }
     }
 }
@@ -14804,30 +15187,56 @@ fn run_recovery_bundle_capture(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Bundle saved: {} zone(s){}{}{}{}",
-                    summary.zone_count,
-                    if summary.vault_included {
-                        " + settings"
-                    } else {
-                        ""
-                    },
-                    if summary.safety_manifest_count > 0 {
-                        " + manifest"
-                    } else {
-                        ""
-                    },
-                    if summary.icon_backup_included {
-                        " + icons"
-                    } else {
-                        ""
-                    },
-                    if summary.user_data_file_count > 0 {
-                        " + user data"
-                    } else {
-                        ""
-                    }
-                ))));
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    format!(
+                        "恢复包已保存：{} 个区域{}{}{}{}",
+                        summary.zone_count,
+                        if summary.vault_included {
+                            " + 设置"
+                        } else {
+                            ""
+                        },
+                        if summary.safety_manifest_count > 0 {
+                            " + 安全清单"
+                        } else {
+                            ""
+                        },
+                        if summary.icon_backup_included {
+                            " + 图标"
+                        } else {
+                            ""
+                        },
+                        if summary.user_data_file_count > 0 {
+                            " + 用户数据"
+                        } else {
+                            ""
+                        }
+                    ),
+                    format!(
+                        "Bundle saved: {} zone(s){}{}{}{}",
+                        summary.zone_count,
+                        if summary.vault_included {
+                            " + settings"
+                        } else {
+                            ""
+                        },
+                        if summary.safety_manifest_count > 0 {
+                            " + manifest"
+                        } else {
+                            ""
+                        },
+                        if summary.icon_backup_included {
+                            " + icons"
+                        } else {
+                            ""
+                        },
+                        if summary.user_data_file_count > 0 {
+                            " + user data"
+                        } else {
+                            ""
+                        }
+                    ),
+                )));
         }
         Err(error) => {
             tracing::warn!(
@@ -14837,9 +15246,10 @@ fn run_recovery_bundle_capture(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Bundle failed: {error}"
-                ))));
+                .replace(SettingsBackupStatus::Error(localized_current(
+                    format!("恢复包保存失败：{error}"),
+                    format!("Bundle failed: {error}"),
+                )));
         }
     }
 }
@@ -14863,30 +15273,56 @@ fn run_recovery_diagnostics_export(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Diagnostics exported: {} zone(s){}{}{}{}",
-                    report.zones.zone_count,
-                    if report.vault.included {
-                        " + settings"
-                    } else {
-                        ""
-                    },
-                    if report.safety_manifests.is_empty() {
-                        ""
-                    } else {
-                        " + manifest"
-                    },
-                    if report.icon_backup.included {
-                        " + icons"
-                    } else {
-                        ""
-                    },
-                    if report.user_data_files.is_empty() {
-                        ""
-                    } else {
-                        " + user data"
-                    }
-                ))));
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    format!(
+                        "诊断已导出：{} 个区域{}{}{}{}",
+                        report.zones.zone_count,
+                        if report.vault.included {
+                            " + 设置"
+                        } else {
+                            ""
+                        },
+                        if report.safety_manifests.is_empty() {
+                            ""
+                        } else {
+                            " + 安全清单"
+                        },
+                        if report.icon_backup.included {
+                            " + 图标"
+                        } else {
+                            ""
+                        },
+                        if report.user_data_files.is_empty() {
+                            ""
+                        } else {
+                            " + 用户数据"
+                        }
+                    ),
+                    format!(
+                        "Diagnostics exported: {} zone(s){}{}{}{}",
+                        report.zones.zone_count,
+                        if report.vault.included {
+                            " + settings"
+                        } else {
+                            ""
+                        },
+                        if report.safety_manifests.is_empty() {
+                            ""
+                        } else {
+                            " + manifest"
+                        },
+                        if report.icon_backup.included {
+                            " + icons"
+                        } else {
+                            ""
+                        },
+                        if report.user_data_files.is_empty() {
+                            ""
+                        } else {
+                            " + user data"
+                        }
+                    ),
+                )));
         }
         Err(error) => {
             tracing::warn!(
@@ -14896,9 +15332,10 @@ fn run_recovery_diagnostics_export(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Diagnostics failed: {error}"
-                ))));
+                .replace(SettingsBackupStatus::Error(localized_current(
+                    format!("诊断导出失败：{error}"),
+                    format!("Diagnostics failed: {error}"),
+                )));
         }
     }
 }
@@ -14947,27 +15384,50 @@ fn run_recovery_bundle_restore(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Bundle restored: {} zone(s){}{}{}{}{}",
-                    summary.zone_count,
-                    if summary.vault_included {
-                        " + settings"
-                    } else {
-                        ""
-                    },
-                    if summary.safety_manifest_count > 0 {
-                        " + manifest"
-                    } else {
-                        ""
-                    },
-                    if summary.icon_backup_included {
-                        " + icons"
-                    } else {
-                        ""
-                    },
-                    recovery_user_data_status_suffix(outcome.user_data_restore),
-                    outcome.icon_restore.status_suffix()
-                ))));
+                .replace(SettingsBackupStatus::Success(localized_current(
+                    format!(
+                        "恢复包已载入：{} 个区域{}{}{}{}{}",
+                        summary.zone_count,
+                        if summary.vault_included {
+                            " + 设置"
+                        } else {
+                            ""
+                        },
+                        if summary.safety_manifest_count > 0 {
+                            " + 安全清单"
+                        } else {
+                            ""
+                        },
+                        if summary.icon_backup_included {
+                            " + 图标"
+                        } else {
+                            ""
+                        },
+                        localized_recovery_user_data_status_suffix(outcome.user_data_restore),
+                        outcome.icon_restore.localized_status_suffix()
+                    ),
+                    format!(
+                        "Bundle restored: {} zone(s){}{}{}{}{}",
+                        summary.zone_count,
+                        if summary.vault_included {
+                            " + settings"
+                        } else {
+                            ""
+                        },
+                        if summary.safety_manifest_count > 0 {
+                            " + manifest"
+                        } else {
+                            ""
+                        },
+                        if summary.icon_backup_included {
+                            " + icons"
+                        } else {
+                            ""
+                        },
+                        localized_recovery_user_data_status_suffix(outcome.user_data_restore),
+                        outcome.icon_restore.localized_status_suffix()
+                    ),
+                )));
         }
         Err(error) => {
             tracing::warn!(
@@ -14977,9 +15437,10 @@ fn run_recovery_bundle_restore(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Bundle restore failed: {error}"
-                ))));
+                .replace(SettingsBackupStatus::Error(localized_current(
+                    format!("恢复包载入失败：{error}"),
+                    format!("Bundle restore failed: {error}"),
+                )));
         }
     }
 }
@@ -15319,13 +15780,22 @@ fn minibar_tooltip_text_for_hover(
         .map(|zone| zone.items.len())
         .unwrap_or(0);
     match minibar::minibar_hit_test_with_items(viewport, &bar, item_count, x, y)? {
-        minibar::MiniBarHit::Unpin => Some(SmolStr::new(format!("Unpin minibar {}", bar.label))),
+        minibar::MiniBarHit::Unpin => Some(localized_current(
+            format!("取消固定迷你栏：{}", bar.label),
+            format!("Unpin minibar {}", bar.label),
+        )),
         minibar::MiniBarHit::Item(index) => {
             let item = app.zones.get(zone_id)?.items.get(index)?;
             let display_path = item_file_display_path(item);
-            Some(SmolStr::new(format!("Open {display_path}")))
+            Some(localized_current(
+                format!("打开 {display_path}"),
+                format!("Open {display_path}"),
+            ))
         }
-        minibar::MiniBarHit::Body => Some(SmolStr::new(format!("Pinned zone {}", bar.label))),
+        minibar::MiniBarHit::Body => Some(localized_current(
+            format!("已固定区域：{}", bar.label),
+            format!("Pinned zone {}", bar.label),
+        )),
     }
 }
 
@@ -17285,14 +17755,17 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     Ok(None) => {
                         set_theme_setting_success(
                             root,
-                            SmolStr::new_static("Theme import cancelled"),
+                            localized_current("已取消导入主题", "Theme import cancelled"),
                         );
                         request_redraw(hwnd);
                     }
                     Err(error) => {
                         set_theme_setting_error(
                             root,
-                            SmolStr::new(format!("Theme import failed: {error}")),
+                            localized_current(
+                                format!("导入主题失败：{error}"),
+                                format!("Theme import failed: {error}"),
+                            ),
                         );
                         request_redraw(hwnd);
                     }
@@ -18335,10 +18808,10 @@ fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, request: PendingItemDr
     log_static(format!("items: drag-out started path={path}\n").as_str());
     set_item_operation_status(
         root,
-        SmolStr::new(format!(
-            "Dragging out: {}",
-            item_operation_leaf(path.as_str())
-        )),
+        localized_current(
+            format!("正在拖出：{}", item_operation_leaf(path.as_str())),
+            format!("Dragging out: {}", item_operation_leaf(path.as_str())),
+        ),
     );
     let result = with_item_drag_out_guard(root, || {
         bento_nano_backend::drag_drop::start_drag_operation_from_hwnd(
@@ -18374,10 +18847,10 @@ fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, request: PendingItemDr
             log_static(format!("items: drag-out failed path={path} error={error}\n").as_str());
             set_item_operation_status(
                 root,
-                SmolStr::new(item_drag_out_status_for_error_message(
-                    leaf.as_str(),
-                    &error.to_string(),
-                )),
+                localized_current(
+                    format!("拖出失败：{leaf}：{error}"),
+                    item_drag_out_status_for_error_message(leaf.as_str(), &error.to_string()),
+                ),
             );
         }
     }
@@ -18396,7 +18869,13 @@ fn finalize_item_drag_out(
 ) {
     match outcome {
         bento_nano_backend::drag_drop::DragOutcome::Dropped if request.copy_only => {
-            set_item_operation_status(root, SmolStr::new(format!("Copied out: {leaf}")));
+            set_item_operation_status(
+                root,
+                localized_current(
+                    format!("已复制到外部：{leaf}"),
+                    format!("Copied out: {leaf}"),
+                ),
+            );
         }
         bento_nano_backend::drag_drop::DragOutcome::Dropped => {
             // The Shell has already completed the MOVE represented by
@@ -18414,7 +18893,10 @@ fn finalize_item_drag_out(
                 .is_none();
             if removed {
                 flush_dirty_zones(root);
-                set_item_operation_status(root, SmolStr::new(format!("Moved out: {leaf}")));
+                set_item_operation_status(
+                    root,
+                    localized_current(format!("已移出：{leaf}"), format!("Moved out: {leaf}")),
+                );
                 log_static(
                     format!(
                         "items: drag-out model-removed zone={} item={} path={}\n",
@@ -18435,7 +18917,10 @@ fn finalize_item_drag_out(
         bento_nano_backend::drag_drop::DragOutcome::Cancelled => {
             set_item_operation_status(
                 root,
-                SmolStr::new(item_drag_out_status_for_outcome(leaf, outcome)),
+                localized_current(
+                    format!("已取消拖出：{leaf}"),
+                    item_drag_out_status_for_outcome(leaf, outcome),
+                ),
             );
         }
     }
@@ -19275,7 +19760,13 @@ where
             "CopyItemPath: copied item path to clipboard"
         );
         log_static(format!("item-file: CopyItemPath copied path={path}\n").as_str());
-        set_item_operation_status(root, SmolStr::new(format!("Copied path: {leaf}")));
+        set_item_operation_status(
+            root,
+            localized_current(
+                format!("已复制路径：{leaf}"),
+                format!("Copied path: {leaf}"),
+            ),
+        );
         true
     } else {
         tracing::warn!(
@@ -19284,7 +19775,13 @@ where
             "CopyItemPath failed: OpenClipboard/SetClipboardData refused"
         );
         log_static(format!("item-file: CopyItemPath failed path={path}\n").as_str());
-        set_item_operation_status(root, SmolStr::new(format!("Copy path failed: {leaf}")));
+        set_item_operation_status(
+            root,
+            localized_current(
+                format!("复制路径失败：{leaf}"),
+                format!("Copy path failed: {leaf}"),
+            ),
+        );
         false
     }
 }
@@ -22136,9 +22633,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                                 Err(error) => {
                                                     set_theme_setting_error(
                                                         root,
-                                                        SmolStr::new(format!(
-                                                            "Theme apply failed: {error}"
-                                                        )),
+                                                        localized_current(
+                                                            format!("应用主题失败：{error}"),
+                                                            format!("Theme apply failed: {error}"),
+                                                        ),
                                                     );
                                                     needs_redraw = true;
                                                 }
@@ -22154,7 +22652,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                             );
                                             set_theme_setting_error(
                                                 root,
-                                                SmolStr::new(format!("Theme save failed: {error}")),
+                                                localized_current(
+                                                    format!("保存主题失败：{error}"),
+                                                    format!("Theme save failed: {error}"),
+                                                ),
                                             );
                                             needs_redraw = true;
                                         }
@@ -22163,7 +22664,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 Err(_poisoned) => {
                                     set_theme_setting_error(
                                         root,
-                                        SmolStr::new_static("Theme save failed: vault lock"),
+                                        localized_current(
+                                            "保存主题失败：设置存储锁不可用",
+                                            "Theme save failed: settings storage lock unavailable",
+                                        ),
                                     );
                                     needs_redraw = true;
                                 }
@@ -22171,7 +22675,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             None => {
                                 set_theme_setting_error(
                                     root,
-                                    SmolStr::new_static("Theme save failed: vault unavailable"),
+                                    localized_current(
+                                        "保存主题失败：设置存储不可用",
+                                        "Theme save failed: settings storage unavailable",
+                                    ),
                                 );
                                 needs_redraw = true;
                             }
@@ -22185,7 +22692,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_theme_setting_error(
                                 root,
-                                SmolStr::new(format!("Theme rejected: {theme_id}")),
+                                localized_current(
+                                    format!("不支持的主题：{theme_id}"),
+                                    format!("Theme rejected: {theme_id}"),
+                                ),
                             );
                             needs_redraw = true;
                         }
@@ -22212,18 +22722,28 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                                         Ok(changed) => {
                                                             set_theme_setting_success(
                                                                 root,
-                                                                SmolStr::new(format!(
-                                                                    "Theme imported: {theme_name}"
-                                                                )),
+                                                                localized_current(
+                                                                    format!(
+                                                                        "已导入主题：{theme_name}"
+                                                                    ),
+                                                                    format!(
+                                                                        "Theme imported: {theme_name}"
+                                                                    ),
+                                                                ),
                                                             );
                                                             needs_redraw |= changed;
                                                         }
                                                         Err(error) => {
                                                             set_theme_setting_error(
                                                                 root,
-                                                                SmolStr::new(format!(
-                                                                    "Theme apply failed: {error}"
-                                                                )),
+                                                                localized_current(
+                                                                    format!(
+                                                                        "应用主题失败：{error}"
+                                                                    ),
+                                                                    format!(
+                                                                        "Theme apply failed: {error}"
+                                                                    ),
+                                                                ),
                                                             );
                                                             needs_redraw = true;
                                                         }
@@ -22237,9 +22757,14 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                                     drop(app);
                                                     set_theme_setting_error(
                                                         root,
-                                                        SmolStr::new(format!(
-                                                            "Theme imported; activation save failed: {error}"
-                                                        )),
+                                                        localized_current(
+                                                            format!(
+                                                                "主题已导入，但无法保存启用状态：{error}"
+                                                            ),
+                                                            format!(
+                                                                "Theme imported; activation save failed: {error}"
+                                                            ),
+                                                        ),
                                                     );
                                                     needs_redraw = true;
                                                 }
@@ -22250,8 +22775,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                                 drop(app);
                                                 set_theme_setting_error(
                                                     root,
-                                                    SmolStr::new_static(
-                                                        "Theme imported; activation save failed: vault lock",
+                                                    localized_current(
+                                                        "主题已导入，但设置存储锁不可用",
+                                                        "Theme imported; activation save failed: settings storage lock unavailable",
                                                     ),
                                                 );
                                                 needs_redraw = true;
@@ -22263,8 +22789,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                             drop(app);
                                             set_theme_setting_error(
                                                 root,
-                                                SmolStr::new_static(
-                                                    "Theme imported; activation save failed: vault unavailable",
+                                                localized_current(
+                                                    "主题已导入，但设置存储不可用",
+                                                    "Theme imported; activation save failed: settings storage unavailable",
                                                 ),
                                             );
                                             needs_redraw = true;
@@ -22280,7 +22807,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                     );
                                     set_theme_setting_error(
                                         root,
-                                        SmolStr::new(format!("Theme reload failed: {error}")),
+                                        localized_current(
+                                            format!("重新载入主题失败：{error}"),
+                                            format!("Theme reload failed: {error}"),
+                                        ),
                                     );
                                     needs_redraw = true;
                                 }
@@ -22295,7 +22825,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_theme_setting_error(
                                 root,
-                                SmolStr::new(format!("Theme import failed: {error}")),
+                                localized_current(
+                                    format!("导入主题失败：{error}"),
+                                    format!("Theme import failed: {error}"),
+                                ),
                             );
                             needs_redraw = true;
                         }
@@ -22515,7 +23048,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_live_folder_error(
                                 root,
-                                format!("Bind live folder failed for zone {}: {error}", id.0),
+                                localized_current(
+                                    format!("区域 {} 绑定文件夹失败：{error}", id.0),
+                                    format!("Bind live folder failed for Zone {}: {error}", id.0),
+                                ),
                             );
                             needs_redraw = true;
                         }
@@ -22534,7 +23070,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         set_live_folder_error(
                             root,
-                            format!("Unbind live folder failed for zone {}: {error}", id.0),
+                            localized_current(
+                                format!("区域 {} 解除文件夹绑定失败：{error}", id.0),
+                                format!("Unbind live folder failed for Zone {}: {error}", id.0),
+                            ),
                         );
                         needs_redraw = true;
                     }
@@ -22552,7 +23091,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         set_live_folder_error(
                             root,
-                            format!("Refresh live folder failed for zone {}: {error}", id.0),
+                            localized_current(
+                                format!("区域 {} 刷新文件夹失败：{error}", id.0),
+                                format!("Refresh live folder failed for Zone {}: {error}", id.0),
+                            ),
                         );
                         needs_redraw = true;
                     }
@@ -22677,8 +23219,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             clear_stack_tray_open_hover_state(&app);
                             app.stack_tray.borrow_mut().replace(
-                                StackTrayState::new(anchor, selected)
-                                    .with_status(SmolStr::new_static("Stack tray opened")),
+                                StackTrayState::new(anchor, selected).with_status(
+                                    localized_current("已打开叠放管理", "Stack manager opened"),
+                                ),
                             );
                             arm_stack_tray_memory_trim(hwnd);
                             needs_redraw = true;
@@ -22710,8 +23253,15 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         let title = app
                             .zones
                             .get(member)
-                            .map(|zone| SmolStr::new(format!("Previewing {}", zone.title)))
-                            .unwrap_or_else(|| SmolStr::new_static("Previewing stack member"));
+                            .map(|zone| {
+                                localized_current(
+                                    format!("正在预览 {}", zone.title),
+                                    format!("Previewing {}", zone.title),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                localized_current("正在预览叠放成员", "Previewing stack member")
+                            });
                         log_static(
                             format!(
                                 "stack: PreviewStackMember anchor={} member={}\n",
@@ -22737,8 +23287,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         needs_redraw = true;
                     } else {
                         app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(anchor, anchor)
-                                .with_status(SmolStr::new_static("Stack member no longer exists")),
+                            StackTrayState::new(anchor, anchor).with_status(localized_current(
+                                "叠放成员已不存在",
+                                "Stack member no longer exists",
+                            )),
                         );
                         needs_redraw = true;
                     }
@@ -22810,8 +23362,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         .unwrap_or(false);
                     if !member_belongs_to_anchor {
                         app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(anchor, anchor).with_status(SmolStr::new_static(
-                                "Cannot detach stale stack member",
+                            StackTrayState::new(anchor, anchor).with_status(localized_current(
+                                "无法移出已失效的叠放成员",
+                                "Cannot detach a stale stack member",
                             )),
                         );
                         needs_redraw = true;
@@ -22829,8 +23382,9 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         if let Some(new_anchor) = outcome.new_anchor {
                             app.stack_tray.borrow_mut().replace(
-                                StackTrayState::new(new_anchor, new_anchor)
-                                    .with_status(SmolStr::new_static("Detached stack member")),
+                                StackTrayState::new(new_anchor, new_anchor).with_status(
+                                    localized_current("已移出叠放成员", "Stack member detached"),
+                                ),
                             );
                         } else {
                             app.stack_tray.borrow_mut().take();
@@ -22856,8 +23410,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         needs_redraw = true;
                     } else {
                         app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(anchor, anchor)
-                                .with_status(SmolStr::new_static("Stack is already dissolved")),
+                            StackTrayState::new(anchor, anchor).with_status(localized_current(
+                                "该叠放已解散",
+                                "Stack is already dissolved",
+                            )),
                         );
                         needs_redraw = true;
                     }
@@ -22875,8 +23431,15 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         let status = app
                             .zones
                             .get(member)
-                            .map(|zone| SmolStr::new(format!("Moved {}", zone.title)))
-                            .unwrap_or_else(|| SmolStr::new_static("Stack order updated"));
+                            .map(|zone| {
+                                localized_current(
+                                    format!("已移动 {}", zone.title),
+                                    format!("Moved {}", zone.title),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                localized_current("已更新叠放顺序", "Stack order updated")
+                            });
                         app.stack_tray
                             .borrow_mut()
                             .replace(StackTrayState::new(anchor, member).with_status(status));
@@ -22885,8 +23448,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         needs_redraw = true;
                     } else {
                         app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(anchor, anchor)
-                                .with_status(SmolStr::new_static("Stack reorder ignored")),
+                            StackTrayState::new(anchor, anchor).with_status(localized_current(
+                                "未改变叠放顺序",
+                                "Stack order unchanged",
+                            )),
                         );
                         app.stack_tray_drag.set(None);
                         needs_redraw = true;
@@ -22928,10 +23493,13 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         set_item_operation_status(
                             root,
-                            SmolStr::new(format!(
-                                "Move item rejected: zone {} item {}",
-                                zone_id.0, item_id.0
-                            )),
+                            localized_current(
+                                format!("移动项目失败：区域 {}，项目 {}", zone_id.0, item_id.0),
+                                format!(
+                                    "Move item rejected: zone {} item {}",
+                                    zone_id.0, item_id.0
+                                ),
+                            ),
                         );
                         needs_redraw = true;
                         continue;
@@ -22943,10 +23511,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         app.mark_dirty();
                         app.item_operation_status
                             .borrow_mut()
-                            .replace(SmolStr::new(format!(
-                                "Moved item: {leaf} ({}, {})",
-                                point.x, point.y
-                            )));
+                            .replace(localized_current(
+                                format!("已移动项目：{leaf}（{}，{}）", point.x, point.y),
+                                format!("Moved item: {leaf} ({}, {})", point.x, point.y),
+                            ));
                         needs_redraw = true;
                     } else {
                         tracing::warn!(
@@ -22958,7 +23526,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         app.item_operation_status
                             .borrow_mut()
-                            .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
+                            .replace(localized_current(
+                                format!("移动项目失败：{leaf}"),
+                                format!("Move item rejected: {leaf}"),
+                            ));
                         needs_redraw = true;
                     }
                 }
@@ -22974,10 +23545,13 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         set_item_operation_status(
                             root,
-                            SmolStr::new(format!(
-                                "Toggle wide rejected: zone {} item {}",
-                                zone_id.0, item_id.0
-                            )),
+                            localized_current(
+                                format!("切换宽卡片失败：区域 {}，项目 {}", zone_id.0, item_id.0),
+                                format!(
+                                    "Toggle wide rejected: zone {} item {}",
+                                    zone_id.0, item_id.0
+                                ),
+                            ),
                         );
                         needs_redraw = true;
                         continue;
@@ -22993,10 +23567,16 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         app.mark_dirty();
                         app.item_operation_status
                             .borrow_mut()
-                            .replace(SmolStr::new(format!(
-                                "Item wide {}: {leaf}",
-                                if is_wide { "enabled" } else { "disabled" }
-                            )));
+                            .replace(localized_current(
+                                format!(
+                                    "已{}宽卡片：{leaf}",
+                                    if is_wide { "启用" } else { "关闭" }
+                                ),
+                                format!(
+                                    "Item wide {}: {leaf}",
+                                    if is_wide { "enabled" } else { "disabled" }
+                                ),
+                            ));
                         needs_redraw = true;
                     } else {
                         tracing::warn!(
@@ -23007,7 +23587,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         app.item_operation_status
                             .borrow_mut()
-                            .replace(SmolStr::new(format!("Toggle wide rejected: {leaf}")));
+                            .replace(localized_current(
+                                format!("切换宽卡片失败：{leaf}"),
+                                format!("Toggle wide rejected: {leaf}"),
+                            ));
                         needs_redraw = true;
                     }
                 }
@@ -23029,10 +23612,16 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         set_item_operation_status(
                             root,
-                            SmolStr::new(format!(
-                                "Move item rejected: zone {} item {}",
-                                from_zone_id.0, item_id.0
-                            )),
+                            localized_current(
+                                format!(
+                                    "移动项目失败：区域 {}，项目 {}",
+                                    from_zone_id.0, item_id.0
+                                ),
+                                format!(
+                                    "Move item rejected: zone {} item {}",
+                                    from_zone_id.0, item_id.0
+                                ),
+                            ),
                         );
                         needs_redraw = true;
                         continue;
@@ -23056,15 +23645,22 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                     ) {
                         app.mark_dirty();
                         let status = if had_hidden_file && moved_hidden_file {
-                            format!("Moved hidden item to zone: {leaf}")
+                            localized_current(
+                                format!("已移动隐藏项目到区域：{leaf}"),
+                                format!("Moved hidden item to zone: {leaf}"),
+                            )
                         } else if had_hidden_file {
-                            format!("Moved item to zone without hidden move: {leaf}")
+                            localized_current(
+                                format!("项目已移动，但隐藏文件未移动：{leaf}"),
+                                format!("Moved item to zone without hidden move: {leaf}"),
+                            )
                         } else {
-                            format!("Moved item to zone: {leaf}")
+                            localized_current(
+                                format!("已移动项目到区域：{leaf}"),
+                                format!("Moved item to zone: {leaf}"),
+                            )
                         };
-                        app.item_operation_status
-                            .borrow_mut()
-                            .replace(SmolStr::new(status));
+                        app.item_operation_status.borrow_mut().replace(status);
                         needs_redraw = true;
                     } else {
                         tracing::warn!(
@@ -23076,7 +23672,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         );
                         app.item_operation_status
                             .borrow_mut()
-                            .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
+                            .replace(localized_current(
+                                format!("移动项目失败：{leaf}"),
+                                format!("Move item rejected: {leaf}"),
+                            ));
                         needs_redraw = true;
                     }
                 }
@@ -23097,7 +23696,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 set_keybinding_feedback(
                                     &app,
                                     action,
-                                    SmolStr::new_static("Reserved by Windows"),
+                                    localized_current(
+                                        "该组合键由 Windows 保留",
+                                        "Reserved by Windows",
+                                    ),
                                     true,
                                 );
                                 needs_redraw = true;
@@ -23112,7 +23714,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action,
-                                            SmolStr::new_static("Unsupported shortcut"),
+                                            localized_current(
+                                                "不支持此快捷键",
+                                                "Unsupported shortcut",
+                                            ),
                                             true,
                                         );
                                         needs_redraw = true;
@@ -23122,7 +23727,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action,
-                                            SmolStr::new_static("Already in use"),
+                                            localized_current("该快捷键已被使用", "Already in use"),
                                             true,
                                         );
                                         needs_redraw = true;
@@ -23134,7 +23739,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 set_keybinding_feedback(
                                     &app,
                                     action,
-                                    SmolStr::new_static("Shortcut must be text"),
+                                    localized_current("快捷键必须是文本", "Shortcut must be text"),
                                     true,
                                 );
                                 needs_redraw = true;
@@ -23202,7 +23807,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action,
-                                            SmolStr::new(format!("Save failed: {e}")),
+                                            localized_current(
+                                                format!("保存失败：{e}"),
+                                                format!("Save failed: {e}"),
+                                            ),
                                             true,
                                         );
                                         needs_redraw = true;
@@ -23224,7 +23832,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                     set_keybinding_feedback(
                                         &app,
                                         action,
-                                        SmolStr::new_static("Vault lock failed"),
+                                        localized_current(
+                                            "设置存储锁定失败",
+                                            "Settings storage lock failed",
+                                        ),
                                         true,
                                     );
                                     needs_redraw = true;
@@ -23244,7 +23855,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 set_keybinding_feedback(
                                     &app,
                                     action,
-                                    SmolStr::new_static("Vault unavailable"),
+                                    localized_current(
+                                        "设置存储不可用",
+                                        "Settings storage unavailable",
+                                    ),
                                     true,
                                 );
                                 needs_redraw = true;
@@ -23260,7 +23874,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 set_keybinding_feedback(
                                     &app,
                                     action,
-                                    SmolStr::new(format!("Saved {chord}")),
+                                    localized_current(
+                                        format!("已保存 {chord}"),
+                                        format!("Saved {chord}"),
+                                    ),
                                     false,
                                 );
                                 needs_redraw = true;
@@ -23279,7 +23896,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         set_keybinding_feedback(
                             &app,
                             action.as_str(),
-                            SmolStr::new_static("Unsupported action"),
+                            localized_current("不支持此操作", "Unsupported action"),
                             true,
                         );
                         needs_redraw = true;
@@ -23291,10 +23908,16 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         let app = root.app.borrow();
                         let message = match error {
                             hotkey::BindingValidationError::UnsupportedActionOrChord => {
-                                SmolStr::new_static("Unsupported default")
+                                localized_current(
+                                    "不支持此默认快捷键",
+                                    "Unsupported default shortcut",
+                                )
                             }
                             hotkey::BindingValidationError::ChordAlreadyAssigned => {
-                                SmolStr::new_static("Default already in use")
+                                localized_current(
+                                    "默认快捷键已被使用",
+                                    "Default shortcut already in use",
+                                )
                             }
                         };
                         set_keybinding_feedback(&app, action.as_str(), message, true);
@@ -23316,7 +23939,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action.as_str(),
-                                            SmolStr::new(format!("Reset to {default_chord}")),
+                                            localized_current(
+                                                format!("已重置为 {default_chord}"),
+                                                format!("Reset to {default_chord}"),
+                                            ),
                                             false,
                                         );
                                         needs_redraw = true;
@@ -23326,7 +23952,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action.as_str(),
-                                            SmolStr::new_static("Unsupported action"),
+                                            localized_current("不支持此操作", "Unsupported action"),
                                             true,
                                         );
                                         needs_redraw = true;
@@ -23336,7 +23962,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                         set_keybinding_feedback(
                                             &app,
                                             action.as_str(),
-                                            SmolStr::new(format!("Reset failed: {error}")),
+                                            localized_current(
+                                                format!("重置失败：{error}"),
+                                                format!("Reset failed: {error}"),
+                                            ),
                                             true,
                                         );
                                         needs_redraw = true;
@@ -23348,7 +23977,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 set_keybinding_feedback(
                                     &app,
                                     action.as_str(),
-                                    SmolStr::new_static("Vault lock failed"),
+                                    localized_current(
+                                        "设置存储锁定失败",
+                                        "Settings storage lock failed",
+                                    ),
                                     true,
                                 );
                                 needs_redraw = true;
@@ -23359,7 +23991,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             set_keybinding_feedback(
                                 &app,
                                 action.as_str(),
-                                SmolStr::new_static("Vault unavailable"),
+                                localized_current("设置存储不可用", "Settings storage unavailable"),
                                 true,
                             );
                             needs_redraw = true;
@@ -23412,7 +24044,8 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
                             app.passphrase_unlock_required.set(false);
                             app.settings_encryption_status.borrow_mut().replace(
-                                SettingsBackupStatus::Success(SmolStr::new_static(
+                                SettingsBackupStatus::Success(localized_current(
+                                    "口令已验证",
                                     "Passphrase verified",
                                 )),
                             );
@@ -23424,9 +24057,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 "SetEncryptionPassphrase failed"
                             );
                             app.settings_encryption_status.borrow_mut().replace(
-                                SettingsBackupStatus::Error(SmolStr::new(format!(
-                                    "Passphrase failed: {e}"
-                                ))),
+                                SettingsBackupStatus::Error(localized_current(
+                                    format!("口令设置失败：{e}"),
+                                    format!("Passphrase failed: {e}"),
+                                )),
                             );
                         }
                     }
@@ -23453,7 +24087,8 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
                             app.passphrase_unlock_required.set(false);
                             app.settings_encryption_status.borrow_mut().replace(
-                                SettingsBackupStatus::Success(SmolStr::new_static(
+                                SettingsBackupStatus::Success(localized_current(
+                                    "口令已解锁",
                                     "Passphrase unlocked",
                                 )),
                             );
@@ -23467,9 +24102,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
                             app.passphrase_unlock_required.set(true);
                             app.settings_encryption_status.borrow_mut().replace(
-                                SettingsBackupStatus::Error(SmolStr::new(format!(
-                                    "Passphrase unlock failed: {e}"
-                                ))),
+                                SettingsBackupStatus::Error(localized_current(
+                                    format!("口令解锁失败：{e}"),
+                                    format!("Passphrase unlock failed: {e}"),
+                                )),
                             );
                         }
                     }
@@ -23504,7 +24140,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         }
                         Err(error) => {
                             let app = root.app.borrow();
-                            set_update_error(&app, "Check failed", &error);
+                            set_update_error(&app, "检查更新失败", "Update check failed", &error);
                             log_static(
                                 format!("updater: CheckForUpdates failed error={error}\n").as_str(),
                             );
@@ -23536,7 +24172,12 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         }
                         Err(error) => {
                             let app = root.app.borrow();
-                            set_update_error(&app, "Download unavailable", &error);
+                            set_update_error(
+                                &app,
+                                "无法下载更新",
+                                "Update download unavailable",
+                                &error,
+                            );
                             log_static(
                                 format!("updater: DownloadUpdate failed error={error}\n").as_str(),
                             );
@@ -23554,7 +24195,12 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         }
                         Err(error) => {
                             let app = root.app.borrow();
-                            set_update_error(&app, "Install unavailable", &error);
+                            set_update_error(
+                                &app,
+                                "无法安装更新",
+                                "Update installation unavailable",
+                                &error,
+                            );
                             log_static(
                                 format!("updater: InstallUpdateAndRestart failed error={error}\n")
                                     .as_str(),
@@ -23566,9 +24212,11 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                 Command::SkipUpdateVersion(version) => {
                     if version.as_str().is_empty() {
                         let app = root.app.borrow();
-                        *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(
-                            SmolStr::new_static("No update version is available to skip"),
-                        );
+                        *app.settings_updater_status.borrow_mut() =
+                            SettingsUpdaterStatus::Error(localized_current(
+                                "当前没有可跳过的更新版本",
+                                "No update version is available to skip",
+                            ));
                     } else {
                         root.updater.skip_version(version.clone());
                         persist_skipped_update_to_vault(&version);
@@ -23641,7 +24289,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_context_capsule_picker_error(
                                 root,
-                                SmolStr::new(format!("Capture failed: {error}")),
+                                localized_current(
+                                    format!("捕获失败：{error}"),
+                                    format!("Capture failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23670,7 +24321,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_context_capsule_picker_error(
                                 root,
-                                SmolStr::new(format!("Restore failed: {error}")),
+                                localized_current(
+                                    format!("恢复失败：{error}"),
+                                    format!("Restore failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23698,7 +24352,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_context_capsule_picker_error(
                                 root,
-                                SmolStr::new(format!("Delete failed: {error}")),
+                                localized_current(
+                                    format!("删除失败：{error}"),
+                                    format!("Delete failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23728,7 +24385,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_snapshot_picker_error(
                                 root,
-                                SmolStr::new(format!("Save failed: {error}")),
+                                localized_current(
+                                    format!("保存失败：{error}"),
+                                    format!("Save failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23753,7 +24413,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_snapshot_picker_error(
                                 root,
-                                SmolStr::new(format!("Load failed: {error}")),
+                                localized_current(
+                                    format!("载入失败：{error}"),
+                                    format!("Load failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23777,7 +24440,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_snapshot_picker_error(
                                 root,
-                                SmolStr::new(format!("Delete failed: {error}")),
+                                localized_current(
+                                    format!("删除失败：{error}"),
+                                    format!("Delete failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23800,7 +24466,13 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 error = %error,
                                 "SaveCheckpoint failed"
                             );
-                            set_timeline_error(root, SmolStr::new(format!("Save failed: {error}")));
+                            set_timeline_error(
+                                root,
+                                localized_current(
+                                    format!("保存失败：{error}"),
+                                    format!("Save failed: {error}"),
+                                ),
+                            );
                         }
                     }
                     if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
@@ -23824,7 +24496,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_timeline_error(
                                 root,
-                                SmolStr::new(format!("Restore failed: {error}")),
+                                localized_current(
+                                    format!("恢复失败：{error}"),
+                                    format!("Restore failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23850,7 +24525,13 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 error = %error,
                                 "UndoCheckpoint failed"
                             );
-                            set_timeline_error(root, SmolStr::new(format!("Undo failed: {error}")));
+                            set_timeline_error(
+                                root,
+                                localized_current(
+                                    format!("撤销失败：{error}"),
+                                    format!("Undo failed: {error}"),
+                                ),
+                            );
                         }
                     }
                     if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
@@ -23875,7 +24556,13 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 error = %error,
                                 "RedoCheckpoint failed"
                             );
-                            set_timeline_error(root, SmolStr::new(format!("Redo failed: {error}")));
+                            set_timeline_error(
+                                root,
+                                localized_current(
+                                    format!("重做失败：{error}"),
+                                    format!("Redo failed: {error}"),
+                                ),
+                            );
                         }
                     }
                     if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
@@ -23898,7 +24585,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_timeline_error(
                                 root,
-                                SmolStr::new(format!("Delete failed: {error}")),
+                                localized_current(
+                                    format!("删除失败：{error}"),
+                                    format!("Delete failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23924,7 +24614,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_rules_wizard_error(
                                 root,
-                                SmolStr::new(format!("Save failed: {error}")),
+                                localized_current(
+                                    format!("保存失败：{error}"),
+                                    format!("Save failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23947,7 +24640,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_rules_wizard_error(
                                 root,
-                                SmolStr::new(format!("Delete failed: {error}")),
+                                localized_current(
+                                    format!("删除失败：{error}"),
+                                    format!("Delete failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23967,7 +24663,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_rules_wizard_error(
                                 root,
-                                SmolStr::new(format!("Preview failed: {error}")),
+                                localized_current(
+                                    format!("预览失败：{error}"),
+                                    format!("Preview failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -23995,7 +24694,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             );
                             set_rules_wizard_error(
                                 root,
-                                SmolStr::new(format!("Run failed: {error}")),
+                                localized_current(
+                                    format!("运行失败：{error}"),
+                                    format!("Run failed: {error}"),
+                                ),
                             );
                         }
                     }
@@ -24047,7 +24749,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             "bulk_pre_apply",
                             "bulk_delete_zones",
                             &coalesce_scope,
-                            "Bulk delete checkpointed",
+                            localized_current(
+                                "已记录批量删除前后的布局",
+                                "Bulk delete checkpointed",
+                            ),
                         );
                     }
                     log_static(format!("bulk: BulkDeleteZones removed={removed}\n").as_str());
@@ -24090,7 +24795,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             "bulk_pre_apply",
                             "bulk_set_zones_visible",
                             &coalesce_scope,
-                            "Bulk visibility checkpointed",
+                            localized_current(
+                                "已记录批量显示状态变更前后的布局",
+                                "Bulk visibility checkpointed",
+                            ),
                         );
                     }
                     log_static(
@@ -24142,7 +24850,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             "bulk_pre_apply",
                             "apply_layout_algorithm",
                             &coalesce_scope,
-                            "Bulk layout checkpointed",
+                            localized_current(
+                                "已记录批量布局前后的状态",
+                                "Bulk layout checkpointed",
+                            ),
                         );
                     }
                     log_static(
@@ -24189,7 +24900,10 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             "bulk_pre_apply",
                             "bulk_update_zones",
                             &coalesce_scope,
-                            "Bulk update checkpointed",
+                            localized_current(
+                                "已记录批量更新前后的状态",
+                                "Bulk update checkpointed",
+                            ),
                         );
                     }
                     log_static(
@@ -24245,7 +24959,7 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                             "bulk_pre_apply",
                             "bulk_move_zones",
                             &coalesce_scope,
-                            "Bulk move checkpointed",
+                            localized_current("已记录批量移动前后的布局", "Bulk move checkpointed"),
                         );
                     }
                     log_static(
@@ -24594,10 +25308,13 @@ fn remove_item_from_zone(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
         );
         set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "Remove item rejected: zone {} item {}",
-                zone_id.0, item_id.0
-            )),
+            localized_current(
+                format!("移除项目失败：区域 {}，项目 {}", zone_id.0, item_id.0),
+                format!(
+                    "Remove item rejected: zone {} item {}",
+                    zone_id.0, item_id.0
+                ),
+            ),
         );
         return true;
     };
@@ -24611,7 +25328,13 @@ fn remove_item_from_zone(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
             ?item_id,
             "RemoveItem kept item because hidden file restore failed"
         );
-        set_item_operation_status(root, SmolStr::new(format!("Remove item failed: {leaf}")));
+        set_item_operation_status(
+            root,
+            localized_current(
+                format!("移除项目失败：{leaf}"),
+                format!("Remove item failed: {leaf}"),
+            ),
+        );
         return true;
     }
 
@@ -24620,7 +25343,10 @@ fn remove_item_from_zone(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
         app.mark_dirty();
         app.item_operation_status
             .borrow_mut()
-            .replace(SmolStr::new(format!("Removed item: {leaf}")));
+            .replace(localized_current(
+                format!("已移除项目：{leaf}"),
+                format!("Removed item: {leaf}"),
+            ));
         return true;
     }
 
@@ -24632,7 +25358,10 @@ fn remove_item_from_zone(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
     );
     app.item_operation_status
         .borrow_mut()
-        .replace(SmolStr::new(format!("Remove item rejected: {leaf}")));
+        .replace(localized_current(
+            format!("移除项目失败：{leaf}"),
+            format!("Remove item rejected: {leaf}"),
+        ));
     true
 }
 
@@ -24664,10 +25393,10 @@ where
         );
         set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "Open item rejected: zone {} item {}",
-                zone_id.0, item_id.0
-            )),
+            localized_current(
+                format!("打开项目失败：区域 {}，项目 {}", zone_id.0, item_id.0),
+                format!("Open item rejected: zone {} item {}", zone_id.0, item_id.0),
+            ),
         );
         return true;
     };
@@ -24677,7 +25406,10 @@ where
         let leaf = item_operation_leaf(display_path.as_str());
         set_item_operation_status(
             root,
-            SmolStr::new(format!("Open item rejected: {leaf} missing")),
+            localized_current(
+                format!("打开项目失败：找不到 {leaf}"),
+                format!("Open item rejected: {leaf} missing"),
+            ),
         );
         return true;
     }
@@ -24732,7 +25464,10 @@ where
         );
         set_item_operation_status(
             root,
-            SmolStr::new(format!("Add item rejected outside Desktop: {leaf}")),
+            localized_current(
+                format!("添加项目失败：{leaf} 不在桌面目录中"),
+                format!("Add item rejected outside Desktop: {leaf}"),
+            ),
         );
         return true;
     }
@@ -24745,7 +25480,10 @@ where
         );
         set_item_operation_status(
             root,
-            SmolStr::new(format!("Add item failed: missing {leaf}")),
+            localized_current(
+                format!("添加项目失败：找不到 {leaf}"),
+                format!("Add item failed: missing {leaf}"),
+            ),
         );
         return true;
     }
@@ -24766,7 +25504,10 @@ where
             app.mark_dirty();
             app.item_operation_status
                 .borrow_mut()
-                .replace(SmolStr::new(format!("Added item: {leaf}")));
+                .replace(localized_current(
+                    format!("已添加项目：{leaf}"),
+                    format!("Added item: {leaf}"),
+                ));
             tracing::info!(
                 target: "bentodesk::items",
                 ?zone_id,
@@ -24793,10 +25534,10 @@ where
             );
             app.item_operation_status
                 .borrow_mut()
-                .replace(SmolStr::new(format!(
-                    "Add item rejected: zone {}",
-                    zone_id.0
-                )));
+                .replace(localized_current(
+                    format!("添加项目失败：区域 {}", zone_id.0),
+                    format!("Add item rejected: zone {}", zone_id.0),
+                ));
             true
         }
     }
@@ -24811,14 +25552,33 @@ fn set_shell_launch_status(
     let leaf = item_operation_leaf(path);
     log_shell_launch_status(action, path, result);
     match result {
-        Ok(()) => {
-            set_item_operation_status(root, SmolStr::new(format!("{action} requested: {leaf}")))
-        }
+        Ok(()) => set_item_operation_status(
+            root,
+            localized_current(
+                format!(
+                    "已请求{}：{leaf}",
+                    if action == "Reveal" {
+                        "定位"
+                    } else {
+                        "打开"
+                    }
+                ),
+                format!("{action} requested: {leaf}"),
+            ),
+        ),
         Err(code) => set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "{action} failed for {leaf}: ShellExecuteW failed: {code}"
-            )),
+            localized_current(
+                format!(
+                    "{}失败：{leaf}（ShellExecuteW：{code}）",
+                    if action == "Reveal" {
+                        "定位"
+                    } else {
+                        "打开"
+                    }
+                ),
+                format!("{action} failed for {leaf}: ShellExecuteW failed: {code}"),
+            ),
         ),
     }
 }
@@ -25123,10 +25883,13 @@ where
     let Some(item) = item else {
         set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "Delete rejected: item {} is no longer in zone {}",
-                item_id.0, zone_id.0
-            )),
+            localized_current(
+                format!("删除失败：项目 {} 已不在区域 {} 中", item_id.0, zone_id.0),
+                format!(
+                    "Delete rejected: item {} is no longer in zone {}",
+                    item_id.0, zone_id.0
+                ),
+            ),
         );
         return true;
     };
@@ -25139,10 +25902,10 @@ where
         }
         app.item_operation_status
             .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Delete failed: missing {}",
-                item.name
-            )));
+            .replace(localized_current(
+                format!("删除失败：找不到 {}", item.name),
+                format!("Delete failed: missing {}", item.name),
+            ));
         return true;
     }
     match recycle(source) {
@@ -25153,7 +25916,10 @@ where
             }
             app.item_operation_status
                 .borrow_mut()
-                .replace(SmolStr::new(format!("Deleted file: {}", item.name)));
+                .replace(localized_current(
+                    format!("已删除文件：{}", item.name),
+                    format!("Deleted file: {}", item.name),
+                ));
             log_static(
                 format!(
                     "item-file: DeleteItemFileToRecycleBin recycled zone={} item={} path={}\n",
@@ -25171,7 +25937,7 @@ where
                 )
                 .as_str(),
             );
-            set_item_operation_status(root, SmolStr::new_static("Delete cancelled"));
+            set_item_operation_status(root, localized_current("已取消删除", "Delete cancelled"));
             true
         }
         Err(error) => {
@@ -25183,7 +25949,13 @@ where
                 error = %error,
                 "DeleteItemFileToRecycleBin failed"
             );
-            set_item_operation_status(root, SmolStr::new(format!("Delete failed: {error}")));
+            set_item_operation_status(
+                root,
+                localized_current(
+                    format!("删除失败：{error}"),
+                    format!("Delete failed: {error}"),
+                ),
+            );
             true
         }
     }
@@ -26396,11 +27168,7 @@ fn open_palette_picker(root: &AppRoot, target: PaletteTarget) {
 /// directly with the snap.md-localised title.
 fn open_capsule_picker(root: &AppRoot) {
     use bento_nano_app::business::capsule_picker::CapsulePicker;
-    // Title string — matches the 1.x `capsulePickerTitle`. F4 wave widens
-    // i18n catalogue with a CAPSULE_PICKER_TITLE id; until then the snap.md
-    // English fallback is the static title (Chinese locale path will pick
-    // the localised string up automatically once the id ships).
-    let _picker = CapsulePicker::new(smol_str::SmolStr::new_static("Context Capsules"));
+    let _picker = CapsulePicker::new(localized_current("场景胶囊", "Context Capsules"));
     if let Err(error) = refresh_context_capsule_picker(root) {
         tracing::warn!(
             target: "bentodesk::picker",
@@ -26409,7 +27177,10 @@ fn open_capsule_picker(root: &AppRoot) {
         );
         set_context_capsule_picker_error(
             root,
-            SmolStr::new(format!("Capsule list failed: {error}")),
+            localized_current(
+                format!("场景胶囊列表载入失败：{error}"),
+                format!("Capsule list failed: {error}"),
+            ),
         );
     }
 
@@ -26465,7 +27236,13 @@ fn open_rules_wizard(root: &AppRoot) {
             error = %error,
             "OpenRulesWizard: rules list refresh failed"
         );
-        set_rules_wizard_error(root, SmolStr::new(format!("Rules list failed: {error}")));
+        set_rules_wizard_error(
+            root,
+            localized_current(
+                format!("规则列表载入失败：{error}"),
+                format!("Rules list failed: {error}"),
+            ),
+        );
     }
 
     let Some(host) = ensure_aux_window(root, WindowKind::RulesWizard) else {
@@ -27075,25 +27852,57 @@ fn scan_search_desktop_files(
     files
 }
 
+fn search_zone_breadcrumb(zone_id: u64, item_count: usize, visible: bool, zh: bool) -> SmolStr {
+    if zh {
+        SmolStr::new(format!(
+            "区域 {zone_id} · {item_count} 个项目 · {}",
+            if visible { "显示" } else { "隐藏" }
+        ))
+    } else {
+        SmolStr::new(format!(
+            "Zone {zone_id} · {item_count} {} · {}",
+            if item_count == 1 { "item" } else { "items" },
+            if visible { "visible" } else { "hidden" }
+        ))
+    }
+}
+
+fn search_query_status(query: &str, result_count: usize, zh: bool) -> SmolStr {
+    if result_count == 0 {
+        localized_message(
+            zh,
+            format!("未找到“{query}”的匹配结果"),
+            format!("No results for \"{query}\""),
+        )
+    } else if zh {
+        SmolStr::new(format!("找到 {result_count} 个实时结果"))
+    } else {
+        SmolStr::new(format!(
+            "{result_count} live {}",
+            if result_count == 1 {
+                "result"
+            } else {
+                "results"
+            }
+        ))
+    }
+}
+
 fn seed_search_index_from_app(app: &AppState) -> SearchIndex {
     use bento_nano_style::i18n_zh_cn::ids;
 
     let mut index = SearchIndex::new();
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
 
     for zone in app.zones.iter() {
         let title = zone.display_title();
         let zone_id = format!("zone:{}", zone.id.0);
-        let zone_path = format!(
-            "Zone {} 路 {} item(s) 路 visible={}",
-            zone.id.0,
-            zone.items.len(),
-            zone.visible
-        );
+        let zone_path = search_zone_breadcrumb(zone.id.0, zone.items.len(), zone.visible, zh);
         add_search_item(
             &mut index,
             &zone_id,
             title,
-            &zone_path,
+            zone_path.as_str(),
             SearchItemKind::Zone,
         );
 
@@ -27263,6 +28072,8 @@ fn search_icon_for_kind(kind: &SearchItemKind) -> SmolStr {
 }
 
 fn run_search_query(root: &AppRoot, query: &str) -> usize {
+    use bento_nano_style::i18n_zh_cn::ids;
+
     let trimmed = query.trim();
     if trimmed.is_empty() {
         let app = root.app.borrow();
@@ -27270,9 +28081,11 @@ fn run_search_query(root: &AppRoot, query: &str) -> usize {
             .borrow_mut()
             .set_results(smallvec::SmallVec::new());
         app.highlight_overlay.borrow_mut().clear();
-        app.search_status.borrow_mut().replace(SmolStr::new_static(
-            "Type to search live zones, items, settings, and actions.",
-        ));
+        app.search_status
+            .borrow_mut()
+            .replace(SmolStr::new_static(bento_nano_style::t(
+                ids::SEARCH_IDLE_HINT,
+            )));
         drop(app);
         if let Some(main) = find_main_hwnd(root) {
             request_redraw(main);
@@ -27307,13 +28120,11 @@ fn run_search_query(root: &AppRoot, query: &str) -> usize {
         request_redraw(main);
     }
     let app = root.app.borrow();
-    let status = if result_count == 0 {
-        SmolStr::new(format!("No real results for '{trimmed}'"))
-    } else {
-        SmolStr::new(format!(
-            "{result_count} result(s) from live zones/items/settings/actions"
-        ))
-    };
+    let status = search_query_status(
+        trimmed,
+        result_count,
+        bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+    );
     app.search_status.borrow_mut().replace(status);
     log_static(
         format!(
@@ -27326,6 +28137,8 @@ fn run_search_query(root: &AppRoot, query: &str) -> usize {
 }
 
 fn show_search(root: &AppRoot) {
+    use bento_nano_style::i18n_zh_cn::ids;
+
     let _panel = search_bar::build();
     if let Some(main) = find_main_hwnd(root) {
         close_inline_zone_search(root, main);
@@ -27334,9 +28147,11 @@ fn show_search(root: &AppRoot) {
         let app = root.app.borrow();
         app.search_bar.borrow_mut().clear();
         app.highlight_overlay.borrow_mut().clear();
-        app.search_status.borrow_mut().replace(SmolStr::new_static(
-            "Type to search live zones, items, settings, and actions.",
-        ));
+        app.search_status
+            .borrow_mut()
+            .replace(SmolStr::new_static(bento_nano_style::t(
+                ids::SEARCH_IDLE_HINT,
+            )));
     }
 
     let Some(host) = ensure_aux_window(root, WindowKind::Search) else {
@@ -27473,6 +28288,7 @@ fn push_search_action(root: &AppRoot, action_id: &str) -> bool {
 }
 
 fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     let hit = {
         let app = root.app.borrow();
         app.search_bar
@@ -27484,9 +28300,11 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
     };
     let Some(hit) = hit else {
         let app = root.app.borrow();
-        app.search_status.borrow_mut().replace(SmolStr::new(format!(
-            "Search result no longer exists: {hit_id}"
-        )));
+        app.search_status.borrow_mut().replace(localized_message(
+            zh,
+            format!("搜索结果已失效：{hit_id}"),
+            format!("Search result no longer exists: {hit_id}"),
+        ));
         return false;
     };
 
@@ -27503,34 +28321,48 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
             let _highlighted = set_highlight_for_search_hit(root, &hit, true);
             let Some(zone_id) = parse_search_zone_id(hit.id.as_str()) else {
                 let app = root.app.borrow();
-                app.search_status
-                    .borrow_mut()
-                    .replace(SmolStr::new(format!("Invalid Search zone id: {}", hit.id)));
+                app.search_status.borrow_mut().replace(localized_message(
+                    zh,
+                    format!("搜索结果中的区域编号无效：{}", hit.id),
+                    format!("Invalid search Zone id: {}", hit.id),
+                ));
                 return false;
             };
             let app = root.app.borrow();
             if app.zones.get(zone_id).is_none() {
-                app.search_status
-                    .borrow_mut()
-                    .replace(SmolStr::new(format!("Zone {} no longer exists", zone_id.0)));
+                app.search_status.borrow_mut().replace(localized_message(
+                    zh,
+                    format!("区域 {} 已不存在", zone_id.0),
+                    format!("Zone {} no longer exists", zone_id.0),
+                ));
                 return false;
             }
             app.selected_zone.set(Some(zone_id));
             app.hovered_zone.set(Some(zone_id));
-            app.search_status
-                .borrow_mut()
-                .replace(SmolStr::new(format!("Selected zone {}", zone_id.0)));
+            app.search_status.borrow_mut().replace(localized_message(
+                zh,
+                format!("已选择区域 {}", zone_id.0),
+                format!("Selected Zone {}", zone_id.0),
+            ));
         }
         SearchItemKind::File | SearchItemKind::Folder => {
             let _highlighted = set_highlight_for_search_hit(root, &hit, true);
             let launch_result = shell_execute_path("open", hit.breadcrumb.as_str(), None);
             let app = root.app.borrow();
             let status = match launch_result {
-                Ok(()) => SmolStr::new(format!("Opening {}", hit.breadcrumb)),
-                Err(code) => SmolStr::new(format!(
-                    "Open failed for {}: ShellExecuteW failed: {code}",
-                    hit.breadcrumb
-                )),
+                Ok(()) => localized_message(
+                    zh,
+                    format!("正在打开：{}", hit.breadcrumb),
+                    format!("Opening {}", hit.breadcrumb),
+                ),
+                Err(code) => localized_message(
+                    zh,
+                    format!("无法打开 {}：ShellExecuteW failed: {code}", hit.breadcrumb),
+                    format!(
+                        "Unable to open {}: ShellExecuteW failed: {code}",
+                        hit.breadcrumb
+                    ),
+                ),
             };
             app.search_status.borrow_mut().replace(status);
         }
@@ -27540,12 +28372,10 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
             drop(app);
             root.dispatcher.push(Command::OpenSettings);
             let app = root.app.borrow();
-            app.search_status.borrow_mut().replace(SmolStr::new(
-                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
-                    format!("正在打开：{}", hit.name)
-                } else {
-                    format!("Opening {}", hit.name)
-                },
+            app.search_status.borrow_mut().replace(localized_message(
+                zh,
+                format!("正在打开：{}", hit.name),
+                format!("Opening {}", hit.name),
             ));
         }
         SearchItemKind::Action => {
@@ -27554,22 +28384,18 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
             drop(app);
             if !push_search_action(root, hit.id.as_str()) {
                 let app = root.app.borrow();
-                app.search_status.borrow_mut().replace(SmolStr::new(
-                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
-                        "当前搜索操作不可用".to_owned()
-                    } else {
-                        format!("Unsupported Search action: {}", hit.id)
-                    },
+                app.search_status.borrow_mut().replace(localized_message(
+                    zh,
+                    "当前搜索操作不可用",
+                    format!("Unsupported search action: {}", hit.id),
                 ));
                 return false;
             }
             let app = root.app.borrow();
-            app.search_status.borrow_mut().replace(SmolStr::new(
-                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
-                    format!("正在执行：{}", hit.name)
-                } else {
-                    format!("Running {}", hit.name)
-                },
+            app.search_status.borrow_mut().replace(localized_message(
+                zh,
+                format!("正在执行：{}", hit.name),
+                format!("Running {}", hit.name),
             ));
         }
     }
@@ -28545,7 +29371,10 @@ fn drain_desktop_events(root: &AppRoot) -> bool {
                 );
                 set_rules_wizard_error(
                     root,
-                    SmolStr::new(format!("File-change rule execution failed: {error}")),
+                    localized_current(
+                        format!("文件变更规则执行失败：{error}"),
+                        format!("File-change rule execution failed: {error}"),
+                    ),
                 );
                 changed = true;
             }
@@ -28587,9 +29416,12 @@ fn drain_live_folder_events(root: &AppRoot) -> bool {
                 );
                 set_live_folder_error(
                     root,
-                    format!(
-                        "Live folder refresh failed for zone {}: {error}",
-                        event.zone_id.0
+                    localized_current(
+                        format!("区域 {} 的绑定文件夹刷新失败：{error}", event.zone_id.0),
+                        format!(
+                            "Live folder refresh failed for zone {}: {error}",
+                            event.zone_id.0
+                        ),
                     ),
                 );
                 changed = true;
@@ -28619,7 +29451,12 @@ fn drain_updater_events(root: &AppRoot) -> bool {
                 Ok(()) => {}
                 Err(error) => {
                     let app = root.app.borrow();
-                    set_update_error(&app, "Auto-download failed", &error);
+                    set_update_error(
+                        &app,
+                        "自动下载更新失败",
+                        "Automatic update download failed",
+                        &error,
+                    );
                 }
             }
         }
@@ -28651,7 +29488,10 @@ fn drain_rules_scheduler_events(root: &AppRoot) -> bool {
                 );
                 set_rules_wizard_error(
                     root,
-                    SmolStr::new(format!("Interval rule execution failed: {error}")),
+                    localized_current(
+                        format!("定时规则执行失败：{error}"),
+                        format!("Interval rule execution failed: {error}"),
+                    ),
                 );
                 changed = true;
             }
@@ -32217,7 +33057,8 @@ mod tests {
             watch.display(),
             watch.display()
         ));
-        let sources = super::validate_settings_sources(&snapshot).expect("valid source list");
+        let sources = super::validate_settings_sources_for_locale(&snapshot, true)
+            .expect("valid source list");
         let canonical_desktop = std::fs::canonicalize(&desktop).expect("canonical desktop");
         let canonical_watch = std::fs::canonicalize(&watch).expect("canonical watch");
         assert_eq!(
@@ -32239,16 +33080,26 @@ mod tests {
 
         snapshot.watch_paths_draft = SmolStr::new(file.to_string_lossy().as_ref());
         assert!(
-            super::validate_settings_sources(&snapshot)
+            super::validate_settings_sources_for_locale(&snapshot, true)
                 .expect_err("file path must be rejected")
                 .contains("不是文件夹")
+        );
+        assert!(
+            super::validate_settings_sources_for_locale(&snapshot, false)
+                .expect_err("file path must be rejected in English")
+                .contains("is not a folder")
         );
         snapshot.watch_paths_draft =
             SmolStr::new(scratch.join("missing").to_string_lossy().as_ref());
         assert!(
-            super::validate_settings_sources(&snapshot)
+            super::validate_settings_sources_for_locale(&snapshot, true)
                 .expect_err("missing path must be rejected")
                 .contains("不存在")
+        );
+        assert!(
+            super::validate_settings_sources_for_locale(&snapshot, false)
+                .expect_err("missing path must be rejected in English")
+                .contains("does not exist")
         );
         assert!(super::settings_path_is_within_prefix(
             r"c:\windows\system32",
@@ -34027,6 +34878,42 @@ mod tests {
                 .results
                 .iter()
                 .any(|hit| hit.id.as_str() == "action:open_bulk_manager")
+        );
+    }
+
+    #[test]
+    fn search_zone_breadcrumb_is_clean_and_localized() {
+        let zh = super::search_zone_breadcrumb(7, 2, true, true);
+        assert_eq!(zh, "区域 7 · 2 个项目 · 显示");
+        assert!(!zh.contains('路'));
+
+        let en_one = super::search_zone_breadcrumb(7, 1, false, false);
+        assert_eq!(en_one, "Zone 7 · 1 item · hidden");
+        let en_many = super::search_zone_breadcrumb(7, 2, true, false);
+        assert_eq!(en_many, "Zone 7 · 2 items · visible");
+    }
+
+    #[test]
+    fn search_query_status_is_complete_in_chinese_and_english() {
+        assert_eq!(
+            super::search_query_status("文档", 0, true),
+            "未找到“文档”的匹配结果"
+        );
+        assert_eq!(
+            super::search_query_status("docs", 0, false),
+            "No results for \"docs\""
+        );
+        assert_eq!(
+            super::search_query_status("文档", 2, true),
+            "找到 2 个实时结果"
+        );
+        assert_eq!(
+            super::search_query_status("docs", 1, false),
+            "1 live result"
+        );
+        assert_eq!(
+            super::search_query_status("docs", 2, false),
+            "2 live results"
         );
     }
 
@@ -36245,7 +37132,7 @@ mod tests {
         assert!(matches!(
             drained.first(),
             Some(Command::SaveCheckpoint { id: None, label: Some(label) })
-                if label.as_str() == "manual save"
+                if matches!(label.as_str(), "manual save" | "手动保存")
         ));
     }
 

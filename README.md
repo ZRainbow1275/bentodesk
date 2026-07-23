@@ -72,15 +72,15 @@ BentoDesk 是一款 Windows 桌面整理工具。它把散落的文件、文件�
 
 | 指标 | 结果 |
 | --- | ---: |
-| Release 可执行文件 | 2.37 MiB |
-| 动画采集后 Private Bytes | 25.86 MiB |
-| 空闲 60 秒 Private Bytes | 21.59 MiB |
-| Zone 展开/收起/反转采样 | 约 60 FPS |
+| Release 可执行文件 | 2.39 MiB |
+| 动画采集后 Private Bytes | 23.25 MiB |
+| 空闲 60 秒 Private Bytes | 23.32 MiB |
+| Zone 展开/收起/反转采样 | 60.7–61.0 FPS |
 
 ### 下载与运行
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk-nano/releases) 下载 Windows x64 压缩包。
-2. 解压后运行 `bento-nano-shell.exe`。
+2. 解压后运行 `BentoDesk-Nano.exe`。
 3. 通过托盘菜单打开设置、关于和管理工具。
 
 程序数据保存在当前用户目录；便携模式可在设置中启用。首次运行不需要 Node.js、WebView2 或额外浏览器内核。
@@ -149,10 +149,10 @@ Measured on Windows x64 with an isolated five-Zone scene; results vary by machin
 
 | Metric | Result |
 | --- | ---: |
-| Release executable | 2.37 MiB |
-| Private Bytes after animation capture | 25.86 MiB |
-| Private Bytes after 60 seconds idle | 21.59 MiB |
-| Zone expand/collapse/reversal capture | about 60 FPS |
+| Release executable | 2.39 MiB |
+| Private Bytes after animation capture | 23.25 MiB |
+| Private Bytes after 60 seconds idle | 23.32 MiB |
+| Zone expand/collapse/reversal capture | 60.7–61.0 FPS |
 
 ### Build
 
@@ -173,6 +173,10 @@ The executable is written to:
 ```text
 target\x86_64-pc-windows-msvc\release\bento-nano-shell.exe
 ```
+
+### Download and run
+
+Download the Windows x64 archive from [Releases](https://github.com/ZRainbow1275/bentodesk-nano/releases), extract it, and run `BentoDesk-Nano.exe`. No Node.js, WebView2, or browser runtime is required.
 
 ### License
 

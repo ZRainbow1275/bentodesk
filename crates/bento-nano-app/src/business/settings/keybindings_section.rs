@@ -25,13 +25,20 @@ pub fn build() -> WidgetNode {
 }
 
 /// One selected-stack keybinding row. `action` is the stable config-vault
-/// suffix (`keybinding.<action>`), `label` is rendered in the modal, and
+/// suffix (`keybinding.<action>`), labels are rendered in the active locale, and
 /// `default_chord` must stay aligned with the shell hotkey defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeybindingRow {
     pub action: &'static str,
     pub label: &'static str,
+    pub label_zh: &'static str,
     pub default_chord: &'static str,
+}
+
+impl KeybindingRow {
+    pub const fn localized_label(self, zh: bool) -> &'static str {
+        if zh { self.label_zh } else { self.label }
+    }
 }
 
 /// Supported selected-stack keybinding rows.
@@ -39,51 +46,61 @@ pub const KEYBINDING_ROWS: &[KeybindingRow] = &[
     KeybindingRow {
         action: "app.toggle",
         label: "Toggle BentoDesk",
+        label_zh: "显示 / 隐藏 BentoDesk",
         default_chord: "Control+Space",
     },
     KeybindingRow {
         action: "zone.new",
         label: "New Zone",
+        label_zh: "新建区域",
         default_chord: "Control+Shift+N",
     },
     KeybindingRow {
         action: "zone.duplicate",
         label: "Duplicate Zone",
+        label_zh: "复制区域",
         default_chord: "Control+Shift+D",
     },
     KeybindingRow {
         action: "zone.lock-toggle",
         label: "Toggle Lock",
+        label_zh: "切换区域锁定",
         default_chord: "Control+Shift+L",
     },
     KeybindingRow {
         action: "zone.hide-all",
         label: "Hide / Show All",
+        label_zh: "隐藏 / 显示全部",
         default_chord: "Control+Shift+H",
     },
     KeybindingRow {
         action: "layout.auto-organize",
         label: "Auto-organize",
+        label_zh: "自动整理",
         default_chord: "Control+Shift+O",
     },
     KeybindingRow {
         action: "layout.reflow",
         label: "Reflow Screen",
+        label_zh: "重新排布屏幕",
         default_chord: "Control+Shift+R",
     },
     KeybindingRow {
         action: "bulk.open-manager",
         label: "Bulk Manager",
+        label_zh: "批量管理区域",
         default_chord: "Control+Shift+M",
     },
     KeybindingRow {
         action: "zone.focus.next",
         label: "Next Zone",
+        label_zh: "下一个区域",
         default_chord: "Control+]",
     },
     KeybindingRow {
         action: "zone.focus.prev",
         label: "Previous Zone",
+        label_zh: "上一个区域",
         default_chord: "Control+[",
     },
 ];
@@ -115,6 +132,7 @@ pub fn label_for_action(action: &str) -> Option<&'static str> {
 ///   modal owns Record/Reset buttons, but this mounted tree remains useful for
 ///   reachability checks and future retained-widget composition.
 pub fn mount(app: &mut AppState, parent: NodeId) -> Result<NodeId, TreeError> {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     let card_id = app.add_child(
         parent,
         "settings_keybindings_section",
@@ -122,7 +140,7 @@ pub fn mount(app: &mut AppState, parent: NodeId) -> Result<NodeId, TreeError> {
     )?;
 
     let title = TextNode {
-        content: std::borrow::Cow::Borrowed("Keybindings"),
+        content: std::borrow::Cow::Borrowed(if zh { "快捷键" } else { "Keybindings" }),
         id: None,
         font_size_pt: 13.0,
         font_weight: 500,
@@ -138,8 +156,14 @@ pub fn mount(app: &mut AppState, parent: NodeId) -> Result<NodeId, TreeError> {
             .unwrap_or_else(|| SmolStr::new_static(row_info.default_chord));
         let row = TextNode {
             content: std::borrow::Cow::Owned(format!(
-                "{}    {}    (Record / Reset)",
-                row_info.label, chord
+                "{}    {}    {}",
+                row_info.localized_label(zh),
+                chord,
+                if zh {
+                    "（录制 / 重置）"
+                } else {
+                    "(Record / Reset)"
+                }
             )),
             id: None,
             font_size_pt: 11.0,
@@ -265,5 +289,27 @@ mod tests {
             Some("Control+Space")
         );
         assert_eq!(default_chord_for_action("timeline.open"), None);
+    }
+
+    #[test]
+    fn row_catalog_exposes_complete_chinese_and_english_labels() {
+        for row in keybinding_rows() {
+            assert!(
+                !row.localized_label(true).trim().is_empty(),
+                "{}",
+                row.action
+            );
+            assert!(
+                !row.localized_label(false).trim().is_empty(),
+                "{}",
+                row.action
+            );
+            assert_ne!(
+                row.localized_label(true),
+                row.localized_label(false),
+                "{}",
+                row.action
+            );
+        }
     }
 }

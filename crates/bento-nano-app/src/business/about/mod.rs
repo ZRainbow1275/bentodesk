@@ -31,14 +31,16 @@ pub const PROJECT_BTN_H: f32 = 50.0;
 pub const AUTHOR_BTN_H: f32 = 64.0;
 
 pub const AUTHOR: &str = "方寒";
+pub const AUTHOR_EN: &str = "Fang Han";
 pub const GITHUB_HANDLE: &str = "@ZRainbow1275";
 pub const GITHUB_URL: &str = "https://github.com/ZRainbow1275";
-pub const PROJECT_URL: &str = "github.com/ZRainbow1275/bentodesk";
-pub const PROJECT_URL_FULL: &str = "https://github.com/ZRainbow1275/bentodesk";
+pub const PROJECT_URL: &str = "github.com/ZRainbow1275/bentodesk-nano";
+pub const PROJECT_URL_FULL: &str = "https://github.com/ZRainbow1275/bentodesk-nano";
 /// Cargo metadata and the repository LICENSE are authoritative. The old Tauri
 /// translation string still says MIT, but the shipped project is AGPL.
 pub const LICENSE_NAME: &str = "AGPL-3.0-or-later";
 pub const LICENSE_SUMMARY_ZH: &str = "GNU Affero 通用公共许可证 v3.0 或更高版本";
+pub const LICENSE_SUMMARY_EN: &str = "GNU Affero General Public License v3.0 or later";
 
 /// Compiled-in app version, sourced from Cargo metadata. Stable across the
 /// session so the About surface and the updater status banner agree on the
@@ -46,18 +48,18 @@ pub const LICENSE_SUMMARY_ZH: &str = "GNU Affero 通用公共许可证 v3.0 或�
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Optional build hash injected by the release pipeline through the
-/// `BENTO_BUILD_HASH` env var. Falls back to `"dev"` for local builds so
-/// the About row never reads "v0.0.1 ()".
-pub const BUILD_HASH: &str = match option_env!("BENTO_BUILD_HASH") {
-    Some(h) => h,
-    None => "dev",
-};
+/// `BENTO_BUILD_HASH` env var. Local and packaged builds without an injected
+/// hash show only the stable Cargo version instead of a misleading `(dev)`.
+pub const BUILD_HASH: Option<&str> = option_env!("BENTO_BUILD_HASH");
 
 /// Format the version + build hash row exactly as the About card renders it.
 /// Pulled into the port today so the snap.md "name + version row" text
 /// matches at composition time — no re-derivation in the Text widget call.
 pub fn format_version() -> SmolStr {
-    SmolStr::new(format!("v{VERSION} ({BUILD_HASH})"))
+    match BUILD_HASH.filter(|hash| !hash.trim().is_empty()) {
+        Some(hash) => SmolStr::new(format!("v{VERSION} ({hash})")),
+        None => SmolStr::new(format!("v{VERSION}")),
+    }
 }
 
 /// Build the optional D2D About modal subtree. Runtime painting is currently
@@ -186,17 +188,19 @@ mod tests {
     fn version_is_non_empty_and_starts_with_v() {
         let v = format_version();
         assert!(v.starts_with('v'), "version must start with 'v', got {v}");
-        assert!(v.contains('('), "version must contain build hash in parens");
-        assert!(v.ends_with(')'), "version must end with ')'");
+        if BUILD_HASH.is_some_and(|hash| !hash.trim().is_empty()) {
+            assert!(v.contains('('), "injected build hash must be parenthesized");
+            assert!(v.ends_with(')'), "injected build hash must end with ')'");
+        } else {
+            assert_eq!(v.as_str(), format!("v{VERSION}"));
+        }
     }
 
     #[test]
-    fn build_hash_falls_back_to_dev_when_env_unset() {
-        // When the env var isn't set at compile time, the const evaluates
-        // to "dev". This pins the fallback so a refactor doesn't silently
-        // ship empty parens to the About card.
+    fn missing_build_hash_keeps_release_version_clean() {
         if option_env!("BENTO_BUILD_HASH").is_none() {
-            assert_eq!(BUILD_HASH, "dev");
+            assert_eq!(BUILD_HASH, None);
+            assert_eq!(format_version().as_str(), format!("v{VERSION}"));
         }
     }
 

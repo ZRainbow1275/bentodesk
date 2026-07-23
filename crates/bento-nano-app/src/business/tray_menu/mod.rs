@@ -94,27 +94,35 @@ impl TrayMenuItem {
         matches!(self, Self::NewZone | Self::OpenSettings | Self::Exit)
     }
 
-    /// Localised label for the menu item. Today returns Chinese to match
-    /// the 1.x verbatim; the locale-switching handle lands when the
-    /// `bento-nano-style::i18n` table grows the menu keys.
-    ///
     /// `main_visible` parameter only affects [`Self::ShowHideMain`]'s label
     /// (other variants ignore it). Mirrors the 1.x `set_text` toggle on
     /// the show/hide menu item when the main window's visibility flips.
-    pub const fn label(&self, main_visible: bool) -> &'static str {
-        match self {
-            Self::ShowHideMain => {
-                if main_visible {
-                    "隐藏 BentoDesk"
-                } else {
-                    "显示 BentoDesk"
-                }
-            }
-            Self::NewZone => "新建区域",
-            Self::AutoOrganize => "智能整理桌面",
-            Self::OpenSettings => "设置",
-            Self::About => "关于",
-            Self::Exit => "退出",
+    pub fn label(&self, main_visible: bool) -> &'static str {
+        self.label_for_language(
+            main_visible,
+            bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN),
+        )
+    }
+
+    /// Pure locale-specific label selection. Keeping this separate from the
+    /// process-global locale lookup makes the complete Chinese/English menu
+    /// contract testable without racing the global locale pointer.
+    pub const fn label_for_language(&self, main_visible: bool, zh: bool) -> &'static str {
+        match (self, main_visible, zh) {
+            (Self::ShowHideMain, true, true) => "隐藏 BentoDesk",
+            (Self::ShowHideMain, false, true) => "显示 BentoDesk",
+            (Self::ShowHideMain, true, false) => "Hide BentoDesk",
+            (Self::ShowHideMain, false, false) => "Show BentoDesk",
+            (Self::NewZone, _, true) => "新建区域",
+            (Self::NewZone, _, false) => "New Zone",
+            (Self::AutoOrganize, _, true) => "智能整理桌面",
+            (Self::AutoOrganize, _, false) => "Organize Desktop",
+            (Self::OpenSettings, _, true) => "设置",
+            (Self::OpenSettings, _, false) => "Settings",
+            (Self::About, _, true) => "关于",
+            (Self::About, _, false) => "About",
+            (Self::Exit, _, true) => "退出",
+            (Self::Exit, _, false) => "Quit",
         }
     }
 }
@@ -146,8 +154,22 @@ mod tests {
 
     #[test]
     fn show_hide_label_flips_with_main_visibility() {
-        assert_eq!(TrayMenuItem::ShowHideMain.label(true), "隐藏 BentoDesk");
-        assert_eq!(TrayMenuItem::ShowHideMain.label(false), "显示 BentoDesk");
+        assert_eq!(
+            TrayMenuItem::ShowHideMain.label_for_language(true, true),
+            "隐藏 BentoDesk"
+        );
+        assert_eq!(
+            TrayMenuItem::ShowHideMain.label_for_language(false, true),
+            "显示 BentoDesk"
+        );
+        assert_eq!(
+            TrayMenuItem::ShowHideMain.label_for_language(true, false),
+            "Hide BentoDesk"
+        );
+        assert_eq!(
+            TrayMenuItem::ShowHideMain.label_for_language(false, false),
+            "Show BentoDesk"
+        );
     }
 
     #[test]
@@ -160,8 +182,31 @@ mod tests {
             TrayMenuItem::About,
             TrayMenuItem::Exit,
         ] {
-            assert_eq!(item.label(true), item.label(false));
+            assert_eq!(
+                item.label_for_language(true, true),
+                item.label_for_language(false, true)
+            );
+            assert_eq!(
+                item.label_for_language(true, false),
+                item.label_for_language(false, false)
+            );
         }
+    }
+
+    #[test]
+    fn all_menu_items_have_complete_chinese_and_english_labels() {
+        for item in TrayMenuItem::ORDER {
+            assert!(!item.label_for_language(true, true).is_empty());
+            assert!(!item.label_for_language(true, false).is_empty());
+        }
+        assert_eq!(
+            TrayMenuItem::AutoOrganize.label_for_language(true, false),
+            "Organize Desktop"
+        );
+        assert_eq!(
+            TrayMenuItem::OpenSettings.label_for_language(true, false),
+            "Settings"
+        );
     }
 
     #[test]

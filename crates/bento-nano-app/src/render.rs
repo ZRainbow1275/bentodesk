@@ -7572,6 +7572,7 @@ impl Renderer {
             settings_keybinding_row_rect, settings_keybindings_close_rect,
             settings_keybindings_modal_rect, settings_panel_shadow_rect,
         };
+        let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
         let palette = app.active_theme_palette();
         let radius_tokens = app.active_theme_radius();
         let spacing_tokens = app.active_theme_spacing();
@@ -7656,7 +7657,7 @@ impl Renderer {
                 width: 138.0,
                 height: 16.0,
             };
-            self.draw_text(row.label, label_rect, label_color)?;
+            self.draw_text(row.localized_label(zh), label_rect, label_color)?;
 
             let chip_rect = bento_nano_style::Rect {
                 x: row_rect.x + 146.0,
@@ -7810,6 +7811,7 @@ impl Renderer {
     fn draw_about_panel(&mut self, app: &AppState) -> Result<(), RenderError> {
         use crate::business::about;
 
+        let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
         let palette = app.active_theme_palette();
         let radius = app.active_theme_radius();
         let viewport = app.viewport;
@@ -7857,7 +7859,11 @@ impl Renderer {
             },
         )?;
         self.draw_text_no_wrap_with_style(
-            "轻量、原生、专注的 Windows 桌面整理器",
+            if zh {
+                "轻量、原生、专注的 Windows 桌面整理器"
+            } else {
+                "A lightweight, native Windows desktop organizer"
+            },
             bento_nano_style::Rect {
                 x: identity_x,
                 y: panel.y + 68.0,
@@ -7901,7 +7907,11 @@ impl Renderer {
             BorderRadius::ZERO,
         )?;
         self.draw_text_no_wrap_with_style(
-            "为专注而整理",
+            if zh {
+                "为专注而整理"
+            } else {
+                "Organize for focus"
+            },
             bento_nano_style::Rect {
                 x: content_x,
                 y: panel.y + 151.0,
@@ -7915,7 +7925,11 @@ impl Renderer {
             dwrite::TextAlign::DEFAULT,
         )?;
         self.draw_text_with_style(
-            "用原生技术重新组织桌面空间，让文件、快捷方式和工作流清爽、可控；保留成熟版本的体验，同时移除 WebView 运行时负担。",
+            if zh {
+                "用原生技术整理桌面空间，让文件、快捷方式和工作流保持清爽、可控；无需 WebView 运行时。"
+            } else {
+                "Organize files, shortcuts, and workflows with native Windows surfaces—without a WebView runtime."
+            },
             bento_nano_style::Rect {
                 x: content_x,
                 y: panel.y + 183.0,
@@ -7930,13 +7944,18 @@ impl Renderer {
 
         let card_gap = 12.0;
         let card_w = (content_w - card_gap) * 0.5;
-        for (index, (heading, detail, icon)) in [
-            ("原生运行时", "Rust · Win32 · Direct2D", "code"),
-            ("开源许可证", about::LICENSE_NAME, "copy"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        let feature_cards = if zh {
+            [
+                ("原生运行时", "Rust · Win32 · Direct2D", "code"),
+                ("开源许可证", about::LICENSE_NAME, "copy"),
+            ]
+        } else {
+            [
+                ("Native runtime", "Rust · Win32 · Direct2D", "code"),
+                ("Open-source license", about::LICENSE_NAME, "copy"),
+            ]
+        };
+        for (index, (heading, detail, icon)) in feature_cards.into_iter().enumerate() {
             let card = bento_nano_style::Rect {
                 x: content_x + index as f32 * (card_w + card_gap),
                 y: panel.y + 232.0,
@@ -7999,7 +8018,7 @@ impl Renderer {
             accent,
         )?;
         self.draw_text_no_wrap_with_style(
-            "项目源代码",
+            if zh { "项目源代码" } else { "Source code" },
             bento_nano_style::Rect {
                 x: project.x + 46.0,
                 y: project.y + 6.0,
@@ -8052,8 +8071,13 @@ impl Renderer {
             width: avatar.width - 4.0,
             height: avatar.height - 4.0,
         })?;
+        let author_label = if zh {
+            format!("作者 · {}", about::AUTHOR)
+        } else {
+            format!("Author · {}", about::AUTHOR_EN)
+        };
         self.draw_text_no_wrap_with_style(
-            format!("作者 · {}", about::AUTHOR).as_str(),
+            author_label.as_str(),
             bento_nano_style::Rect {
                 x: avatar.right() + 13.0,
                 y: author.y + 10.0,
@@ -8094,8 +8118,13 @@ impl Renderer {
             muted,
         )?;
 
+        let license_summary = if zh {
+            about::LICENSE_SUMMARY_ZH
+        } else {
+            about::LICENSE_SUMMARY_EN
+        };
         self.draw_text_no_wrap_with_style(
-            format!("{} · {}", about::LICENSE_SUMMARY_ZH, about::LICENSE_NAME).as_str(),
+            format!("{license_summary} · {}", about::LICENSE_NAME).as_str(),
             bento_nano_style::Rect {
                 x: content_x,
                 y: panel.y + 475.0,
