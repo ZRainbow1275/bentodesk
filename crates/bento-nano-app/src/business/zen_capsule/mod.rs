@@ -84,7 +84,7 @@ impl CapsuleShape {
             Self::Rounded => 12.0,
             Self::Circle => height_px * 0.5,
             Self::Minimal => 8.0,
-            Self::Square => 4.0,
+            Self::Square => 0.0,
         }
     }
 }
@@ -100,28 +100,28 @@ pub enum CapsuleSize {
 }
 
 impl CapsuleSize {
-    /// Capsule outer height in logical pixels — snap.md mandated.
+    /// Capsule outer height in logical pixels.
     ///
     /// M2② (2026-05-29) — re-centred on Tauri v1.3.0's `getCapsuleBoxPx`
     /// (`bentodesk/src/services/hitTest.ts:94-99`), the authoritative pixel
     /// source for the collapsed capsule box: `small {height:36}` /
-    /// `medium {height:48}` / `large {height:56}`. Medium (the default tier)
-    /// grows 44→48 to match Tauri 1:1 (Q2 pixel parity); Large 52→56. Small
-    /// already matched at 36. snap.md updated in lockstep.
+    /// `medium {height:48}` / `large {height:56}`. The selected-stack Large
+    /// tier intentionally compacts the outer height to 50 DIPs after the
+    /// 2026-07-23 hand test: its 200-DIP width remains distinct, while the
+    /// former 56-DIP band read disproportionately heavy at 150% DPI.
     pub const fn height_px(self) -> f32 {
         match self {
             Self::Small => 36.0,
             Self::Medium => 48.0,
-            Self::Large => 56.0,
+            Self::Large => 50.0,
         }
     }
 
-    /// Default capsule outer width in logical pixels for the non-circle tiers,
-    /// from Tauri `getCapsuleBoxPx` (`hitTest.ts:94-99`): `small {width:120}` /
-    /// `medium {width:160}` / `large {width:200}`. The live nano pill sizes its
-    /// width dynamically from the label + badge run (see
-    /// `zone_pill_geometry::pill_layout_for_zone`), so this is the *circle*
-    /// 1:1 fallback / reference width rather than a hard clamp.
+    /// Capsule outer width in logical pixels for the non-circle tiers. This is
+    /// the original Tauri runtime contract shared by `hitTest.ts`,
+    /// `StackWrapper.tsx`, and the recorded DOM geometry: 120 / 160 / 200 DIPs.
+    /// Keeping visibly distinct tiers is also essential for the editor's width
+    /// control to have an immediately understandable runtime effect.
     pub const fn width_px(self) -> f32 {
         match self {
             Self::Small => 120.0,
@@ -141,17 +141,17 @@ impl CapsuleSize {
         }
     }
 
-    /// Icon size in logical pixels.
+    /// Actual icon box size in logical pixels.
     ///
-    /// M2② (2026-05-29) — aligned to Tauri's `.zen-capsule__icon` font-size
-    /// per size tier (`ZenCapsule.css`): small `14px` (`:85`), medium `18px`
-    /// (base `:14`), large `22px` (`:105`). Replaces the pre-Tauri 20/24/28
-    /// stand-ins. snap.md updated in lockstep.
+    /// V21-C4 (2026-06-22) — align to Tauri's real `ZenCapsule.tsx` render
+    /// contract, not the unreachable CSS font-size intent. `ZenCapsule` passes
+    /// `size={18}` into `ZoneIcon`; `ZoneIcon.css` uses that prop to set
+    /// `--zone-icon-size`, and the built-in SVG/custom image fills that 18px
+    /// wrapper. The small/large `.zen-capsule__icon { font-size: ... }` rules
+    /// apply to the outer span only and do not resize the inner SVG box.
     pub const fn icon_px(self) -> f32 {
         match self {
-            Self::Small => 14.0,
-            Self::Medium => 18.0,
-            Self::Large => 22.0,
+            Self::Small | Self::Medium | Self::Large => 18.0,
         }
     }
 
@@ -191,82 +191,83 @@ impl CapsuleSize {
         }
     }
 
-    /// G5 (2026-06-01) — title font size in logical pixels per tier, matching
-    /// Tauri's `.zen-capsule__title` font-size (`ZenCapsule.css:25` medium
-    /// `--font-size-md`=14; `:90` small `--font-size-xs`=11; `:110` large
-    /// `--font-size-lg`=16). The pre-G5 renderer drew the label with the global
-    /// default 16px format on every tier (small over-sized, large under-sized).
+    /// Readable title role in logical pixels. Capsule size changes geometry,
+    /// not legibility: every tier keeps the same 13-DIP title and lets DWrite
+    /// ellipsize when the available line is short. This replaces the former
+    /// 11/14/15 table plus 8px shrink floor that made small capsules look like
+    /// a different product state rather than a compact size option.
     #[inline]
     pub const fn title_font_px(self) -> f32 {
         match self {
-            Self::Small => 11.0,
-            Self::Medium => 14.0,
-            Self::Large => 16.0,
+            Self::Small | Self::Medium | Self::Large => 13.0,
         }
     }
 
-    /// G5 (2026-06-01) — count-badge font size in logical pixels per tier,
-    /// matching Tauri's `.zen-capsule__badge` font-size (`ZenCapsule.css:35`
-    /// medium `--font-size-xs`=11; `:94` small `10`; `:114` large
-    /// `--font-size-sm`=13). Drawn at `--font-weight-semibold`=600
-    /// ([`badge_font_weight`]).
+    /// Count-badge font size in logical pixels per tier.
+    ///
+    /// G5 matched the local Tauri CSS source table (`10/11/13`), but the
+    /// 2026-06-02 authoritative reference frame shows large Browser/Compiler
+    /// count chips with the same visual bbox as medium chips. Keep the large
+    /// title and outer capsule large, but use the video-observed medium badge
+    /// metrics so the count chip does not overgrow the local reference band.
     #[inline]
     pub const fn badge_font_px(self) -> f32 {
         match self {
             Self::Small => 10.0,
             Self::Medium => 11.0,
-            Self::Large => 13.0,
+            Self::Large => 11.0,
         }
     }
 
-    /// G5 (2026-06-01) — count-badge weight. Tauri `.zen-capsule__badge` is
-    /// `--font-weight-semibold`=600 on every tier (`ZenCapsule.css:36`); the
-    /// pre-G5 renderer drew it at the default medium (500) body weight.
+    /// V21-C34 — count-badge weight. Tauri `.zen-capsule__badge` declares
+    /// semibold, but the 2026-06-02 reference frame reads heavier than DWrite's
+    /// weight-600 digit rasterization at the video-observed 11px badge tier.
+    /// Use a heavier DWrite weight step to match the reference ink density
+    /// without changing the already-aligned badge box geometry.
     #[inline]
     pub const fn badge_font_weight(self) -> u16 {
-        600
+        800
     }
 
-    /// G5 (2026-06-01) — count-badge inner padding `(pad_x, pad_y)` in logical
-    /// pixels per tier, matching Tauri's `.zen-capsule__badge { padding }`
-    /// (`ZenCapsule.css:40` medium `2px 9px`; `:95` small `1px 6px`; `:115`
-    /// large `3px 12px`). Order is `(horizontal, vertical)` to mirror the CSS
-    /// `padding: <v> <h>` shorthand split.
+    /// Count-badge inner padding `(pad_x, pad_y)` in logical pixels per tier.
+    ///
+    /// Order is `(horizontal, vertical)` to mirror the CSS `padding: <v> <h>`
+    /// shorthand split. Large uses the same chip padding as medium because the
+    /// 2026-06-02 reference large capsules show medium-sized count chips.
     #[inline]
     pub const fn badge_padding_xy(self) -> (f32, f32) {
         match self {
             Self::Small => (6.0, 1.0),
             Self::Medium => (9.0, 2.0),
-            Self::Large => (12.0, 3.0),
+            Self::Large => (9.0, 2.0),
         }
     }
 
-    /// G5 (2026-06-01) — count-badge box height in logical pixels per tier,
-    /// derived from Tauri's `font-size * line-height(1.4) + 2*pad_y`
-    /// (`ZenCapsule.css:35-42`): small `10*1.4 + 2`≈16→**14**, medium
-    /// `11*1.4 + 4`≈19→**16**, large `13*1.4 + 6`≈24→**20**. Rounded to the
-    /// nearest readable even DIP per tier (small 14 / medium 16 / large 20).
-    /// Replaces the flat `PILL_BADGE_HEIGHT`=20 used on every tier.
+    /// Count-badge box height in logical pixels per tier.
+    ///
+    /// Small and medium keep the G5 table. C18 reduced the old 20-DIP large
+    /// chip, but post-C22 component crops showed 16 DIPs undershot the
+    /// 2026-06-02 Browser/Compiler badge vertical span. Large therefore uses a
+    /// 17-DIP video-observed midpoint: just taller than medium, shorter than
+    /// the source 20-DIP large chip.
     #[inline]
     pub const fn badge_height_px(self) -> f32 {
         match self {
             Self::Small => 14.0,
             Self::Medium => 16.0,
-            Self::Large => 20.0,
+            Self::Large => 17.0,
         }
     }
 
-    /// G5 (2026-06-01) — icon glyph size in logical pixels when the shape is
-    /// `Circle`, matching Tauri's `.zen-capsule--circle .zen-capsule__icon`
-    /// override (`ZenCapsule.css:68-70` = 22 for small+medium; `:127-129`
-    /// large = 28). The circle branch must NOT reuse [`icon_px`] (14/18/22);
-    /// only the non-circle shapes use the per-tier base icon size.
+    /// Icon glyph size in logical pixels when the shape is `Circle`.
+    ///
+    /// V21-C4 — Tauri still renders the same inner `ZoneIcon size={18}` box in
+    /// circle mode. The circle CSS font-size override targets the wrapping
+    /// span, not `ZoneIcon`'s `--zone-icon-size`, so the actual SVG/custom image
+    /// size remains 18px for every tier.
     #[inline]
     pub const fn circle_icon_px(self) -> f32 {
-        match self {
-            Self::Small | Self::Medium => 22.0,
-            Self::Large => 28.0,
-        }
+        self.icon_px()
     }
 
     /// Parse the lowercase wire token written to `Zone.capsule_size`. Unknown
@@ -319,19 +320,27 @@ mod tests {
     }
 
     #[test]
-    fn size_height_table_matches_tauri() {
-        // M2② — Tauri `getCapsuleBoxPx` heights (hitTest.ts:94-99).
+    fn size_height_table_keeps_large_capsule_compact() {
+        // Small/medium retain the baseline; Large is the hand-test-polished
+        // selected-stack tier (same 200-DIP width, less vertical bulk).
         assert!((CapsuleSize::Small.height_px() - 36.0).abs() < 0.01);
         assert!((CapsuleSize::Medium.height_px() - 48.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.height_px() - 56.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.height_px() - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn size_width_table_matches_tauri() {
+        assert_eq!(CapsuleSize::Small.width_px(), 120.0);
+        assert_eq!(CapsuleSize::Medium.width_px(), 160.0);
+        assert_eq!(CapsuleSize::Large.width_px(), 200.0);
     }
 
     #[test]
     fn size_icon_table_matches_tauri() {
-        // M2② — Tauri `.zen-capsule__icon` per-tier font-size (ZenCapsule.css).
-        assert!((CapsuleSize::Small.icon_px() - 14.0).abs() < 0.01);
+        // V21-C4 — Tauri `ZenCapsule.tsx` passes fixed `size={18}` to ZoneIcon.
+        assert!((CapsuleSize::Small.icon_px() - 18.0).abs() < 0.01);
         assert!((CapsuleSize::Medium.icon_px() - 18.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.icon_px() - 22.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.icon_px() - 18.0).abs() < 0.01);
     }
 
     #[test]
@@ -359,46 +368,46 @@ mod tests {
     }
 
     #[test]
-    fn title_font_table_matches_tauri() {
-        // G5 — title font-size per tier (ZenCapsule.css:25/:90/:110).
-        assert!((CapsuleSize::Small.title_font_px() - 11.0).abs() < 0.01);
-        assert!((CapsuleSize::Medium.title_font_px() - 14.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.title_font_px() - 16.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn badge_font_table_matches_tauri() {
-        // G5 — badge font-size per tier (ZenCapsule.css:35/:94/:114), weight
-        // semibold 600 on every tier (:36).
-        assert!((CapsuleSize::Small.badge_font_px() - 10.0).abs() < 0.01);
-        assert!((CapsuleSize::Medium.badge_font_px() - 11.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.badge_font_px() - 13.0).abs() < 0.01);
-        for s in [CapsuleSize::Small, CapsuleSize::Medium, CapsuleSize::Large] {
-            assert_eq!(s.badge_font_weight(), 600);
+    fn title_font_role_stays_readable_across_size_switches() {
+        for size in [CapsuleSize::Small, CapsuleSize::Medium, CapsuleSize::Large] {
+            assert!((size.title_font_px() - 13.0).abs() < 0.01);
         }
     }
 
     #[test]
-    fn badge_padding_and_height_tables_match_tauri() {
-        // G5 — badge padding (h, v) per tier (ZenCapsule.css:40/:95/:115).
+    fn badge_font_table_matches_video_observed_reference() {
+        // C18 — small/medium stay source-aligned; large uses the
+        // video-observed medium-sized count chip from the 2026-06-02 Browser /
+        // Compiler reference crops.
+        assert!((CapsuleSize::Small.badge_font_px() - 10.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.badge_font_px() - 11.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.badge_font_px() - 11.0).abs() < 0.01);
+        for s in [CapsuleSize::Small, CapsuleSize::Medium, CapsuleSize::Large] {
+            assert_eq!(s.badge_font_weight(), 800);
+        }
+    }
+
+    #[test]
+    fn badge_padding_and_height_tables_match_video_observed_reference() {
+        // C23 — large count chips keep medium padding/font but use a 17-DIP
+        // video-observed vertical span between C18's 16-DIP chip and the source
+        // 20-DIP large chip.
         assert_eq!(CapsuleSize::Small.badge_padding_xy(), (6.0, 1.0));
         assert_eq!(CapsuleSize::Medium.badge_padding_xy(), (9.0, 2.0));
-        assert_eq!(CapsuleSize::Large.badge_padding_xy(), (12.0, 3.0));
-        // Box height derived from font*1.4 + 2*pad_y, rounded per tier.
+        assert_eq!(CapsuleSize::Large.badge_padding_xy(), (9.0, 2.0));
         assert!((CapsuleSize::Small.badge_height_px() - 14.0).abs() < 0.01);
         assert!((CapsuleSize::Medium.badge_height_px() - 16.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.badge_height_px() - 20.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.badge_height_px() - 17.0).abs() < 0.01);
     }
 
     #[test]
     fn circle_icon_table_matches_tauri() {
-        // G5 — circle icon override (ZenCapsule.css:68-70 = 22 small+medium,
-        // :127-129 large = 28). Distinct from the base icon_px (14/18/22).
-        assert!((CapsuleSize::Small.circle_icon_px() - 22.0).abs() < 0.01);
-        assert!((CapsuleSize::Medium.circle_icon_px() - 22.0).abs() < 0.01);
-        assert!((CapsuleSize::Large.circle_icon_px() - 28.0).abs() < 0.01);
-        // The circle override must NOT equal the base icon size for small/med.
-        assert_ne!(
+        // V21-C4 — circle keeps the same fixed `ZoneIcon size={18}` inner box;
+        // the CSS circle font-size override affects only the outer span.
+        assert!((CapsuleSize::Small.circle_icon_px() - 18.0).abs() < 0.01);
+        assert!((CapsuleSize::Medium.circle_icon_px() - 18.0).abs() < 0.01);
+        assert!((CapsuleSize::Large.circle_icon_px() - 18.0).abs() < 0.01);
+        assert_eq!(
             CapsuleSize::Small.circle_icon_px(),
             CapsuleSize::Small.icon_px()
         );
@@ -413,7 +422,7 @@ mod tests {
         assert!((CapsuleShape::Rounded.corner_radius_px(h) - 12.0).abs() < 0.01);
         assert!((CapsuleShape::Minimal.corner_radius_px(h) - 8.0).abs() < 0.01);
         assert!((CapsuleShape::Circle.corner_radius_px(h) - 24.0).abs() < 0.01);
-        assert!((CapsuleShape::Square.corner_radius_px(h) - 4.0).abs() < 0.01);
+        assert!((CapsuleShape::Square.corner_radius_px(h) - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -443,7 +452,7 @@ mod tests {
     fn build_with_size_overrides_height() {
         let node = build_with(CapsuleShape::Rounded, CapsuleSize::Large);
         let layout = node.layout();
-        assert!(matches!(layout.height, Length::Px(h) if (h - 56.0).abs() < 0.01));
+        assert!(matches!(layout.height, Length::Px(h) if (h - 50.0).abs() < 0.01));
     }
 
     /// Wire-format lock: 1.x `appearance.capsule_shape = "pill"` + serde must
@@ -480,8 +489,7 @@ mod tests {
         );
         // Back-compat: the legacy `"square"` tag from pre-Tauri saves must
         // still deserialize to the retained `Square` variant.
-        let legacy: CapsuleShape =
-            serde_json::from_str("\"square\"").unwrap_or_default();
+        let legacy: CapsuleShape = serde_json::from_str("\"square\"").unwrap_or_default();
         assert_eq!(legacy, CapsuleShape::Square);
         // Forward-compat: every canonical token deserializes.
         for (tok, want) in [

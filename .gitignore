@@ -6,6 +6,8 @@
 *.log
 runtime-proof-*.txt
 runtime-proof-*.csv
+runtime-proof-*.json
+runtime-proof-*.png
 runtime-proof-*.summary.txt
 runtime-proof-*-stderr.log
 runtime-proof-*-stdout.log
@@ -13,7 +15,17 @@ runtime-proof-*-stdout.log
 # Manual test state
 manual-test-state/
 runtime-proof-*/
+runtime-handtest-*
+runtime-diagnostic-*
+runtime-reference-*
+handtest-*
+manual-test-*
+runtime-screen-*
 debug_frames/
+__pycache__/
+
+# Local release assembly (GitHub artifacts are produced from this directory)
+/dist/
 
 # Ad-hoc wave benchmark artifacts (regenerable)
 wave*_vmscan*.csv

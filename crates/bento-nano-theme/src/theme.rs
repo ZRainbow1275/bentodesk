@@ -22,12 +22,12 @@ pub static DARK_DEFAULT: ThemeTokens = ThemeTokens {
     radius: radius::DEFAULT,
     shadow: shadow::DEFAULT,
     typo: TypoTokens {
-        font_family: SmolStr::new_static("Microsoft YaHei UI"),
+        font_family: SmolStr::new_static("Segoe UI"),
         sizes: FontSizes {
             xs: 11.0,
             sm: 13.0,
-            md: 16.0,
-            lg: 20.0,
+            md: 14.0,
+            lg: 16.0,
             xl: 24.0,
             xxl: 32.0,
         },
@@ -50,12 +50,12 @@ pub static LIGHT_DEFAULT: ThemeTokens = ThemeTokens {
     radius: radius::DEFAULT,
     shadow: shadow::DEFAULT,
     typo: TypoTokens {
-        font_family: SmolStr::new_static("Microsoft YaHei UI"),
+        font_family: SmolStr::new_static("Segoe UI"),
         sizes: FontSizes {
             xs: 11.0,
             sm: 13.0,
-            md: 16.0,
-            lg: 20.0,
+            md: 14.0,
+            lg: 16.0,
             xl: 24.0,
             xxl: 32.0,
         },
@@ -99,5 +99,17 @@ mod tests {
         // background = 0x18181CCC. The DARK theme MUST keep the same
         // alpha byte (0xCC) so T-004 can swap literals without ΔE.
         assert_eq!(DARK_DEFAULT.palette.surface.a, 0xCC as f32 / 255.0);
+    }
+
+    #[test]
+    fn default_typography_scale_matches_tauri_css_and_style_tokens() {
+        let expected = bento_nano_style::tokens::TYPOGRAPHY;
+        for (_, theme) in THEMES {
+            assert_eq!(theme.typo.font_family.as_str(), expected.font_family);
+            assert_eq!(theme.typo.sizes.xs, expected.xs.size_px);
+            assert_eq!(theme.typo.sizes.sm, expected.sm.size_px);
+            assert_eq!(theme.typo.sizes.md, expected.md.size_px);
+            assert_eq!(theme.typo.sizes.lg, expected.lg.size_px);
+        }
     }
 }

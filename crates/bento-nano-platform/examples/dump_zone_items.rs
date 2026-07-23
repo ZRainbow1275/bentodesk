@@ -7,18 +7,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zones_path = zones_path_from_args(env::args().skip(1))?;
     let zones = read_zones(&zones_path)?;
 
-    println!("zone_id\titem_id\tname\tpath\toriginal_path\thidden_path\tmissing");
+    println!("zone_id\titem_id\tname\tpath\toriginal_path\thidden_path\tmissing\ticon_hash");
     for zone in zones.iter() {
         for item in &zone.items {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 zone.id.0,
                 item.id.0,
                 tsv_escape(item.name.as_ref()),
                 tsv_escape(item.path.as_ref()),
                 tsv_escape(item.original_path.as_deref().unwrap_or_default()),
                 tsv_escape(item.hidden_path.as_deref().unwrap_or_default()),
-                item.file_missing
+                item.file_missing,
+                tsv_escape(item.icon_hash.as_ref())
             );
         }
     }

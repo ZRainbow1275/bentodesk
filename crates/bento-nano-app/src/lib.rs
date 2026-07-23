@@ -56,8 +56,9 @@ pub use settings_panel::{
 };
 pub use state::{
     AppState, IconPickerSession, ItemDragCandidate, ItemFileRenameSession, PalettePickerSession,
-    PassphraseEntryPurpose, SettingsBackupEntry, SettingsBackupStatus, SettingsEncryptionMode,
-    SettingsKeybindingFeedback, SettingsPluginEntry, SettingsTextField, SettingsUpdaterStatus,
-    ThemeOption, WindowState, ZoneDisplayMode, ZoneEditorSession,
+    PanelHeaderButtonHover, PanelHeaderButtonKind, PassphraseEntryPurpose, SettingsBackupEntry,
+    SettingsBackupStatus, SettingsEncryptionMode, SettingsKeybindingFeedback, SettingsPluginEntry,
+    SettingsTextField, SettingsUpdaterStatus, ThemeOption, WindowState, ZoneDisplayMode,
+    ZoneEditorSession,
 };
 pub use window_registry::{MAX_MINIBARS, WindowRegistry, WindowSlot};

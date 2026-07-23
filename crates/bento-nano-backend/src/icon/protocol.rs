@@ -27,6 +27,8 @@ use super::cache::IconCache;
 use super::extractor;
 use super::{IconConfig, IconError, custom_icons};
 
+const INTERNET_SHORTCUT_ICON_CACHE_REVISION: &str = "internet-shortcut-icon-resource-v1";
+
 /// Status code mirroring the 1.x HTTP response shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IconStatus {
@@ -103,8 +105,9 @@ pub fn lookup_custom_icon(config: &IconConfig, uuid: &str) -> IconResponse {
 }
 
 /// Extract an icon for a file path and store it in the cache, returning
-/// the hash. For `.lnk` shortcuts, the target is resolved first so the
-/// cache key is based on the resolved target path. If the icon is
+/// the hash. A `.lnk` is keyed by the shortcut path itself: Explorer may
+/// assign a shortcut-specific `IconLocation`, so two shortcuts targeting
+/// the same executable must not share a cache identity. If the icon is
 /// already cached (hot or warm tier), extraction is skipped.
 pub fn extract_and_cache(cache: &IconCache, path: &str) -> Result<String, IconError> {
     extract_and_cache_inner(cache, path, false)
@@ -122,19 +125,25 @@ fn extract_and_cache_inner(
     path: &str,
     force: bool,
 ) -> Result<String, IconError> {
-    let effective_path = if path.to_ascii_lowercase().ends_with(".lnk") {
-        extractor::resolve_lnk_target(path).unwrap_or_else(|| path.to_string())
-    } else {
-        path.to_string()
-    };
-
-    let hash = extractor::compute_icon_hash(&effective_path);
+    let hash = icon_cache_key(path);
 
     if force {
         cache.remove(&hash);
-        let lnk_hash = extractor::compute_icon_hash(path);
-        if lnk_hash != hash {
-            cache.remove(&lnk_hash);
+        // Remove the pre-fix target-keyed entry as well. This is intentionally
+        // migration-only: normal lookups never key a shortcut by its target.
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".lnk")
+            && let Some(target) = extractor::resolve_lnk_target(path)
+        {
+            let legacy_target_hash = extractor::compute_icon_hash(&target);
+            if legacy_target_hash != hash {
+                cache.remove(&legacy_target_hash);
+            }
+        } else if lower.ends_with(".url") {
+            let legacy_url_hash = extractor::compute_icon_hash(path);
+            if legacy_url_hash != hash {
+                cache.remove(&legacy_url_hash);
+            }
         }
     }
 
@@ -143,6 +152,23 @@ fn extract_and_cache_inner(
         cache.put(hash.clone(), png);
     }
     Ok(hash)
+}
+
+/// Return the stable cache identity for a concrete item path.
+///
+/// Shortcut identity intentionally belongs to the shortcut itself rather than
+/// its resolved target because Explorer can assign a per-shortcut icon. `.url`
+/// keys carry an extractor revision so installations with the former generic
+/// URL-file icon perform one bounded startup refresh without invalidating all
+/// other cached file icons.
+pub fn icon_cache_key(path: &str) -> String {
+    if path.to_ascii_lowercase().ends_with(".url") {
+        extractor::compute_icon_hash(
+            format!("{INTERNET_SHORTCUT_ICON_CACHE_REVISION}\0{path}").as_str(),
+        )
+    } else {
+        extractor::compute_icon_hash(path)
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +221,30 @@ mod tests {
         cache.put(h.clone(), vec![1, 2, 3]);
         let got = extract_and_cache(&cache, path).expect("hit");
         assert_eq!(got, h);
+    }
+
+    #[test]
+    fn shortcut_cache_identity_is_the_shortcut_not_its_target() {
+        let left = icon_cache_key("C:/Desktop/Game - Fox.lnk");
+        let right = icon_cache_key("C:/Desktop/Game - Blue.lnk");
+        let target = extractor::compute_icon_hash("C:/Games/Game/game.exe");
+
+        assert_ne!(left, right);
+        assert_ne!(left, target);
+        assert_ne!(right, target);
+    }
+
+    #[test]
+    fn internet_shortcut_cache_identity_revisions_the_legacy_generic_icon() {
+        let path = "C:/Desktop/Game.url";
+        let legacy = extractor::compute_icon_hash(path);
+        let current = icon_cache_key(path);
+
+        assert_ne!(current, legacy);
+        assert_eq!(current, icon_cache_key(path));
+        assert_eq!(
+            icon_cache_key("C:/Desktop/Game.lnk"),
+            extractor::compute_icon_hash("C:/Desktop/Game.lnk")
+        );
     }
 }

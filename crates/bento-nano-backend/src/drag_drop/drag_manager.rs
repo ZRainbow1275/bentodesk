@@ -17,9 +17,8 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::{
     Foundation::*,
     System::{Com::IDataObject, Ole::*},
-    UI::Shell::SHDoDragDrop,
 };
-use windows::core::HRESULT;
+use windows::core::{HRESULT, Interface};
 
 /// Errors surfaced by [`start_drag_operation`].
 #[derive(Debug)]
@@ -162,6 +161,20 @@ fn should_run_drag_inline_for_source_thread(source_thread: u32, current_thread: 
     source_thread != 0 && source_thread == current_thread
 }
 
+fn classify_drag_result(
+    hr: HRESULT,
+    effect: DROPEFFECT,
+    source_window_drag: bool,
+) -> Result<DragOutcome, DragDropError> {
+    if hr == DRAGDROP_S_DROP || (source_window_drag && hr == S_OK && effect != DROPEFFECT(0)) {
+        Ok(DragOutcome::Dropped)
+    } else if hr == DRAGDROP_S_CANCEL {
+        Ok(DragOutcome::Cancelled)
+    } else {
+        Err(DragDropError::Unexpected(hr))
+    }
+}
+
 fn start_drag_operation_inner(
     file_paths: &[String],
     source_hwnd: Option<HWND>,
@@ -250,37 +263,26 @@ fn start_drag_operation_inner(
                 )
                 .as_str(),
             );
-            let mut effect = DROPEFFECT(0);
             log_drag_proof(format!("drag_drop: SHDoDragDrop enter hwnd={hwnd:?}\n").as_str());
-            let result = SHDoDragDrop(
-                hwnd,
-                &data_object,
-                None::<&IDropSource>,
-                DROPEFFECT_COPY | DROPEFFECT_MOVE,
+            // The typed `windows` wrapper maps every successful HRESULT to
+            // `Ok(DROPEFFECT)`, which loses the distinction between `S_OK` and
+            // `DRAGDROP_S_DROP`. Preserve the raw Shell result so a completed
+            // desktop drop can safely remove its non-Ctrl source item.
+            let mut raw_effect = 0u32;
+            let raw_hr = windows_sys::Win32::UI::Shell::SHDoDragDrop(
+                hwnd.0 as windows_sys::Win32::Foundation::HWND,
+                data_object.as_raw(),
+                core::ptr::null_mut(),
+                windows_sys::Win32::System::Ole::DROPEFFECT_COPY
+                    | windows_sys::Win32::System::Ole::DROPEFFECT_MOVE,
+                &mut raw_effect,
             );
-            match result {
-                Ok(shell_effect) => {
-                    effect = shell_effect;
-                    log_drag_proof(
-                        format!(
-                            "drag_drop: SHDoDragDrop returned hr={:?} effect={effect:?}\n",
-                            S_OK
-                        )
-                        .as_str(),
-                    );
-                    Ok((S_OK, effect))
-                }
-                Err(err) => {
-                    log_drag_proof(
-                        format!(
-                            "drag_drop: SHDoDragDrop returned hr={:?} effect={effect:?}\n",
-                            err.code()
-                        )
-                        .as_str(),
-                    );
-                    Ok((err.code(), effect))
-                }
-            }
+            let hr = HRESULT(raw_hr);
+            let effect = DROPEFFECT(raw_effect);
+            log_drag_proof(
+                format!("drag_drop: SHDoDragDrop returned hr={hr:?} effect={effect:?}\n").as_str(),
+            );
+            Ok((hr, effect))
         } else {
             let drop_source: IDropSource = super::drop_source::BentoDropSource.into();
             let mut effect = DROPEFFECT(0);
@@ -316,17 +318,21 @@ fn start_drag_operation_inner(
             Err(hr) => return Err(DragDropError::Unexpected(hr)),
         };
 
-        if hr == DRAGDROP_S_DROP || (source_window_drag && hr == S_OK && effect != DROPEFFECT(0)) {
-            tracing::info!("drag_drop: completed (effect = {:?})", effect);
-            log_drag_proof(format!("drag_drop: completed (effect = {effect:?})\n").as_str());
-            Ok(DragOutcome::Dropped)
-        } else if hr == DRAGDROP_S_CANCEL {
-            tracing::info!("drag_drop: cancelled by user");
-            log_drag_proof("drag_drop: cancelled by user\n");
-            Ok(DragOutcome::Cancelled)
-        } else {
-            tracing::warn!("drag_drop: unexpected HRESULT {hr:?}");
-            Err(DragDropError::Unexpected(hr))
+        match classify_drag_result(hr, effect, source_window_drag) {
+            Ok(DragOutcome::Dropped) => {
+                tracing::info!("drag_drop: completed (effect = {:?})", effect);
+                log_drag_proof(format!("drag_drop: completed (effect = {effect:?})\n").as_str());
+                Ok(DragOutcome::Dropped)
+            }
+            Ok(DragOutcome::Cancelled) => {
+                tracing::info!("drag_drop: cancelled by user");
+                log_drag_proof("drag_drop: cancelled by user\n");
+                Ok(DragOutcome::Cancelled)
+            }
+            Err(err) => {
+                tracing::warn!("drag_drop: unexpected HRESULT {hr:?}");
+                Err(err)
+            }
         }
     }
 }
@@ -361,5 +367,33 @@ mod tests {
         assert!(should_run_drag_inline_for_source_thread(42, 42));
         assert!(!should_run_drag_inline_for_source_thread(0, 42));
         assert!(!should_run_drag_inline_for_source_thread(7, 42));
+    }
+
+    #[test]
+    fn raw_shell_drop_hresult_is_classified_even_when_effect_is_zero() {
+        assert!(matches!(
+            classify_drag_result(DRAGDROP_S_DROP, DROPEFFECT(0), true),
+            Ok(DragOutcome::Dropped)
+        ));
+    }
+
+    #[test]
+    fn shell_cancel_never_becomes_a_drop() {
+        assert!(matches!(
+            classify_drag_result(DRAGDROP_S_CANCEL, DROPEFFECT_COPY, true),
+            Ok(DragOutcome::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn source_shell_s_ok_requires_an_accepted_effect() {
+        assert!(matches!(
+            classify_drag_result(S_OK, DROPEFFECT_COPY, true),
+            Ok(DragOutcome::Dropped)
+        ));
+        assert!(matches!(
+            classify_drag_result(S_OK, DROPEFFECT(0), true),
+            Err(DragDropError::Unexpected(hr)) if hr == S_OK
+        ));
     }
 }

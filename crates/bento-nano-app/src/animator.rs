@@ -38,11 +38,19 @@ pub const HOVER_OUT_DURATION_MS: u32 = 220;
 pub const PRESS_DOWN_DURATION_MS: u32 = 80;
 /// V-8 — press-release duration.
 pub const PRESS_UP_DURATION_MS: u32 = 120;
+/// Inline Zone search reveal duration. The field expands from the header
+/// search affordance instead of appearing as a fully formed slab.
+pub const INLINE_SEARCH_IN_DURATION_MS: u32 = 180;
+/// Inline Zone search dismissal duration. Closing is slightly quicker than
+/// opening so an explicit Escape/outside-idle dismissal stays responsive.
+pub const INLINE_SEARCH_OUT_DURATION_MS: u32 = 140;
+/// Tauri `.spring-emerge` duration used when a new stack capsule mounts.
+pub const STACK_EMERGE_DURATION_MS: u32 = 240;
 // #2 step 6 (2026-06-02) — `EXPAND_DURATION_MS` (=200) and the dead
 // `AnimChannel::PillExpand` it timed were REMOVED. The pill↔panel expand is
 // owned solely by the Wave G2 `zone_pill_anim_*` state machine on the M3
-// easeOutBack@500ms curve; the V-8 PillExpand channel was never sampled
-// (render samples only PillHover/PillPress), a dead parallel timeline.
+// easeOutBack curve; the V-8 PillExpand channel was never sampled (render
+// samples only PillHover/PillPress), a dead parallel timeline.
 /// V-8 — status-dot pulse period. 1600 ms full cycle = 0.6 → 1.0 → 0.6.
 pub const PULSE_PERIOD_MS: u32 = 1600;
 /// V-12 (2026-05-21) — pill hover scale **disabled** (0.0). The collapsed
@@ -72,6 +80,11 @@ pub const PULSE_ALPHA_SPAN: f32 = 0.4;
 pub enum AnimChannel {
     PillHover,
     PillPress,
+    /// Expanded Zone's inline search reveal/collapse channel.
+    InlineSearch,
+    /// One-shot stack-formation pop. Stored as a 1→0 remaining fraction so
+    /// the normal terminal-zero retirement path releases it after 240 ms.
+    StackEmerge,
     /// Status-dot pulse is global (every count>0 dot pulses in lockstep), so
     /// the sampler ignores the `ZoneId` for this channel.
     StatusDotPulse,
@@ -231,6 +244,16 @@ impl Animator {
                 }
             }
         }
+    }
+
+    /// Whether a concrete `(zone, channel)` animation entry exists. This lets
+    /// callers distinguish a settled/default value from a zero-terminal entry
+    /// that has just been retired.
+    pub fn contains(&self, zone: ZoneId, channel: AnimChannel) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.zone == zone && entry.channel == channel)
     }
 
     /// Sample the eased current value for `(zone, channel)`. Returns 0.0 if
@@ -580,6 +603,27 @@ mod tests {
     }
 
     #[test]
+    fn stack_emerge_remaining_fraction_retires_at_tauri_duration() {
+        let mut a = Animator::new();
+        a.start(
+            z(14),
+            AnimChannel::StackEmerge,
+            1_000,
+            STACK_EMERGE_DURATION_MS,
+            1.0,
+            0.0,
+            Easing::Linear,
+        );
+
+        assert_eq!(a.sample(z(14), AnimChannel::StackEmerge, 1_000), 1.0);
+        assert!((a.sample(z(14), AnimChannel::StackEmerge, 1_120) - 0.5).abs() < 1e-5);
+        assert!(a.tick(1_239));
+        assert!(!a.tick(1_240));
+        assert_eq!(a.occupancy(), 0);
+        assert_eq!(a.sample(z(14), AnimChannel::StackEmerge, 1_240), 0.0);
+    }
+
+    #[test]
     fn is_active_tracks_in_flight_entries() {
         let mut a = Animator::new();
         assert!(!a.is_active(0));
@@ -684,7 +728,7 @@ mod tests {
         assert_eq!(PRESS_UP_DURATION_MS, 120);
         // #2 step 6 (2026-06-02) — EXPAND_DURATION_MS removed with the dead
         // PillExpand channel; the expand timeline is the Wave G2
-        // ZONE_PILL_ANIM_DURATION_MS (500ms) pinned in zone_pill_geometry.
+        // ZONE_PILL_ANIM_DURATION_MS pinned in zone_pill_geometry.
         assert_eq!(PULSE_PERIOD_MS, 1_600);
     }
 

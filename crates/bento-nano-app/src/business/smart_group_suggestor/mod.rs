@@ -79,25 +79,25 @@ pub const MAX_VISIBLE_SUGGESTIONS: usize = 5;
 pub const RUNTIME_PANEL_MARGIN_PX: f32 = 16.0;
 
 /// Runtime status/header body top in the D2D aux panel.
-pub const RUNTIME_STATUS_TOP_PX: f32 = 74.0;
+pub const RUNTIME_STATUS_TOP_PX: f32 = 76.0;
 
 /// Runtime row top in the D2D aux panel.
-pub const RUNTIME_ROW_TOP_PX: f32 = 108.0;
+pub const RUNTIME_ROW_TOP_PX: f32 = 96.0;
 
 /// Runtime row height in the D2D aux panel.
-pub const RUNTIME_ROW_HEIGHT_PX: f32 = 58.0;
+pub const RUNTIME_ROW_HEIGHT_PX: f32 = 54.0;
 
 /// Runtime row stride in the D2D aux panel.
-pub const RUNTIME_ROW_STRIDE_PX: f32 = 66.0;
+pub const RUNTIME_ROW_STRIDE_PX: f32 = 62.0;
 
 /// Runtime Apply button width.
-pub const RUNTIME_APPLY_BUTTON_WIDTH_PX: f32 = 68.0;
+pub const RUNTIME_APPLY_BUTTON_WIDTH_PX: f32 = 60.0;
 
 /// Runtime Dismiss button width.
-pub const RUNTIME_DISMISS_BUTTON_WIDTH_PX: f32 = 30.0;
+pub const RUNTIME_DISMISS_BUTTON_WIDTH_PX: f32 = 28.0;
 
 /// Runtime close button size.
-pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 58.0;
+pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 32.0;
 
 pub const RUNTIME_PREVIEW_TOP_PX: f32 =
     RUNTIME_ROW_TOP_PX + (MAX_VISIBLE_SUGGESTIONS as f32 * RUNTIME_ROW_STRIDE_PX) + 10.0;
@@ -108,7 +108,7 @@ pub const RUNTIME_PREVIEW_ROW_STRIDE_PX: f32 = 20.0;
 
 pub const MAX_VISIBLE_PREVIEW_FILES: usize = 2;
 
-pub const RUNTIME_PREVIEW_BUTTON_WIDTH_PX: f32 = 54.0;
+pub const RUNTIME_PREVIEW_BUTTON_WIDTH_PX: f32 = 50.0;
 
 /// SmartGroupSuggestor colour contract derived from an active palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,6 +139,8 @@ pub struct SmartGroupSuggestorChrome {
     pub action_background: Color,
     /// Dismiss/close button fill colour.
     pub danger_background: Color,
+    /// Quiet close-button fill colour.
+    pub close_background: Color,
     /// Manual-selection preview panel fill colour.
     pub preview_background: Color,
     /// Title text colour.
@@ -175,6 +177,7 @@ impl SmartGroupSuggestorChrome {
             selected_background: palette.selection,
             action_background: palette.accent,
             danger_background: palette.danger,
+            close_background: palette.hover_overlay,
             preview_background: palette.surface_alt,
             title_color: palette.text,
             body_color: palette.text,
@@ -186,8 +189,8 @@ impl SmartGroupSuggestorChrome {
     ///
     /// Token mapping (Wave A `search-bar-and-suggestor.md` SmartGroup metrics +
     /// Wave B `token-mapping.md`):
-    /// - panel + preview bg ← `surface_expanded`
-    /// - row bg ← `surface_subtle`; selected ← `surface_active`
+    /// - panel bg ← `surface_expanded`
+    /// - row + preview bg ← `surface_subtle`; selected ← `surface_active`
     /// - apply action button ← `accent_blue`; dismiss ← `accent_red`
     /// - panel radius ← `expanded` (16); rows/actions/preview ← `card` (10); badge ← `card`
     /// - panel shadow ← `expanded` outer layer
@@ -196,6 +199,7 @@ impl SmartGroupSuggestorChrome {
         radius: RadiusTauri,
         shadow: ShadowTauri,
     ) -> Self {
+        let controls = palette.control_palette();
         Self {
             // M6b — `expanded` is a `ShadowStack`; consume the outer layer.
             panel_shadow: shadow.expanded.outer(),
@@ -211,7 +215,8 @@ impl SmartGroupSuggestorChrome {
             selected_background: palette.surface_active,
             action_background: palette.accent_blue,
             danger_background: palette.accent_red,
-            preview_background: palette.surface_expanded,
+            close_background: controls.fill,
+            preview_background: palette.surface_subtle,
             title_color: palette.text_primary,
             body_color: palette.text_primary,
             muted_color: palette.text_muted,
@@ -364,16 +369,11 @@ pub fn rule_summary(suggestion: &SuggestedGroup) -> SmolStr {
 
 /// Runtime panel rectangle shared by renderer and shell hit-testing.
 pub fn suggestor_panel_rect(viewport: Size) -> Rect {
-    let max_width = (viewport.width * PANEL_MAX_WIDTH_FRACTION).max(320.0);
-    let width = PANEL_WIDTH_PX.min(max_width).max(320.0);
-    let max_height = (viewport.height * PANEL_MAX_HEIGHT_FRACTION).max(240.0);
-    let preferred_height = PANEL_PADDING_PX.mul_add(2.0, 472.0);
-    let height = preferred_height.min(max_height).max(240.0);
     Rect {
-        x: ((viewport.width - width) * 0.5).max(RUNTIME_PANEL_MARGIN_PX),
-        y: RUNTIME_PANEL_MARGIN_PX,
-        width,
-        height,
+        x: 0.0,
+        y: 0.0,
+        width: viewport.width.max(1.0),
+        height: viewport.height.max(1.0),
     }
 }
 
@@ -414,7 +414,7 @@ pub fn suggestor_apply_rect(viewport: Size, row_index: usize) -> Rect {
     let row = suggestor_row_rect(viewport, row_index);
     Rect {
         x: row.right() - RUNTIME_APPLY_BUTTON_WIDTH_PX - RUNTIME_DISMISS_BUTTON_WIDTH_PX - 14.0,
-        y: row.y + 17.0,
+        y: row.y + 15.0,
         width: RUNTIME_APPLY_BUTTON_WIDTH_PX,
         height: 24.0,
     }
@@ -425,7 +425,7 @@ pub fn suggestor_dismiss_rect(viewport: Size, row_index: usize) -> Rect {
     let row = suggestor_row_rect(viewport, row_index);
     Rect {
         x: row.right() - RUNTIME_DISMISS_BUTTON_WIDTH_PX - 8.0,
-        y: row.y + 17.0,
+        y: row.y + 15.0,
         width: RUNTIME_DISMISS_BUTTON_WIDTH_PX,
         height: 24.0,
     }
@@ -1151,6 +1151,27 @@ mod tests {
     }
 
     #[test]
+    fn runtime_panel_owns_the_full_aux_client_without_a_translucent_host_frame() {
+        let viewport = Size {
+            width: 522.0,
+            height: 574.0,
+        };
+        assert_eq!(
+            suggestor_panel_rect(viewport),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 522.0,
+                height: 574.0,
+            }
+        );
+        let last_row = suggestor_row_rect(viewport, MAX_VISIBLE_SUGGESTIONS - 1);
+        let preview = suggestor_preview_rect(viewport);
+        assert!(last_row.bottom() < preview.y);
+        assert!(preview.bottom() <= viewport.height);
+    }
+
+    #[test]
     fn suggestor_panel_shadow_rect_uses_token_shadow_geometry() {
         let panel = Rect {
             x: 24.0,
@@ -1514,17 +1535,44 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_subtle);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
-        assert_eq!(chrome.action_background, style_tokens::PALETTE_DARK.accent_blue);
-        assert_eq!(chrome.danger_background, style_tokens::PALETTE_DARK.accent_red);
-        assert_eq!(chrome.preview_background, style_tokens::PALETTE_DARK.surface_expanded);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
+        assert_eq!(
+            chrome.action_background,
+            style_tokens::PALETTE_DARK.accent_blue
+        );
+        assert_eq!(
+            chrome.danger_background,
+            style_tokens::PALETTE_DARK.accent_red
+        );
+        assert_eq!(
+            chrome.preview_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
         assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.action_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.action_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }

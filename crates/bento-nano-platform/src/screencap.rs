@@ -5,16 +5,17 @@
 //! (Win11 26100 + iGPU → `E_NOINTERFACE`; forensics in `dcomp.rs`), and the
 //! deprecated `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)`
 //! is forbidden by spec §3.2. So we render the frost ourselves: BitBlt the
-//! primary work area into a downsampled GDI DIB, hand the pixels to D2D as a
+//! host monitor work area into a downsampled GDI DIB, hand the pixels to D2D as a
 //! bitmap, run `CLSID_D2D1GaussianBlur` then `CLSID_D2D1Saturation` (the same
 //! `CreateEffect`/`SetValue` machinery already exercised for `CLSID_D2D1Shadow`
 //! under the `shadow` feature) to match Tauri's `backdrop-filter: blur(24px)
 //! saturate(1.7)`, and bake the effect output into an offscreen `ID2D1Bitmap1`
 //! that Pass 2 wraps in a bitmap brush behind every Main-overlay zone surface.
 //!
-//! §11 discipline: every COM / GDI failure degrades to `Err(PlatformError::…)`
-//! via `ok(...)` — no `unwrap` / `expect` / `panic`. The renderer (Pass 2)
-//! treats `Err` as "no frost, fall back to a single flat tint", never murk.
+//! §11 discipline: every COM / GDI failure flows through `PlatformError` — no
+//! `unwrap` / `expect` / `panic`. Once the desktop source bitmap exists, a
+//! non-device-lost effect/bake failure keeps that real capture as the backdrop;
+//! capture/source failures still return `Err` for the renderer's flat fallback.
 //!
 //! §10 discipline: capture + blur is on-demand (Pass 2 caches the `Backdrop`
 //! and only rebuilds it on `backdrop_dirty`); this module does no per-frame
@@ -30,8 +31,8 @@
 
 use windows::Win32::Foundation::{HWND, TRUE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_BORDER_MODE_HARD, D2D1_COMPOSITE_MODE_SOURCE_OVER,
-    D2D1_PIXEL_FORMAT,
+    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BORDER_MODE_HARD,
+    D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_BITMAP_OPTIONS_NONE,
@@ -52,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::errors::{PlatformError, ok};
-use crate::monitor::{RectI32, primary_monitor};
+use crate::monitor::RectI32;
 
 /// A baked, blurred snapshot of the primary monitor work area. The `bitmap` is
 /// an offscreen D2D bitmap (NOT an effect output) so Pass 2 can build an
@@ -92,15 +93,15 @@ unsafe impl Sync for Backdrop {}
 /// effect chained after `D2D1GaussianBlur`).
 ///
 /// Steps (frosted-backdrop spec "New platform module"):
-///  1. `region = primary_monitor().rect_work`.
+///  1. `region = monitor_from_window(main_hwnd).rect_work`.
 ///  2. Momentary `WDA_EXCLUDEFROMCAPTURE` on `main_hwnd` + `DwmFlush()` so the
 ///     exclusion lands before the blit; an `AffinityGuard` restores `WDA_NONE`
 ///     on every exit path (including an early `?`).
 ///  3. `StretchBlt(HALFTONE)` the screen DC into a top-down 32bpp BGRA DIB,
 ///     downsampled — bounds memory (no full-res DIB ever exists).
-///  4. `ctx.CreateBitmap` over the DIB pixels (`alphaMode = IGNORE`: BitBlt'd
-///     desktop has no real alpha, so treating it as opaque avoids premultiply
-///     darkening).
+///  4. Stamp the undefined GDI alpha byte to `0xff`, then `ctx.CreateBitmap`
+///     over the opaque premultiplied BGRA pixels. This keeps the blur/effect
+///     graph opaque instead of leaking the live sharp desktop through it.
 ///  5. `CreateEffect(CLSID_D2D1GaussianBlur)` + `SetInput` +
 ///     `SetValue(STANDARD_DEVIATION, stddev)` + `SetValue(BORDER_MODE, HARD)`
 ///     (HARD clamps beyond-bitmap samples, killing the dark edge halo `SOFT`
@@ -112,7 +113,9 @@ unsafe impl Sync for Backdrop {}
 ///     restore the original target. (A brush needs an `ID2D1Bitmap`, not a raw
 ///     effect output, hence the bake.)
 ///
-/// Degrades (returns `Err`) on any COM/GDI failure; never panics.
+/// Capture/source failures return `Err`. A non-device-lost blur/saturation/bake
+/// failure degrades to the already-created desktop source bitmap; device loss is
+/// propagated so the renderer can rebuild the graphics chain. Never panics.
 ///
 /// # Safety contract
 ///
@@ -126,11 +129,13 @@ pub fn capture_primary_workarea_blurred(
     stddev: f32,
     saturation: f32,
 ) -> Result<Backdrop, PlatformError> {
-    // 1. Primary work-area rect (screen px). Degenerate work areas (the
+    // 1. Host-monitor work-area rect (screen px). Degenerate work areas (the
     //    `FALLBACK_NO_MONITOR` sentinel) collapse to a 1×1 capture via
     //    `dib_dims`, which still produces a valid — if tiny — backdrop rather
     //    than a divide-by-zero.
-    let region = primary_monitor().rect_work;
+    // SAFETY: `main_hwnd` is live for the whole render call. The platform
+    // helper uses MONITOR_DEFAULTTOPRIMARY when Windows cannot resolve it.
+    let region = unsafe { crate::monitor::monitor_from_window(main_hwnd.0) }.rect_work;
     let (dst_w, dst_h) = dib_dims(region, downsample);
     let src_w = region.width().max(1);
     let src_h = region.height().max(1);
@@ -149,13 +154,20 @@ pub fn capture_primary_workarea_blurred(
     //    `DibCapture` guard frees the DCs + DIB deterministically on Drop.
     let capture = DibCapture::take(region.left, region.top, src_w, src_h, dst_w, dst_h)?;
 
-    // 4. Wrap the DIB pixels into a D2D bitmap. Alpha IGNORE: the BitBlt'd
-    //    desktop carries no meaningful alpha channel, so treat it as opaque to
-    //    avoid premultiply-darkening the frost.
+    // 4. GDI's 32-bpp RGB blit does not define a useful alpha byte. Direct2D
+    //    effects do propagate that byte, so make every captured pixel explicitly
+    //    opaque before the bitmap enters the blur graph.
+    let byte_len = dst_w as usize * dst_h as usize * 4;
+    // SAFETY: `capture.bits` points to the writable DIB section allocated for
+    //         exactly `dst_w * dst_h * 4` bytes and `capture` remains alive for
+    //         the duration of this slice.
+    let capture_bytes =
+        unsafe { core::slice::from_raw_parts_mut(capture.bits.cast::<u8>(), byte_len) };
+    force_bgra_alpha_opaque(capture_bytes);
     let bmp_props = D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
         },
         dpiX: 96.0,
         dpiY: 96.0,
@@ -174,152 +186,172 @@ pub fn capture_primary_workarea_blurred(
     //         pointer need not outlive the call. `bmp_props` lives on the stack
     //         for the call duration.
     let source: ID2D1Bitmap1 = ok("D2D/CreateBitmap(captured DIB)", unsafe {
-        ctx.CreateBitmap(size, Some(capture.bits), pitch, &bmp_props)
+        ctx.CreateBitmap(size, Some(capture.bits.cast_const()), pitch, &bmp_props)
     })?;
     // The DIB + DCs are no longer needed once D2D has copied the pixels.
     drop(capture);
 
-    // 5. Gaussian blur effect over the captured bitmap.
-    // SAFETY: ctx valid; CLSID is the documented gaussian-blur effect (mirrors
-    //         the `CLSID_D2D1Shadow` path in `d2d.rs::shadow_effect`).
-    let effect = ok("D2D/CreateEffect(GaussianBlur)", unsafe {
-        ctx.CreateEffect(&CLSID_D2D1GaussianBlur)
-    })?;
-    // `ID2D1Bitmap1` is in the `ID2D1Image` interface hierarchy, so it is a
-    // valid `SetInput` source. `TRUE` = invalidate (re-evaluate the graph).
-    // SAFETY: effect + source valid; SetInput borrows neither past the call.
-    unsafe {
-        effect.SetInput(0, &source, TRUE);
-    }
-    let stddev_bytes = stddev.to_ne_bytes();
-    // SAFETY: effect valid; `SetValue` lives on the `ID2D1Properties` base
-    //         (effect derefs to it). The prop index is the 0-based gaussian
-    //         standard-deviation slot; the data slice is exactly one f32.
-    ok("D2D/Effect.SetValue(STANDARD_DEVIATION)", unsafe {
-        effect.SetValue(
-            D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
-            D2D1_PROPERTY_TYPE_FLOAT,
-            &stddev_bytes,
-        )
-    })?;
-    // P1.4 — clamp beyond-bitmap samples to the bitmap edge (HARD), preventing
-    // the dark halo the default SOFT mode draws within ~`stddev` device-px of
-    // the capture edge (counterintuitively HARD *prevents* the halo). Mirrors
-    // CSS `backdrop-filter`'s effectively edge-clamped sampling.
-    let border_mode_bytes = (D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes();
-    // SAFETY: effect valid; BORDER_MODE is an enum-typed gaussian prop; the
-    //         data slice is exactly one u32 (the enum discriminant).
-    ok("D2D/Effect.SetValue(BORDER_MODE)", unsafe {
-        effect.SetValue(
-            D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,
-            D2D1_PROPERTY_TYPE_ENUM,
-            &border_mode_bytes,
-        )
-    })?;
+    let blurred_bitmap = (|| -> Result<ID2D1Bitmap1, PlatformError> {
+        // 5. Gaussian blur effect over the captured bitmap.
+        // SAFETY: ctx valid; CLSID is the documented gaussian-blur effect (mirrors
+        //         the `CLSID_D2D1Shadow` path in `d2d.rs::shadow_effect`).
+        let effect = ok("D2D/CreateEffect(GaussianBlur)", unsafe {
+            ctx.CreateEffect(&CLSID_D2D1GaussianBlur)
+        })?;
+        // `ID2D1Bitmap1` is in the `ID2D1Image` interface hierarchy, so it is a
+        // valid `SetInput` source. `TRUE` = invalidate (re-evaluate the graph).
+        // SAFETY: effect + source valid; SetInput borrows neither past the call.
+        unsafe {
+            effect.SetInput(0, &source, TRUE);
+        }
+        let stddev_bytes = stddev.to_ne_bytes();
+        // SAFETY: effect valid; `SetValue` lives on the `ID2D1Properties` base
+        //         (effect derefs to it). The prop index is the 0-based gaussian
+        //         standard-deviation slot; the data slice is exactly one f32.
+        ok("D2D/Effect.SetValue(STANDARD_DEVIATION)", unsafe {
+            effect.SetValue(
+                D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &stddev_bytes,
+            )
+        })?;
+        // P1.4 — clamp beyond-bitmap samples to the bitmap edge (HARD), preventing
+        // the dark halo the default SOFT mode draws within ~`stddev` device-px of
+        // the capture edge (counterintuitively HARD *prevents* the halo). Mirrors
+        // CSS `backdrop-filter`'s effectively edge-clamped sampling.
+        let border_mode_bytes = (D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes();
+        // SAFETY: effect valid; BORDER_MODE is an enum-typed gaussian prop; the
+        //         data slice is exactly one u32 (the enum discriminant).
+        ok("D2D/Effect.SetValue(BORDER_MODE)", unsafe {
+            effect.SetValue(
+                D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32,
+                D2D1_PROPERTY_TYPE_ENUM,
+                &border_mode_bytes,
+            )
+        })?;
 
-    // P1.1 — chain a saturation colour-matrix effect after the gaussian so the
-    // frost reads with Tauri's `saturate(1.7)` vibrancy (a plain blur of the
-    // desktop is noticeably greyer than the CSS reference). The saturation
-    // effect takes the gaussian's output as its input; `blurred` is then
-    // rebound from the saturation output for the bake below.
-    // SAFETY: ctx valid; CLSID is the documented saturation effect (same
-    //         CreateEffect machinery as the gaussian above).
-    let sat = ok("D2D/CreateEffect(Saturation)", unsafe {
-        ctx.CreateEffect(&CLSID_D2D1Saturation)
-    })?;
-    // SAFETY: effect valid; GetOutput returns the gaussian's output image,
-    //         which is in the ID2D1Image hierarchy (a valid SetInput source).
-    let blurred_in: ID2D1Image = ok("D2D/GaussianBlur.GetOutput", unsafe { effect.GetOutput() })?;
-    // SAFETY: sat + blurred_in valid; SetInput borrows neither past the call.
-    //         `TRUE` = invalidate (re-evaluate the graph).
-    unsafe {
-        sat.SetInput(0, &blurred_in, TRUE);
-    }
-    let sat_bytes = saturation.to_ne_bytes();
-    // SAFETY: sat valid; SATURATION is a float-typed prop on the saturation
-    //         effect's ID2D1Properties base; the data slice is exactly one f32.
-    ok("D2D/Effect.SetValue(SATURATION)", unsafe {
-        sat.SetValue(
-            D2D1_SATURATION_PROP_SATURATION.0 as u32,
-            D2D1_PROPERTY_TYPE_FLOAT,
-            &sat_bytes,
-        )
-    })?;
-    // SAFETY: sat valid; GetOutput returns the saturated (final) output image.
-    let blurred: ID2D1Image = ok("D2D/Saturation.GetOutput", unsafe { sat.GetOutput() })?;
+        // P1.1 — chain a saturation colour-matrix effect after the gaussian so the
+        // frost reads with Tauri's `saturate(1.7)` vibrancy (a plain blur of the
+        // desktop is noticeably greyer than the CSS reference). The saturation
+        // effect takes the gaussian's output as its input; `blurred` is then
+        // rebound from the saturation output for the bake below.
+        // SAFETY: ctx valid; CLSID is the documented saturation effect (same
+        //         CreateEffect machinery as the gaussian above).
+        let sat = ok("D2D/CreateEffect(Saturation)", unsafe {
+            ctx.CreateEffect(&CLSID_D2D1Saturation)
+        })?;
+        // SAFETY: effect valid; GetOutput returns the gaussian's output image,
+        //         which is in the ID2D1Image hierarchy (a valid SetInput source).
+        let blurred_in: ID2D1Image =
+            ok("D2D/GaussianBlur.GetOutput", unsafe { effect.GetOutput() })?;
+        // SAFETY: sat + blurred_in valid; SetInput borrows neither past the call.
+        //         `TRUE` = invalidate (re-evaluate the graph).
+        unsafe {
+            sat.SetInput(0, &blurred_in, TRUE);
+        }
+        let sat_bytes = saturation.to_ne_bytes();
+        // SAFETY: sat valid; SATURATION is a float-typed prop on the saturation
+        //         effect's ID2D1Properties base; the data slice is exactly one f32.
+        ok("D2D/Effect.SetValue(SATURATION)", unsafe {
+            sat.SetValue(
+                D2D1_SATURATION_PROP_SATURATION.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &sat_bytes,
+            )
+        })?;
+        // SAFETY: sat valid; GetOutput returns the saturated (final) output image.
+        let blurred: ID2D1Image = ok("D2D/Saturation.GetOutput", unsafe { sat.GetOutput() })?;
 
-    // 6. Bake the effect output into an offscreen TARGET bitmap. A brush needs
-    //    a concrete `ID2D1Bitmap`, not a live effect graph, so we render once
-    //    here and hand Pass 2 the static result.
-    let target_props = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            // Premultiplied so the baked bitmap composites correctly as a brush
-            // (matches the swap-chain target format in `d2d.rs`).
-            alphaMode: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-        colorContext: std::mem::ManuallyDrop::new(None),
+        // 6. Bake the effect output into an offscreen TARGET bitmap. A brush needs
+        //    a concrete `ID2D1Bitmap`, not a live effect graph, so we render once
+        //    here and hand Pass 2 the static result.
+        let target_props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                // Premultiplied so the baked bitmap composites correctly as a brush
+                // (matches the swap-chain target format in `d2d.rs`).
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        // SAFETY: ctx valid; `None` source data + TARGET option allocates a blank
+        //         renderable bitmap. `target_props` lives on the stack for the call.
+        let offscreen: ID2D1Bitmap1 = ok("D2D/CreateBitmap(offscreen target)", unsafe {
+            ctx.CreateBitmap(size, None, 0, &target_props)
+        })?;
+
+        // Save the current target so we can restore it after baking. `GetTarget`
+        // returns `Ok` for a context with a bound target (the swap-chain backbuffer
+        // in steady state). A `TargetGuard` restores it on every exit path.
+        // SAFETY: ctx valid; GetTarget reads the currently bound target image.
+        let prev_target: ID2D1Image = ok("D2D/GetTarget", unsafe { ctx.GetTarget() })?;
+        let target_guard = TargetGuard {
+            ctx,
+            prev: prev_target,
+        };
+
+        // SAFETY: ctx + offscreen valid; offscreen is in the ID2D1Image hierarchy.
+        unsafe {
+            ctx.SetTarget(&offscreen);
+        }
+        // SAFETY: ctx valid; the target is the offscreen bitmap set above.
+        //         `BeginDraw` on the RenderTarget base returns `()` (errors surface
+        //         from the paired `EndDraw` below).
+        unsafe {
+            ctx.BeginDraw();
+        }
+        // SAFETY: ctx valid; Clear(None) clears to transparent.
+        unsafe {
+            ctx.Clear(None);
+        }
+        // SAFETY: ctx + blurred image valid; draw the blurred output at the origin.
+        //         `DrawImage` returns `()` — D2D defers draw-error reporting to the
+        //         paired `EndDraw` below, so we balance Begin/End and check there.
+        unsafe {
+            ctx.DrawImage(
+                &blurred,
+                None,
+                None,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
+        }
+        // SAFETY: ctx valid; EndDraw flushes the bake and surfaces any deferred
+        //         draw error (incl. `D2DERR_RECREATE_TARGET`, which `ok()` maps to
+        //         `DeviceLost`). Must balance the `BeginDraw` above on every path.
+        let end = unsafe { ctx.EndDraw(None, None) };
+        // Restore the original target before surfacing any bake error so the
+        // renderer's next frame draws into the right target regardless.
+        drop(target_guard);
+        ok("D2D/EndDraw(bake)", end)?;
+
+        Ok(offscreen)
+    })();
+
+    let bitmap = match blurred_bitmap {
+        Ok(bitmap) => bitmap,
+        Err(PlatformError::DeviceLost) => return Err(PlatformError::DeviceLost),
+        Err(error) => {
+            eprintln!("screencap: effect graph unavailable; using captured source: {error}");
+            source
+        }
     };
-    // SAFETY: ctx valid; `None` source data + TARGET option allocates a blank
-    //         renderable bitmap. `target_props` lives on the stack for the call.
-    let offscreen: ID2D1Bitmap1 = ok("D2D/CreateBitmap(offscreen target)", unsafe {
-        ctx.CreateBitmap(size, None, 0, &target_props)
-    })?;
-
-    // Save the current target so we can restore it after baking. `GetTarget`
-    // returns `Ok` for a context with a bound target (the swap-chain backbuffer
-    // in steady state). A `TargetGuard` restores it on every exit path.
-    // SAFETY: ctx valid; GetTarget reads the currently bound target image.
-    let prev_target: ID2D1Image = ok("D2D/GetTarget", unsafe { ctx.GetTarget() })?;
-    let target_guard = TargetGuard {
-        ctx,
-        prev: prev_target,
-    };
-
-    // SAFETY: ctx + offscreen valid; offscreen is in the ID2D1Image hierarchy.
-    unsafe {
-        ctx.SetTarget(&offscreen);
-    }
-    // SAFETY: ctx valid; the target is the offscreen bitmap set above.
-    //         `BeginDraw` on the RenderTarget base returns `()` (errors surface
-    //         from the paired `EndDraw` below).
-    unsafe {
-        ctx.BeginDraw();
-    }
-    // SAFETY: ctx valid; Clear(None) clears to transparent.
-    unsafe {
-        ctx.Clear(None);
-    }
-    // SAFETY: ctx + blurred image valid; draw the blurred output at the origin.
-    //         `DrawImage` returns `()` — D2D defers draw-error reporting to the
-    //         paired `EndDraw` below, so we balance Begin/End and check there.
-    unsafe {
-        ctx.DrawImage(
-            &blurred,
-            None,
-            None,
-            D2D1_INTERPOLATION_MODE_LINEAR,
-            D2D1_COMPOSITE_MODE_SOURCE_OVER,
-        );
-    }
-    // SAFETY: ctx valid; EndDraw flushes the bake and surfaces any deferred
-    //         draw error (incl. `D2DERR_RECREATE_TARGET`, which `ok()` maps to
-    //         `DeviceLost`). Must balance the `BeginDraw` above on every path.
-    let end = unsafe { ctx.EndDraw(None, None) };
-    // Restore the original target before surfacing any bake error so the
-    // renderer's next frame draws into the right target regardless.
-    drop(target_guard);
-    ok("D2D/EndDraw(bake)", end)?;
 
     Ok(Backdrop {
-        bitmap: offscreen,
+        bitmap,
         src_w: dst_w,
         src_h: dst_h,
         region,
     })
+}
+
+fn force_bgra_alpha_opaque(bytes: &mut [u8]) {
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel[3] = u8::MAX;
+    }
 }
 
 /// Downsampled DIB dimensions for a capture `region` at `downsample`. Never
@@ -395,7 +427,7 @@ impl Drop for AffinityGuard {
 struct DibCapture {
     /// Pointer to the DIB's pixel bytes (`dst_w * dst_h * 4`). Valid for the
     /// lifetime of `self` (the DIB section stays selected until Drop).
-    bits: *const core::ffi::c_void,
+    bits: *mut core::ffi::c_void,
     screen_dc: HDC,
     mem_dc: HDC,
     dib: HBITMAP,
@@ -517,7 +549,7 @@ impl DibCapture {
         }
 
         Ok(DibCapture {
-            bits: bits as *const core::ffi::c_void,
+            bits,
             screen_dc,
             mem_dc,
             dib,
@@ -605,6 +637,15 @@ mod tests {
     fn dib_dims_downsample_zero_is_treated_as_one() {
         // downsample 0 would divide by zero; it is floored to 1.
         assert_eq!(dib_dims(rect(0, 0, 800, 600), 0), (800, 600));
+    }
+
+    #[test]
+    fn gdi_capture_alpha_is_forced_opaque_before_d2d_effects() {
+        let mut pixels = [1, 2, 3, 0, 4, 5, 6, 17];
+
+        force_bgra_alpha_opaque(&mut pixels);
+
+        assert_eq!(pixels, [1, 2, 3, 255, 4, 5, 6, 255]);
     }
 
     #[test]

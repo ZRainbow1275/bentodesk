@@ -109,25 +109,34 @@ pub const RUNTIME_PANEL_MARGIN_PX: f32 = 16.0;
 pub const RUNTIME_PANEL_INSET_PX: f32 = 18.0;
 
 /// Runtime action button height in the D2D aux panel.
-pub const RUNTIME_ACTION_BUTTON_HEIGHT_PX: f32 = 22.0;
+pub const RUNTIME_ACTION_BUTTON_HEIGHT_PX: f32 = 24.0;
+
+/// Runtime helper copy top in the D2D aux panel.
+pub const RUNTIME_HELPER_TOP_PX: f32 = 52.0;
+
+/// Runtime live-status top in the D2D aux panel.
+pub const RUNTIME_STATUS_TOP_PX: f32 = 78.0;
+
+/// Square close-button target in the self-painted header.
+pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 32.0;
 
 /// Runtime search field maximum length in Unicode scalar values.
 pub const RUNTIME_SEARCH_LIMIT: usize = 80;
 
 /// Runtime sort-header row top in the D2D aux panel.
-pub const RUNTIME_SORT_HEADER_TOP_PX: f32 = 160.0;
+pub const RUNTIME_SORT_HEADER_TOP_PX: f32 = 166.0;
 
 /// Runtime sort-header row height in the D2D aux panel.
-pub const RUNTIME_SORT_HEADER_HEIGHT_PX: f32 = 14.0;
+pub const RUNTIME_SORT_HEADER_HEIGHT_PX: f32 = 22.0;
 
 /// Runtime row top in the D2D aux panel.
-pub const RUNTIME_ROW_TOP_PX: f32 = 176.0;
+pub const RUNTIME_ROW_TOP_PX: f32 = 194.0;
 
 /// Runtime row height in the D2D aux panel.
-pub const RUNTIME_ROW_HEIGHT_PX: f32 = 34.0;
+pub const RUNTIME_ROW_HEIGHT_PX: f32 = 38.0;
 
 /// Runtime row stride in the D2D aux panel.
-pub const RUNTIME_ROW_STRIDE_PX: f32 = 42.0;
+pub const RUNTIME_ROW_STRIDE_PX: f32 = 40.0;
 
 /// The current runtime renderer shows at most eight visible rows.
 pub const RUNTIME_VISIBLE_ROW_LIMIT: usize = 8;
@@ -258,6 +267,40 @@ pub enum BulkManagerPointerHit {
     Row(usize),
 }
 
+/// Whether a runtime action is available for the current list/selection.
+///
+/// Layout and metadata refresh deliberately fall back to all listed rows when
+/// no explicit selection exists.  Keep that contract shared by paint and
+/// pointer dispatch so an action never looks disabled while still accepting a
+/// click (or the reverse).
+pub const fn bulk_manager_action_enabled(
+    hit: BulkManagerPointerHit,
+    has_rows: bool,
+    has_selection: bool,
+) -> bool {
+    match hit {
+        BulkManagerPointerHit::Close => true,
+        BulkManagerPointerHit::SelectAll
+        | BulkManagerPointerHit::Invert
+        | BulkManagerPointerHit::LayoutGrid
+        | BulkManagerPointerHit::LayoutRow
+        | BulkManagerPointerHit::LayoutColumn
+        | BulkManagerPointerHit::LayoutSpiral
+        | BulkManagerPointerHit::LayoutOrganic
+        | BulkManagerPointerHit::Update => has_rows,
+        BulkManagerPointerHit::Hide
+        | BulkManagerPointerHit::Show
+        | BulkManagerPointerHit::TextEdit
+        | BulkManagerPointerHit::IconPicker
+        | BulkManagerPointerHit::AccentPicker
+        | BulkManagerPointerHit::Delete
+        | BulkManagerPointerHit::Move => has_selection,
+        BulkManagerPointerHit::SearchInput
+        | BulkManagerPointerHit::Sort(_)
+        | BulkManagerPointerHit::Row(_) => has_rows,
+    }
+}
+
 /// Static action-button descriptor shared by renderer and shell hit-testing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BulkManagerButtonSpec {
@@ -273,122 +316,115 @@ pub const BULK_MANAGER_ACTION_BUTTONS: &[BulkManagerButtonSpec] = &[
         hit: BulkManagerPointerHit::SelectAll,
         label: "All",
         x_offset: 0.0,
-        y_offset: 106.0,
-        width: 44.0,
+        y_offset: 104.0,
+        width: 48.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Invert,
         label: "Invert",
-        x_offset: 50.0,
-        y_offset: 106.0,
+        x_offset: 54.0,
+        y_offset: 104.0,
         width: 58.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Hide,
         label: "Hide",
-        x_offset: 114.0,
-        y_offset: 106.0,
-        width: 50.0,
+        x_offset: 118.0,
+        y_offset: 104.0,
+        width: 52.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Show,
         label: "Show",
-        x_offset: 170.0,
-        y_offset: 106.0,
-        width: 50.0,
+        x_offset: 176.0,
+        y_offset: 104.0,
+        width: 52.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::LayoutGrid,
         label: "Grid",
-        x_offset: 226.0,
-        y_offset: 106.0,
-        width: 50.0,
+        x_offset: 234.0,
+        y_offset: 104.0,
+        width: 52.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::LayoutRow,
         label: "Row",
-        x_offset: 282.0,
-        y_offset: 106.0,
-        width: 50.0,
+        x_offset: 292.0,
+        y_offset: 104.0,
+        width: 52.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::LayoutColumn,
         label: "Col",
-        x_offset: 0.0,
-        y_offset: 136.0,
-        width: 44.0,
+        x_offset: 350.0,
+        y_offset: 104.0,
+        width: 52.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::LayoutSpiral,
         label: "Spiral",
-        x_offset: 50.0,
-        y_offset: 136.0,
-        width: 56.0,
+        x_offset: 408.0,
+        y_offset: 104.0,
+        width: 62.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::LayoutOrganic,
         label: "Organic",
-        x_offset: 112.0,
-        y_offset: 136.0,
-        width: 68.0,
+        x_offset: 476.0,
+        y_offset: 104.0,
+        width: 70.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Update,
         label: "Update",
-        x_offset: 186.0,
-        y_offset: 136.0,
-        width: 62.0,
+        x_offset: 0.0,
+        y_offset: 134.0,
+        width: 64.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::TextEdit,
         label: "Text",
-        x_offset: 438.0,
-        y_offset: 136.0,
-        width: 50.0,
+        x_offset: 70.0,
+        y_offset: 134.0,
+        width: 58.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::IconPicker,
         label: "Icon",
-        x_offset: 494.0,
-        y_offset: 136.0,
-        width: 48.0,
+        x_offset: 134.0,
+        y_offset: 134.0,
+        width: 54.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::AccentPicker,
         label: "Color",
-        x_offset: 548.0,
-        y_offset: 136.0,
-        width: 56.0,
+        x_offset: 194.0,
+        y_offset: 134.0,
+        width: 60.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Delete,
         label: "Delete",
-        x_offset: 254.0,
-        y_offset: 136.0,
-        width: 58.0,
+        x_offset: 610.0,
+        y_offset: 134.0,
+        width: 64.0,
     },
     BulkManagerButtonSpec {
         hit: BulkManagerPointerHit::Move,
         label: "Move",
-        x_offset: 318.0,
-        y_offset: 136.0,
-        width: 52.0,
-    },
-    BulkManagerButtonSpec {
-        hit: BulkManagerPointerHit::Close,
-        label: "Close",
-        x_offset: 376.0,
-        y_offset: 136.0,
-        width: 54.0,
+        x_offset: 546.0,
+        y_offset: 134.0,
+        width: 58.0,
     },
 ];
 
 pub fn bulk_manager_panel_rect(viewport: Size) -> Rect {
     Rect {
-        x: RUNTIME_PANEL_MARGIN_PX,
-        y: RUNTIME_PANEL_MARGIN_PX,
-        width: (viewport.width - (RUNTIME_PANEL_MARGIN_PX * 2.0)).max(480.0),
-        height: (viewport.height - (RUNTIME_PANEL_MARGIN_PX * 2.0)).max(360.0),
+        x: 0.0,
+        y: 0.0,
+        width: viewport.width.max(1.0),
+        height: viewport.height.max(1.0),
     }
 }
 
@@ -416,10 +452,25 @@ pub fn bulk_manager_button_rect(viewport: Size, spec: BulkManagerButtonSpec) -> 
 pub fn bulk_manager_search_rect(viewport: Size) -> Rect {
     let panel = bulk_manager_panel_rect(viewport);
     Rect {
-        x: panel.x + panel.width - RUNTIME_PANEL_INSET_PX - SEARCH_INPUT_WIDTH_PX,
+        x: panel.right()
+            - RUNTIME_PANEL_INSET_PX
+            - RUNTIME_CLOSE_BUTTON_SIZE_PX
+            - 8.0
+            - SEARCH_INPUT_WIDTH_PX,
         y: panel.y + 18.0,
         width: SEARCH_INPUT_WIDTH_PX,
         height: SEARCH_INPUT_HEIGHT_PX,
+    }
+}
+
+/// Header close button, separate from destructive batch actions.
+pub fn bulk_manager_close_rect(viewport: Size) -> Rect {
+    let panel = bulk_manager_panel_rect(viewport);
+    Rect {
+        x: panel.right() - RUNTIME_PANEL_INSET_PX - RUNTIME_CLOSE_BUTTON_SIZE_PX,
+        y: panel.y + 18.0,
+        width: RUNTIME_CLOSE_BUTTON_SIZE_PX,
+        height: RUNTIME_CLOSE_BUTTON_SIZE_PX,
     }
 }
 
@@ -428,17 +479,24 @@ pub fn bulk_manager_sort_header_rect(viewport: Size, key: SortKey) -> Rect {
     let panel = bulk_manager_panel_rect(viewport);
     let table_x = panel.x + RUNTIME_PANEL_INSET_PX;
     let table_width = panel.width - (RUNTIME_PANEL_INSET_PX * 2.0);
-    let (x_fraction, width_fraction) = match key {
-        SortKey::Name => (0.0, 0.46),
-        SortKey::Items => (0.46, 0.14),
-        SortKey::Accent => (0.60, 0.20),
-        SortKey::Size => (0.80, 0.20),
-    };
+    let (x_fraction, width_fraction) = table_column_fractions(key);
     Rect {
         x: table_x + (table_width * x_fraction),
         y: panel.y + RUNTIME_SORT_HEADER_TOP_PX,
         width: table_width * width_fraction,
         height: RUNTIME_SORT_HEADER_HEIGHT_PX,
+    }
+}
+
+/// One body cell using exactly the same horizontal partition as its header.
+pub fn bulk_manager_row_cell_rect(viewport: Size, row_index: usize, key: SortKey) -> Rect {
+    let row = bulk_manager_row_rect(viewport, row_index);
+    let (x_fraction, width_fraction) = table_column_fractions(key);
+    Rect {
+        x: row.x + row.width * x_fraction,
+        y: row.y,
+        width: row.width * width_fraction,
+        height: row.height,
     }
 }
 
@@ -488,6 +546,9 @@ pub fn bulk_manager_hit_test(
     x: f32,
     y: f32,
 ) -> Option<BulkManagerPointerHit> {
+    if rect_contains(bulk_manager_close_rect(viewport), x, y) {
+        return Some(BulkManagerPointerHit::Close);
+    }
     if rect_contains(bulk_manager_search_rect(viewport), x, y) {
         return Some(BulkManagerPointerHit::SearchInput);
     }
@@ -510,6 +571,15 @@ pub fn bulk_manager_hit_test(
         }
     }
     None
+}
+
+fn table_column_fractions(key: SortKey) -> (f32, f32) {
+    match key {
+        SortKey::Name => (0.0, 0.54),
+        SortKey::Items => (0.54, 0.12),
+        SortKey::Accent => (0.66, 0.18),
+        SortKey::Size => (0.84, 0.16),
+    }
 }
 
 fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {

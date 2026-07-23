@@ -108,6 +108,7 @@ mod tests {
             id: SmolStr::from(id),
             title: SmolStr::from(title),
             path: SmolStr::from("/desktop"),
+            keywords: SmolStr::default(),
             kind: SearchItemKind::File,
         }
     }

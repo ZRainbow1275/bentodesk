@@ -119,31 +119,36 @@ pub const PALETTE_SUNSET: PaletteTauri = PaletteTauri {
     tooltip_bg: Color::from_u8(0x2A, 0x1A, 0x0A, 0xE6),
 };
 
-/// `frosted` — translucent white-on-glass, light polarity.
+/// `frosted` — readable cool glass, light polarity.
+///
+/// The Tauri token transcription used near-transparent white surfaces with
+/// near-white text.  That only worked when CSS happened to composite over a
+/// dark page and became white-on-white in a native auxiliary HWND.  Nano keeps
+/// the glass identity while making the semantic light polarity self-sufficient.
 pub const PALETTE_FROSTED: PaletteTauri = PaletteTauri {
     is_dark: false,
-    surface_zen: Color::from_u8(0xFF, 0xFF, 0xFF, 0x14),
-    surface_expanded: Color::from_u8(0xFF, 0xFF, 0xFF, 0x1F),
-    surface_dialog: Color::from_u8(0xFF, 0xFF, 0xFF, 0x33),
-    surface_hover: Color::from_u8(0xFF, 0xFF, 0xFF, 0x26),
-    surface_active: Color::from_u8(0xFF, 0xFF, 0xFF, 0x1A),
-    surface_subtle: Color::from_u8(0xFF, 0xFF, 0xFF, 0x0D),
-    border_zen: Color::from_u8(0xFF, 0xFF, 0xFF, 0x2E),
-    border_expanded: Color::from_u8(0xFF, 0xFF, 0xFF, 0x38),
-    border_hover: Color::from_u8(0xFF, 0xFF, 0xFF, 0x59),
-    text_primary: Color::from_u8(0xF0, 0xF0, 0xF5, 0xFF),
-    text_secondary: Color::from_u8(0xD0, 0xD0, 0xDD, 0xFF),
-    text_muted: Color::from_u8(0x88, 0x88, 0xAA, 0xFF),
-    accent_blue: Color::from_u8(0x60, 0xA5, 0xFA, 0xFF),
+    surface_zen: Color::from_u8(0xF8, 0xFA, 0xFC, 0x9E),
+    surface_expanded: Color::from_u8(0xF8, 0xFA, 0xFC, 0xD9),
+    surface_dialog: Color::from_u8(0xF8, 0xFA, 0xFC, 0xF2),
+    surface_hover: Color::from_u8(0x0F, 0x17, 0x2A, 0x0F),
+    surface_active: Color::from_u8(0x0F, 0x17, 0x2A, 0x0A),
+    surface_subtle: Color::from_u8(0x0F, 0x17, 0x2A, 0x06),
+    border_zen: Color::from_u8(0x64, 0x74, 0x8B, 0x29),
+    border_expanded: Color::from_u8(0x64, 0x74, 0x8B, 0x3D),
+    border_hover: Color::from_u8(0x47, 0x55, 0x69, 0x66),
+    text_primary: Color::from_u8(0x17, 0x20, 0x33, 0xFF),
+    text_secondary: Color::from_u8(0x47, 0x55, 0x69, 0xFF),
+    text_muted: Color::from_u8(0x78, 0x83, 0x97, 0xFF),
+    accent_blue: Color::from_u8(0x3B, 0x82, 0xF6, 0xFF),
     accent_purple: Color::from_u8(0xA7, 0x8B, 0xFA, 0xFF),
     accent_green: Color::from_u8(0x4A, 0xDE, 0x80, 0xFF),
     accent_orange: Color::from_u8(0xFB, 0xBF, 0x24, 0xFF),
     accent_pink: Color::from_u8(0xF4, 0x72, 0xB6, 0xFF),
     accent_red: Color::from_u8(0xF8, 0x71, 0x71, 0xFF),
-    badge_bg: Color::from_u8(0xFF, 0xFF, 0xFF, 0x26),
+    badge_bg: Color::from_u8(0x3B, 0x82, 0xF6, 0x24),
     minibar_gradient_top: MINIBAR_TOP_LIGHT,
     minibar_gradient_bottom: MINIBAR_BOTTOM_LIGHT,
-    tooltip_bg: Color::from_u8(0xFF, 0xFF, 0xFF, 0xE6),
+    tooltip_bg: Color::from_u8(0xF8, 0xFA, 0xFC, 0xF2),
 };
 
 /// `ocean-blue` — deep ocean teal, dark polarity.
@@ -282,12 +287,12 @@ pub const PALETTE_ORDER: PaletteTauri = PaletteTauri {
     tooltip_bg: Color::from_u8(0xFA, 0xFA, 0xFA, 0xE6),
 };
 
-/// `flat` — Flat-UI midnight-blue slab. Authored light-polarity per the M6a
-/// contract's explicit 7/10 split (flat groups with the light Angular family
-/// `order`/`brutalism`/`editorial`); its text ramp is light-on-slab so the
-/// `is_dark=false` flag matches how the polarity-driven affordances behave.
+/// `flat` — Flat-UI midnight-blue slab, dark polarity.
+///
+/// Its opaque surface and light text are unambiguously dark; treating it as a
+/// light theme inverted native control overlays and disabled states.
 pub const PALETTE_FLAT: PaletteTauri = PaletteTauri {
-    is_dark: false,
+    is_dark: true,
     surface_zen: Color::from_u8(0x2C, 0x3E, 0x50, 0xF2),
     surface_expanded: Color::from_u8(0x2C, 0x3E, 0x50, 0xFA),
     surface_dialog: Color::from_u8(0x2C, 0x3E, 0x50, 0xFF),
@@ -551,9 +556,9 @@ mod tests {
 
     #[test]
     fn builtin_theme_polarity_matches_contract() {
-        // M6a contract: exactly 7 light-polarity themes.
-        let light = ["light", "frosted", "order", "flat", "brutalism", "editorial", "neo"];
-        // ... and 10 dark-polarity themes.
+        // Six palettes use light surfaces with dark text.
+        let light = ["light", "frosted", "order", "brutalism", "editorial", "neo"];
+        // Eleven palettes use dark surfaces with light text.
         let dark = [
             "dark",
             "midnight",
@@ -563,11 +568,12 @@ mod tests {
             "rose-gold",
             "forest-green",
             "solid",
+            "flat",
             "terminal",
             "cyberpunk",
         ];
-        assert_eq!(light.len(), 7);
-        assert_eq!(dark.len(), 10);
+        assert_eq!(light.len(), 6);
+        assert_eq!(dark.len(), 11);
         for id in light {
             let p = palette_tauri_for_theme(id).expect("resolves");
             assert!(!p.is_dark, "{id} should be light-polarity");

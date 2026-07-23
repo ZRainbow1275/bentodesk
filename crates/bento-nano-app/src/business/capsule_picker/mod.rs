@@ -79,6 +79,14 @@ impl CapsuleEntry {
 /// Hover/click target inside the selected-stack CapsulePicker aux window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapsulePickerHit {
+    /// Save the current Desktop layout as a new capsule.
+    Capture,
+    /// Restore the selected capsule.
+    Restore,
+    /// Delete the selected capsule.
+    Delete,
+    /// Close the picker.
+    Close,
     /// Keyboard shortcut hint text.
     Hint,
     /// Visible backend error banner.
@@ -91,6 +99,19 @@ pub enum CapsulePickerHit {
 
 /// Maximum capsule rows rendered by the current D2D surface.
 pub const CAPSULE_VISIBLE_ROW_LIMIT: usize = 7;
+
+/// Mouse-accessible actions rendered below the helper text.
+pub const CAPSULE_PICKER_ACTIONS: [CapsulePickerHit; 4] = [
+    CapsulePickerHit::Capture,
+    CapsulePickerHit::Restore,
+    CapsulePickerHit::Delete,
+    CapsulePickerHit::Close,
+];
+
+const ACTION_TOP_PX: f32 = 82.0;
+const ACTION_HEIGHT_PX: f32 = 30.0;
+const ACTION_GAP_PX: f32 = 8.0;
+const ROW_TOP_PX: f32 = 128.0;
 
 /// Panel rectangle shared by renderer and hit-test producers.
 pub fn capsule_picker_panel_rect(viewport: Size) -> Rect {
@@ -129,7 +150,7 @@ pub fn capsule_picker_error_rect(viewport: Size) -> Rect {
     let panel = capsule_picker_panel_rect(viewport);
     Rect {
         x: panel.x + 18.0,
-        y: panel.y + 80.0,
+        y: panel.y + 116.0,
         width: panel.width - 36.0,
         height: 22.0,
     }
@@ -140,9 +161,22 @@ pub fn capsule_picker_empty_rect(viewport: Size) -> Rect {
     let panel = capsule_picker_panel_rect(viewport);
     Rect {
         x: panel.x + 18.0,
-        y: panel.y + 116.0,
+        y: panel.y + panel.height * 0.46,
         width: panel.width - 36.0,
-        height: 24.0,
+        height: 104.0,
+    }
+}
+
+/// Action button rectangle shared by rendering and pointer hit-testing.
+pub fn capsule_picker_action_rect(viewport: Size, index: usize) -> Rect {
+    let panel = capsule_picker_panel_rect(viewport);
+    let total_gap = ACTION_GAP_PX * (CAPSULE_PICKER_ACTIONS.len() as f32 - 1.0);
+    let width = (panel.width - 36.0 - total_gap) / CAPSULE_PICKER_ACTIONS.len() as f32;
+    Rect {
+        x: panel.x + 18.0 + index as f32 * (width + ACTION_GAP_PX),
+        y: panel.y + ACTION_TOP_PX,
+        width,
+        height: ACTION_HEIGHT_PX,
     }
 }
 
@@ -151,7 +185,7 @@ pub fn capsule_picker_row_rect(viewport: Size, index: usize) -> Rect {
     let panel = capsule_picker_panel_rect(viewport);
     Rect {
         x: panel.x + 18.0,
-        y: panel.y + 112.0 + (index as f32 * 48.0),
+        y: panel.y + ROW_TOP_PX + (index as f32 * 48.0),
         width: panel.width - 36.0,
         height: 40.0,
     }
@@ -165,6 +199,11 @@ pub fn capsule_picker_hit_test(
     x: f32,
     y: f32,
 ) -> Option<CapsulePickerHit> {
+    for (index, hit) in CAPSULE_PICKER_ACTIONS.iter().copied().enumerate() {
+        if contains_point(capsule_picker_action_rect(viewport, index), x, y) {
+            return Some(hit);
+        }
+    }
     if contains_point(capsule_picker_hint_rect(viewport), x, y) {
         return Some(CapsulePickerHit::Hint);
     }
@@ -383,6 +422,15 @@ impl CapsulePickerState {
         self.selected_index
     }
 
+    /// Select a visible row by mouse index.
+    pub fn select_index(&mut self, index: usize) -> bool {
+        if index >= self.entries.len() || index == self.selected_index {
+            return false;
+        }
+        self.selected_index = index;
+        true
+    }
+
     /// Borrow the selected entry, if any.
     pub fn selected_entry(&self) -> Option<&CapsuleEntry> {
         self.entries.get(self.selected_index)
@@ -494,15 +542,30 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_hover);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_hover
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
         assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.body_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
         assert_eq!(chrome.error_color, style_tokens::PALETTE_DARK.accent_red);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }
@@ -639,6 +702,39 @@ mod tests {
         s.set_entries(one);
         assert_eq!(s.selected_index(), 0);
         assert_eq!(s.selected_entry().map(|entry| entry.id.as_str()), Some("z"));
+    }
+
+    #[test]
+    fn capsule_picker_mouse_actions_and_row_selection_are_reachable() {
+        let viewport = Size {
+            width: 480.0,
+            height: 600.0,
+        };
+        for (index, expected) in CAPSULE_PICKER_ACTIONS.iter().copied().enumerate() {
+            let rect = capsule_picker_action_rect(viewport, index);
+            assert_eq!(
+                capsule_picker_hit_test(
+                    viewport,
+                    2,
+                    false,
+                    rect.x + rect.width * 0.5,
+                    rect.y + rect.height * 0.5,
+                ),
+                Some(expected)
+            );
+        }
+
+        let mut state = CapsulePickerState::new();
+        let mut entries = SmallVec::new();
+        entries.push(sample_entry("a", "Coding"));
+        entries.push(sample_entry("b", "Reading"));
+        state.set_entries(entries);
+        assert!(state.select_index(1));
+        assert_eq!(
+            state.selected_entry().map(|entry| entry.id.as_str()),
+            Some("b")
+        );
+        assert!(!state.select_index(9));
     }
 
     #[test]

@@ -104,10 +104,10 @@ const MI_OPTION_PURGE_DELAY: mi_option_t = 15;
 /// (default 1 GiB = 1_048_576 KiB). Header position: 23.
 const MI_OPTION_ARENA_RESERVE: mi_option_t = 23;
 
-/// 64 MiB in KiB. mimalloc reads `arena_reserve` as a KiB-quantity per the
+/// 16 MiB in KiB. mimalloc reads `arena_reserve` as a KiB-quantity per the
 /// header comment "internally, this value is in KiB; use
 /// `mi_option_get_size`".
-const ARENA_RESERVE_KIB: core::ffi::c_long = 64 * 1024;
+const ARENA_RESERVE_KIB: core::ffi::c_long = 16 * 1024;
 
 /// Function pointer registered in the `.CRT$XCU` CRT init array. The
 /// MSVC CRT walks this array during process start, before
@@ -143,8 +143,8 @@ static WAVE19_INIT_PTR: unsafe extern "C" fn() = wave19_mimalloc_init;
 unsafe extern "C" fn wave19_mimalloc_init() {
     unsafe {
         // Three live tuning writes. Order matches briefing.
-        mi_option_set(MI_OPTION_ARENA_RESERVE, ARENA_RESERVE_KIB); // 64 MiB (default 1 GiB)
-        mi_option_set(MI_OPTION_PURGE_DELAY, 1); // 1 ms (default 10 ms)
+        mi_option_set(MI_OPTION_ARENA_RESERVE, ARENA_RESERVE_KIB); // 16 MiB (default 1 GiB)
+        mi_option_set(MI_OPTION_PURGE_DELAY, 0); // immediate purge (default 10 ms)
         mi_option_set(MI_OPTION_EAGER_COMMIT, 0); // lazy commit (default 1)
 
         // Probe: did the writes stick? `_mi_options_init()` may have

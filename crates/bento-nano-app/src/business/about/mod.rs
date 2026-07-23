@@ -14,15 +14,31 @@ use bento_nano_style::{Edges, Length, Rect, Size};
 use bento_nano_widget::{ContainerNode, WidgetNode};
 use smol_str::SmolStr;
 
-/// Default About window geometry (DIPs) per snap.md.
-pub const WINDOW_WIDTH: f32 = 360.0;
-pub const WINDOW_HEIGHT: f32 = 280.0;
+/// Refined borderless About window geometry (DIPs).
+pub const WINDOW_WIDTH: f32 = 640.0;
+pub const WINDOW_HEIGHT: f32 = 520.0;
 
-/// Padding inside the About card (snap.md: 24 px on all sides).
-pub const CONTENT_PADDING: f32 = 24.0;
+/// Padding inside the richer About card.
+pub const CONTENT_PADDING: f32 = 32.0;
+/// Product identity remains primary; the author avatar is deliberately a
+/// compact footer identity rather than the hero image.
+pub const APP_ICON_SIZE: f32 = 76.0;
+pub const AUTHOR_AVATAR_SIZE: f32 = 42.0;
 /// Close button geometry shared by renderer and shell hit-test.
-pub const CLOSE_BTN_W: f32 = 96.0;
+pub const CLOSE_BTN_W: f32 = 32.0;
 pub const CLOSE_BTN_H: f32 = 32.0;
+pub const PROJECT_BTN_H: f32 = 50.0;
+pub const AUTHOR_BTN_H: f32 = 64.0;
+
+pub const AUTHOR: &str = "方寒";
+pub const GITHUB_HANDLE: &str = "@ZRainbow1275";
+pub const GITHUB_URL: &str = "https://github.com/ZRainbow1275";
+pub const PROJECT_URL: &str = "github.com/ZRainbow1275/bentodesk";
+pub const PROJECT_URL_FULL: &str = "https://github.com/ZRainbow1275/bentodesk";
+/// Cargo metadata and the repository LICENSE are authoritative. The old Tauri
+/// translation string still says MIT, but the shipped project is AGPL.
+pub const LICENSE_NAME: &str = "AGPL-3.0-or-later";
+pub const LICENSE_SUMMARY_ZH: &str = "GNU Affero 通用公共许可证 v3.0 或更高版本";
 
 /// Compiled-in app version, sourced from Cargo metadata. Stable across the
 /// session so the About surface and the updater status banner agree on the
@@ -62,6 +78,10 @@ pub fn build() -> WidgetNode {
 pub enum AboutHit {
     /// Close button hit.
     Close,
+    /// Project repository link.
+    Project,
+    /// Author GitHub profile link.
+    Author,
     /// Inside the card but outside the close button.
     Body,
     /// Outside the card; selected-stack parity closes the modal.
@@ -82,10 +102,50 @@ pub fn panel_rect(viewport: Size) -> Rect {
 pub fn close_button_rect(viewport: Size) -> Rect {
     let panel = panel_rect(viewport);
     Rect {
-        x: panel.x + (panel.width - CLOSE_BTN_W) * 0.5,
-        y: panel.y + panel.height - CONTENT_PADDING - CLOSE_BTN_H,
+        x: panel.x + panel.width - CONTENT_PADDING - CLOSE_BTN_W,
+        y: panel.y + CONTENT_PADDING,
         width: CLOSE_BTN_W,
         height: CLOSE_BTN_H,
+    }
+}
+
+pub fn app_icon_rect(viewport: Size) -> Rect {
+    let panel = panel_rect(viewport);
+    Rect {
+        x: panel.x + CONTENT_PADDING,
+        y: panel.y + CONTENT_PADDING,
+        width: APP_ICON_SIZE,
+        height: APP_ICON_SIZE,
+    }
+}
+
+pub fn project_button_rect(viewport: Size) -> Rect {
+    let panel = panel_rect(viewport);
+    Rect {
+        x: panel.x + CONTENT_PADDING,
+        y: panel.y + 330.0,
+        width: panel.width - CONTENT_PADDING * 2.0,
+        height: PROJECT_BTN_H,
+    }
+}
+
+pub fn author_button_rect(viewport: Size) -> Rect {
+    let panel = panel_rect(viewport);
+    Rect {
+        x: panel.x + CONTENT_PADDING,
+        y: panel.y + 396.0,
+        width: panel.width - CONTENT_PADDING * 2.0,
+        height: AUTHOR_BTN_H,
+    }
+}
+
+pub fn author_avatar_rect(viewport: Size) -> Rect {
+    let author = author_button_rect(viewport);
+    Rect {
+        x: author.x + 11.0,
+        y: author.y + (author.height - AUTHOR_AVATAR_SIZE) * 0.5,
+        width: AUTHOR_AVATAR_SIZE,
+        height: AUTHOR_AVATAR_SIZE,
     }
 }
 
@@ -97,6 +157,10 @@ pub fn hit_test(viewport: Size, x: f32, y: f32) -> AboutHit {
 
     if contains(close_button_rect(viewport), x, y) {
         AboutHit::Close
+    } else if contains(project_button_rect(viewport), x, y) {
+        AboutHit::Project
+    } else if contains(author_button_rect(viewport), x, y) {
+        AboutHit::Author
     } else if contains(panel_rect(viewport), x, y) {
         AboutHit::Body
     } else {
@@ -138,21 +202,31 @@ mod tests {
 
     #[test]
     fn padding_matches_snap_md() {
-        // snap.md mandates 24 px all-around. Pin so a chrome refactor
+        // The richer profile layout uses 32 px all-around. Pin so a chrome refactor
         // doesn't silently shrink the visual breathing room.
-        assert!((CONTENT_PADDING - 24.0).abs() < 0.01);
+        assert!((CONTENT_PADDING - 32.0).abs() < 0.01);
     }
 
     #[test]
     fn hit_test_closes_on_button_and_outside_only() {
         let viewport = Size {
-            width: 480.0,
-            height: 320.0,
+            width: 800.0,
+            height: 640.0,
         };
         let close = close_button_rect(viewport);
         assert_eq!(
             hit_test(viewport, close.x + 1.0, close.y + 1.0),
             AboutHit::Close
+        );
+        let project = project_button_rect(viewport);
+        assert_eq!(
+            hit_test(viewport, project.x + 1.0, project.y + 1.0),
+            AboutHit::Project
+        );
+        let author = author_button_rect(viewport);
+        assert_eq!(
+            hit_test(viewport, author.x + 1.0, author.y + 1.0),
+            AboutHit::Author
         );
         let panel = panel_rect(viewport);
         assert_eq!(

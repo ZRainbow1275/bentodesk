@@ -325,14 +325,16 @@ impl HotLru {
 pub(crate) mod wic {
     use super::IconError;
 
+    use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::Graphics::Imaging::{
         CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppRGBA,
         IWICBitmapDecoder, IWICBitmapEncoder, IWICBitmapFrameDecode, IWICBitmapFrameEncode,
         IWICImagingFactory, IWICStream, WICBitmapEncoderNoCache,
         WICBitmapPaletteTypeFixedHalftone256, WICDecodeMetadataCacheOnLoad,
     };
+    use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, STREAM_SEEK_SET};
-    use windows::core::{GUID, Interface};
+    use windows::core::GUID;
 
     /// Encode raw RGBA8 pixels (`width * height * 4` bytes) as a PNG
     /// byte vector via WIC. Returns `IconError::Wic` on any failure.
@@ -365,21 +367,15 @@ pub(crate) mod wic {
                     message: e.to_string(),
                 })?;
 
-        // SAFETY: CreateStream allocates a heap-backed `IWICStream`. We
-        // initialise it with `InitializeFromMemory(empty)` so it grows
-        // as the encoder writes; final bytes are copied out via Seek+Read.
-        let stream: IWICStream = unsafe { factory.CreateStream() }.map_err(|e| IconError::Wic {
-            ctx: "encode_png/CreateStream",
-            message: e.to_string(),
-        })?;
-
-        // SAFETY: We pass an empty mutable buffer; WIC docs allow this
-        // and the stream becomes growable. The buffer pointer is kept
-        // alive for the duration of the call by `init_buf`.
-        let init_buf: Vec<u8> = Vec::new();
-        unsafe { stream.InitializeFromMemory(&init_buf) }.map_err(|e| IconError::Wic {
-            ctx: "encode_png/InitializeFromMemory",
-            message: e.to_string(),
+        // SAFETY: a null HGLOBAL asks OLE to allocate a growable backing
+        // store. `fDeleteOnRelease=true` transfers that memory's lifetime to
+        // the returned stream. IWICStream::InitializeFromMemory is fixed-size
+        // and cannot be used as an encoder destination.
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.map_err(|e| {
+            IconError::Wic {
+                ctx: "encode_png/CreateStreamOnHGlobal",
+                message: e.to_string(),
+            }
         })?;
 
         // SAFETY: Encoder creation; container format = PNG; vendor null.
@@ -452,17 +448,10 @@ pub(crate) mod wic {
             message: e.to_string(),
         })?;
 
-        // Read the encoded PNG bytes back out of the stream.
-        // SAFETY: Seek to start, then Read into a growable Vec until EOF.
-        // Cast IWICStream → IStream for Seek/Read; both APIs are typed.
-        let istream: windows::Win32::System::Com::IStream =
-            stream.cast().map_err(|e| IconError::Wic {
-                ctx: "encode_png/cast IStream",
-                message: e.to_string(),
-            })?;
+        // Read the encoded PNG bytes back out of the growable IStream.
         // SAFETY: Seek the IStream pointer to offset 0.
         unsafe {
-            istream
+            stream
                 .Seek(0, STREAM_SEEK_SET, None)
                 .map_err(|e| IconError::Wic {
                     ctx: "encode_png/Seek",
@@ -476,7 +465,7 @@ pub(crate) mod wic {
             let mut read: u32 = 0;
             // SAFETY: Read up to `buf.len()` bytes; returns S_OK or S_FALSE.
             let hr = unsafe {
-                istream.Read(
+                stream.Read(
                     buf.as_mut_ptr().cast(),
                     buf.len() as u32,
                     Some(&mut read as *mut u32),
@@ -559,6 +548,35 @@ pub(crate) mod wic {
         }
 
         buf.chunks_exact(4).all(|p| p[3] == 0)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+
+        #[test]
+        fn hglobal_png_stream_grows_and_round_trips() {
+            // SAFETY: WIC is COM-based. Balance only a successful apartment
+            // initialisation; an existing apartment remains owned by its host.
+            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+            let outcome = (|| -> Result<(Vec<u8>, bool), IconError> {
+                let png = encode_png(&[0xE2, 0x44, 0x44, 0xFF], 1, 1)?;
+                let transparent = decode_png_alpha_check(&png);
+                Ok((png, transparent))
+            })();
+            if initialized {
+                // SAFETY: balances the successful CoInitializeEx above on
+                // this test thread after every WIC object has been dropped.
+                unsafe { CoUninitialize() };
+            }
+
+            let (png, transparent) = outcome.expect("encode one opaque pixel");
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert!(!transparent);
+        }
     }
 }
 

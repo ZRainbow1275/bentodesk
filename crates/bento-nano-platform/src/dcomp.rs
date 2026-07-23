@@ -9,9 +9,9 @@
 //!     -> IDCompositionVisual2 (root) -> SetEffect(blur)
 //!     -> SetContent(swap chain)
 
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HWND};
@@ -27,11 +27,10 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_PRESENT_TEST,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_PRESENT_TEST, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
-    IDXGISwapChain1, IDXGISwapChain2,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, IDXGISwapChain2,
 };
 use windows::core::Interface;
 
@@ -659,12 +658,18 @@ mod tests {
         // DXGI_STATUS_OCCLUDED (0x087A0001) is a *success* HRESULT — the bug
         // this fix addresses is that `.ok()` masks it; classify must catch it.
         assert_eq!(classify_present(0x087A_0001), PresentOutcome::Occluded);
-        assert_eq!(classify_present(DXGI_STATUS_OCCLUDED.0), PresentOutcome::Occluded);
+        assert_eq!(
+            classify_present(DXGI_STATUS_OCCLUDED.0),
+            PresentOutcome::Occluded
+        );
         // S_OK.
         assert_eq!(classify_present(0), PresentOutcome::Ok);
         // An unrelated success / arbitrary other HRESULT routes through the
         // `ok()` helper as `Other`.
-        assert_eq!(classify_present(0x887A_0001u32 as i32), PresentOutcome::Other);
+        assert_eq!(
+            classify_present(0x887A_0001u32 as i32),
+            PresentOutcome::Other
+        );
         assert_eq!(classify_present(1), PresentOutcome::Other);
     }
 

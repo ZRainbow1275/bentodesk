@@ -119,6 +119,13 @@ const DEFAULT_ZONE_H: i32 = 220;
 /// Explicit state-dir override for isolated selected-stack runtime proof.
 /// The value is a directory; `zones.bin` is appended by [`appdata_path`].
 const STATE_DIR_ENV: &str = "BENTODESK_NANO_STATE_DIR";
+/// Marker next to the executable in production. Its presence selects an
+/// executable-local data directory on the next launch. Under an isolated
+/// `BENTODESK_NANO_STATE_DIR` proof run the marker is kept inside that isolated
+/// directory so a hand-test can never mutate the installed application.
+const PORTABLE_MARKER_FILE: &str = ".bentodesk-portable";
+/// Executable-local state directory used while portable mode is enabled.
+const PORTABLE_DATA_DIR_NAME: &str = "BentoDeskData";
 
 /// Resolve `%APPDATA%\BentoDesk\zones.bin`.
 ///
@@ -130,12 +137,100 @@ const STATE_DIR_ENV: &str = "BENTODESK_NANO_STATE_DIR";
 /// not exist yet — `read_zones` treats that the same as an absent file
 /// (returns an empty list); `write_zones_atomic` creates it on demand.
 pub fn appdata_path() -> Result<PathBuf, PlatformError> {
-    use windows_sys::Win32::Foundation::S_OK;
-    use windows_sys::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath};
-
     if let Some(path) = state_dir_override_path() {
         return Ok(path);
     }
+
+    let mut path = state_dir_for_portable_mode(portable_mode_enabled())?;
+    path.push("zones.bin");
+    Ok(path)
+}
+
+/// Return whether the next normal launch should use executable-local storage.
+///
+/// The marker is intentionally the source of truth rather than a value inside
+/// `vault.bin`: the storage root must be selected before that vault can be
+/// opened. Runtime-proof overrides keep their own marker under the override
+/// directory and still retain absolute precedence in [`appdata_path`].
+pub fn portable_mode_enabled() -> bool {
+    portable_marker_path()
+        .map(|path| path.is_file())
+        .unwrap_or(false)
+}
+
+/// Enable or disable portable mode for the next process launch.
+pub fn set_portable_mode_enabled(enabled: bool) -> Result<(), PlatformError> {
+    let marker = portable_marker_path()?;
+    if enabled {
+        let Some(parent) = marker.parent() else {
+            return Err(PlatformError::Storage("portable marker has no parent"));
+        };
+        fs::create_dir_all(parent).map_err(|error| PlatformError::StorageIo {
+            ctx: "create portable marker parent",
+            kind: error.kind(),
+        })?;
+        fs::write(&marker, b"BentoDesk portable mode\n").map_err(|error| PlatformError::StorageIo {
+            ctx: "write portable marker",
+            kind: error.kind(),
+        })
+    } else {
+        match fs::remove_file(&marker) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(PlatformError::StorageIo {
+                ctx: "remove portable marker",
+                kind: error.kind(),
+            }),
+        }
+    }
+}
+
+/// Resolve the state directory for a requested portable-mode value.
+///
+/// Isolated proof state always wins. Production portable state lives beside
+/// the executable; normal state remains `%APPDATA%\BentoDesk`.
+pub fn state_dir_for_portable_mode(portable: bool) -> Result<PathBuf, PlatformError> {
+    if let Some(mut path) = state_dir_override_path() {
+        let _ = path.pop();
+        return Ok(path);
+    }
+    if portable {
+        portable_state_dir()
+    } else {
+        roaming_state_dir()
+    }
+}
+
+fn portable_marker_path() -> Result<PathBuf, PlatformError> {
+    if let Some(mut path) = state_dir_override_path() {
+        let _ = path.pop();
+        path.push(PORTABLE_MARKER_FILE);
+        return Ok(path);
+    }
+    let exe = std::env::current_exe().map_err(|error| PlatformError::StorageIo {
+        ctx: "resolve executable for portable marker",
+        kind: error.kind(),
+    })?;
+    let Some(parent) = exe.parent() else {
+        return Err(PlatformError::Storage("executable has no parent directory"));
+    };
+    Ok(parent.join(PORTABLE_MARKER_FILE))
+}
+
+fn portable_state_dir() -> Result<PathBuf, PlatformError> {
+    let exe = std::env::current_exe().map_err(|error| PlatformError::StorageIo {
+        ctx: "resolve executable for portable state",
+        kind: error.kind(),
+    })?;
+    let Some(parent) = exe.parent() else {
+        return Err(PlatformError::Storage("executable has no parent directory"));
+    };
+    Ok(parent.join(PORTABLE_DATA_DIR_NAME))
+}
+
+fn roaming_state_dir() -> Result<PathBuf, PlatformError> {
+    use windows_sys::Win32::Foundation::S_OK;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath};
 
     let mut raw: *mut u16 = core::ptr::null_mut();
     // SAFETY: SHGetKnownFolderPath canonical signature; `raw` written on
@@ -187,7 +282,6 @@ pub fn appdata_path() -> Result<PathBuf, PlatformError> {
 
     let mut path = PathBuf::from(s);
     path.push("BentoDesk");
-    path.push("zones.bin");
     Ok(path)
 }
 
@@ -462,6 +556,11 @@ pub fn decode(buf: &[u8]) -> Result<ZoneList, PlatformError> {
         }
         zones.add(zone);
     }
+    // W14: old builds could persist a stack anchor as another stack's child
+    // while keeping its own members. Repair that hidden tree at the storage
+    // boundary so existing user state observes the same flat relation as new
+    // in-session stack operations.
+    zones.flatten_nested_stacks();
     Ok(zones)
 }
 
@@ -872,6 +971,55 @@ mod tests {
         let child = back.get(ZoneId(2)).expect("child");
         assert_eq!(parent.stack_members.as_slice(), &[ZoneId(2)]);
         assert_eq!(child.stack_parent, Some(ZoneId(1)));
+    }
+
+    #[test]
+    fn decode_flattens_legacy_nested_stack_relationships() {
+        let mut zl = ZoneList::new();
+        zl.add(Zone::new(
+            ZoneId(1),
+            Cow::Borrowed("Legacy source"),
+            0,
+            0,
+            100,
+            100,
+        ));
+        zl.add(Zone::new(
+            ZoneId(2),
+            Cow::Borrowed("Legacy member"),
+            10,
+            10,
+            100,
+            100,
+        ));
+        zl.add(Zone::new(
+            ZoneId(4),
+            Cow::Borrowed("Target"),
+            20,
+            20,
+            100,
+            100,
+        ));
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        zl.get_mut(ZoneId(1)).expect("source").stack_parent = Some(ZoneId(4));
+        zl.get_mut(ZoneId(4))
+            .expect("target")
+            .stack_members
+            .push(ZoneId(1));
+
+        let back = decode(&encode(&zl)).expect("decode");
+
+        assert_eq!(
+            back.stack_member_ids(ZoneId(4)).map(|ids| ids.into_vec()),
+            Some(vec![ZoneId(4), ZoneId(1), ZoneId(2)])
+        );
+        assert_eq!(
+            back.get(ZoneId(2)).and_then(|zone| zone.stack_parent),
+            Some(ZoneId(4))
+        );
+        assert!(back.get(ZoneId(1)).is_some_and(|zone| {
+            zone.stack_parent == Some(ZoneId(4)) && zone.stack_members.is_empty()
+        }));
     }
 
     #[test]

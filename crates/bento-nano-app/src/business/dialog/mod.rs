@@ -307,11 +307,15 @@ mod tests {
         // Wave A chrome.md: dialog uses the denser `surface_dialog` (0.92α).
         assert_eq!(d.background, style_tokens::PALETTE_DARK.surface_dialog);
         assert!(
-            style_tokens::PALETTE_DARK.surface_dialog.a > style_tokens::PALETTE_DARK.surface_expanded.a,
+            style_tokens::PALETTE_DARK.surface_dialog.a
+                > style_tokens::PALETTE_DARK.surface_expanded.a,
             "dialog alpha must be denser than expanded per Wave A chrome.md"
         );
         assert_eq!(d.title_color, style_tokens::PALETTE_DARK.text_primary);
-        assert_eq!(d.border_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
+        assert_eq!(
+            d.border_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
         assert_eq!(d.padding.top, style_tokens::SPACING.lg);
         assert_eq!(d.padding.left, style_tokens::SPACING.xl);
     }

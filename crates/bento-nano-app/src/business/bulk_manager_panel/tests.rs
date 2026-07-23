@@ -12,10 +12,11 @@ use super::{
     PANEL_CORNER_RADIUS_PX, PANEL_HEIGHT_PX, PANEL_MAX_HEIGHT_FRACTION, PANEL_MAX_WIDTH_FRACTION,
     PANEL_PADDING_PX, PANEL_WIDTH_PX, RUNTIME_SEARCH_LIMIT, SEARCH_INPUT_HEIGHT_PX,
     SEARCH_INPUT_WIDTH_PX, SELECTED_ROW_STRIPE_PX, SortDirection, SortKey, TABLE_CELL_PADDING_Y_PX,
-    TABLE_ROW_HEIGHT_PX, TOOLBAR_HEIGHT_PX, ZoneRow, build, bulk_manager_button_rect,
-    bulk_manager_hit_test, bulk_manager_panel_shadow_rect, bulk_manager_row_rect,
-    bulk_manager_search_rect, bulk_manager_sort_header_rect, bulk_manager_visible_window_start,
-    bulk_manager_visible_window_summary,
+    TABLE_ROW_HEIGHT_PX, TOOLBAR_HEIGHT_PX, ZoneRow, build, bulk_manager_action_enabled,
+    bulk_manager_button_rect, bulk_manager_close_rect, bulk_manager_hit_test,
+    bulk_manager_panel_rect, bulk_manager_panel_shadow_rect, bulk_manager_row_cell_rect,
+    bulk_manager_row_rect, bulk_manager_search_rect, bulk_manager_sort_header_rect,
+    bulk_manager_visible_window_start, bulk_manager_visible_window_summary,
 };
 use bento_nano_layout::{Direction, LayoutSource};
 use bento_nano_style::{BorderRadius, Color, Length, Rect, Shadow, Size};
@@ -205,6 +206,73 @@ fn pointer_hit_test_maps_visible_buttons_and_rows() {
         bulk_manager_hit_test(viewport, 3, 0, search.x + 2.0, search.y + 2.0),
         Some(BulkManagerPointerHit::SearchInput)
     );
+    let close = bulk_manager_close_rect(viewport);
+    assert_eq!(
+        bulk_manager_hit_test(viewport, 3, 0, close.x + 2.0, close.y + 2.0),
+        Some(BulkManagerPointerHit::Close)
+    );
+}
+
+#[test]
+fn action_enablement_matches_list_and_selection_fallbacks() {
+    assert!(bulk_manager_action_enabled(
+        BulkManagerPointerHit::Close,
+        false,
+        false
+    ));
+    for hit in [
+        BulkManagerPointerHit::SelectAll,
+        BulkManagerPointerHit::Invert,
+        BulkManagerPointerHit::LayoutGrid,
+        BulkManagerPointerHit::LayoutRow,
+        BulkManagerPointerHit::LayoutColumn,
+        BulkManagerPointerHit::LayoutSpiral,
+        BulkManagerPointerHit::LayoutOrganic,
+        BulkManagerPointerHit::Update,
+    ] {
+        assert!(!bulk_manager_action_enabled(hit, false, false));
+        assert!(bulk_manager_action_enabled(hit, true, false));
+    }
+    for hit in [
+        BulkManagerPointerHit::Hide,
+        BulkManagerPointerHit::Show,
+        BulkManagerPointerHit::TextEdit,
+        BulkManagerPointerHit::IconPicker,
+        BulkManagerPointerHit::AccentPicker,
+        BulkManagerPointerHit::Delete,
+        BulkManagerPointerHit::Move,
+    ] {
+        assert!(!bulk_manager_action_enabled(hit, true, false));
+        assert!(bulk_manager_action_enabled(hit, true, true));
+    }
+}
+
+#[test]
+fn native_panel_fills_client_and_body_cells_partition_each_row_once() {
+    let viewport = Size {
+        width: 720.0,
+        height: 540.0,
+    };
+    assert_eq!(
+        bulk_manager_panel_rect(viewport),
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 720.0,
+            height: 540.0,
+        }
+    );
+
+    let row = bulk_manager_row_rect(viewport, 0);
+    let cells = SortKey::ALL
+        .iter()
+        .map(|key| bulk_manager_row_cell_rect(viewport, 0, *key))
+        .collect::<Vec<_>>();
+    assert_eq!(cells.first().map(|cell| cell.x), Some(row.x));
+    assert_eq!(cells.last().map(Rect::right), Some(row.right()));
+    for pair in cells.windows(2) {
+        assert!((pair[0].right() - pair[1].x).abs() < 0.01);
+    }
 }
 
 #[test]
@@ -728,22 +796,43 @@ fn zone_row_serde_round_trip() {
 
 #[test]
 fn bulk_manager_chrome_from_tauri_tokens_consumes_wave_b_ssot() {
-    use bento_nano_style::tokens as style_tokens;
     use bento_nano_style::BorderRadius;
+    use bento_nano_style::tokens as style_tokens;
     let chrome = BulkManagerChrome::from_tauri_tokens(
         style_tokens::PALETTE_DARK,
         style_tokens::RADIUS,
         style_tokens::SHADOW,
     );
-    assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-    assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_hover);
-    assert_eq!(chrome.cursor_background, style_tokens::PALETTE_DARK.surface_active);
-    assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
+    assert_eq!(
+        chrome.panel_background,
+        style_tokens::PALETTE_DARK.surface_expanded
+    );
+    assert_eq!(
+        chrome.row_background,
+        style_tokens::PALETTE_DARK.surface_hover
+    );
+    assert_eq!(
+        chrome.cursor_background,
+        style_tokens::PALETTE_DARK.surface_active
+    );
+    assert_eq!(
+        chrome.selected_background,
+        style_tokens::PALETTE_DARK.surface_active
+    );
     assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
     assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
-    assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-    assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
-    assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
+    assert_eq!(
+        chrome.panel_radius,
+        BorderRadius::all(style_tokens::RADIUS.expanded)
+    );
+    assert_eq!(
+        chrome.row_radius,
+        BorderRadius::all(style_tokens::RADIUS.card)
+    );
+    assert_eq!(
+        chrome.button_radius,
+        BorderRadius::all(style_tokens::RADIUS.card)
+    );
     // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
     assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
 }

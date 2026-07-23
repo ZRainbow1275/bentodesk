@@ -46,25 +46,7 @@ impl PluginManifest {
     /// Returns `Ok(())` when the manifest passes all checks, or a
     /// [`PluginError::ManifestInvalid`] describing the first violation found.
     pub fn validate(&self) -> Result<(), PluginError> {
-        if self.id.len() < 3 || self.id.len() > 128 {
-            return Err(PluginError::ManifestInvalid(SmolStr::from(
-                "Plugin ID must be 3-128 characters",
-            )));
-        }
-        if !self.id.starts_with(|c: char| c.is_ascii_lowercase()) {
-            return Err(PluginError::ManifestInvalid(SmolStr::from(
-                "Plugin ID must start with a lowercase letter",
-            )));
-        }
-        if !self
-            .id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-        {
-            return Err(PluginError::ManifestInvalid(SmolStr::from(
-                "Plugin ID must only contain lowercase letters, digits, dots, and hyphens",
-            )));
-        }
+        validate_plugin_id(&self.id)?;
 
         if self.name.is_empty() || self.name.len() > 100 {
             return Err(PluginError::ManifestInvalid(SmolStr::from(
@@ -101,15 +83,44 @@ impl PluginManifest {
     }
 }
 
+/// Validate the ID anywhere it crosses a filesystem boundary.
+///
+/// Registry JSON is user-writable state, so uninstall and theme discovery must
+/// not trust a previously persisted `install_path` or unvalidated `id`.
+pub(crate) fn validate_plugin_id(id: &str) -> Result<(), PluginError> {
+    if id.len() < 3 || id.len() > 128 {
+        return Err(PluginError::ManifestInvalid(SmolStr::from(
+            "Plugin ID must be 3-128 characters",
+        )));
+    }
+    if !id.starts_with(|c: char| c.is_ascii_lowercase()) {
+        return Err(PluginError::ManifestInvalid(SmolStr::from(
+            "Plugin ID must start with a lowercase letter",
+        )));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+    {
+        return Err(PluginError::ManifestInvalid(SmolStr::from(
+            "Plugin ID must only contain lowercase letters, digits, dots, and hyphens",
+        )));
+    }
+    Ok(())
+}
+
 /// Basic SemVer validation: MAJOR.MINOR.PATCH where each part is a non-negative integer.
 fn is_valid_semver(version: &str) -> bool {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 {
-        return false;
+    let mut parts = version.split('.');
+    for _ in 0..3 {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.is_empty() || part.parse::<u64>().is_err() {
+            return false;
+        }
     }
-    parts
-        .iter()
-        .all(|p| !p.is_empty() && p.parse::<u64>().is_ok())
+    parts.next().is_none()
 }
 
 #[cfg(test)]
@@ -153,6 +164,18 @@ mod tests {
         let mut m = valid_manifest();
         m.id = "1plugin".into();
         assert!(matches!(m.validate(), Err(PluginError::ManifestInvalid(_))));
+    }
+
+    #[test]
+    fn rejects_id_with_path_separator() {
+        assert!(matches!(
+            validate_plugin_id("../outside"),
+            Err(PluginError::ManifestInvalid(_))
+        ));
+        assert!(matches!(
+            validate_plugin_id("com.example/theme"),
+            Err(PluginError::ManifestInvalid(_))
+        ));
     }
 
     #[test]

@@ -144,8 +144,9 @@ pub struct Zone {
     /// helpers leave this zone in place until it is explicitly unlocked.
     #[serde(default)]
     pub locked: bool,
-    /// User-facing bulk alias. When set, list/panel surfaces prefer this over
-    /// the canonical title without destroying the title itself.
+    /// User-facing display alias. When set, all visible Zone title surfaces
+    /// prefer this over the canonical title without destroying the title
+    /// itself (Tauri's `zone.alias ?? zone.name` contract).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<Cow<'static, str>>,
     /// Per-zone display-mode override (`hover`, `always`, `click`). `None`
@@ -289,6 +290,33 @@ impl Zone {
         true
     }
 
+    /// Alphabetically arrange the current zone's items and rebuild their
+    /// grid coordinates. This is the zone-scoped counterpart of Tauri's
+    /// `reorderItems(zone.id, sortedIds)` context-menu action; it must not
+    /// invoke the process-wide Desktop auto-grouping command.
+    pub fn auto_arrange_items(&mut self) -> bool {
+        let previous_ids: Vec<ZoneItemId> = self.items.iter().map(|item| item.id).collect();
+        self.items.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.id.0.cmp(&right.id.0))
+        });
+        let mut changed = previous_ids
+            .iter()
+            .copied()
+            .ne(self.items.iter().map(|item| item.id));
+        let columns = self.grid_columns.max(1) as i32;
+        for (index, item) in self.items.iter_mut().enumerate() {
+            let next_x = index as i32 % columns;
+            let next_y = index as i32 / columns;
+            changed |= item.x != next_x || item.y != next_y;
+            item.x = next_x;
+            item.y = next_y;
+        }
+        changed
+    }
+
     pub fn update_item_file_metadata(
         &mut self,
         id: ZoneItemId,
@@ -387,6 +415,16 @@ impl Zone {
         }
         self.alias = alias;
         true
+    }
+
+    /// Visible Zone title used by capsules, expanded headers, stack petals,
+    /// stack trays, search, and management panels.
+    #[inline]
+    pub fn display_title(&self) -> &str {
+        self.alias
+            .as_deref()
+            .filter(|alias| !alias.is_empty())
+            .unwrap_or(self.title.as_ref())
     }
 
     pub fn set_display_mode(&mut self, display_mode: Option<Cow<'static, str>>) -> bool {
@@ -532,30 +570,215 @@ impl ZoneList {
         true
     }
 
-    /// Fold `child` under `parent` and make `parent` the visible stack
-    /// anchor. Returns `false` when either id is missing or both ids match.
+    /// Fold `child` under `parent` and keep the relation as one flat stack.
+    ///
+    /// `parent` may name an existing stack member; in that case its visible
+    /// anchor remains the target. When `child` is itself a stack anchor, the
+    /// whole source stack is transferred and flattened under the target. This
+    /// mirrors Tauri's shared `stack_id` model and prevents a zone from being
+    /// both a hidden child and a nested anchor.
     pub fn stack(&mut self, parent: ZoneId, child: ZoneId) -> bool {
-        if parent == child {
+        if parent == child || self.get(parent).is_none() || self.get(child).is_none() {
             return false;
         }
-        let Some(parent_idx) = self.zones.iter().position(|z| z.id == parent) else {
-            return false;
-        };
-        let Some(child_idx) = self.zones.iter().position(|z| z.id == child) else {
-            return false;
-        };
 
-        if let Some(old_parent) = self.zones[child_idx].stack_parent {
-            if let Some(old_idx) = self.zones.iter().position(|z| z.id == old_parent) {
-                self.zones[old_idx].stack_members.retain(|id| *id != child);
+        let target_anchor = self.stack_anchor_for(parent).unwrap_or(parent);
+        let source_anchor = self.stack_anchor_for(child).unwrap_or(child);
+        if target_anchor == source_anchor {
+            return false;
+        }
+
+        let child_is_anchor = self.get(child).is_some_and(Zone::is_stack_anchor);
+        let mut transfer = SmallVec::<[ZoneId; 8]>::new();
+        transfer.push(child);
+        if child_is_anchor {
+            let source_members = self
+                .get(child)
+                .map(|zone| zone.stack_members.clone())
+                .unwrap_or_default();
+            for member in source_members {
+                if self
+                    .get(member)
+                    .and_then(|zone| zone.stack_parent)
+                    .is_some_and(|anchor| anchor == child)
+                    && !transfer.contains(&member)
+                {
+                    transfer.push(member);
+                }
+            }
+        }
+        if transfer.contains(&target_anchor) {
+            return false;
+        }
+
+        // Remove every transferred zone from its previous parent first. The
+        // target list is rebuilt below, so no zone can remain in two stacks.
+        for member in transfer.iter().copied() {
+            let old_parent = self.get(member).and_then(|zone| zone.stack_parent);
+            if let Some(old_parent) = old_parent {
+                if old_parent == target_anchor {
+                    continue;
+                }
+                if let Some(old_idx) = self.zones.iter().position(|zone| zone.id == old_parent) {
+                    self.zones[old_idx].stack_members.retain(|id| *id != member);
+                }
             }
         }
 
-        self.zones[child_idx].stack_parent = Some(parent);
-        if !self.zones[parent_idx].stack_members.contains(&child) {
-            self.zones[parent_idx].stack_members.push(child);
+        // A transferred source anchor becomes an ordinary child; its former
+        // children are transferred beside it rather than remaining nested.
+        if child_is_anchor {
+            if let Some(source) = self.get_mut(child) {
+                source.stack_members.clear();
+            }
+        }
+        for member in transfer.iter().copied() {
+            if let Some(zone) = self.get_mut(member) {
+                zone.stack_parent = Some(target_anchor);
+            }
+        }
+        let Some(parent_idx) = self.zones.iter().position(|zone| zone.id == target_anchor) else {
+            return false;
+        };
+        for member in transfer {
+            if !self.zones[parent_idx].stack_members.contains(&member) {
+                self.zones[parent_idx].stack_members.push(member);
+            }
         }
         true
+    }
+
+    /// Move a free zone or every member of its existing stack by one rigid
+    /// delta, preserving all member offsets exactly (Tauri `StackWrapper`).
+    pub fn move_group_to(&mut self, id: ZoneId, x: i32, y: i32) -> bool {
+        let Some(zone) = self.get(id) else {
+            return false;
+        };
+        let dx = x.saturating_sub(zone.x);
+        let dy = y.saturating_sub(zone.y);
+        if dx == 0 && dy == 0 {
+            return false;
+        }
+
+        let anchor = self.stack_anchor_for(id).unwrap_or(id);
+        let mut members = self.stack_member_ids(anchor).unwrap_or_else(|| {
+            let mut ids = SmallVec::<[ZoneId; 8]>::new();
+            ids.push(id);
+            ids
+        });
+        if !members.contains(&id) {
+            members.push(id);
+        }
+        for member in members {
+            if let Some(zone) = self.get_mut(member) {
+                zone.x = zone.x.saturating_add(dx);
+                zone.y = zone.y.saturating_add(dy);
+            }
+        }
+        true
+    }
+
+    /// Flatten legacy nested stack relations without disturbing the order of
+    /// already-valid stacks.
+    ///
+    /// Older builds could make a stack anchor a child of another anchor while
+    /// leaving its own `stack_members` intact. Move those members immediately
+    /// after the former source anchor in its parent stack. Each pass removes
+    /// one nested anchor, so the bounded zone-count loop also handles deeper
+    /// legacy trees without recursion.
+    pub fn flatten_nested_stacks(&mut self) -> bool {
+        let mut changed = false;
+        for _ in 0..self.zones.len() {
+            let Some(source_idx) = self
+                .zones
+                .iter()
+                .position(|zone| zone.stack_parent.is_some() && !zone.stack_members.is_empty())
+            else {
+                break;
+            };
+            let source_id = self.zones[source_idx].id;
+            let Some(parent_id) = self.zones[source_idx].stack_parent else {
+                continue;
+            };
+            let Some(parent_idx) = self.zones.iter().position(|zone| zone.id == parent_id) else {
+                // A missing parent cannot own a visible stack. Promote the
+                // source back to an independent anchor instead of hiding it.
+                self.zones[source_idx].stack_parent = None;
+                changed = true;
+                continue;
+            };
+            if source_id == parent_id {
+                self.zones[source_idx].stack_parent = None;
+                changed = true;
+                continue;
+            }
+            let mut cursor = parent_id;
+            let mut cycle = false;
+            for _ in 0..self.zones.len() {
+                if cursor == source_id {
+                    cycle = true;
+                    break;
+                }
+                let Some(next) = self.get(cursor).and_then(|zone| zone.stack_parent) else {
+                    break;
+                };
+                cursor = next;
+            }
+            if cycle {
+                // Keep the source's member order and promote it to the root;
+                // its former parent can then remain a normal child.
+                self.zones[source_idx].stack_parent = None;
+                changed = true;
+                continue;
+            }
+
+            let source_members = core::mem::take(&mut self.zones[source_idx].stack_members);
+            let mut transfer = SmallVec::<[ZoneId; 8]>::new();
+            for member in source_members {
+                if member != source_id
+                    && member != parent_id
+                    && self
+                        .get(member)
+                        .and_then(|zone| zone.stack_parent)
+                        .is_some_and(|owner| owner == source_id)
+                    && !transfer.contains(&member)
+                {
+                    transfer.push(member);
+                }
+            }
+
+            for member in transfer.iter().copied() {
+                if let Some(zone) = self.get_mut(member) {
+                    zone.stack_parent = Some(parent_id);
+                }
+            }
+            for zone in &mut self.zones {
+                if zone.id != parent_id {
+                    zone.stack_members
+                        .retain(|member| !transfer.contains(member));
+                }
+            }
+
+            let parent = &mut self.zones[parent_idx];
+            parent
+                .stack_members
+                .retain(|member| !transfer.contains(member));
+            let insert_at = if let Some(source_pos) = parent
+                .stack_members
+                .iter()
+                .position(|member| *member == source_id)
+            {
+                source_pos + 1
+            } else {
+                parent.stack_members.push(source_id);
+                parent.stack_members.len()
+            };
+            for (offset, member) in transfer.into_iter().enumerate() {
+                parent.stack_members.insert(insert_at + offset, member);
+            }
+            changed = true;
+        }
+        changed
     }
 
     pub fn stack_anchor_for(&self, id: ZoneId) -> Option<ZoneId> {
@@ -800,6 +1023,10 @@ impl ZoneList {
             .is_some_and(|zone| zone.remove_item(item_id))
     }
 
+    pub fn auto_arrange_items(&mut self, zone_id: ZoneId) -> bool {
+        self.get_mut(zone_id).is_some_and(Zone::auto_arrange_items)
+    }
+
     pub fn update_item_file_metadata(
         &mut self,
         zone_id: ZoneId,
@@ -939,6 +1166,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_arrange_items_sorts_one_zone_and_rebuilds_its_grid() {
+        let mut z = zone(7, 0);
+        z.grid_columns = 2;
+        let zulu = z
+            .add_item(Cow::Borrowed("C:/Desktop/Zulu.txt"), Cow::Borrowed("z"))
+            .expect("zulu");
+        let alpha = z
+            .add_item(Cow::Borrowed("C:/Desktop/alpha.txt"), Cow::Borrowed("a"))
+            .expect("alpha");
+        let beta = z
+            .add_item(Cow::Borrowed("C:/Desktop/Beta.txt"), Cow::Borrowed("b"))
+            .expect("beta");
+
+        assert!(z.auto_arrange_items());
+        assert_eq!(
+            z.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![alpha, beta, zulu]
+        );
+        assert_eq!(
+            z.items
+                .iter()
+                .map(|item| (item.x, item.y))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 0), (0, 1)]
+        );
+        assert!(
+            !z.auto_arrange_items(),
+            "already-arranged items are a no-op"
+        );
+    }
+
+    #[test]
     fn zone_list_get_mut_allows_geometry_edit() {
         let mut zl = ZoneList::new();
         zl.add(zone(1, 10));
@@ -979,6 +1238,7 @@ mod tests {
         let mut z = zone(8, 0);
         assert!(!z.locked);
         assert!(z.alias.is_none());
+        assert_eq!(z.display_title(), z.title.as_ref());
         assert!(z.display_mode.is_none());
 
         assert!(z.set_locked(true));
@@ -990,8 +1250,10 @@ mod tests {
         assert!(z.set_alias(Some(Cow::Borrowed("Alias"))));
         assert!(!z.set_alias(Some(Cow::Borrowed("Alias"))));
         assert_eq!(z.alias.as_deref(), Some("Alias"));
+        assert_eq!(z.display_title(), "Alias");
         assert!(z.set_alias(None));
         assert!(z.alias.is_none());
+        assert_eq!(z.display_title(), z.title.as_ref());
 
         assert!(z.set_display_mode(Some(Cow::Borrowed("hover"))));
         assert!(!z.set_display_mode(Some(Cow::Borrowed("hover"))));
@@ -1095,6 +1357,165 @@ mod tests {
         assert!(zl.unstack(ZoneId(2)));
         assert!(matches!(zl.get(ZoneId(1)), Some(parent) if !parent.is_stack_anchor()));
         assert!(matches!(zl.get(ZoneId(2)), Some(child) if !child.is_stacked_child()));
+    }
+
+    #[test]
+    fn stack_anchor_merge_flattens_the_whole_source_stack() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+        zl.add(zone(3, 30));
+        zl.add(zone(4, 40));
+
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+        assert!(zl.stack(ZoneId(4), ZoneId(1)));
+
+        assert_eq!(
+            zl.stack_member_ids(ZoneId(4)).map(|ids| ids.into_vec()),
+            Some(vec![ZoneId(4), ZoneId(1), ZoneId(2), ZoneId(3)])
+        );
+        for id in [ZoneId(1), ZoneId(2), ZoneId(3)] {
+            assert_eq!(
+                zl.get(id).and_then(|zone| zone.stack_parent),
+                Some(ZoneId(4))
+            );
+        }
+        assert!(matches!(zl.get(ZoneId(1)), Some(zone) if zone.stack_members.is_empty()));
+        assert!(
+            zl.iter()
+                .all(|zone| !(zone.is_stacked_child() && zone.is_stack_anchor()))
+        );
+    }
+
+    #[test]
+    fn stacking_onto_a_member_keeps_its_existing_anchor() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+        zl.add(zone(3, 30));
+
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(2), ZoneId(3)));
+        assert_eq!(zl.stack_anchor_for(ZoneId(3)), Some(ZoneId(1)));
+        assert_eq!(
+            zl.stack_member_ids(ZoneId(1)).map(|ids| ids.into_vec()),
+            Some(vec![ZoneId(1), ZoneId(2), ZoneId(3)])
+        );
+    }
+
+    #[test]
+    fn stacking_members_that_already_share_an_anchor_is_a_noop() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+        zl.add(zone(3, 30));
+
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+        assert!(!zl.stack(ZoneId(2), ZoneId(3)));
+        assert_eq!(
+            zl.stack_member_ids(ZoneId(1)).map(|ids| ids.into_vec()),
+            Some(vec![ZoneId(1), ZoneId(2), ZoneId(3)])
+        );
+    }
+
+    #[test]
+    fn flatten_nested_stacks_repairs_legacy_hidden_tree_without_reordering() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+        zl.add(zone(3, 30));
+        zl.add(zone(4, 40));
+        zl.add(zone(5, 50));
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+        assert!(zl.stack(ZoneId(4), ZoneId(5)));
+
+        // Legacy state: source anchor 1 was appended below anchor 4 but its
+        // own children were left pointing at 1, creating a hidden tree.
+        zl.get_mut(ZoneId(1)).unwrap().stack_parent = Some(ZoneId(4));
+        zl.get_mut(ZoneId(4))
+            .unwrap()
+            .stack_members
+            .insert(0, ZoneId(1));
+
+        assert!(zl.flatten_nested_stacks());
+        assert_eq!(
+            zl.stack_member_ids(ZoneId(4)).map(|ids| ids.into_vec()),
+            Some(vec![ZoneId(4), ZoneId(1), ZoneId(2), ZoneId(3), ZoneId(5)])
+        );
+        for id in [ZoneId(1), ZoneId(2), ZoneId(3), ZoneId(5)] {
+            assert_eq!(
+                zl.get(id).and_then(|zone| zone.stack_parent),
+                Some(ZoneId(4))
+            );
+        }
+        assert!(
+            zl.iter()
+                .all(|zone| !(zone.is_stacked_child() && zone.is_stack_anchor()))
+        );
+        assert!(!zl.flatten_nested_stacks());
+    }
+
+    #[test]
+    fn flatten_nested_stacks_promotes_a_cycle_root_instead_of_hiding_every_zone() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+        zl.get_mut(ZoneId(1)).unwrap().stack_parent = Some(ZoneId(2));
+        zl.get_mut(ZoneId(1)).unwrap().stack_members.push(ZoneId(2));
+        zl.get_mut(ZoneId(2)).unwrap().stack_parent = Some(ZoneId(1));
+        zl.get_mut(ZoneId(2)).unwrap().stack_members.push(ZoneId(1));
+
+        assert!(zl.flatten_nested_stacks());
+        assert!(zl.iter().any(|zone| zone.stack_parent.is_none()));
+        assert!(
+            zl.iter()
+                .all(|zone| !(zone.is_stacked_child() && zone.is_stack_anchor()))
+        );
+    }
+
+    #[test]
+    fn move_group_to_preserves_every_stack_member_offset() {
+        let mut zl = ZoneList::new();
+        zl.add(Zone::new(ZoneId(1), "anchor", 100, 80, 120, 90));
+        zl.add(Zone::new(ZoneId(2), "child-a", 140, 150, 120, 90));
+        zl.add(Zone::new(ZoneId(3), "child-b", 70, 210, 120, 90));
+        assert!(zl.stack(ZoneId(1), ZoneId(2)));
+        assert!(zl.stack(ZoneId(1), ZoneId(3)));
+
+        assert!(zl.move_group_to(ZoneId(1), 300, 330));
+        assert_eq!(
+            zl.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((300, 330))
+        );
+        assert_eq!(
+            zl.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((340, 400))
+        );
+        assert_eq!(
+            zl.get(ZoneId(3)).map(|zone| (zone.x, zone.y)),
+            Some((270, 460))
+        );
+        assert!(!zl.move_group_to(ZoneId(1), 300, 330));
+    }
+
+    #[test]
+    fn move_group_to_moves_a_free_zone_without_touching_others() {
+        let mut zl = ZoneList::new();
+        zl.add(zone(1, 10));
+        zl.add(zone(2, 20));
+
+        assert!(zl.move_group_to(ZoneId(1), 200, 240));
+        assert_eq!(
+            zl.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((200, 240))
+        );
+        assert_eq!(
+            zl.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((20, 0))
+        );
     }
 
     #[test]

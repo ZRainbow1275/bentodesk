@@ -1,4 +1,4 @@
-//! Business surface: global SearchBar.
+//! Business surface: global SearchBar plus Tauri-parity inline Zone search.
 //!
 //! Visual spec: `search_bar.snap.md`. The selected-stack runtime owns a
 //! native D2D Search HWND: keyboard producers update this state machine, the
@@ -28,6 +28,16 @@ pub const MAX_VISIBLE_RESULTS: usize = 8;
 /// Maximum query length accepted by the selected-stack keyboard path.
 pub const MAX_QUERY_CHARS: usize = 96;
 
+/// Inline Zone search geometry from the Tauri `SearchBar.css` baseline.
+pub const ZONE_INLINE_HEIGHT_PX: f32 = 36.0;
+pub const ZONE_INLINE_MARGIN_X_PX: f32 = 16.0;
+pub const ZONE_INLINE_TOP_PX: f32 = 54.0;
+pub const ZONE_INLINE_ITEM_OFFSET_Y_PX: f32 = 44.0;
+pub const ZONE_INLINE_CLEAR_SIZE_PX: f32 = 20.0;
+/// Empty inline search fields fold back after this period without input.
+/// Non-empty queries remain open so user work is never discarded by idling.
+pub const ZONE_INLINE_IDLE_DISMISS_MS: u32 = 3_000;
+
 /// Runtime panel margin inside the Search aux HWND.
 pub const RUNTIME_PANEL_MARGIN_PX: f32 = 18.0;
 
@@ -43,8 +53,9 @@ pub const RUNTIME_STATUS_HEIGHT_PX: f32 = 24.0;
 /// Runtime search row stride in DIPs.
 pub const RUNTIME_ROW_STRIDE_PX: f32 = 48.0;
 
-/// Runtime close button size.
-pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 58.0;
+/// Runtime close button size. The selected-stack Search surface uses the same
+/// compact icon-only header control as Settings/About rather than a text slab.
+pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 32.0;
 
 /// SearchBar colour contract derived from an active palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -298,6 +309,42 @@ impl SearchBarState {
     }
 }
 
+/// Rectangle occupied by the inline search input inside an expanded Zone.
+pub fn zone_inline_rect(zone: Rect) -> Rect {
+    Rect {
+        x: zone.x + ZONE_INLINE_MARGIN_X_PX,
+        y: zone.y + ZONE_INLINE_TOP_PX,
+        width: (zone.width - ZONE_INLINE_MARGIN_X_PX * 2.0).max(0.0),
+        height: ZONE_INLINE_HEIGHT_PX,
+    }
+}
+
+/// Clear button inside the inline Zone search input.
+pub fn zone_inline_clear_rect(zone: Rect) -> Rect {
+    let input = zone_inline_rect(zone);
+    Rect {
+        x: input.right() - ZONE_INLINE_CLEAR_SIZE_PX - 8.0,
+        y: input.y + (input.height - ZONE_INLINE_CLEAR_SIZE_PX) * 0.5,
+        width: ZONE_INLINE_CLEAR_SIZE_PX,
+        height: ZONE_INLINE_CLEAR_SIZE_PX,
+    }
+}
+
+/// Tauri-parity item-name filter without allocating for the common ASCII path.
+pub fn zone_item_matches_query(name: &str, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    if name.is_ascii() && query.is_ascii() {
+        return name
+            .as_bytes()
+            .windows(query.len())
+            .any(|candidate| candidate.eq_ignore_ascii_case(query.as_bytes()));
+    }
+    name.to_lowercase().contains(&query.to_lowercase())
+}
+
 /// Build the SearchBar subtree. The runtime D2D renderer owns the rich body,
 /// but the widget node remains as the business-surface reachability anchor.
 pub fn build() -> WidgetNode {
@@ -349,10 +396,10 @@ pub fn search_input_rect(viewport: Size) -> Rect {
 pub fn search_close_rect(viewport: Size) -> Rect {
     let panel = search_panel_rect(viewport);
     Rect {
-        x: panel.right() - RUNTIME_CLOSE_BUTTON_SIZE_PX - 14.0,
-        y: panel.y + 14.0,
+        x: panel.right() - RUNTIME_CLOSE_BUTTON_SIZE_PX - 16.0,
+        y: panel.y + (RUNTIME_HEADER_HEIGHT_PX - RUNTIME_CLOSE_BUTTON_SIZE_PX) * 0.5,
         width: RUNTIME_CLOSE_BUTTON_SIZE_PX,
-        height: 26.0,
+        height: RUNTIME_CLOSE_BUTTON_SIZE_PX,
     }
 }
 
@@ -651,18 +698,72 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.input_background, style_tokens::PALETTE_DARK.surface_subtle);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_subtle);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
-        assert_eq!(chrome.danger_background, style_tokens::PALETTE_DARK.accent_red);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.input_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
+        assert_eq!(
+            chrome.danger_background,
+            style_tokens::PALETTE_DARK.accent_red
+        );
         assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.input_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.close_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.input_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.close_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
+    }
+
+    #[test]
+    fn inline_zone_search_geometry_matches_tauri_bar() {
+        let zone = Rect {
+            x: 100.0,
+            y: 200.0,
+            width: 320.0,
+            height: 220.0,
+        };
+        let input = zone_inline_rect(zone);
+        assert_eq!(input.x, 116.0);
+        assert_eq!(input.y, 254.0);
+        assert_eq!(input.width, 288.0);
+        assert_eq!(input.height, 36.0);
+        let clear = zone_inline_clear_rect(zone);
+        assert!(clear.x >= input.x && clear.right() <= input.right());
+        assert!(clear.y >= input.y && clear.bottom() <= input.bottom());
+    }
+
+    #[test]
+    fn inline_zone_search_filters_case_insensitively() {
+        assert!(zone_item_matches_query("Quarterly Report.PDF", "report"));
+        assert!(zone_item_matches_query("Quarterly Report.PDF", "REPORT"));
+        assert!(zone_item_matches_query("项目总结.docx", "项目"));
+        assert!(zone_item_matches_query("anything", "   "));
+        assert!(!zone_item_matches_query("Quarterly Report.PDF", "music"));
     }
 }

@@ -53,10 +53,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bento_nano_app::{
     AppState, BulkLayoutAlgorithm, BulkZoneUpdate, Command, EventDispatcher, IconPickerSession,
-    ItemDragCandidate, ItemFileRenameSession, PalettePickerSession, PassphraseEntryPurpose,
-    Renderer, SettingsBackupEntry, SettingsBackupStatus, SettingsEncryptionMode,
-    SettingsKeybindingFeedback, SettingsPluginEntry, SettingsUpdaterStatus, ThemeOption,
-    WindowRegistry, WindowSlot, WindowState, ZoneDisplayMode, ZoneEditorSession,
+    ItemDragCandidate, ItemFileRenameSession, PalettePickerSession, PanelHeaderButtonHover,
+    PanelHeaderButtonKind, PassphraseEntryPurpose, Renderer, SettingsBackupEntry,
+    SettingsBackupStatus, SettingsEncryptionMode, SettingsKeybindingFeedback, SettingsPluginEntry,
+    SettingsUpdaterStatus, ThemeOption, WindowRegistry, WindowSlot, WindowState, ZoneDisplayMode,
+    ZoneEditorSession,
+    animator::{AnimChannel, Easing, INLINE_SEARCH_IN_DURATION_MS, INLINE_SEARCH_OUT_DURATION_MS},
     business::minibar::{self, MAX_MINIBARS as BUSINESS_MAX_MINIBARS, MiniBar, MiniBarRoster},
     business::{
         bulk_manager_panel::{
@@ -65,7 +67,7 @@ use bento_nano_app::{
         capsule_picker::{self, CapsuleEntry, CapsulePickerHit},
         highlight_overlay::{self, HighlightPulse, HighlightRect},
         icons::{ALL_ICON_KINDS, IconKind},
-        palette_picker,
+        palette_picker, popover,
         rules_wizard::{
             self, ActionKind, PredicateKind, RulesWizardAction, RulesWizardPointerHit,
             RunModeChoice, WizardStep,
@@ -81,12 +83,13 @@ use bento_nano_app::{
         tray_menu::TrayMenuItem,
         zone_editor::{
             ACCENT_PALETTE, CapsuleShapeChoice, CapsuleSizeChoice, GRID_COLUMNS_MAX,
-            GRID_COLUMNS_MIN,
+            GRID_COLUMNS_MIN, NAME_MAX_LEN,
         },
     },
     dispatcher::{PaletteTarget, Point as DispatchPoint, Size as DispatchSize, ZoneSpec},
     item_file_rename_geometry::{self, ItemFileRenameHit},
     picker_geometry::{self, IconPickerHit, PalettePickerHit},
+    state::SettingsSnapshot,
     zone_editor_geometry::{self, ZoneEditorHit},
     zone_pill_geometry,
 };
@@ -110,7 +113,8 @@ use bento_nano_backend::{
     updater::{UpdateCheckFrequency, UpdateEvent, Updater},
 };
 use bento_nano_platform::{
-    PlatformError, WindowDesc, WindowKind, create_window, message_loop, storage, to_windows_hwnd,
+    PlatformError, WindowDesc, WindowKind, create_window, default_size, message_loop, storage,
+    to_windows_hwnd,
 };
 use bento_nano_tree::NodeId;
 use bento_nano_widget::WidgetNode;
@@ -123,13 +127,16 @@ use mimalloc::MiMalloc;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use windows_sys::Win32::Foundation::{
-    BOOL, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HWND, LPARAM, LRESULT,
-    POINT, RECT, WPARAM,
+    BOOL, COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HWND,
+    LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 // #19-B (2026-05-31) — OS UI-language default. kernel32 Vista+; static import
 // safe on our Win7+ target.
 use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
+use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, InvalidateRect, ScreenToClient, UpdateWindow,
+};
 // Wave 15 — Tier 0 #29/#31. `EmptyWorkingSet(GetCurrentProcess())` is the
 // one-shot, post-first-paint working-set trim that pushes cold pages onto
 // the standby list so Windows can reclaim them under memory pressure.
@@ -147,23 +154,32 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA;
 use windows_sys::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalFlags, GlobalLock, GlobalSize, GlobalUnlock, MEM_COMMIT,
-    MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
-    PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
+    GMEM_MOVEABLE, GetProcessHeaps, GlobalAlloc, GlobalFlags, GlobalLock, GlobalSize, GlobalUnlock,
+    HeapCompact, MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+    PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+    PAGE_WRITECOPY, VirtualQuery,
 };
 use windows_sys::Win32::System::ProcessStatus::{EmptyWorkingSet, GetModuleFileNameExW};
+use windows_sys::Win32::System::Recovery::{
+    RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT, RegisterApplicationRestart,
+    UnregisterApplicationRestart,
+};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    ABOVE_NORMAL_PRIORITY_CLASS, AttachThreadInput, CreateMutexW, GetCurrentProcess,
+    GetCurrentThreadId, NORMAL_PRIORITY_CLASS, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    SetPriorityClass,
 };
 use windows_sys::Win32::UI::Controls::Dialogs::{
-    CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
-    OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    CC_ANYCOLOR, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, CommDlgExtendedError,
+    GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST,
+    OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
-    ReleaseCapture, SetCapture, UnregisterHotKey, VK_CONTROL,
+    ReleaseCapture, SetActiveWindow, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, UnregisterHotKey, VK_CONTROL,
 };
 use windows_sys::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, FO_DELETE, FOF_ALLOWUNDO,
@@ -172,19 +188,21 @@ use windows_sys::Win32::UI::Shell::{
     NOTIFYICONDATAW, SHFILEOPSTRUCTW, SHFileOperationW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CREATESTRUCTW, CreatePopupMenu, DefWindowProcW, DestroyMenu, DestroyWindow,
-    EnumWindows, FindWindowW, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW, GetClientRect,
-    GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IDI_APPLICATION, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LoadIconW, MB_ICONERROR,
+    AppendMenuW, BringWindowToTop, CREATESTRUCTW, CreatePopupMenu, DefWindowProcW, DestroyMenu,
+    DestroyWindow, EnumWindows, FindWindowW, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HTTRANSPARENT, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KillTimer, MB_ICONERROR,
     MB_OK, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW, PostQuitMessage,
     RegisterWindowMessageW, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CHAR, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_PAINT,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR,
+    WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_POWERBROADCAST,
     WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
+    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
 };
 
 use bento_nano_shell::{hotkey, ui};
@@ -202,6 +220,8 @@ const WM_ITEM_DRAG_OUT: u32 = WM_APP + 0x0505;
 /// so the primary instance surfaces its Main window. 0x0505 is taken by
 /// `WM_ITEM_DRAG_OUT` above, so this uses 0x0506.
 const WM_WAKE_INSTANCE: u32 = WM_APP + 0x0506;
+/// Posted once startup icon-cache repair has queued its UI-thread results.
+const WM_ICON_CACHE_READY: u32 = WM_APP + 0x0507;
 /// Mc-1b — process-wide single-instance mutex HANDLE (stored as `isize`).
 /// Held for the whole process lifetime; we deliberately never `CloseHandle`
 /// it (closing would release the named mutex and defeat the guard — the OS
@@ -245,19 +265,49 @@ const GMEM_INVALID_HANDLE_FLAG: u32 = 0x8000;
 const DROPFILES_HEADER_LEN: usize = 20;
 const MAX_RAW_DROPFILES_BYTES: usize = 64 * 1024;
 const MAX_RAW_DROPFILES_PATH_CHARS: usize = 32 * 1024;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+const RESTART_ATTEMPT_ARG: &str = "--bentodesk-restart-attempt=";
+const RESTART_WINDOW_START_ARG: &str = "--bentodesk-restart-window-start=";
 
-/// Polling bridge for Tauri-style `setIgnoreCursorEvents`: when the main
-/// Ghost Layer is transparent it will not receive `WM_MOUSEMOVE`, so a cheap
-/// Win32 timer re-evaluates the real selected-stack hit map and flips
-/// `WS_EX_TRANSPARENT` only when the cursor crosses interactive geometry.
+/// Legacy ghost passthrough timer id. The selected-stack Main HWND now relies
+/// on the renderer-owned window region for idle click-through, so startup no
+/// longer arms this timer; the id remains reserved for cleanup/test stability.
 const GHOST_PASSTHROUGH_TIMER_ID: usize = 0xB470_0505;
-const GHOST_PASSTHROUGH_POLL_MS: u32 = 50;
 
 /// Backend/native event bridge. File watchers, live-folder refreshes, updater
 /// events, and scheduler events arrive on crossbeam channels; this timer wakes
 /// the UI thread even when no animation or input is producing paint messages.
 const BACKEND_EVENT_POLL_TIMER_ID: usize = 0xB470_0507;
 const BACKEND_EVENT_POLL_MS: u32 = 250;
+
+/// On-demand frame backstop for hover-intent, stack bloom, capsule morph, and
+/// theme cross-fade animations.
+/// `InvalidateRect` is still the primary immediate-mode pump; this timer only
+/// runs while a hover scheduler deadline, stack bloom, pill animation, or
+/// Settings theme transition is active, so a cursor move into transparent
+/// desktop space cannot strand a pending collapse, petal reveal, or color fade.
+const HOVER_FRAME_TIMER_ID: usize = 0xB470_050A;
+const SETTINGS_OUTSIDE_CLICK_TIMER_ID: usize = 0xB470_0511;
+const SETTINGS_OUTSIDE_CLICK_POLL_MS: u32 = 32;
+const CONTEXT_MENU_INPUT_TIMER_ID: usize = 0xB470_0512;
+const CONTEXT_MENU_INPUT_POLL_MS: u32 = 24;
+const HOVER_FRAME_POLL_MS: u32 = 16;
+
+/// One-shot post-startup memory trim. First-paint trim runs before late
+/// startup work (tray, minibar restore, watcher warm-up) has fully settled, so
+/// this timer gives the selected-stack runtime one more bounded chance to
+/// release retained allocator/D2D resources before the WS-7 t10 sample.
+const STARTUP_MEMORY_TRIM_TIMER_ID: usize = 0xB470_0508;
+const STARTUP_MEMORY_TRIM_MS: u32 = 5_000;
+/// Low-frequency resident trim for the always-on desktop surface. The first
+/// two startup trims cover cold boot; this keeps long-idle D2D/DXGI allocator
+/// rebound from crossing the strict WS-7 t30/t60 Private Bytes gate.
+const RESIDENT_MEMORY_TRIM_TIMER_ID: usize = 0xB470_0509;
+const RESIDENT_MEMORY_TRIM_MS: u32 = 25_000;
+/// One-shot trim after StackTray opens. The first paint presents the tray, then
+/// this drops rebuildable renderer caches before the strict t10/t30 samples.
+const STACK_TRAY_MEMORY_TRIM_TIMER_ID: usize = 0xB470_050B;
+const STACK_TRAY_MEMORY_TRIM_MS: u32 = 900;
 
 /// 500 ms hibernation gate (T-099). A non-Main window hidden for less than
 /// this many milliseconds keeps its swap chain backbuffer resident, so a
@@ -329,6 +379,7 @@ const ZONE_EDITOR_CAPSULE_PRESETS: &[(CapsuleSizeChoice, CapsuleShapeChoice)] = 
     (CapsuleSizeChoice::Medium, CapsuleShapeChoice::Rounded),
     (CapsuleSizeChoice::Large, CapsuleShapeChoice::Circle),
     (CapsuleSizeChoice::Large, CapsuleShapeChoice::Minimal),
+    (CapsuleSizeChoice::Large, CapsuleShapeChoice::Square),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +399,17 @@ enum AuxiliaryEscapeAction {
 /// `RefCell` / `Cell` interior mutability is sound because the Win32 message
 /// pump is strictly single-threaded — every wndproc call comes from the UI
 /// thread that owns the pump (Win32 contract, not our enforcement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingItemDragOut {
+    zone_id: ZoneId,
+    item_id: ZoneItemId,
+    path: SmolStr,
+    /// Explorer convention: Ctrl-drag copies and keeps the source Zone item;
+    /// an ordinary drag moves the item out of BentoDesk after OLE confirms a
+    /// successful drop.
+    copy_only: bool,
+}
+
 struct AppRoot {
     /// Domain widget tree + zones + global UI flags. Shared across windows.
     app: RefCell<AppState>,
@@ -384,23 +446,21 @@ struct AppRoot {
     /// per `WindowKind::MiniBar` HWND) can pick the right descriptor by
     /// zone id without re-walking `app.zones`. Inline cap matches §11 R7.
     minibars: RefCell<smallvec::SmallVec<[(ZoneId, MiniBar); BUSINESS_MAX_MINIBARS]>>,
-    /// Native zone context-menu state used while `TrackPopupMenu` owns its
-    /// modal loop. This lets both `TPM_RETURNCMD` and standard `WM_COMMAND`
-    /// menu delivery route through the same production action mapper.
+    /// Selection context for the app-rendered Zone menu. The D2D menu owns
+    /// presentation while this record keeps command IDs mapped to real zones.
     zone_context_menu: RefCell<Option<PendingZoneContextMenu>>,
-    zone_context_menu_consumed: Cell<bool>,
-    zone_context_menu_deferred: RefCell<Option<(ZoneId, ZoneContextAction)>>,
-    /// Native item context-menu state used while `TrackPopupMenu` owns its
-    /// modal loop. Mirrors the zone/tray contract so physical menu selection,
-    /// keyboard selection, and `WM_COMMAND` automation all reach the same
-    /// selected-stack item/file-operation mapper.
+    /// Selection context for the app-rendered item menu.
     item_context_menu: RefCell<Option<PendingItemContextMenu>>,
-    item_context_menu_consumed: Cell<bool>,
-    /// Path captured when an item drag crosses the external-drag threshold.
+    /// Item identity captured when a drag crosses the external-drag threshold.
     /// The shell posts `WM_ITEM_DRAG_OUT` and starts OLE from that later pump
     /// turn so `DoDragDrop` is not entered from inside the threshold
     /// `WM_MOUSEMOVE` handler.
-    pending_item_drag_out: RefCell<Option<SmolStr>>,
+    pending_item_drag_out: RefCell<Option<PendingItemDragOut>>,
+    /// Stack anchor produced by the current pointer-drop command. The domain
+    /// relation is created by the dispatcher first; only then may hover reveal
+    /// resolve the new anchor's members and start the Bloom under the unchanged
+    /// release point. Context-menu `StackZone` commands never set this flag.
+    pending_stack_drop_bloom: Cell<Option<ZoneId>>,
     /// Source-only OLE guard. While BentoDesk is dragging one of its own
     /// items out to another application, the main HWND must not also accept
     /// the same CF_HDROP payload through its registered OLE drop target.
@@ -444,6 +504,10 @@ struct AppRoot {
     /// Desktop watcher handle. Keeping it in AppRoot preserves the underlying
     /// notify watcher for the whole process lifetime.
     desktop_watcher: RefCell<Option<bento_nano_backend::watcher::DesktopWatcher>>,
+    /// Retained sender used to rebuild the desktop watcher after Settings path
+    /// changes or power resume without replacing the receiver wired into the UI
+    /// pump.
+    desktop_event_tx: crossbeam_channel::Sender<bento_nano_backend::watcher::FileChangedEvent>,
     /// Live desktop-change events routed from the backend watcher into the UI
     /// pump. Drained once per paint by `drain_desktop_events`.
     desktop_events: crossbeam_channel::Receiver<bento_nano_backend::watcher::FileChangedEvent>,
@@ -457,6 +521,11 @@ struct AppRoot {
     /// resume events are drained in the paint pump and reassert work-area
     /// placement.
     ghost_events: crossbeam_channel::Receiver<bento_nano_backend::ghost_layer::GhostLayerEvent>,
+    /// Delayed power-resume producer/consumer. `GhostLayerEvent::PowerResume`
+    /// schedules the user-configured delay through the backend; only the
+    /// resulting `PowerEvent::Resumed` performs watcher/overlay recovery.
+    power_event_tx: crossbeam_channel::Sender<bento_nano_backend::power::PowerEvent>,
+    power_events: crossbeam_channel::Receiver<bento_nano_backend::power::PowerEvent>,
     /// Selected-stack updater driver. Commands call this directly; lifecycle
     /// events are drained into `AppState::settings_updater_status`.
     updater: Updater,
@@ -716,6 +785,7 @@ fn main() {
     let (desktop_event_tx, desktop_event_rx) = crossbeam_channel::unbounded();
     let (live_folder_event_tx, live_folder_event_rx) = crossbeam_channel::unbounded();
     let (ghost_event_tx, ghost_event_rx) = crossbeam_channel::unbounded();
+    let (power_event_tx, power_event_rx) = crossbeam_channel::unbounded();
     let (updater_event_tx, updater_event_rx) = crossbeam_channel::unbounded();
     let (rules_scheduler_event_tx, rules_scheduler_event_rx) = crossbeam_channel::unbounded();
     bento_nano_backend::ghost_layer::set_event_sender(ghost_event_tx);
@@ -723,7 +793,10 @@ fn main() {
     let desktop_watcher = if startup_diag_skip("desktop_watcher") {
         None
     } else {
-        match bento_nano_backend::watcher::setup_file_watcher(&desktop_sources, desktop_event_tx) {
+        match bento_nano_backend::watcher::setup_file_watcher(
+            &desktop_sources,
+            desktop_event_tx.clone(),
+        ) {
             Ok(watcher) => Some(watcher),
             Err(e) => {
                 tracing::warn!(
@@ -746,9 +819,16 @@ fn main() {
         );
     }
 
-    // T-010 — install the process AppRoot before creating any window.
+    // T-010 — install the process AppRoot before creating any window. Seed the
+    // editable Desktop path from the real resolved user Desktop rather than
+    // the old machine-specific `D:\Desktop` placeholder.
+    let app_state = AppState::new();
+    if let Some(primary_desktop) = desktop_sources.first() {
+        *app_state.desktop_path_draft.borrow_mut() =
+            SmolStr::new(primary_desktop.to_string_lossy());
+    }
     install_app_root(Box::new(AppRoot {
-        app: RefCell::new(AppState::new()),
+        app: RefCell::new(app_state),
         registry: RefCell::new(WindowRegistry::new()),
         dispatcher: EventDispatcher::new(),
         hovered: RefCell::new(None),
@@ -760,11 +840,9 @@ fn main() {
         minibar_roster: RefCell::new(MiniBarRoster::new()),
         minibars: RefCell::new(smallvec::SmallVec::new()),
         zone_context_menu: RefCell::new(None),
-        zone_context_menu_consumed: Cell::new(false),
-        zone_context_menu_deferred: RefCell::new(None),
         item_context_menu: RefCell::new(None),
-        item_context_menu_consumed: Cell::new(false),
         pending_item_drag_out: RefCell::new(None),
+        pending_stack_drop_bloom: Cell::new(None),
         item_drag_out_active: Cell::new(false),
         tray_context_menu: RefCell::new(None),
         tray_context_menu_consumed: Cell::new(false),
@@ -775,10 +853,13 @@ fn main() {
         tray_retry_attempts: Cell::new(0),
         tray_uid_only: Cell::new(false),
         desktop_watcher: RefCell::new(desktop_watcher),
+        desktop_event_tx,
         desktop_events: desktop_event_rx,
         live_folder_events: live_folder_event_rx,
         live_folder_rehydrated: Cell::new(false),
         ghost_events: ghost_event_rx,
+        power_event_tx,
+        power_events: power_event_rx,
         updater: Updater::new(updater_event_tx),
         updater_events: updater_event_rx,
         rules_scheduler_events: rules_scheduler_event_rx,
@@ -817,7 +898,49 @@ fn main() {
                 app_data_dir: smol_str::SmolStr::new(dir.to_string_lossy().as_ref()),
             };
             if !startup_diag_skip("icon") {
-                let _icon_cache = bento_nano_backend::icon::init(&icon_config);
+                let icon_cache = bento_nano_backend::icon::init(&icon_config);
+                if let Some(root) = app_root() {
+                    icon_cache.resize(root.app.borrow().icon_cache_size.get().max(1) as usize);
+                }
+            }
+            if let Some(root) = app_root() {
+                // The marker chooses the storage root before vault.bin can be
+                // opened, so it is the runtime truth for the toggle.
+                root.app
+                    .borrow()
+                    .setting_portable_mode
+                    .set(storage::portable_mode_enabled());
+                let startup_settings = root.app.borrow().snapshot_settings();
+                if let Err(error) = apply_process_priority(startup_settings.startup_high_priority) {
+                    tracing::warn!(
+                        target: "bentodesk::settings",
+                        %error,
+                        "startup process-priority restore failed"
+                    );
+                }
+                if let Err(error) = configure_application_restart(&startup_settings) {
+                    tracing::warn!(
+                        target: "bentodesk::settings",
+                        %error,
+                        "startup crash-restart restore failed"
+                    );
+                }
+                match validate_settings_sources(&startup_settings) {
+                    Ok(sources) => {
+                        if let Err(error) = rebuild_desktop_watcher(root, &sources) {
+                            tracing::warn!(
+                                target: "bentodesk::watcher",
+                                %error,
+                                "startup Settings-path watcher restore failed; initial watcher retained"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        target: "bentodesk::watcher",
+                        %error,
+                        "startup Settings paths invalid; initial watcher retained"
+                    ),
+                }
             }
             if !startup_diag_skip("recovery")
                 && let Some(root) = app_root()
@@ -915,29 +1038,44 @@ fn main() {
         }
     }
 
+    if let Some(root) = app_root() {
+        let show_in_taskbar = root.app.borrow().setting_show_in_taskbar.get();
+        if let Err(error) = apply_show_in_taskbar(hwnd, show_in_taskbar) {
+            tracing::warn!(
+                target: "bentodesk::settings",
+                %error,
+                "startup taskbar-visibility restore failed"
+            );
+        }
+    }
+
+    let desktop_embed_enabled = app_root()
+        .map(|root| root.app.borrow().setting_desktop_embed.get())
+        .unwrap_or(true);
     if startup_diag_skip("ghost") {
         tracing::info!(
             target: "bentodesk::startup_diag",
             "BENTODESK_NANO_DIAG_SKIP=ghost; ghost layer startup skipped"
         );
-    } else if let Err(e) = bento_nano_backend::ghost_layer::attach(hwnd) {
+    } else if !desktop_embed_enabled {
+        tracing::info!(
+            target: "bentodesk::ghost_layer",
+            "ghost layer startup skipped by saved Settings"
+        );
+    } else if let Err(e) = bento_nano_backend::ghost_layer::attach_selected_stack(hwnd) {
         tracing::warn!(
             target: "bentodesk::ghost_layer",
             error = %e,
             "ghost layer attach failed; main window remains normal HWND"
         );
     } else {
-        // SAFETY: `hwnd` is the live main HWND. The timer has no callback;
-        // it posts WM_TIMER to the same window so the message pump owns all
-        // hit-test and style transitions on the UI thread.
-        unsafe {
-            SetTimer(
-                hwnd,
-                GHOST_PASSTHROUGH_TIMER_ID,
-                GHOST_PASSTHROUGH_POLL_MS,
-                None,
-            );
-        }
+        // The Main HWND region is the selected-stack click-through boundary:
+        // blank desktop pixels fall outside the window, and painted chrome
+        // remains interactive. Do not arm the old always-on 50 ms ghost polling
+        // timer at startup; it repeatedly scans global cursor state even when
+        // the app is idle and blows the strict resident memory budget. Pointer
+        // movement inside the region still updates passthrough state through
+        // the normal WM_MOUSEMOVE path.
         // V-10 live-audit (2026-05-21) — log the Main HWND ex_style at
         // t+0/100/500/2000ms after attach so a live hand-test can correlate
         // user-reported click-through breakage to whether the
@@ -1024,6 +1162,7 @@ unsafe extern "system" fn wnd_proc(
                 schedule_tray_retry(root, hwnd);
                 // SAFETY: `hwnd` is the just-created Main HWND.
                 unsafe { register_global_hotkeys(root, hwnd) };
+                start_startup_icon_rehydrate(root, hwnd);
             }
             // SAFETY: `hwnd` is the just-created Main HWND. Timer messages
             // are delivered on the same UI thread and use no callback.
@@ -1034,8 +1173,35 @@ unsafe extern "system" fn wnd_proc(
                     BACKEND_EVENT_POLL_MS,
                     None,
                 );
+                let trim_timer = SetTimer(
+                    hwnd,
+                    STARTUP_MEMORY_TRIM_TIMER_ID,
+                    STARTUP_MEMORY_TRIM_MS,
+                    None,
+                );
+                if trim_timer == 0 {
+                    log_static(
+                        format!(
+                            "memory: SetTimer(STARTUP_MEMORY_TRIM) failed (GetLastError={})\n",
+                            GetLastError()
+                        )
+                        .as_str(),
+                    );
+                }
+                arm_resident_memory_trim(hwnd);
             }
             0
+        }
+        WM_POWERBROADCAST => {
+            if wparam == PBT_APMRESUMEAUTOMATIC {
+                if let Some(root) = app_root() {
+                    schedule_power_resume(root);
+                }
+                return 1;
+            }
+            // SAFETY: unhandled power notifications retain the default window
+            // procedure semantics.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         // Mc-1b — a second launch attempt posts this to the already-running
         // instance (single-instance guard). Surface the Main window. Harmless
@@ -1045,6 +1211,13 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 ShowWindow(hwnd, SW_SHOW);
                 SetForegroundWindow(hwnd);
+            }
+            0
+        }
+        x if x == WM_ICON_CACHE_READY => {
+            if let Some(root) = app_root() {
+                consume_dispatcher(root, hwnd);
+                request_redraw(hwnd);
             }
             0
         }
@@ -1282,6 +1455,17 @@ unsafe extern "system" fn wnd_proc(
                     let dx = (lparam as i32 & 0xFFFF) as i16 as f32;
                     let dy = ((lparam as i32 >> 16) & 0xFFFF) as i16 as f32;
                     let slot = &*p;
+                    if slot.kind == WindowKind::Main {
+                        let mut tracking = TRACKMOUSEEVENT {
+                            cbSize: core::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        // SAFETY: `hwnd` is the live Main HWND currently dispatching
+                        // WM_MOUSEMOVE, and `tracking` points to initialized stack storage.
+                        let _ = TrackMouseEvent(&mut tracking);
+                    }
                     let live_dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd);
                     if live_dpi != 0 {
                         slot.state.dpi.set(live_dpi);
@@ -1300,15 +1484,21 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == WM_ITEM_DRAG_OUT => {
             if let Some(root) = app_root() {
-                if let Some(path) = root.pending_item_drag_out.borrow_mut().take() {
-                    log_static(format!("items: drag-out deferred-start path={path}\n").as_str());
+                if let Some(request) = root.pending_item_drag_out.borrow_mut().take() {
+                    log_static(
+                        format!(
+                            "items: drag-out deferred-start zone={} item={} copy={} path={}\n",
+                            request.zone_id.0, request.item_id.0, request.copy_only, request.path
+                        )
+                        .as_str(),
+                    );
                     // SAFETY: the shell used capture only to detect the
                     // item-drag threshold. OLE owns mouse capture during
                     // `DoDragDrop`; keeping BentoDesk's capture here can
                     // prevent the OLE modal loop from observing pointer
                     // transitions and calling `IDropSource::QueryContinueDrag`.
                     unsafe { ReleaseCapture() };
-                    start_item_drag_out(root, hwnd, path.to_string());
+                    start_item_drag_out(root, hwnd, request);
                     // SAFETY: defensive cleanup for failed/cancelled OLE
                     // paths. Normal OLE completion should already have
                     // released its own capture.
@@ -1319,6 +1509,12 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER => {
+            if wparam == CONTEXT_MENU_INPUT_TIMER_ID {
+                if let Some(root) = app_root() {
+                    poll_context_menu_input(root, hwnd);
+                }
+                return 0;
+            }
             if wparam == GHOST_PASSTHROUGH_TIMER_ID {
                 unsafe {
                     let p = get_slot_ptr(hwnd);
@@ -1352,6 +1548,7 @@ unsafe extern "system" fn wnd_proc(
                                     drop(app);
                                     if had_hover {
                                         clear_hover(root);
+                                        arm_hover_frame_timer(hwnd);
                                         request_redraw(hwnd);
                                     }
                                 }
@@ -1372,11 +1569,49 @@ unsafe extern "system" fn wnd_proc(
             }
             if wparam == BACKEND_EVENT_POLL_TIMER_ID {
                 if let Some(root) = app_root() {
-                    if drain_backend_events(root) {
+                    let hover_changed = unsafe {
+                        let p = get_slot_ptr(hwnd);
+                        !p.is_null() && reconcile_main_hover_from_cursor(root, &*p, hwnd)
+                    };
+                    let backend_changed = drain_backend_events(root);
+                    // The backend bridge already wakes every 250 ms. Reuse it
+                    // for the empty inline-search idle dismissal instead of
+                    // adding a permanent search-only timer.
+                    let search_changed =
+                        close_idle_inline_zone_search(root, hwnd, unsafe { GetTickCount() });
+                    if hover_changed || backend_changed || search_changed {
                         flush_dirty_zones(root);
                         request_redraw(hwnd);
                     }
                 }
+                return 0;
+            }
+            if wparam == HOVER_FRAME_TIMER_ID {
+                handle_hover_frame_timer(hwnd);
+                return 0;
+            }
+            if wparam == STARTUP_MEMORY_TRIM_TIMER_ID {
+                unsafe {
+                    KillTimer(hwnd, STARTUP_MEMORY_TRIM_TIMER_ID);
+                }
+                trim_runtime_memory("startup-delayed");
+                return 0;
+            }
+            if wparam == RESIDENT_MEMORY_TRIM_TIMER_ID {
+                // A hidden auxiliary surface may receive no later WM_PAINT,
+                // so its deferred backbuffer release cannot rely on the paint
+                // pump alone. Reuse this existing idle-memory checkpoint.
+                if let Some(root) = app_root() {
+                    flush_hibernation(root, unsafe { GetTickCount() });
+                }
+                trim_runtime_memory("resident-idle");
+                return 0;
+            }
+            if wparam == STACK_TRAY_MEMORY_TRIM_TIMER_ID {
+                unsafe {
+                    KillTimer(hwnd, STACK_TRAY_MEMORY_TRIM_TIMER_ID);
+                }
+                trim_runtime_memory("stack-tray-open");
                 return 0;
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -1384,12 +1619,6 @@ unsafe extern "system" fn wnd_proc(
         WM_COMMAND => {
             if let Some(root) = app_root() {
                 let command_id = (wparam as u32 & 0xFFFF) as usize;
-                if handle_zone_context_wm_command(root, hwnd, command_id) {
-                    return 0;
-                }
-                if handle_item_context_wm_command(root, hwnd, command_id) {
-                    return 0;
-                }
                 if handle_tray_wm_command(root, hwnd, command_id) {
                     return 0;
                 }
@@ -1402,6 +1631,7 @@ unsafe extern "system" fn wnd_proc(
                 if !p.is_null() {
                     if let Some(root) = app_root() {
                         clear_hover(root);
+                        arm_hover_frame_timer(hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -1413,7 +1643,15 @@ unsafe extern "system" fn wnd_proc(
             if !p.is_null() {
                 let slot = &*p;
                 if let Some(root) = app_root() {
+                    if root.app.borrow().active_context_menu.borrow().is_some()
+                        && handle_context_menu_mousewheel(root, hwnd, wparam)
+                    {
+                        return 0;
+                    }
                     if handle_settings_mousewheel(root, slot, hwnd, wparam) {
+                        return 0;
+                    }
+                    if handle_zone_mousewheel(root, slot, hwnd, wparam) {
                         return 0;
                     }
                 }
@@ -1436,6 +1674,49 @@ unsafe extern "system" fn wnd_proc(
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
                         handle_lbutton_down(root, slot, hwnd, x, y);
+                        // Pointer producers queue business commands. Reduce them
+                        // before the next paint so the click cannot present one
+                        // stale frame and wait for another mouse move to update.
+                        consume_dispatcher(root, hwnd);
+                        request_redraw(hwnd);
+                        let geometry_drag_armed = {
+                            let app = root.app.borrow();
+                            app.zone_drag.get().is_some() || app.zone_resize.get().is_some()
+                        };
+                        if geometry_drag_armed {
+                            // The renderer expands Main's exact chrome region to
+                            // full-client while a move/resize owns capture. Commit
+                            // that unchanged pointer-down frame synchronously so
+                            // the first WM_MOUSEMOVE never combines SetWindowRgn
+                            // with the first moved DComp present (a one-frame
+                            // transparent flash on a cold drag).
+                            UpdateWindow(hwnd);
+                            // `SetWindowRgn` changes DWM's visible clip
+                            // synchronously, while the DComp commit above is
+                            // consumed asynchronously. Wait once at arm time so
+                            // there is no compositor interval with the new clip
+                            // but no matching surface. This is deliberately not
+                            // part of the per-WM_MOUSEMOVE hot path.
+                            let _ = DwmFlush();
+                        }
+                    }
+                }
+            }
+            0
+        }
+        WM_LBUTTONDBLCLK => {
+            unsafe {
+                let p = get_slot_ptr(hwnd);
+                if !p.is_null() {
+                    let dx = (lparam as i32 & 0xFFFF) as i16 as f32;
+                    let dy = ((lparam as i32 >> 16) & 0xFFFF) as i16 as f32;
+                    let slot = &*p;
+                    let dpi = slot.state.dpi.get();
+                    let x = bento_nano_style::dpi::device_to_logical_f32(dx, dpi);
+                    let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
+                    if let Some(root) = app_root() {
+                        handle_lbutton_double_click(root, slot, hwnd, x, y);
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -1454,6 +1735,7 @@ unsafe extern "system" fn wnd_proc(
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
                         handle_lbutton_up(root, slot, hwnd, x, y);
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -1470,6 +1752,7 @@ unsafe extern "system" fn wnd_proc(
                     let slot = &*p;
                     if let Some(root) = app_root() {
                         raw_payload = handle_drop_files(root, slot, hdrop);
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -1490,7 +1773,8 @@ unsafe extern "system" fn wnd_proc(
                     let x = bento_nano_style::dpi::device_to_logical_f32(dx, dpi);
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
-                        handle_rbutton_up(root, x, y);
+                        handle_rbutton_up(root, hwnd, x, y);
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -1557,6 +1841,10 @@ unsafe extern "system" fn wnd_proc(
             }
             if slot.kind == WindowKind::Main {
                 if let Some(root) = app_root() {
+                    if handle_inline_zone_search_char(root, wparam as u32, hwnd) {
+                        request_redraw(hwnd);
+                        return 0;
+                    }
                     // M7 — desktop_path / watch values live edit (focused-field
                     // model) is tried first, then the passphrase capture path.
                     if handle_settings_text_char(root, wparam as u32) {
@@ -1640,11 +1928,21 @@ unsafe extern "system" fn wnd_proc(
         WM_HOTKEY => {
             if let Some(root) = app_root() {
                 if let Some(command) = global_hotkey_command(root, wparam as i32) {
+                    let quit_requested = command == hotkey::HotkeyCommand::QuitApp;
                     log_static(
                         format!("hotkey: id={} command={command:?}\n", wparam as i32).as_str(),
                     );
                     dispatch_hotkey_command(root, command);
                     consume_dispatcher(root, hwnd);
+                    if quit_requested {
+                        // `consume_dispatcher` has synchronously performed the
+                        // full persistence + DestroyWindow teardown. Two real
+                        // cross-process WM_HOTKEY runs still left the idle
+                        // message loop resident after WM_QUIT, so make the
+                        // explicit QuitApp shortcut terminal rather than
+                        // relying on a second pump signal.
+                        std::process::exit(0);
+                    }
                     request_redraw(hwnd);
                 } else {
                     tracing::warn!(
@@ -1664,6 +1962,11 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 KillTimer(hwnd, GHOST_PASSTHROUGH_TIMER_ID);
                 KillTimer(hwnd, BACKEND_EVENT_POLL_TIMER_ID);
+                KillTimer(hwnd, HOVER_FRAME_TIMER_ID);
+                KillTimer(hwnd, STARTUP_MEMORY_TRIM_TIMER_ID);
+                KillTimer(hwnd, RESIDENT_MEMORY_TRIM_TIMER_ID);
+                KillTimer(hwnd, STACK_TRAY_MEMORY_TRIM_TIMER_ID);
+                KillTimer(hwnd, CONTEXT_MENU_INPUT_TIMER_ID);
                 if let Err(e) =
                     bento_nano_backend::drag_drop::unregister_drop_target(hwnd as *mut _)
                 {
@@ -1962,6 +2265,39 @@ fn window_slot_logical_viewport(slot: &WindowSlot) -> bento_nano_style::Size {
     )
 }
 
+/// Run one auxiliary-window input dispatch against that HWND's own logical
+/// viewport, then restore the caller's viewport.
+///
+/// `AppState` predates the selected-stack multi-HWND shell and still carries
+/// one shared `viewport`. Paint already projects each auxiliary renderer into
+/// its own DIPs; input must use the same projection or the visible control and
+/// its hit target diverge whenever Main and the auxiliary window differ in
+/// size. The scoped restore also prevents an editor/settings click from
+/// poisoning later Main hit-testing.
+fn with_app_viewport<R>(
+    root: &AppRoot,
+    viewport: bento_nano_style::Size,
+    callback: impl FnOnce() -> R,
+) -> R {
+    let previous = {
+        let mut app = root.app.borrow_mut();
+        let previous = app.viewport;
+        app.viewport = viewport;
+        previous
+    };
+    let result = callback();
+    root.app.borrow_mut().viewport = previous;
+    result
+}
+
+fn with_window_slot_viewport<R>(
+    root: &AppRoot,
+    slot: &WindowSlot,
+    callback: impl FnOnce() -> R,
+) -> R {
+    with_app_viewport(root, window_slot_logical_viewport(slot), callback)
+}
+
 fn sync_app_viewport_from_window_slot(root: &AppRoot, slot: &WindowSlot) -> bento_nano_style::Size {
     let viewport = window_slot_logical_viewport(slot);
     root.app.borrow_mut().viewport = viewport;
@@ -2002,7 +2338,10 @@ fn handle_settings_scroll_delta(root: &AppRoot, hwnd: HWND, delta: i32) {
     )
     .with_source_rows(app.desktop_sources.borrow().len())
     .with_backup_rows(backup_visible)
-    .with_plugin_rows(plugin_visible);
+    .with_backup_status(app.settings_backup_status.borrow().is_some())
+    .with_encryption_status(app.settings_encryption_status.borrow().is_some())
+    .with_plugin_rows(plugin_visible)
+    .with_plugin_status(app.settings_plugin_status.borrow().is_some());
     let next = settings_clamp_scroll(app.scroll_offset_y.get(), delta as f32, vp, &flags);
     app.scroll_offset_y.set(next);
     drop(app);
@@ -2030,6 +2369,92 @@ fn handle_settings_mousewheel(
     true
 }
 
+fn zone_item_max_scroll(app: &AppState, zone: &bento_nano_zone::Zone) -> f32 {
+    let search_active = app.zone_search_target.get() == Some(zone.id);
+    let item_top_offset = if search_active {
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+    } else {
+        0.0
+    };
+    if search_active {
+        let query = app.search_bar.borrow();
+        highlight_overlay::item_flow_max_scroll(
+            zone,
+            item_top_offset,
+            zone.items
+                .iter()
+                .filter(|item| {
+                    search_bar::zone_item_matches_query(item.name.as_ref(), query.query.as_str())
+                })
+                .map(|item| item.is_wide),
+        )
+    } else {
+        highlight_overlay::item_flow_max_scroll(
+            zone,
+            item_top_offset,
+            zone.items.iter().map(|item| item.is_wide),
+        )
+    }
+}
+
+fn zone_scroll_target_for_point(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, f32)> {
+    for zone in app.zones.iter().rev() {
+        if !zone.is_visible() || zone.is_stacked_child() || !app.zone_pill_body_visible(zone) {
+            continue;
+        }
+        let search_active = app.zone_search_target.get() == Some(zone.id);
+        let item_top_offset = if search_active {
+            search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+        } else {
+            0.0
+        };
+        let clip = highlight_overlay::item_content_clip_rect(zone, item_top_offset);
+        if x >= clip.x && x < clip.right() && y >= clip.y && y < clip.bottom() {
+            return Some((zone.id, zone_item_max_scroll(app, zone)));
+        }
+    }
+    None
+}
+
+fn handle_zone_mousewheel(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, wparam: WPARAM) -> bool {
+    if slot.kind != WindowKind::Main || root.app.borrow().settings_open.get() {
+        return false;
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: the live Main HWND owns `slot`; both APIs only translate the
+    // current desktop cursor into its client coordinate space.
+    unsafe {
+        if GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 {
+            return false;
+        }
+    }
+    let dpi = slot.state.dpi.get();
+    let x = bento_nano_style::dpi::device_to_logical_f32(point.x as f32, dpi);
+    let y = bento_nano_style::dpi::device_to_logical_f32(point.y as f32, dpi);
+    let app = root.app.borrow();
+    let Some((zone_id, max_scroll)) = zone_scroll_target_for_point(&app, x, y) else {
+        return false;
+    };
+    let Some(delta) = settings_wheel_scroll_delta_from_wparam(wparam) else {
+        return true;
+    };
+    let current = app.zone_content_scroll_offset(zone_id).min(max_scroll);
+    let next = (current + delta as f32).clamp(0.0, max_scroll);
+    let changed = app.set_zone_content_scroll(zone_id, next);
+    drop(app);
+    if changed {
+        log_static(
+            format!(
+                "zone: content_scroll zone={} delta={} offset={next:.1} max={max_scroll:.1}\n",
+                zone_id.0, delta
+            )
+            .as_str(),
+        );
+        request_redraw(hwnd);
+    }
+    true
+}
+
 fn handle_keydown(
     hwnd: HWND,
     vk: u32,
@@ -2038,6 +2463,9 @@ fn handle_keydown(
     slot: &WindowSlot,
     lparam: LPARAM,
 ) -> LRESULT {
+    if root.app.borrow().active_context_menu.borrow().is_some() {
+        return handle_context_menu_keydown(root, hwnd, vk);
+    }
     if slot.kind == WindowKind::ZoneEditor {
         return handle_zone_editor_keydown(root, vk, hwnd);
     }
@@ -2071,6 +2499,11 @@ fn handle_keydown(
     if slot.kind == WindowKind::SnapshotPicker {
         return handle_snapshot_picker_keydown(root, vk, hwnd);
     }
+    if slot.kind == WindowKind::Main {
+        if let Some(result) = handle_inline_zone_search_keydown(root, vk, hwnd) {
+            return result;
+        }
+    }
     // W3 (#7 fix wave 2026-06-01) — the Settings section lives on the focusable
     // Settings AUX HWND (`show_settings_surface` calls `SetForegroundWindow` on
     // it), so its keystrokes arrive here with `slot.kind == Settings`, NOT Main.
@@ -2078,11 +2511,10 @@ fn handle_keydown(
     // therefore be reachable for BOTH Main and Settings or typing into a focused
     // field would do nothing (the latent pre-existing bug this fix closes). The
     // stack-tray keydown stays Main-ONLY (the tray only exists on the desktop).
-    // INVARIANT: `handle_settings_text_keydown` consumes Esc only WHILE a §2
-    // field is focused (first Esc blurs); once no field is focused it returns
-    // `None`, and `handle_settings_passphrase_keydown` returns `None` for Esc
-    // unless a passphrase capture is active — so the auxiliary-escape branch
-    // below still closes Settings on the next Esc.
+    // INVARIANT: a regular Settings text field clears its focus on Esc but
+    // returns `None`, so the same keydown continues to the auxiliary-escape
+    // branch and closes/cancels Settings in one press. True nested captures
+    // (keybinding/passphrase) still consume Esc to cancel only that capture.
     if window_kind_routes_settings_keydown(slot.kind) {
         if let Some(result) = handle_settings_keybinding_keydown(root, vk, hwnd) {
             return result;
@@ -2243,32 +2675,186 @@ fn stack_bloom_hit_for_point(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, 
     // hits a petal on a frame where the bloom is actually painted: the tray
     // must be closed and no member focused/selected (mutually exclusive
     // surfaces — never a hit behind the tray or a focused-member panel).
-    if app.stack_tray.borrow().is_some() || app.selected_zone.get().is_some() {
+    if app
+        .stack_tray
+        .borrow()
+        .as_ref()
+        .is_some_and(StackTrayState::is_management)
+        || app.selected_zone.get().is_some()
+    {
         return None;
     }
-    let anchor_id = app
-        .hovered_zone
-        .get()
-        .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))?;
+    // The renderer uses `stack_bloom_anchor` as the single structural state.
+    // Do not synthesize invisible petal hits from `hovered_zone`: a pointer
+    // drop explicitly arms this state only after the stack relation exists.
+    let anchor_id = app.stack_bloom_anchor.get()?;
     let anchor = app.zones.get(anchor_id)?;
     let members = app.zones.stack_member_ids(anchor.id)?;
-    let reveal_progress = stack_bloom_reveal_progress_for_anchor(app, anchor.id);
-    let petal_index = stack_tray::stack_bloom_hit_test_at(
-        app.viewport,
-        anchor,
-        members.len(),
-        reveal_progress,
-        x,
-        y,
-    )?;
+    // Tauri round-13 `no-auto-open`: Bloom petals spring out from the
+    // capsule centre. During the first part of that animation their visual
+    // hit rects overlap the still-clickable capsule. Treating the animated
+    // petal as the top hit arms the 150 ms preview timer even though the
+    // pointer only entered (and remained on) the capsule, which can both
+    // auto-open a member and steal the capsule's collapse click. The capsule
+    // is the stable interaction surface, so it owns any transient overlap;
+    // settled petals remain fully interactive outside this rect.
+    let capsule = zone_pill_geometry::stack_capsule_layout_for_zone(anchor, members.len()).rect;
+    if x >= capsule.x && x <= capsule.right() && y >= capsule.y && y <= capsule.bottom() {
+        return None;
+    }
+    let petal_index =
+        if app.stack_bloom_leaving.get() && app.stack_bloom_anchor.get() == Some(anchor.id) {
+            stack_tray::stack_bloom_exit_hit_test_at(
+                app.viewport,
+                anchor,
+                members.len(),
+                app.stack_bloom_progress.get(),
+                x,
+                y,
+            )?
+        } else {
+            let reveal_progress = stack_bloom_reveal_progress_for_anchor(app, anchor.id);
+            stack_tray::stack_bloom_hit_test_at(
+                app.viewport,
+                anchor,
+                members.len(),
+                reveal_progress,
+                x,
+                y,
+            )?
+        };
+    let member_index = stack_tray::stack_bloom_member_index_for_petal(members.len(), petal_index)?;
     members
-        .get(petal_index)
+        .get(member_index)
         .copied()
         .map(|member_id| (anchor.id, member_id))
 }
 
+fn stack_bloom_preview_hit_for_point(
+    app: &AppState,
+    x: f32,
+    y: f32,
+) -> Option<(ZoneId, ZoneId, bento_nano_style::Rect)> {
+    let state = app.stack_tray.borrow().clone()?;
+    if !state.is_bloom_preview() {
+        return None;
+    }
+    let anchor = app.zones.get(state.anchor_zone_id)?;
+    let members = app.zones.stack_member_ids(anchor.id)?;
+    let member_index = members
+        .iter()
+        .position(|member_id| *member_id == state.selected_member_id)?;
+    let member = app.zones.get(state.selected_member_id)?;
+    let petals = stack_tray::stack_bloom_petal_rects(app.viewport, anchor, members.len());
+    let petal = petals.get(member_index).copied()?;
+    let preview = stack_tray::focused_bloom_preview_rect(app.viewport, petal, &petals, member);
+    (x >= preview.x && x <= preview.right() && y >= preview.y && y <= preview.bottom())
+        .then_some((anchor.id, member.id, preview))
+}
+
+fn stack_bloom_preview_item_hit_for_point(
+    app: &AppState,
+    x: f32,
+    y: f32,
+) -> Option<(ZoneId, ZoneId, ZoneItemId)> {
+    let (anchor, member, preview) = stack_bloom_preview_hit_for_point(app, x, y)?;
+    let zone = app.zones.get(member)?;
+    let search_active = app.zone_search_target.get() == Some(member);
+    let search_state = app.search_bar.borrow();
+    let query = search_state.query.as_str();
+    let mut flow_slot = 0;
+    for item in &zone.items {
+        if search_active && !search_bar::zone_item_matches_query(item.name.as_ref(), query) {
+            continue;
+        }
+        let (rect, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_in_panel(
+            zone,
+            preview,
+            flow_slot,
+            item.is_wide,
+            if search_active {
+                search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            } else {
+                0.0
+            },
+        );
+        flow_slot = next_slot;
+        if rect.width > 0.0
+            && rect.height > 0.0
+            && x >= rect.x
+            && x < rect.right()
+            && y >= rect.y
+            && y < rect.bottom()
+        {
+            return Some((anchor, member, item.id));
+        }
+    }
+    None
+}
+
+fn item_hit_for_point(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, ZoneItemId)> {
+    stack_bloom_preview_item_hit_for_point(app, x, y)
+        .map(|(_, member, item)| (member, item))
+        .or_else(|| ui::hit_test_zone_item(app, x, y).map(|(zone, item, _)| (zone, item)))
+}
+
+fn item_drag_target_zone_for_point(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+    stack_bloom_preview_hit_for_point(app, x, y)
+        .map(|(_, member, _)| member)
+        .or_else(|| ui::hit_test_zone(app, x, y))
+}
+
+fn item_grid_position_for_drag_point(
+    app: &AppState,
+    zone_id: ZoneId,
+    x: f32,
+    y: f32,
+) -> Option<(i32, i32)> {
+    if let Some((_, member, preview)) = stack_bloom_preview_hit_for_point(app, x, y) {
+        if member == zone_id {
+            let zone = app.zones.get(member)?;
+            return highlight_overlay::item_grid_position_for_panel(
+                preview,
+                zone.grid_columns,
+                x,
+                y,
+                if app.zone_search_target.get() == Some(member) {
+                    search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+                } else {
+                    0.0
+                },
+            );
+        }
+    }
+    ui::item_grid_position_for_point(app, zone_id, x, y)
+}
+
+fn item_open_command_for_double_click(app: &AppState, x: f32, y: f32) -> Option<Command> {
+    let (zone_id, item_id) = item_hit_for_point(app, x, y)?;
+    let item = app
+        .zones
+        .get(zone_id)?
+        .items
+        .iter()
+        .find(|item| item.id == item_id)?;
+    (!item.file_missing).then_some(Command::OpenItemFile(
+        zone_id,
+        bento_nano_app::ItemId(item_id.0),
+    ))
+}
+
 fn stack_bloom_hover_anchor_for_point(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
-    stack_bloom_hit_for_point(app, x, y).map(|(anchor, _)| anchor)
+    stack_bloom_hit_for_point(app, x, y)
+        .map(|(anchor, _)| anchor)
+        .or_else(|| stack_bloom_preview_hit_for_point(app, x, y).map(|(anchor, _, _)| anchor))
+}
+
+/// Resolve the visual top layer first. Bloom petals and the focused preview are
+/// painted above ordinary zones, so an unrelated zone geometrically underneath
+/// them must not steal hover and collapse the Bloom while the cursor is visibly
+/// on a petal.
+fn stack_aware_hover_zone_for_point(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+    stack_bloom_hover_anchor_for_point(app, x, y).or_else(|| ui::hit_test_zone(app, x, y))
 }
 
 fn stack_bloom_reveal_progress_for_anchor(app: &AppState, anchor: ZoneId) -> f32 {
@@ -2279,22 +2865,296 @@ fn stack_bloom_reveal_progress_for_anchor(app: &AppState, anchor: ZoneId) -> f32
     }
 }
 
-fn update_stack_bloom_hover(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) -> bool {
-    let next_anchor = hover_zone.and_then(|zone_id| app.zones.stack_anchor_for(zone_id));
-    if app.stack_bloom_anchor.get() == next_anchor {
+fn reset_stack_bloom_interaction(app: &AppState) {
+    app.stack_bloom_interaction
+        .set(bento_nano_app::state::StackBloomInteractionState::default());
+}
+
+fn start_stack_bloom_exit(app: &AppState, now_ms: u32) -> bool {
+    if app.stack_bloom_anchor.get().is_none() || app.stack_bloom_leaving.get() {
         return false;
     }
-    app.stack_bloom_anchor.set(next_anchor);
+    if app
+        .stack_tray
+        .borrow()
+        .as_ref()
+        .is_some_and(StackTrayState::is_bloom_preview)
+    {
+        app.stack_tray.borrow_mut().take();
+    }
+    reset_stack_bloom_interaction(app);
+    app.stack_bloom_leaving.set(true);
     app.stack_bloom_started_ms.set(now_ms);
-    app.stack_bloom_progress
-        .set(if next_anchor.is_some() { 0.0 } else { 1.0 });
+    app.stack_bloom_progress.set(0.0);
     true
+}
+
+fn clear_stack_bloom_surface(app: &AppState) {
+    if app
+        .stack_tray
+        .borrow()
+        .as_ref()
+        .is_some_and(StackTrayState::is_bloom_preview)
+    {
+        app.stack_tray.borrow_mut().take();
+    }
+    app.stack_bloom_anchor.set(None);
+    app.stack_bloom_leaving.set(false);
+    app.stack_bloom_progress.set(1.0);
+    reset_stack_bloom_interaction(app);
+}
+
+fn update_stack_bloom_hover(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) -> bool {
+    let next_anchor = hover_zone.and_then(|zone_id| app.zones.stack_anchor_for(zone_id));
+    let current_anchor = app.stack_bloom_anchor.get();
+    if let Some(anchor) = next_anchor {
+        if current_anchor == Some(anchor) && !app.stack_bloom_leaving.get() {
+            let mut interaction = app.stack_bloom_interaction.get();
+            let changed = interaction.leave_started_ms.take().is_some();
+            app.stack_bloom_interaction.set(interaction);
+            return changed;
+        }
+        if current_anchor != Some(anchor) {
+            reset_stack_bloom_interaction(app);
+        } else {
+            let mut interaction = app.stack_bloom_interaction.get();
+            interaction.leave_started_ms = None;
+            app.stack_bloom_interaction.set(interaction);
+        }
+        app.stack_bloom_anchor.set(Some(anchor));
+        app.stack_bloom_leaving.set(false);
+        app.stack_bloom_started_ms.set(now_ms);
+        app.stack_bloom_progress.set(0.0);
+        return true;
+    }
+    if current_anchor.is_some() && !app.stack_bloom_leaving.get() {
+        if hover_zone.is_none() {
+            let mut interaction = app.stack_bloom_interaction.get();
+            if interaction.leave_started_ms.is_none() {
+                interaction.leave_started_ms = Some(now_ms);
+                app.stack_bloom_interaction.set(interaction);
+                return true;
+            }
+            return false;
+        }
+        // An unrelated zone is a real target, not a one-pixel family gap. Match
+        // Tauri v9 and yield to it immediately.
+        return start_stack_bloom_exit(app, now_ms);
+    }
+    false
+}
+
+/// Track petal-level intent independently from the stack anchor hover. Moving
+/// between two petals leaves `hovered_zone == anchor`, so relying only on the
+/// zone-level transition would never retarget the focused preview.
+fn update_stack_bloom_petal_hover(app: &AppState, x: f32, y: f32, now_ms: u32) -> bool {
+    let petal_hit = (!normal_pointer_drag_active(app)
+        && !app.stack_bloom_leaving.get()
+        && app.stack_bloom_anchor.get().is_some())
+    .then(|| stack_bloom_hit_for_point(app, x, y))
+    .flatten()
+    .filter(|(anchor, _)| app.stack_bloom_anchor.get() == Some(*anchor));
+
+    let mut interaction = app.stack_bloom_interaction.get();
+    let mut changed = false;
+    match petal_hit {
+        Some((anchor, member)) => {
+            let reentered = interaction.active_member_leave_started_ms.take().is_some();
+            if interaction.active_member != Some(member) || reentered {
+                interaction.active_member = Some(member);
+                interaction.active_member_started_ms = now_ms;
+                interaction.hover_preview_opened = false;
+                changed = true;
+            }
+            if interaction.preview_sticky {
+                let should_switch = app.stack_tray.borrow().as_ref().is_some_and(|state| {
+                    state.is_bloom_preview()
+                        && (state.anchor_zone_id != anchor || state.selected_member_id != member)
+                });
+                if should_switch {
+                    app.stack_tray
+                        .borrow_mut()
+                        .replace(StackTrayState::bloom_preview(anchor, member));
+                    interaction.hover_preview_opened = true;
+                    changed = true;
+                }
+            }
+        }
+        None => {
+            if interaction.active_member.is_some()
+                && interaction.active_member_leave_started_ms.is_none()
+            {
+                interaction.active_member_leave_started_ms = Some(now_ms);
+                // Petal leave cancels a not-yet-fired preview timer immediately;
+                // the active ring alone gets the short visual grace.
+                interaction.hover_preview_opened = true;
+                changed = true;
+            }
+        }
+    }
+    app.stack_bloom_interaction.set(interaction);
+    if changed && drag_proof_log_enabled() {
+        log_static(
+            format!(
+                "stack: PetalHover point={x:.1},{y:.1} now_ms={now_ms} active={} started_ms={} leave_started={} preview_opened={} sticky={}\n",
+                proof_zone_id_label(interaction.active_member),
+                interaction.active_member_started_ms,
+                interaction
+                    .active_member_leave_started_ms
+                    .map(|started| started.to_string())
+                    .unwrap_or_else(|| "none".to_owned()),
+                interaction.hover_preview_opened,
+                interaction.preview_sticky,
+            )
+            .as_str(),
+        );
+    }
+    changed
+}
+
+/// Advance the two short Bloom interaction deadlines from the existing hover
+/// frame timer. Returns true only when visible state changed.
+fn poll_stack_bloom_interaction(app: &AppState, now_ms: u32) -> bool {
+    if app.stack_bloom_anchor.get().is_none() || app.stack_bloom_leaving.get() {
+        return false;
+    }
+    let mut interaction = app.stack_bloom_interaction.get();
+    if interaction
+        .leave_started_ms
+        .is_some_and(|started| now_ms.wrapping_sub(started) >= stack_tray::BLOOM_LEAVE_GRACE_MS)
+    {
+        return start_stack_bloom_exit(app, now_ms);
+    }
+
+    let mut changed = false;
+    if interaction
+        .active_member_leave_started_ms
+        .is_some_and(|started| now_ms.wrapping_sub(started) >= stack_tray::BLOOM_LEAVE_GRACE_MS)
+    {
+        interaction.active_member = None;
+        interaction.active_member_leave_started_ms = None;
+        changed = true;
+    }
+
+    if let (Some(anchor), Some(member)) = (app.stack_bloom_anchor.get(), interaction.active_member)
+        && interaction.active_member_leave_started_ms.is_none()
+        && !interaction.hover_preview_opened
+        && now_ms.wrapping_sub(interaction.active_member_started_ms)
+            >= stack_tray::BLOOM_PREVIEW_HOVER_INTENT_MS
+    {
+        let valid = app
+            .zones
+            .stack_member_ids(anchor)
+            .is_some_and(|members| members.contains(&member));
+        if valid {
+            let already_open = app.stack_tray.borrow().as_ref().is_some_and(|state| {
+                state.is_bloom_preview()
+                    && state.anchor_zone_id == anchor
+                    && state.selected_member_id == member
+            });
+            if !already_open {
+                app.stack_tray
+                    .borrow_mut()
+                    .replace(StackTrayState::bloom_preview(anchor, member));
+                log_static(
+                    format!(
+                        "stack: HoverPreviewStackMember anchor={} member={} intent_ms={}\n",
+                        anchor.0,
+                        member.0,
+                        stack_tray::BLOOM_PREVIEW_HOVER_INTENT_MS
+                    )
+                    .as_str(),
+                );
+                changed = true;
+            }
+            interaction.hover_preview_opened = true;
+            interaction.preview_sticky = false;
+        }
+    }
+    app.stack_bloom_interaction.set(interaction);
+    changed
+}
+
+/// Keep a moved free Zone collapsed under the unchanged release point. Tauri
+/// collapses an expanded panel at drag start and does not immediately expand
+/// that same free Zone again on mouse-up.
+fn hold_free_zone_drag_result_collapsed_until_reentry(
+    app: &AppState,
+    hover_zone: ZoneId,
+    clear_selection: bool,
+) {
+    if clear_selection {
+        app.selected_zone.set(None);
+    }
+    app.hovered_zone.set(Some(hover_zone));
+    clear_stack_bloom_surface(app);
+    let mut scheduler = app.hover_scheduler.get();
+    scheduler.reset();
+    app.hover_scheduler.set(scheduler);
+}
+
+/// Reveal the stack surface under the release pointer after its model relation
+/// exists. The Tauri `StackWrapper` is immediately `:hover` after drop, so its
+/// petals bloom at once while the focused member preview remains closed until
+/// the existing 150 ms petal-hover intent fires.
+fn reveal_stack_at_drop_pointer(app: &AppState, anchor: ZoneId, now_ms: u32) {
+    app.selected_zone.set(None);
+    // Force the consolidated hover driver to observe a fresh target even when
+    // the drag settled over an anchor that was hovered before mouse-down.
+    app.hovered_zone.set(None);
+    on_hover_target_changed(app, Some(anchor), now_ms);
+}
+
+/// Apply the Tauri StackCapsule click contract for the anchor's effective
+/// display mode. Hover mode toggles Bloom as a motionless-drop fallback; Click
+/// mode toggles the management tray; Always mode is already pinned and is a
+/// no-op.
+fn toggle_stack_bloom_from_capsule_click(app: &AppState, anchor: ZoneId, now_ms: u32) -> bool {
+    let Some(zone) = app.zones.get(anchor) else {
+        return false;
+    };
+    app.selected_zone.set(None);
+    app.hovered_zone.set(Some(anchor));
+    match app.effective_zone_display_mode(zone) {
+        ZoneDisplayMode::Hover => {
+            if app.stack_bloom_anchor.get() == Some(anchor) && !app.stack_bloom_leaving.get() {
+                start_stack_bloom_exit(app, now_ms)
+            } else {
+                update_stack_bloom_hover(app, Some(anchor), now_ms)
+            }
+        }
+        ZoneDisplayMode::Click => {
+            clear_stack_bloom_surface(app);
+            let management_open = app
+                .stack_tray
+                .borrow()
+                .as_ref()
+                .is_some_and(|state| state.is_management() && state.anchor_zone_id == anchor);
+            if management_open {
+                app.stack_tray.borrow_mut().take();
+            } else {
+                app.stack_tray
+                    .borrow_mut()
+                    .replace(StackTrayState::new(anchor, anchor));
+            }
+            true
+        }
+        ZoneDisplayMode::Always => false,
+    }
 }
 
 fn normal_pointer_drag_active(app: &AppState) -> bool {
     app.zone_drag.get().is_some()
         || app.zone_resize.get().is_some()
         || app.item_drag.borrow().is_some()
+}
+
+fn zone_accepts_click_expand(app: &AppState, zone_id: ZoneId, body_was_visible: bool) -> bool {
+    !body_was_visible
+        && app.zones.get(zone_id).is_some_and(|zone| {
+            !zone.is_stack_anchor()
+                && app.effective_zone_display_mode(zone) == ZoneDisplayMode::Click
+        })
 }
 
 fn proof_zone_id_label(id: Option<ZoneId>) -> String {
@@ -2352,7 +3212,7 @@ fn log_animation_proof_state(
     };
     log_static(
         format!(
-            "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_anim_zone={} pill_anim_progress={:.3} pill_anim_expanding={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
+            "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_anim_zone={} pill_anim_progress={:.3} pill_anim_expanding={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} stack_bloom_leaving={} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
             proof_active_drag_label(app),
             proof_zone_id_label(app.zone_drag.get().map(|(id, _, _)| id)),
             proof_zone_id_label(app.zone_resize.get().map(|(id, _, _)| id)),
@@ -2366,6 +3226,7 @@ fn log_animation_proof_state(
             pill_animator_occupancy,
             proof_zone_id_label(app.stack_bloom_anchor.get()),
             app.stack_bloom_progress.get(),
+            app.stack_bloom_leaving.get(),
             hover_scheduler.is_pending(),
             proof_zone_id_label(hover_scheduler.expanded_zone()),
             item_hover_active,
@@ -2387,14 +3248,19 @@ fn reset_pointer_drag_hover_channels(app: &AppState, dragged_zone: Option<ZoneId
         if app.zone_pill_anim_zone.get() == Some(zone_id) {
             app.zone_pill_anim_zone.set(None);
             app.zone_pill_anim_progress.set(1.0);
+            app.zone_pill_anim_from_morph.set(0.0);
+            app.zone_pill_anim_duration_ms
+                .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
             app.zone_pill_anim_expanding.set(false);
             app.zone_pill_anim_started_ms.set(now_ms);
         }
     }
     app.pill_pressed_zone.set(None);
     app.hovered_zone.set(None);
-    app.stack_bloom_anchor.set(None);
-    app.stack_bloom_progress.set(1.0);
+    app.set_panel_header_button_hover(None);
+    app.set_settings_encryption_mode_hover(None);
+    app.set_settings_close_hover(false);
+    clear_stack_bloom_surface(app);
     app.highlight_overlay.borrow_mut().clear();
     let mut scheduler = app.hover_scheduler.get();
     scheduler.reset();
@@ -2403,32 +3269,89 @@ fn reset_pointer_drag_hover_channels(app: &AppState, dragged_zone: Option<ZoneId
         .set(bento_nano_app::business::item_card::ItemHoverState::new());
 }
 
+fn clear_stack_tray_open_hover_state(app: &AppState) {
+    app.hovered_zone.set(None);
+    app.set_panel_header_button_hover(None);
+    clear_stack_bloom_surface(app);
+    app.pill_pressed_zone.set(None);
+    let mut scheduler = app.hover_scheduler.get();
+    scheduler.reset();
+    app.hover_scheduler.set(scheduler);
+    app.item_hover
+        .set(bento_nano_app::business::item_card::ItemHoverState::new());
+}
+
 fn tick_stack_bloom_animation(app: &AppState, now_ms: u32) -> bool {
-    if app.stack_bloom_anchor.get().is_none() {
-        if app.stack_bloom_progress.get() < 1.0 {
-            app.stack_bloom_progress.set(1.0);
-            return true;
-        }
+    let Some(anchor_id) = app.stack_bloom_anchor.get() else {
         return false;
-    }
+    };
     let elapsed = now_ms.wrapping_sub(app.stack_bloom_started_ms.get());
-    let progress = (elapsed as f32 / stack_tray::BLOOM_REVEAL_DURATION_MS as f32).clamp(0.0, 1.0);
+    let member_count = app
+        .zones
+        .stack_member_ids(anchor_id)
+        .map(|members| members.len());
+    let duration_ms = if app.stack_bloom_leaving.get() {
+        member_count
+            .map(stack_tray::stack_bloom_exit_duration_ms)
+            .unwrap_or(stack_tray::BLOOM_EXIT_VISIBLE_DURATION_MS)
+    } else {
+        member_count
+            .map(stack_tray::stack_bloom_reveal_duration_ms)
+            .unwrap_or(stack_tray::BLOOM_REVEAL_DURATION_MS)
+    };
+    let progress = (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0);
     let changed = (app.stack_bloom_progress.get() - progress).abs() > 0.001;
     app.stack_bloom_progress.set(progress);
+    if changed || progress < 1.0 {
+        log_animation_proof_state(app, "stack_bloom_tick", now_ms, None, None);
+    }
+    if app.stack_bloom_leaving.get() && progress >= 1.0 {
+        clear_stack_bloom_surface(app);
+        log_animation_proof_state(app, "stack_bloom_exit_done", now_ms, None, None);
+        return true;
+    }
     changed || progress < 1.0
 }
 
-/// Wave G2 — start / cancel the capsule pill expand-shrink transition for
-/// whichever zone the pointer just entered or left. Returns `true` when the
-/// shell should request a redraw (transition state changed). Stack anchors
-/// keep their bespoke chrome and never enter the pill morph path; they're
-/// skipped here so the dedicated stack-bloom animation owns them exclusively.
+#[inline]
+fn sampled_zone_pill_morph(app: &AppState) -> f32 {
+    zone_pill_geometry::current_morph_progress(
+        app.zone_pill_anim_from_morph.get(),
+        app.zone_pill_anim_progress.get(),
+        app.zone_pill_anim_expanding.get(),
+    )
+}
+
+fn begin_zone_pill_segment(
+    app: &AppState,
+    zone_id: ZoneId,
+    from_morph: f32,
+    expanding: bool,
+    now_ms: u32,
+) {
+    // Reverse from the exact visible boundary. Geometry and expanded content
+    // consume this same monotonic morph, so there is no second alpha timeline
+    // to jump when the pointer changes direction mid-flight.
+    let from = from_morph.clamp(0.0, 1.0);
+    let target = if expanding { 1.0 } else { 0.0 };
+    app.zone_pill_anim_zone.set(Some(zone_id));
+    app.zone_pill_anim_from_morph.set(from);
+    app.zone_pill_anim_duration_ms
+        .set(zone_pill_geometry::pill_segment_duration_ms(from, target));
+    app.zone_pill_anim_expanding.set(expanding);
+    app.zone_pill_anim_started_ms.set(now_ms);
+    app.zone_pill_anim_progress.set(0.0);
+}
+
+/// Start or reverse the capsule pill transition for the current hover target.
+/// The segment records its painted start morph, so reversing an eased curve is
+/// continuous instead of mirroring raw time (which is only correct for linear
+/// interpolation). Stack anchors remain owned by the Bloom animation.
 fn update_zone_pill_hover(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) -> bool {
     // Resolve the previous "expanded under hover" zone so we know what to
     // collapse if the pointer moved off it.
     let prev_zone = app.zone_pill_anim_zone.get();
     let prev_expanding = app.zone_pill_anim_expanding.get();
-    let prev_progress = app.zone_pill_anim_progress.get();
 
     // Treat stack anchors as non-pill so they don't steal the animation slot.
     let next_zone = hover_zone.and_then(|id| {
@@ -2449,45 +3372,35 @@ fn update_zone_pill_hover(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u3
     let mut changed = false;
     if let Some(prev_id) = prev_zone {
         if prev_expanding && Some(prev_id) != next_zone {
-            // Was expanding `prev_id`, but pointer left — start collapse.
-            app.zone_pill_anim_zone.set(Some(prev_id));
-            app.zone_pill_anim_expanding.set(false);
-            // Resume from the inverse so a quick leave doesn't pop back to 0.
-            let resume = 1.0 - prev_progress;
-            let elapsed_back_ms =
-                (resume * zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS as f32) as u32;
-            app.zone_pill_anim_started_ms
-                .set(now_ms.wrapping_sub(elapsed_back_ms));
-            app.zone_pill_anim_progress.set(resume);
+            // Was expanding `prev_id`, but pointer left — continue from the
+            // exact shape painted by the current eased segment.
+            let current = sampled_zone_pill_morph(app);
+            begin_zone_pill_segment(app, prev_id, current, false, now_ms);
             changed = true;
         }
     }
 
     if let Some(next_id) = next_zone {
         if Some(next_id) != prev_zone || !prev_expanding {
-            // Either no prior animation, or it was a collapse — start expand.
-            app.zone_pill_anim_zone.set(Some(next_id));
-            app.zone_pill_anim_expanding.set(true);
-            // If we were mid-collapse for a different zone, start fresh; if
-            // we were mid-collapse for the same zone, mirror progress so the
-            // expand starts where the collapse left off.
-            let resume = if prev_zone == Some(next_id) && !prev_expanding {
-                1.0 - prev_progress
+            // Either no prior animation, or it was a collapse. A same-zone
+            // reversal samples the in-flight shape; a new zone starts at its
+            // collapsed pill.
+            let from = if prev_zone == Some(next_id) && !prev_expanding {
+                sampled_zone_pill_morph(app)
             } else {
                 0.0
             };
-            let elapsed_ms =
-                (resume * zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS as f32) as u32;
-            app.zone_pill_anim_started_ms
-                .set(now_ms.wrapping_sub(elapsed_ms));
-            app.zone_pill_anim_progress.set(resume);
+            begin_zone_pill_segment(app, next_id, from, true, now_ms);
             changed = true;
         }
-    } else if prev_zone.is_some() && !prev_expanding && prev_progress >= 1.0 {
+    } else if prev_zone.is_some() && !prev_expanding && app.zone_pill_anim_progress.get() >= 1.0 {
         // Already collapsed — clear stale state so the renderer skips the
         // morph branch entirely.
         app.zone_pill_anim_zone.set(None);
         app.zone_pill_anim_progress.set(1.0);
+        app.zone_pill_anim_from_morph.set(0.0);
+        app.zone_pill_anim_duration_ms
+            .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
         changed = true;
     }
 
@@ -2502,8 +3415,8 @@ fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
         return false;
     };
     let elapsed = now_ms.wrapping_sub(app.zone_pill_anim_started_ms.get());
-    let progress =
-        (elapsed as f32 / zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS as f32).clamp(0.0, 1.0);
+    let duration_ms = app.zone_pill_anim_duration_ms.get().max(1);
+    let progress = (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0);
     let prev = app.zone_pill_anim_progress.get();
     let changed = (prev - progress).abs() > 0.001;
     app.zone_pill_anim_progress.set(progress);
@@ -2511,16 +3424,18 @@ fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
     // to the steady pill chrome (no allocation per frame).
     if progress >= 1.0 && !app.zone_pill_anim_expanding.get() {
         app.zone_pill_anim_zone.set(None);
+        app.zone_pill_anim_from_morph.set(0.0);
+        app.zone_pill_anim_duration_ms
+            .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
         log_animation_proof_state(app, "hover_collapse_settled", now_ms, None, None);
     }
     changed || progress < 1.0
 }
 
-/// A3 (2026-05-29) — true when leaving `zone` should auto-collapse it. Only
-/// the HOVER display mode auto-collapses on leave; ALWAYS keeps the body
-/// open and CLICK is dismissed by click-away, not pointer leave (mirrors
-/// Tauri `BentoZone.tsx:589`).
-fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> bool {
+/// Structural hover is a display-mode capability, not a generic pointer
+/// affordance. Micro hover tint/scale may still run in every mode, but only
+/// `Hover` may arm a pill↔panel or stack-bloom state transition.
+fn zone_structurally_expands_on_hover(app: &AppState, zone_id: ZoneId) -> bool {
     app.zones
         .get(zone_id)
         .map(|zone| {
@@ -2530,6 +3445,13 @@ fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// A3 (2026-05-29) — true when leaving `zone` should auto-collapse it. The
+/// same policy gates enter and leave so Click/Always can never inherit one
+/// half of the Hover state machine.
+fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> bool {
+    zone_structurally_expands_on_hover(app, zone_id)
 }
 
 /// A3 — feed the hover-intent and grace-collapse scheduler from a hover-target
@@ -2543,7 +3465,7 @@ fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32
     // Treat stack anchors as non-pill so they don't engage the scheduler.
     let next_zone = hover_zone.and_then(|id| {
         let zone = app.zones.get(id)?;
-        if zone.is_stack_anchor() {
+        if zone.is_stack_anchor() || !zone_structurally_expands_on_hover(app, id) {
             None
         } else {
             Some(id)
@@ -2597,11 +3519,44 @@ fn poll_hover_scheduler(app: &AppState, now_ms: u32) -> bool {
             changed
         }
         zone_pill_geometry::HoverAction::Collapse(_zone) => {
+            app.reset_zone_content_scroll();
             let changed = update_zone_pill_hover(app, None, now_ms);
             log_animation_proof_state(app, "hover_collapse_fired", now_ms, None, None);
             changed
         }
     }
+}
+
+fn collapse_zone_from_header(app: &AppState, zone_id: ZoneId, now_ms: u32) -> bool {
+    // Mouse-down selects the hit Zone before header-button dispatch. Without
+    // clearing that selection, Hover/Click display modes immediately force the
+    // expanded body visible again after the collapse animation settles.
+    let body_was_visible = app
+        .zones
+        .get(zone_id)
+        .is_some_and(|zone| app.zone_pill_body_visible(zone));
+    let selection_changed = app.selected_zone.get() == Some(zone_id);
+    if selection_changed {
+        app.selected_zone.set(None);
+    }
+    let mut scheduler = app.hover_scheduler.get();
+    scheduler.reset();
+    app.hover_scheduler.set(scheduler);
+    app.set_panel_header_button_hover(None);
+    let scroll_changed = app.reset_zone_content_scroll();
+    let morph_changed = if app.zone_pill_anim_zone.get().is_some() {
+        update_zone_pill_hover(app, None, now_ms)
+    } else if body_was_visible {
+        // Click-selected zones can be fully open without a hover scheduler
+        // marker. Closing still begins from the visible panel instead of
+        // dropping directly to the capsule.
+        begin_zone_pill_segment(app, zone_id, 1.0, false, now_ms);
+        true
+    } else {
+        false
+    };
+    let hover_changed = update_pill_hover_animator(app, None, now_ms);
+    selection_changed || scroll_changed || morph_changed || hover_changed
 }
 
 /// V-8 (2026-05-21) — drive the pill hover animator channel.
@@ -2668,7 +3623,7 @@ fn update_pill_hover_animator(app: &AppState, hover_zone: Option<ZoneId>, now_ms
 /// exactly the channel that zone needs:
 ///
 /// * **stack anchor** → the bloom only (its hover affordance is the petal fan,
-///   never the pill↔panel expand morph). The pill-hover + expand-scheduler
+///   never the pill→panel expand morph). The pill-hover + expand-scheduler
 ///   drivers already self-exclude anchors, so they are simply not engaged.
 /// * **normal zone** → the pill-hover micro-animation + the expand scheduler;
 ///   the bloom is cleared (its `update` resolves a non-anchor to `None`).
@@ -2687,9 +3642,31 @@ fn on_hover_target_changed(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u
     update_pill_hover_animator(app, hover_zone, now_ms);
     app.hovered_zone.set(hover_zone);
     if is_anchor {
-        // Stack anchor → bloom only. Clear any pending pill expand for safety
-        // (the scheduler also self-excludes anchors, so this is belt-and-braces).
-        update_stack_bloom_hover(app, hover_zone, now_ms);
+        let Some(anchor) = hover_zone else {
+            return;
+        };
+        let mode = app
+            .zones
+            .get(anchor)
+            .map(|zone| app.effective_zone_display_mode(zone))
+            .unwrap_or(ZoneDisplayMode::Hover);
+        let management_anchor = app
+            .stack_tray
+            .borrow()
+            .as_ref()
+            .filter(|state| state.is_management())
+            .map(|state| state.anchor_zone_id);
+        match mode {
+            ZoneDisplayMode::Hover if management_anchor.is_none() => {
+                update_stack_bloom_hover(app, hover_zone, now_ms);
+            }
+            ZoneDisplayMode::Hover | ZoneDisplayMode::Click | ZoneDisplayMode::Always => {
+                // Click and Always must not create a structural surface from a
+                // pointer-enter. Hover also stays clear while an explicit
+                // management tray owns the stack surface.
+                clear_stack_bloom_surface(app);
+            }
+        }
         drive_hover_scheduler(app, None, now_ms);
         log_animation_proof_state(app, "hover_changed", now_ms, None, None);
     } else {
@@ -2699,6 +3676,16 @@ fn on_hover_target_changed(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u
         drive_hover_scheduler(app, hover_zone, now_ms);
         log_animation_proof_state(app, "hover_changed", now_ms, None, None);
     }
+}
+
+fn update_main_zone_hover_for_point(app: &AppState, x: f32, y: f32, now_ms: u32) -> bool {
+    let hover_zone = stack_aware_hover_zone_for_point(app, x, y);
+    let mut changed = false;
+    if app.hovered_zone.get() != hover_zone {
+        on_hover_target_changed(app, hover_zone, now_ms);
+        changed = true;
+    }
+    changed | update_stack_bloom_petal_hover(app, x, y, now_ms)
 }
 
 /// M3-A2 (2026-05-29) — drive the per-item hover scale ramp from a pointer
@@ -2713,7 +3700,7 @@ fn update_item_hover_animator(app: &AppState, x: f32, y: f32) -> bool {
     let card = if app.item_drag.borrow().is_some() {
         None
     } else {
-        ui::hit_test_zone_item(app, x, y).map(|(zone_id, item_id, _path)| (zone_id, item_id))
+        item_hit_for_point(app, x, y)
     };
     // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
     let now_ms = unsafe { GetTickCount() };
@@ -2724,16 +3711,18 @@ fn update_item_hover_animator(app: &AppState, x: f32, y: f32) -> bool {
 }
 
 fn move_zone_live(app: &mut AppState, id: ZoneId, point: DispatchPoint) -> bool {
-    let Some(z) = app.zones.get_mut(id) else {
-        return false;
-    };
-    if z.x == point.x && z.y == point.y {
+    if !app.zones.move_group_to(id, point.x, point.y) {
         return false;
     }
-    z.x = point.x;
-    z.y = point.y;
     app.mark_dirty();
     true
+}
+
+fn zone_drag_pointer_offset(app: &AppState, id: ZoneId) -> Option<(i32, i32)> {
+    let zone = app.zones.get(id)?;
+    let (_, _, width, height) =
+        bento_nano_app::zone_gesture_geometry::zone_drag_capsule_rect(&app.zones, zone);
+    Some((width / 2, height / 2))
 }
 
 fn resize_zone_live(app: &mut AppState, id: ZoneId, size: DispatchSize) -> bool {
@@ -2845,6 +3834,9 @@ fn stack_tray_hit(
         return None;
     }
     let state = app.stack_tray.borrow().clone()?;
+    if !state.is_management() {
+        return None;
+    }
     let anchor = app.zones.get(state.anchor_zone_id)?;
     let members = app.zones.stack_member_ids(anchor.id)?.into_vec();
     let hit = stack_tray::stack_tray_hit_test(app.viewport, anchor, members.len(), x, y)?;
@@ -2862,6 +3854,128 @@ fn handle_stack_tray_lbutton_down(root: &AppRoot, x: f32, y: f32) -> bool {
                 .set(Some(StackTrayDragState::new(anchor, member, row)));
         }
     }
+    true
+}
+
+fn handle_stack_bloom_preview_lbutton_down(app: &AppState, hwnd: HWND, x: f32, y: f32) -> bool {
+    if stack_bloom_preview_hit_for_point(app, x, y).is_none() {
+        return false;
+    }
+    let Some((_, member, item_id)) = stack_bloom_preview_item_hit_for_point(app, x, y) else {
+        return true;
+    };
+    let Some(item) = app
+        .zones
+        .get(member)
+        .and_then(|zone| zone.items.iter().find(|item| item.id == item_id))
+    else {
+        return true;
+    };
+    if item.file_missing {
+        return true;
+    }
+    app.item_drag.borrow_mut().replace(ItemDragCandidate {
+        zone_id: member,
+        item_id,
+        path: SmolStr::new(item.path.as_ref()),
+        start_x: x as i32,
+        start_y: y as i32,
+        last_x: x as i32,
+        last_y: y as i32,
+        is_internal_dragging: false,
+    });
+    // SAFETY: GetTickCount is total + thread-safe; `hwnd` is the live Main
+    // window dispatching this pointer message.
+    let now_ms = unsafe { GetTickCount() };
+    start_item_press_animator(app, member, item_id, now_ms);
+    unsafe { SetCapture(hwnd) };
+    true
+}
+
+fn handle_stack_bloom_preview_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> bool {
+    let app = root.app.borrow();
+    let Some((anchor, member, preview)) = stack_bloom_preview_hit_for_point(&app, x, y) else {
+        return false;
+    };
+    // A preview card uses the ordinary item-drag release path. Returning false
+    // here lets that one shared path release capture, animate the card and
+    // commit a reorder/cross-zone move; the preview must not swallow mouse-up.
+    if app.item_drag.borrow().is_some() {
+        return false;
+    }
+    let contains = |rect: bento_nano_style::Rect| {
+        x >= rect.x && x <= rect.right() && y >= rect.y && y <= rect.bottom()
+    };
+    let close = contains(stack_tray::focused_bloom_preview_close_rect(preview));
+    let search = contains(stack_tray::focused_bloom_preview_search_rect(preview));
+    let inline_search_active =
+        app.zone_search_target.get() == Some(member) && !app.zone_search_closing.get();
+    let inline_input = inline_search_active && contains(search_bar::zone_inline_rect(preview));
+    let inline_clear = inline_input
+        && !app.search_bar.borrow().query.is_empty()
+        && contains(search_bar::zone_inline_clear_rect(preview));
+    drop(app);
+
+    if inline_input {
+        if inline_clear {
+            root.app.borrow().search_bar.borrow_mut().clear();
+        } else {
+            set_main_inline_search_keyboard_focus(hwnd, true);
+        }
+        {
+            let app = root.app.borrow();
+            // SAFETY: GetTickCount is total and thread-safe.
+            touch_inline_zone_search(&app, unsafe { GetTickCount() });
+        }
+        request_redraw(hwnd);
+        return true;
+    }
+
+    if search {
+        let already_open = {
+            let app = root.app.borrow();
+            app.zone_search_target.get() == Some(member) && !app.zone_search_closing.get()
+        };
+        if already_open {
+            set_main_inline_search_keyboard_focus(hwnd, true);
+        } else {
+            open_inline_zone_search(root, member, hwnd);
+        }
+        log_static(
+            format!(
+                "stack: SearchBloomPreview anchor={} member={} inline=true\n",
+                anchor.0, member.0
+            )
+            .as_str(),
+        );
+        request_redraw(hwnd);
+        return true;
+    }
+
+    if close {
+        if root.app.borrow().zone_search_target.get() == Some(member) {
+            close_inline_zone_search(root, hwnd);
+        }
+        let app = root.app.borrow();
+        app.stack_tray.borrow_mut().take();
+        let mut interaction = app.stack_bloom_interaction.get();
+        interaction.active_member = None;
+        interaction.active_member_leave_started_ms = None;
+        interaction.hover_preview_opened = true;
+        interaction.preview_sticky = false;
+        app.stack_bloom_interaction.set(interaction);
+        drop(app);
+        log_static(
+            format!(
+                "stack: CloseBloomPreview anchor={} member={}\n",
+                anchor.0, member.0
+            )
+            .as_str(),
+        );
+        request_redraw(hwnd);
+        return true;
+    }
+
     true
 }
 
@@ -2923,9 +4037,8 @@ fn handle_stack_bloom_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> 
     let Some((anchor, member)) = bloom_hit else {
         return false;
     };
-    root.dispatcher.push(Command::OpenStackTray(anchor));
     root.dispatcher
-        .push(Command::PreviewStackMember(anchor, member));
+        .push(Command::ToggleStackBloomPreview(anchor, member));
     request_redraw(hwnd);
     true
 }
@@ -2957,7 +4070,13 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                     label: None,
                 });
             } else {
-                set_timeline_error(root, SmolStr::new_static("No checkpoint selected to pin"));
+                set_timeline_error(
+                    root,
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要固定的时间线记录",
+                        "No checkpoint selected to pin",
+                    )),
+                );
             }
             request_redraw(hwnd);
             0
@@ -2970,9 +4089,15 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                     if panel.confirm_restore_or_arm(checkpoint_id.clone()) {
                         true
                     } else {
-                        panel.set_status(SmolStr::new(format!(
-                            "Press Restore again to replace the current layout with checkpoint {checkpoint_id}"
-                        )));
+                        panel.set_status(SmolStr::new(
+                            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                "再次选择“恢复”以替换当前布局".to_owned()
+                            } else {
+                                format!(
+                                    "Press Restore again to replace the current layout with checkpoint {checkpoint_id}"
+                                )
+                            },
+                        ));
                         false
                     }
                 };
@@ -2983,7 +4108,10 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             } else {
                 set_timeline_error(
                     root,
-                    SmolStr::new_static("No checkpoint selected to restore"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要恢复的时间线记录",
+                        "No checkpoint selected to restore",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -2997,9 +4125,15 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                     if panel.confirm_delete_or_arm(checkpoint_id.clone()) {
                         true
                     } else {
-                        panel.set_status(SmolStr::new(format!(
-                            "Press Delete again to permanently remove checkpoint {checkpoint_id}"
-                        )));
+                        panel.set_status(SmolStr::new(
+                            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                "再次选择“删除”以确认移除该记录".to_owned()
+                            } else {
+                                format!(
+                                    "Press Delete again to permanently remove checkpoint {checkpoint_id}"
+                                )
+                            },
+                        ));
                         false
                     }
                 };
@@ -3010,7 +4144,10 @@ fn handle_timeline_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             } else {
                 set_timeline_error(
                     root,
-                    SmolStr::new_static("No checkpoint selected to delete"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要删除的时间线记录",
+                        "No checkpoint selected to delete",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -3079,7 +4216,10 @@ fn handle_snapshot_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESUL
             } else {
                 set_snapshot_picker_error(
                     root,
-                    SmolStr::new_static("No snapshot selected to load"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要载入的布局快照",
+                        "No snapshot selected to load",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -3106,7 +4246,10 @@ fn handle_snapshot_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESUL
             } else {
                 set_snapshot_picker_error(
                     root,
-                    SmolStr::new_static("No snapshot selected to delete"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要删除的布局快照",
+                        "No snapshot selected to delete",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -3206,7 +4349,10 @@ fn handle_capsule_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT
             } else {
                 set_context_capsule_picker_error(
                     root,
-                    SmolStr::new_static("No capsule selected to restore"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要恢复的场景胶囊",
+                        "No capsule selected to restore",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -3224,7 +4370,10 @@ fn handle_capsule_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT
             } else {
                 set_context_capsule_picker_error(
                     root,
-                    SmolStr::new_static("No capsule selected to delete"),
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择要删除的场景胶囊",
+                        "No capsule selected to delete",
+                    )),
                 );
             }
             request_redraw(hwnd);
@@ -3239,14 +4388,55 @@ fn handle_capsule_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT
     }
 }
 
+fn handle_capsule_picker_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> bool {
+    let (visible_count, has_error) = {
+        let app = root.app.borrow();
+        let picker = app.capsule_picker.borrow();
+        (picker.entries().len(), picker.last_error().is_some())
+    };
+    let viewport = root.app.borrow().viewport;
+    let Some(hit) =
+        capsule_picker::capsule_picker_hit_test(viewport, visible_count, has_error, x, y)
+    else {
+        return false;
+    };
+    let key = match hit {
+        CapsulePickerHit::Capture => Some(VK_C_KEY),
+        CapsulePickerHit::Restore if visible_count > 0 => Some(VK_ENTER),
+        CapsulePickerHit::Delete if visible_count > 0 => Some(VK_DELETE_KEY),
+        CapsulePickerHit::Close => Some(VK_ESCAPE_KEY),
+        CapsulePickerHit::Row(index) => {
+            let app = root.app.borrow();
+            let _ = app.capsule_picker.borrow_mut().select_index(index);
+            request_redraw(hwnd);
+            None
+        }
+        CapsulePickerHit::Restore
+        | CapsulePickerHit::Delete
+        | CapsulePickerHit::Hint
+        | CapsulePickerHit::Error
+        | CapsulePickerHit::Empty => None,
+    };
+    if let Some(key) = key {
+        let _ = handle_capsule_picker_keydown(root, key, hwnd);
+    }
+    true
+}
+
 fn suggestor_manual_selection_status(app: &AppState) -> SmolStr {
     let suggestor = app.suggestor.borrow();
     let Some(entry) = suggestor.selected_entry() else {
-        return SmolStr::new_static("No suggestion selected for manual file selection");
+        return SmolStr::new_static(context_menu_text(
+            "尚未选择分组建议",
+            "No suggestion selected for manual file selection",
+        ));
     };
     let total = entry.total_path_count();
     if total == 0 {
-        return SmolStr::new_static("Selected suggestion has no matching files");
+        return SmolStr::new_static(context_menu_text(
+            "当前建议没有匹配文件",
+            "Selected suggestion has no matching files",
+        ));
     }
     let focused = entry.focused_path_index();
     let file_name = entry
@@ -3256,19 +4446,33 @@ fn suggestor_manual_selection_status(app: &AppState) -> SmolStr {
         .map(|path| smart_group_suggestor::path_basename(path))
         .unwrap_or("-");
     let marker = if entry.is_path_selected(focused) {
-        "[x]"
+        "✓"
     } else {
-        "[ ]"
+        "○"
     };
-    SmolStr::new(format!(
-        "Manual apply: {}/{} checked; file {}/{} {} {}",
-        entry.selected_path_count(),
-        total,
-        focused.saturating_add(1),
-        total,
-        marker,
-        file_name
-    ))
+    SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "本次整理已选 {}/{}；当前文件 {}/{} {} {}",
+                entry.selected_path_count(),
+                total,
+                focused.saturating_add(1),
+                total,
+                marker,
+                file_name
+            )
+        } else {
+            format!(
+                "Manual apply: {}/{} checked; file {}/{} {} {}",
+                entry.selected_path_count(),
+                total,
+                focused.saturating_add(1),
+                total,
+                marker,
+                file_name
+            )
+        },
+    )
 }
 
 fn set_suggestor_manual_selection_status(app: &AppState) {
@@ -3509,7 +4713,10 @@ fn handle_suggestor_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             } else {
                 app.suggestor_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No file checkbox available to toggle"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "当前没有可切换的文件",
+                        "No file checkbox available to toggle",
+                    )));
             }
             request_redraw(hwnd);
             0
@@ -3548,9 +4755,10 @@ fn handle_suggestor_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             } else {
                 app.suggestor_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static(
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择要整理的文件",
                         "No checked files selected to apply; press Space or A",
-                    ));
+                    )));
                 request_redraw(hwnd);
             }
             0
@@ -3563,7 +4771,10 @@ fn handle_suggestor_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             } else {
                 app.suggestor_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No suggestion selected to dismiss"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择要忽略的建议",
+                        "No suggestion selected to dismiss",
+                    )));
                 request_redraw(hwnd);
             }
             0
@@ -3671,9 +4882,10 @@ fn handle_suggestor_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> bo
             } else {
                 app.suggestor_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static(
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "该文件已不在当前预览中",
                         "Preview checkbox is no longer available",
-                    ));
+                    )));
             }
             request_redraw(hwnd);
         }
@@ -3686,6 +4898,309 @@ fn handle_suggestor_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> bo
         }
     }
     true
+}
+
+fn focus_window_for_keyboard(hwnd: HWND) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let current_thread = GetCurrentThreadId();
+        let foreground_thread = if foreground.is_null() || foreground == hwnd {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, ptr::null_mut())
+        };
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+        if attached {
+            AttachThreadInput(current_thread, foreground_thread, 0);
+        }
+    }
+}
+
+fn set_main_inline_search_keyboard_focus(hwnd: HWND, active: bool) {
+    if hwnd.is_null() {
+        return;
+    }
+    // Main normally stays WS_EX_NOACTIVATE so desktop clicks do not foreground
+    // its fullscreen transparent host. Inline Zone search is the one bounded
+    // exception: it needs WM_CHAR, so remove the bit only for that session.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = if active {
+            style & !(WS_EX_NOACTIVATE as isize)
+        } else {
+            style | WS_EX_NOACTIVATE as isize
+        };
+        if style != next {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+            SetWindowPos(
+                hwnd,
+                ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+        if active {
+            // A fullscreen desktop host normally lives outside the foreground
+            // input queue. `SetForegroundWindow` alone can therefore fail and
+            // leave WM_CHAR routed to the previously active application even
+            // after WS_EX_NOACTIVATE was removed. Join the two queues only for
+            // this bounded hand-off, make Main the active/focused window, then
+            // detach immediately. No polling or helper window is required.
+            focus_window_for_keyboard(hwnd);
+        }
+    }
+}
+
+fn open_inline_zone_search(root: &AppRoot, zone_id: ZoneId, hwnd: HWND) {
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { GetTickCount() };
+    {
+        let app = root.app.borrow();
+        let previous_target = app.zone_search_target.get();
+        let expand_from = app.zones.get(zone_id).and_then(|zone| {
+            if zone.is_stack_anchor() || app.zone_pill_body_visible(zone) {
+                None
+            } else if app.zone_pill_anim_zone.get() == Some(zone_id) {
+                Some(sampled_zone_pill_morph(&app))
+            } else {
+                Some(0.0)
+            }
+        });
+        if previous_target.is_none() {
+            // SAFETY: GetForegroundWindow returns either a live HWND or null.
+            app.zone_search_previous_foreground
+                .set(unsafe { GetForegroundWindow() } as isize);
+        }
+        if let Some(previous_zone_id) = previous_target.filter(|id| *id != zone_id) {
+            app.pill_animator
+                .borrow_mut()
+                .cancel(previous_zone_id, AnimChannel::InlineSearch);
+        }
+        app.zone_search_target.set(Some(zone_id));
+        app.zone_search_closing.set(false);
+        app.zone_search_last_interaction_ms.set(now_ms);
+        app.search_bar.borrow_mut().clear();
+        app.highlight_overlay.borrow_mut().clear();
+        app.reset_zone_content_scroll();
+        let mut animator = app.pill_animator.borrow_mut();
+        if previous_target == Some(zone_id) {
+            animator.start_or_reverse(
+                zone_id,
+                AnimChannel::InlineSearch,
+                now_ms,
+                INLINE_SEARCH_IN_DURATION_MS,
+                1.0,
+                Easing::EaseOutCubic,
+            );
+        } else {
+            animator.start(
+                zone_id,
+                AnimChannel::InlineSearch,
+                now_ms,
+                INLINE_SEARCH_IN_DURATION_MS,
+                0.0,
+                1.0,
+                Easing::EaseOutCubic,
+            );
+        }
+        drop(animator);
+        if let Some(from_morph) = expand_from {
+            begin_zone_pill_segment(&app, zone_id, from_morph, true, now_ms);
+        }
+    }
+    set_main_inline_search_keyboard_focus(hwnd, true);
+    arm_hover_frame_timer(hwnd);
+    request_redraw(hwnd);
+    log_static(format!("search: OpenZoneSearch zone={} inline=true\n", zone_id.0).as_str());
+}
+
+fn close_inline_zone_search(root: &AppRoot, hwnd: HWND) -> bool {
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { GetTickCount() };
+    let previous = {
+        let app = root.app.borrow();
+        let Some(zone_id) = app.zone_search_target.get() else {
+            return false;
+        };
+        if app.zone_search_closing.replace(true) {
+            return false;
+        }
+        app.zone_search_last_interaction_ms.set(now_ms);
+        app.pill_animator.borrow_mut().start_or_reverse(
+            zone_id,
+            AnimChannel::InlineSearch,
+            now_ms,
+            INLINE_SEARCH_OUT_DURATION_MS,
+            0.0,
+            Easing::EaseOutCubic,
+        );
+        app.zone_search_previous_foreground.replace(0) as HWND
+    };
+    set_main_inline_search_keyboard_focus(hwnd, false);
+    // Restore the app the user was in before clicking the desktop Zone. The
+    // Main host immediately returns to no-activate desktop behavior.
+    unsafe {
+        if !previous.is_null() && previous != hwnd && IsWindow(previous) != 0 {
+            SetForegroundWindow(previous);
+        }
+    }
+    arm_hover_frame_timer(hwnd);
+    request_redraw(hwnd);
+    log_static("search: CloseZoneSearch inline=true animated=true\n");
+    true
+}
+
+fn touch_inline_zone_search(app: &AppState, now_ms: u32) {
+    if app.zone_search_target.get().is_some() && !app.zone_search_closing.get() {
+        app.zone_search_last_interaction_ms.set(now_ms);
+    }
+}
+
+/// Retire the held open animator entry and clear the search model only after
+/// the reverse reveal reaches zero. Returns true when paint-visible state
+/// changed and the Main HWND needs one final redraw.
+fn settle_inline_zone_search_animation(app: &AppState, now_ms: u32) -> bool {
+    let Some(zone_id) = app.zone_search_target.get() else {
+        return false;
+    };
+    let progress = app.zone_search_animation_progress_at(now_ms);
+    let contains = app
+        .pill_animator
+        .borrow()
+        .contains(zone_id, AnimChannel::InlineSearch);
+    if app.zone_search_closing.get() {
+        if contains || progress > f32::EPSILON {
+            return false;
+        }
+        let collapse_after_search = app.zones.get(zone_id).is_some_and(|zone| {
+            !zone.is_stack_anchor()
+                && match app.effective_zone_display_mode(zone) {
+                    ZoneDisplayMode::Always => false,
+                    ZoneDisplayMode::Hover => {
+                        app.hover_scheduler.get().expanded_zone() != Some(zone_id)
+                    }
+                    ZoneDisplayMode::Click => app.selected_zone.get() != Some(zone_id),
+                }
+        });
+        app.zone_search_target.set(None);
+        app.zone_search_closing.set(false);
+        app.search_bar.borrow_mut().clear();
+        app.reset_zone_content_scroll();
+        if collapse_after_search {
+            begin_zone_pill_segment(app, zone_id, 1.0, false, now_ms);
+        }
+        log_static("search: inline collapse settled\n");
+        return true;
+    }
+    if contains && progress >= 1.0 - f32::EPSILON {
+        app.pill_animator
+            .borrow_mut()
+            .cancel(zone_id, AnimChannel::InlineSearch);
+    }
+    false
+}
+
+fn close_idle_inline_zone_search(root: &AppRoot, hwnd: HWND, now_ms: u32) -> bool {
+    let should_close = {
+        let app = root.app.borrow();
+        app.zone_search_target.get().is_some()
+            && !app.zone_search_closing.get()
+            && app.search_bar.borrow().query.is_empty()
+            && now_ms.wrapping_sub(app.zone_search_last_interaction_ms.get())
+                >= search_bar::ZONE_INLINE_IDLE_DISMISS_MS
+    };
+    should_close && close_inline_zone_search(root, hwnd)
+}
+
+fn handle_inline_zone_search_char(root: &AppRoot, codepoint: u32, hwnd: HWND) -> bool {
+    let Some(character) = char::from_u32(codepoint) else {
+        return false;
+    };
+    if character.is_control() {
+        return false;
+    }
+    let app = root.app.borrow();
+    if app.zone_search_target.get().is_none() || app.zone_search_closing.get() {
+        return false;
+    }
+    let changed = app.search_bar.borrow_mut().append_char(character);
+    if changed {
+        app.reset_zone_content_scroll();
+        // SAFETY: GetTickCount is total and thread-safe.
+        touch_inline_zone_search(&app, unsafe { GetTickCount() });
+    }
+    drop(app);
+    if changed {
+        request_redraw(hwnd);
+    }
+    changed
+}
+
+fn handle_inline_zone_search_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<LRESULT> {
+    let zone_id = {
+        let app = root.app.borrow();
+        if app.zone_search_closing.get() {
+            return None;
+        }
+        app.zone_search_target.get()?
+    };
+    match vk {
+        VK_BACKSPACE => {
+            let app = root.app.borrow();
+            let changed = app.search_bar.borrow_mut().backspace();
+            if changed {
+                app.reset_zone_content_scroll();
+                // SAFETY: GetTickCount is total and thread-safe.
+                touch_inline_zone_search(&app, unsafe { GetTickCount() });
+                request_redraw(hwnd);
+            }
+            Some(0)
+        }
+        VK_ENTER => {
+            let first_match = {
+                let app = root.app.borrow();
+                let query = app.search_bar.borrow().query.clone();
+                if query.trim().is_empty() {
+                    None
+                } else {
+                    app.zones.get(zone_id).and_then(|zone| {
+                        zone.items
+                            .iter()
+                            .find(|item| {
+                                search_bar::zone_item_matches_query(
+                                    item.name.as_ref(),
+                                    query.as_str(),
+                                )
+                            })
+                            .map(|item| bento_nano_app::ItemId(item.id.0))
+                    })
+                }
+            };
+            if let Some(item_id) = first_match {
+                root.dispatcher
+                    .push(Command::OpenItemFile(zone_id, item_id));
+                close_inline_zone_search(root, hwnd);
+            }
+            Some(0)
+        }
+        VK_ESCAPE_KEY => {
+            close_inline_zone_search(root, hwnd);
+            Some(0)
+        }
+        _ => None,
+    }
 }
 
 fn handle_search_char(root: &AppRoot, codepoint: u32, hwnd: HWND) -> bool {
@@ -3760,7 +5275,10 @@ fn handle_search_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                 let app = root.app.borrow();
                 app.search_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No Search result selected"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择搜索结果",
+                        "No Search result selected",
+                    )));
                 request_redraw(hwnd);
             }
             0
@@ -3847,7 +5365,10 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             app.bulk_manager.borrow_mut().select_all();
             app.bulk_manager_status
                 .borrow_mut()
-                .replace(SmolStr::new_static("Selected all visible zones"));
+                .replace(SmolStr::new_static(context_menu_text(
+                    "已选择所有可见区域",
+                    "Selected all visible zones",
+                )));
             request_redraw(hwnd);
             0
         }
@@ -3856,7 +5377,10 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             app.bulk_manager.borrow_mut().invert_selection();
             app.bulk_manager_status
                 .borrow_mut()
-                .replace(SmolStr::new_static("Inverted visible selection"));
+                .replace(SmolStr::new_static(context_menu_text(
+                    "已反选可见区域",
+                    "Inverted visible selection",
+                )));
             request_redraw(hwnd);
             0
         }
@@ -3867,16 +5391,25 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                 if manager.selected().is_empty() {
                     app.bulk_manager_status
                         .borrow_mut()
-                        .replace(SmolStr::new_static("No zones selected to delete"));
+                        .replace(SmolStr::new_static(context_menu_text(
+                            "尚未选择要删除的区域",
+                            "No zones selected to delete",
+                        )));
                     None
                 } else {
                     let selected_count = manager.selected().len();
                     match manager.confirm_delete_or_arm() {
                         Some(ids) => Some(ids),
                         None => {
-                            app.bulk_manager_status.borrow_mut().replace(SmolStr::new(format!(
-                                "Press Delete again to permanently remove {selected_count} selected zone(s)"
-                            )));
+                            app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+                                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                    format!("再次选择“删除”以确认移除 {selected_count} 个区域")
+                                } else {
+                                    format!(
+                                        "Select Delete again to remove {selected_count} selected zone(s)"
+                                    )
+                                },
+                            ));
                             None
                         }
                     }
@@ -3897,7 +5430,10 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                 let app = root.app.borrow();
                 app.bulk_manager_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No zones selected to hide"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择要隐藏的区域",
+                        "No zones selected to hide",
+                    )));
             } else {
                 root.dispatcher.push(Command::BulkSetZonesVisible {
                     ids,
@@ -3916,7 +5452,10 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                 let app = root.app.borrow();
                 app.bulk_manager_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No zones selected to show"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择要显示的区域",
+                        "No zones selected to show",
+                    )));
             } else {
                 root.dispatcher
                     .push(Command::BulkSetZonesVisible { ids, visible: true });
@@ -3946,7 +5485,10 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                 let app = root.app.borrow();
                 app.bulk_manager_status
                     .borrow_mut()
-                    .replace(SmolStr::new_static("No zones selected to move"));
+                    .replace(SmolStr::new_static(context_menu_text(
+                        "尚未选择要移动的区域",
+                        "No zones selected to move",
+                    )));
             } else {
                 root.dispatcher.push(Command::BulkMoveZones {
                     ids,
@@ -3968,7 +5510,7 @@ fn handle_bulk_manager_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
 }
 
 fn handle_bulk_manager_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> bool {
-    let hit = {
+    let (hit, has_rows, has_selection) = {
         let app = root.app.borrow();
         let manager = app.bulk_manager.borrow();
         let visible_count = manager.visible_count();
@@ -3976,18 +5518,25 @@ fn handle_bulk_manager_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) ->
             manager.cursor_index(),
             visible_count,
         );
-        bulk_manager_panel::bulk_manager_hit_test(
-            app.viewport,
-            visible_count,
-            visible_window_start,
-            x,
-            y,
+        (
+            bulk_manager_panel::bulk_manager_hit_test(
+                app.viewport,
+                visible_count,
+                visible_window_start,
+                x,
+                y,
+            ),
+            visible_count > 0,
+            !manager.selected().is_empty(),
         )
     };
     log_static(format!("bulk: pointer up x={x:.1} y={y:.1} hit={hit:?}\n").as_str());
     let Some(hit) = hit else {
         return false;
     };
+    if !bulk_manager_panel::bulk_manager_action_enabled(hit, has_rows, has_selection) {
+        return true;
+    }
     let mapped_key = match hit {
         BulkManagerPointerHit::SearchInput => {
             let _ = focus_bulk_manager_search(root, hwnd);
@@ -3999,11 +5548,19 @@ fn handle_bulk_manager_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) ->
                 let mut manager = app.bulk_manager.borrow_mut();
                 manager.blur_search();
                 manager.set_sort_key(key);
-                let direction = match manager.sort_direction() {
-                    bulk_manager_panel::SortDirection::Ascending => "ascending",
-                    bulk_manager_panel::SortDirection::Descending => "descending",
-                };
-                SmolStr::new(format!("Sorted Bulk rows by {} ({direction})", key.label()))
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    let direction = match manager.sort_direction() {
+                        bulk_manager_panel::SortDirection::Ascending => "升序",
+                        bulk_manager_panel::SortDirection::Descending => "降序",
+                    };
+                    SmolStr::new(format!("已按{}{}排列", bulk_sort_key_text(key), direction))
+                } else {
+                    let direction = match manager.sort_direction() {
+                        bulk_manager_panel::SortDirection::Ascending => "ascending",
+                        bulk_manager_panel::SortDirection::Descending => "descending",
+                    };
+                    SmolStr::new(format!("Sorted Bulk rows by {} ({direction})", key.label()))
+                }
             };
             app.bulk_manager_status.borrow_mut().replace(status);
             request_redraw(hwnd);
@@ -4073,25 +5630,30 @@ fn handle_bulk_manager_char(root: &AppRoot, wparam: u32) -> bool {
 }
 
 fn bulk_manager_search_status(term: &str, visible_count: usize) -> SmolStr {
-    if term.is_empty() {
-        SmolStr::new(format!(
-            "Bulk search cleared — {visible_count} zones listed"
-        ))
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) && term.is_empty() {
+        SmolStr::new(format!("已清空搜索，共 {visible_count} 个区域"))
+    } else if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        SmolStr::new(format!("“{term}”匹配 {visible_count} 个区域"))
+    } else if term.is_empty() {
+        SmolStr::new(format!("Bulk search cleared —{visible_count} zones listed"))
     } else {
         SmolStr::new(format!(
-            "Bulk search '{term}' — {visible_count} matching zones"
+            "Bulk search '{term}' —{visible_count} matching zones"
         ))
     }
 }
 
 fn focus_bulk_manager_search(root: &AppRoot, hwnd: HWND) -> LRESULT {
-    let app = root.app.borrow();
-    let status = {
-        let mut manager = app.bulk_manager.borrow_mut();
-        manager.focus_search();
-        bulk_manager_search_status(manager.search(), manager.visible_count())
-    };
-    app.bulk_manager_status.borrow_mut().replace(status);
+    focus_window_for_keyboard(hwnd);
+    {
+        let app = root.app.borrow();
+        let status = {
+            let mut manager = app.bulk_manager.borrow_mut();
+            manager.focus_search();
+            bulk_manager_search_status(manager.search(), manager.visible_count())
+        };
+        app.bulk_manager_status.borrow_mut().replace(status);
+    }
     request_redraw(hwnd);
     0
 }
@@ -4114,7 +5676,10 @@ fn handle_bulk_manager_search_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LR
             app.bulk_manager.borrow_mut().blur_search();
             app.bulk_manager_status
                 .borrow_mut()
-                .replace(SmolStr::new_static("Bulk search focus cleared"));
+                .replace(SmolStr::new_static(context_menu_text(
+                    "已结束搜索输入",
+                    "Bulk search focus cleared",
+                )));
             request_redraw(hwnd);
             0
         }
@@ -4141,7 +5706,10 @@ fn handle_bulk_manager_text_edit_keydown(root: &AppRoot, vk: u32, hwnd: HWND) ->
             app.bulk_manager.borrow_mut().cancel_text_edit();
             app.bulk_manager_status
                 .borrow_mut()
-                .replace(SmolStr::new_static("Bulk text edit cancelled"));
+                .replace(SmolStr::new_static(context_menu_text(
+                    "已取消批量文字编辑",
+                    "Bulk text edit cancelled",
+                )));
             request_redraw(hwnd);
             0
         }
@@ -4161,12 +5729,19 @@ fn handle_bulk_manager_text_edit_keydown(root: &AppRoot, vk: u32, hwnd: HWND) ->
                 .text_edit()
                 .map(|edit| edit.field)
                 .unwrap_or(BulkTextEditField::Alias);
-            app.bulk_manager_status
-                .borrow_mut()
-                .replace(SmolStr::new(format!(
-                    "Editing {} — type value, Enter apply, Esc cancel",
-                    field.label()
-                )));
+            app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    format!(
+                        "正在编辑{}；Enter 应用，Esc 取消",
+                        bulk_text_field_text(field)
+                    )
+                } else {
+                    format!(
+                        "Editing {} — type value, Enter apply, Esc cancel",
+                        field.label()
+                    )
+                },
+            ));
             request_redraw(hwnd);
             0
         }
@@ -4182,20 +5757,28 @@ fn begin_bulk_text_edit(root: &AppRoot, hwnd: HWND, field: BulkTextEditField) ->
     };
     let app = root.app.borrow();
     if selected_count == 0 {
-        app.bulk_manager_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Select zones before editing {}",
-                field.label()
-            )));
+        app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("请先选择区域，再编辑{}", bulk_text_field_text(field))
+            } else {
+                format!("Select zones before editing {}", field.label())
+            },
+        ));
     } else {
         app.bulk_manager.borrow_mut().start_text_edit(field);
-        app.bulk_manager_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Editing {} for {selected_count} zones — type value, F2 field, Enter apply",
-                field.label()
-            )));
+        app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!(
+                    "正在为 {selected_count} 个区域编辑{}；Enter 应用",
+                    bulk_text_field_text(field)
+                )
+            } else {
+                format!(
+                    "Editing {} for {selected_count} zones — type value, F2 field, Enter apply",
+                    field.label()
+                )
+            },
+        ));
     }
     request_redraw(hwnd);
     0
@@ -4213,7 +5796,10 @@ fn commit_bulk_text_edit(root: &AppRoot, hwnd: HWND) -> LRESULT {
         let app = root.app.borrow();
         app.bulk_manager_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No zones selected for text edit"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "尚未选择要编辑的区域",
+                "No zones selected for text edit",
+            )));
         request_redraw(hwnd);
         return 0;
     }
@@ -4232,13 +5818,21 @@ fn commit_bulk_text_edit(root: &AppRoot, hwnd: HWND) -> LRESULT {
     {
         let app = root.app.borrow();
         app.bulk_manager.borrow_mut().cancel_text_edit();
-        app.bulk_manager_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Applying {} text edit to {} zones",
-                edit.field.label(),
-                ids.len()
-            )));
+        app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!(
+                    "正在为 {} 个区域应用{}修改",
+                    ids.len(),
+                    bulk_text_field_text(edit.field)
+                )
+            } else {
+                format!(
+                    "Applying {} text edit to {} zones",
+                    edit.field.label(),
+                    ids.len()
+                )
+            },
+        ));
     }
     root.dispatcher.push(Command::BulkUpdateZones(updates));
     request_redraw(hwnd);
@@ -4274,15 +5868,19 @@ fn bulk_text_update_for_id(
         }
         BulkTextEditField::Icon => {
             if trimmed.is_empty() {
-                return Err(SmolStr::new_static(
+                return Err(SmolStr::new_static(context_menu_text(
+                    "图标名称不能为空",
                     "Icon edit requires a non-empty icon slug",
-                ));
+                )));
             }
             update.icon = Some(SmolStr::new(trimmed));
         }
         BulkTextEditField::Accent => {
             if !is_bulk_hex_color(trimmed) {
-                return Err(SmolStr::new_static("Accent edit requires #rrggbb"));
+                return Err(SmolStr::new_static(context_menu_text(
+                    "颜色必须使用 #rrggbb 格式",
+                    "Accent edit requires #rrggbb",
+                )));
             }
             update.accent_color = Some(SmolStr::new(trimmed));
         }
@@ -4291,9 +5889,10 @@ fn bulk_text_update_for_id(
             let value = match lower.as_str() {
                 "small" | "medium" | "large" => lower,
                 _ => {
-                    return Err(SmolStr::new_static(
+                    return Err(SmolStr::new_static(context_menu_text(
+                        "胶囊尺寸必须为 small、medium 或 large",
                         "Capsule edit requires small/medium/large",
-                    ));
+                    )));
                 }
             };
             update.capsule_size = Some(SmolStr::new(value));
@@ -4308,9 +5907,10 @@ fn bulk_text_update_for_id(
                     update.display_mode = Some(None);
                 }
                 _ => {
-                    return Err(SmolStr::new_static(
+                    return Err(SmolStr::new_static(context_menu_text(
+                        "显示模式必须为 hover、always、click 或 clear",
                         "Mode edit requires hover/always/click/clear",
-                    ));
+                    )));
                 }
             }
         }
@@ -4332,7 +5932,10 @@ fn queue_bulk_layout(root: &AppRoot, hwnd: HWND, algorithm: BulkLayoutAlgorithm)
         let app = root.app.borrow();
         app.bulk_manager_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No zones listed to layout"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "暂无可调整布局的区域",
+                "No zones listed to layout",
+            )));
     } else {
         root.dispatcher
             .push(Command::BulkApplyLayout { ids, algorithm });
@@ -4350,7 +5953,10 @@ fn queue_bulk_metadata_update(root: &AppRoot, hwnd: HWND) -> LRESULT {
         let app = root.app.borrow();
         app.bulk_manager_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No zones listed to update"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "暂无可更新的区域",
+                "No zones listed to update",
+            )));
     } else {
         root.dispatcher.push(Command::BulkUpdateZones(updates));
     }
@@ -4367,17 +5973,22 @@ fn queue_bulk_icon_picker(root: &AppRoot, hwnd: HWND) -> LRESULT {
         let app = root.app.borrow();
         app.bulk_manager_status
             .borrow_mut()
-            .replace(SmolStr::new_static("Select zones before picking an icon"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "请先选择要修改图标的区域",
+                "Select zones before picking an icon",
+            )));
         log_static("bulk: icon picker rejected selected_count=0\n");
     } else {
         root.dispatcher
             .push(Command::OpenIconPicker { zone_id: None });
         let app = root.app.borrow();
-        app.bulk_manager_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Pick an icon for {selected_count} selected zones"
-            )));
+        app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("为 {selected_count} 个已选区域选择图标")
+            } else {
+                format!("Pick an icon for {selected_count} selected zones")
+            },
+        ));
         log_static(
             format!("bulk: icon picker requested selected_count={selected_count}\n").as_str(),
         );
@@ -4395,17 +6006,22 @@ fn queue_bulk_accent_picker(root: &AppRoot, hwnd: HWND) -> LRESULT {
         let app = root.app.borrow();
         app.bulk_manager_status
             .borrow_mut()
-            .replace(SmolStr::new_static("Select zones before picking a color"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "请先选择要修改颜色的区域",
+                "Select zones before picking a color",
+            )));
     } else {
         root.dispatcher.push(Command::OpenPalettePicker {
             target: PaletteTarget::BulkManagerSelectedAccent,
         });
         let app = root.app.borrow();
-        app.bulk_manager_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Pick a color for {selected_count} selected zones"
-            )));
+        app.bulk_manager_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("为 {selected_count} 个已选区域选择颜色")
+            } else {
+                format!("Pick a color for {selected_count} selected zones")
+            },
+        ));
     }
     request_redraw(hwnd);
     0
@@ -4457,9 +6073,13 @@ fn handle_rules_wizard_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             let mut wizard = app.rules_wizard.borrow_mut();
             let next = !wizard.enabled();
             wizard.set_enabled(next);
-            app.rules_wizard_status
-                .borrow_mut()
-                .replace(SmolStr::new(format!("Rule enabled set to {next}")));
+            app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    format!("规则已{}", if next { "启用" } else { "停用" })
+                } else {
+                    format!("Rule {}", if next { "enabled" } else { "disabled" })
+                },
+            ));
             request_redraw(hwnd);
             0
         }
@@ -4482,7 +6102,13 @@ fn handle_rules_wizard_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
             if let Some(rule_id) = selected_rules_wizard_rule_id(root) {
                 root.dispatcher.push(Command::RunRuleNow(rule_id));
             } else {
-                set_rules_wizard_error(root, SmolStr::new_static("No persisted rule selected"));
+                set_rules_wizard_error(
+                    root,
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择已保存规则",
+                        "No persisted rule selected",
+                    )),
+                );
             }
             request_redraw(hwnd);
             0
@@ -4493,7 +6119,13 @@ fn handle_rules_wizard_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> LRESULT {
                     root.dispatcher.push(Command::DeleteRule(rule_id));
                 }
             } else {
-                set_rules_wizard_error(root, SmolStr::new_static("No persisted rule selected"));
+                set_rules_wizard_error(
+                    root,
+                    SmolStr::new_static(context_menu_text(
+                        "尚未选择已保存规则",
+                        "No persisted rule selected",
+                    )),
+                );
             }
             request_redraw(hwnd);
             0
@@ -4651,13 +6283,21 @@ fn cycle_rules_wizard_condition(root: &AppRoot) {
     let next = next_predicate_kind(current);
     wizard.set_condition_kind(condition_index, next);
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Condition {} predicate: {}",
-            condition_index + 1,
-            predicate_kind_name(next)
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "条件 {}：{}",
+                condition_index + 1,
+                predicate_kind_display_text(next)
+            )
+        } else {
+            format!(
+                "Condition {} predicate: {}",
+                condition_index + 1,
+                predicate_kind_name(next)
+            )
+        },
+    ));
 }
 
 fn cycle_rules_wizard_action(root: &AppRoot) {
@@ -4666,9 +6306,13 @@ fn cycle_rules_wizard_action(root: &AppRoot) {
     let next = next_action_kind(wizard.action().kind);
     wizard.set_action_kind(next);
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Action: {}", action_kind_name(next))));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("执行操作：{}", action_kind_display_text(next))
+        } else {
+            format!("Action: {}", action_kind_name(next))
+        },
+    ));
 }
 
 fn cycle_rules_wizard_run_mode(root: &AppRoot) {
@@ -4677,12 +6321,13 @@ fn cycle_rules_wizard_run_mode(root: &AppRoot) {
     let next = next_run_mode_choice(wizard.run_mode());
     wizard.set_run_mode(next);
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Run mode: {}",
-            run_mode_choice_name(next)
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("运行方式：{}", run_mode_choice_display_text(next))
+        } else {
+            format!("Run mode: {}", run_mode_choice_name(next))
+        },
+    ));
 }
 
 fn cycle_rules_wizard_combine(root: &AppRoot) {
@@ -4694,12 +6339,13 @@ fn cycle_rules_wizard_combine(root: &AppRoot) {
     };
     wizard.set_combine(next);
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Condition combine: {}",
-            combine_mode_name(next)
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("条件组合：{}", combine_mode_display_text(next))
+        } else {
+            format!("Condition combine: {}", combine_mode_name(next))
+        },
+    ));
 }
 
 fn add_rules_wizard_condition(root: &AppRoot) {
@@ -4708,9 +6354,13 @@ fn add_rules_wizard_condition(root: &AppRoot) {
     wizard.add_condition();
     wizard.set_error(None);
     let count = wizard.conditions().len();
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Added condition {count}")));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已添加条件 {count}")
+        } else {
+            format!("Added condition {count}")
+        },
+    ));
 }
 
 fn remove_current_rules_wizard_condition(root: &AppRoot) {
@@ -4722,9 +6372,18 @@ fn remove_current_rules_wizard_condition(root: &AppRoot) {
     wizard.set_error(None);
     let after = wizard.conditions().len();
     let status = if after == before {
-        SmolStr::new_static("At least one condition is required")
+        SmolStr::new_static(context_menu_text(
+            "至少需要保留一个条件",
+            "At least one condition is required",
+        ))
     } else {
-        SmolStr::new(format!("Removed condition {}", condition_index + 1))
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("已移除条件 {}", condition_index + 1)
+            } else {
+                format!("Removed condition {}", condition_index + 1)
+            },
+        )
     };
     app.rules_wizard_status.borrow_mut().replace(status);
 }
@@ -4734,13 +6393,21 @@ fn select_next_rules_wizard_condition(root: &AppRoot) {
     let mut wizard = app.rules_wizard.borrow_mut();
     wizard.select_next_condition();
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Editing condition {} of {}",
-            wizard.condition_cursor() + 1,
-            wizard.conditions().len()
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "正在编辑第 {} 个条件，共 {} 个",
+                wizard.condition_cursor() + 1,
+                wizard.conditions().len()
+            )
+        } else {
+            format!(
+                "Editing condition {} of {}",
+                wizard.condition_cursor() + 1,
+                wizard.conditions().len()
+            )
+        },
+    ));
 }
 
 fn select_rules_wizard_condition(root: &AppRoot, condition_index: usize) {
@@ -4748,13 +6415,21 @@ fn select_rules_wizard_condition(root: &AppRoot, condition_index: usize) {
     let mut wizard = app.rules_wizard.borrow_mut();
     wizard.set_condition_cursor(condition_index);
     wizard.set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Editing condition {} of {}",
-            wizard.condition_cursor() + 1,
-            wizard.conditions().len()
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "正在编辑第 {} 个条件，共 {} 个",
+                wizard.condition_cursor() + 1,
+                wizard.conditions().len()
+            )
+        } else {
+            format!(
+                "Editing condition {} of {}",
+                wizard.condition_cursor() + 1,
+                wizard.conditions().len()
+            )
+        },
+    ));
 }
 
 fn next_predicate_kind(current: PredicateKind) -> PredicateKind {
@@ -4789,6 +6464,54 @@ fn predicate_kind_name(kind: PredicateKind) -> &'static str {
     }
 }
 
+fn predicate_kind_display_text(kind: PredicateKind) -> &'static str {
+    match kind {
+        PredicateKind::NameStartsWith => "名称开头是",
+        PredicateKind::NameContains => "名称包含",
+        PredicateKind::NameEndsWith => "名称结尾是",
+        PredicateKind::ExtensionIn => "扩展名属于",
+        PredicateKind::CreatedBefore => "创建时间早于指定天数",
+        PredicateKind::ModifiedBefore => "修改时间早于指定天数",
+        PredicateKind::SizeGreaterThan => "文件大于指定大小",
+        PredicateKind::InZone => "位于区域",
+        PredicateKind::OnDesktop => "位于桌面",
+    }
+}
+
+fn bulk_sort_key_text(key: bulk_manager_panel::SortKey) -> &'static str {
+    match key {
+        bulk_manager_panel::SortKey::Name => "名称",
+        bulk_manager_panel::SortKey::Items => "项目数",
+        bulk_manager_panel::SortKey::Accent => "颜色",
+        bulk_manager_panel::SortKey::Size => "尺寸",
+    }
+}
+
+fn bulk_layout_algorithm_text(algorithm: BulkLayoutAlgorithm, zh: bool) -> &'static str {
+    match (algorithm, zh) {
+        (BulkLayoutAlgorithm::Grid, true) => "网格",
+        (BulkLayoutAlgorithm::Row, true) => "横排",
+        (BulkLayoutAlgorithm::Column, true) => "纵列",
+        (BulkLayoutAlgorithm::Spiral, true) => "环绕",
+        (BulkLayoutAlgorithm::Organic, true) => "自然",
+        (BulkLayoutAlgorithm::Grid, false) => "grid",
+        (BulkLayoutAlgorithm::Row, false) => "row",
+        (BulkLayoutAlgorithm::Column, false) => "column",
+        (BulkLayoutAlgorithm::Spiral, false) => "spiral",
+        (BulkLayoutAlgorithm::Organic, false) => "organic",
+    }
+}
+
+fn bulk_text_field_text(field: BulkTextEditField) -> &'static str {
+    match field {
+        BulkTextEditField::Alias => "别名",
+        BulkTextEditField::Icon => "图标",
+        BulkTextEditField::Accent => "颜色",
+        BulkTextEditField::CapsuleSize => "胶囊尺寸",
+        BulkTextEditField::DisplayMode => "显示模式",
+    }
+}
+
 fn action_kind_name(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::MoveToZone => "MoveToZone",
@@ -4796,6 +6519,16 @@ fn action_kind_name(kind: ActionKind) -> &'static str {
         ActionKind::DeleteToRecycleBin => "DeleteToRecycleBin",
         ActionKind::Tag => "Tag",
         ActionKind::Notify => "Notify",
+    }
+}
+
+fn action_kind_display_text(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::MoveToZone => "移动到区域",
+        ActionKind::MoveToFolder => "移动到文件夹",
+        ActionKind::DeleteToRecycleBin => "移入回收站",
+        ActionKind::Tag => "添加标签",
+        ActionKind::Notify => "发送通知",
     }
 }
 
@@ -4807,10 +6540,25 @@ fn run_mode_choice_name(mode: RunModeChoice) -> &'static str {
     }
 }
 
+fn run_mode_choice_display_text(mode: RunModeChoice) -> &'static str {
+    match mode {
+        RunModeChoice::OnDemand => "手动运行",
+        RunModeChoice::OnFileChange => "文件变化时运行",
+        RunModeChoice::Interval => "定时运行",
+    }
+}
+
 fn combine_mode_name(mode: rules_wizard::CombineMode) -> &'static str {
     match mode {
         rules_wizard::CombineMode::All => "All",
         rules_wizard::CombineMode::Any => "Any",
+    }
+}
+
+fn combine_mode_display_text(mode: rules_wizard::CombineMode) -> &'static str {
+    match mode {
+        rules_wizard::CombineMode::All => "全部满足",
+        rules_wizard::CombineMode::Any => "任一满足",
     }
 }
 
@@ -4992,9 +6740,9 @@ fn handle_settings_passphrase_char(root: &AppRoot, codepoint: u32) -> bool {
     true
 }
 
-/// M7 (2026-06-01) — WM_CHAR handler for the §2 桌面路径 / 监控值 inline text
+/// M7 (2026-06-01) — WM_CHAR handler for the §2 妗岄潰璺緞 / 鐩戞帶鍊?inline text
 /// fields (the focused-field model that generalises the passphrase-only path).
-/// Gated on `settings_open && settings_focused_field ∈ {DesktopPath,
+/// Gated on `settings_open && settings_focused_field 鈭?{DesktopPath,
 /// WatchValues}`; appends the composed Unicode codepoint to the focused draft
 /// via the pure `AppState::settings_focused_push_char` (which caps length, is
 /// CJK-safe, and allows `\n` only for the WatchValues textarea). Marks the
@@ -5020,6 +6768,7 @@ fn handle_settings_text_char(root: &AppRoot, codepoint: u32) -> bool {
         app.settings_focused_field.get(),
         bento_nano_app::SettingsTextField::DesktopPath
             | bento_nano_app::SettingsTextField::WatchValues
+            | bento_nano_app::SettingsTextField::AccentColor
     ) {
         return false;
     }
@@ -5033,15 +6782,14 @@ fn handle_settings_text_char(root: &AppRoot, codepoint: u32) -> bool {
     }
 }
 
-/// M7 — WM_KEYDOWN handler for the §2 桌面路径 / 监控值 inline text fields.
+/// M7 — WM_KEYDOWN handler for the §2 妗岄潰璺緞 / 鐩戞帶鍊?inline text fields.
 /// Returns `Some(0)` (consumed) ONLY when a non-passphrase field is focused;
 /// otherwise `None` so the passphrase + auxiliary-escape paths still run.
 /// - Backspace → pop last scalar, mark dirty, redraw.
 /// - Enter → DesktopPath (single line): blur the field; WatchValues (textarea):
 ///   insert a `\n` into the draft.
-/// - Esc → blur the field (set `None`) + redraw; the panel does NOT close while
-///   a field is focused (only the second Esc, with no focus, reaches the
-///   auxiliary-escape close path).
+/// - Esc → blur the field (set `None`) + return `None`, allowing the same
+///   keydown to reach the Settings auxiliary-escape close/cancel path.
 fn handle_settings_text_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<LRESULT> {
     let field = {
         let app = root.app.borrow();
@@ -5054,6 +6802,7 @@ fn handle_settings_text_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<L
         field,
         bento_nano_app::SettingsTextField::DesktopPath
             | bento_nano_app::SettingsTextField::WatchValues
+            | bento_nano_app::SettingsTextField::AccentColor
     );
     if !is_text_field {
         return None;
@@ -5085,13 +6834,13 @@ fn handle_settings_text_keydown(root: &AppRoot, vk: u32, hwnd: HWND) -> Option<L
             Some(0)
         }
         VK_ESCAPE_KEY => {
-            // Blur the field; keep the panel open (first Esc only clears focus).
+            // Blur first, then let this same keydown close/cancel Settings.
             let app = root.app.borrow();
             app.settings_focused_field
                 .set(bento_nano_app::SettingsTextField::None);
             drop(app);
             request_redraw(hwnd);
-            Some(0)
+            None
         }
         _ => None,
     }
@@ -5154,15 +6903,67 @@ fn handle_zone_editor_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> 
     let Some(hit) = hit else {
         return false;
     };
+    log_static(
+        format!(
+            "zone-editor: lbutton_up x={x:.1} y={y:.1} viewport={:.1}x{:.1} hit={hit:?}\n",
+            root.app.borrow().viewport.width,
+            root.app.borrow().viewport.height,
+        )
+        .as_str(),
+    );
     match hit {
+        ZoneEditorHit::Close => {
+            root.app.borrow().zone_editor.borrow_mut().take();
+            hide_aux_and_redraw_main(root, hwnd);
+            return true;
+        }
+        ZoneEditorHit::Name => {
+            focus_window_for_keyboard(hwnd);
+        }
         ZoneEditorHit::Icon => {
             if !queue_zone_editor_icon_picker(root) {
                 return false;
             }
         }
-        ZoneEditorHit::Accent => cycle_zone_editor_accent(root),
-        ZoneEditorHit::GridColumns => cycle_zone_editor_grid_columns(root),
-        ZoneEditorHit::CapsuleSize | ZoneEditorHit::CapsuleShape => cycle_zone_editor_capsule(root),
+        ZoneEditorHit::AccentClear => {
+            let app = root.app.borrow();
+            if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+                session.draft_accent_color = None;
+            }
+        }
+        ZoneEditorHit::AccentSwatch(index) => {
+            let Some(accent) = ACCENT_PALETTE.get(index) else {
+                return false;
+            };
+            let app = root.app.borrow();
+            if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+                session.draft_accent_color = Some(SmolStr::new_static(accent));
+            }
+        }
+        ZoneEditorHit::AccentCustom => {
+            let initial = {
+                let app = root.app.borrow();
+                app.zone_editor
+                    .borrow()
+                    .as_ref()
+                    .and_then(|session| session.draft_accent_color.clone())
+                    .unwrap_or_else(|| SmolStr::new_static("#3b82f6"))
+            };
+            if let Some(accent) = choose_native_accent_color(hwnd, initial.as_str()) {
+                let app = root.app.borrow();
+                if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+                    session.draft_accent_color = Some(accent);
+                }
+            }
+        }
+        ZoneEditorHit::GridColumns(columns) => {
+            let app = root.app.borrow();
+            if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+                session.draft_grid_columns = columns.clamp(GRID_COLUMNS_MIN, GRID_COLUMNS_MAX);
+            }
+        }
+        ZoneEditorHit::CapsuleSize(size) => set_zone_editor_capsule_size(root, size),
+        ZoneEditorHit::CapsuleShape(shape) => set_zone_editor_capsule_shape(root, shape),
         ZoneEditorHit::Save => {
             save_zone_editor(root);
             hide_aux_and_redraw_main(root, hwnd);
@@ -5253,6 +7054,20 @@ fn cycle_zone_editor_capsule(root: &AppRoot) {
     session.draft_capsule_shape = SmolStr::new_static(shape.wire());
 }
 
+fn set_zone_editor_capsule_size(root: &AppRoot, size: CapsuleSizeChoice) {
+    let app = root.app.borrow();
+    if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+        session.draft_capsule_size = SmolStr::new_static(size.wire());
+    }
+}
+
+fn set_zone_editor_capsule_shape(root: &AppRoot, shape: CapsuleShapeChoice) {
+    let app = root.app.borrow();
+    if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+        session.draft_capsule_shape = SmolStr::new_static(shape.wire());
+    }
+}
+
 fn handle_zone_editor_char(root: &AppRoot, codepoint: u32) {
     if matches!(codepoint, VK_BACKSPACE | VK_ENTER | VK_ESCAPE_KEY) {
         return;
@@ -5265,7 +7080,7 @@ fn handle_zone_editor_char(root: &AppRoot, codepoint: u32) {
     }
     let app = root.app.borrow();
     if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
-        if session.draft_name.chars().count() < 32 {
+        if session.draft_name.chars().count() < NAME_MAX_LEN {
             session.draft_name.push(ch);
         }
     }
@@ -5284,6 +7099,10 @@ fn save_zone_editor(root: &AppRoot) {
         root.dispatcher
             .push(Command::RenameZone(session.zone_id, SmolStr::new(trimmed)));
     }
+    root.dispatcher.push(Command::SetZoneAlias(
+        session.zone_id,
+        SmolStr::new_static(""),
+    ));
     root.dispatcher.push(Command::SetZoneIcon(
         session.zone_id,
         normalize_icon_slug(session.draft_icon.as_str()),
@@ -5364,7 +7183,13 @@ fn save_item_file_rename(root: &AppRoot) -> bool {
                 SmolStr::new(name),
             ),
             Err(error) => {
-                let status = SmolStr::new(format!("Rename rejected: {error}"));
+                let status = SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("无法重命名：{error}")
+                    } else {
+                        format!("Rename rejected: {error}")
+                    },
+                );
                 session.status = Some(status.clone());
                 app.item_operation_status.borrow_mut().replace(status);
                 return false;
@@ -5464,6 +7289,7 @@ fn icon_picker_slug_for_hit(hit: IconPickerHit) -> Option<SmolStr> {
         IconPickerHit::Icon(index) => ALL_ICON_KINDS
             .get(index)
             .map(|kind| SmolStr::new_static(kind.as_str())),
+        IconPickerHit::Close => None,
     }
 }
 
@@ -5472,7 +7298,15 @@ fn handle_icon_picker_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) -> 
         let app = root.app.borrow();
         picker_geometry::icon_picker_hit_test(app.viewport, x, y, ALL_ICON_KINDS.len())
     };
-    let Some(selected_icon) = hit.and_then(icon_picker_slug_for_hit) else {
+    let Some(hit) = hit else {
+        return false;
+    };
+    if hit == IconPickerHit::Close {
+        root.app.borrow().icon_picker.borrow_mut().take();
+        hide_aux_and_redraw_main(root, hwnd);
+        return true;
+    }
+    let Some(selected_icon) = icon_picker_slug_for_hit(hit) else {
         return false;
     };
     {
@@ -5634,6 +7468,7 @@ const SETTING_UPDATES_AUTO_DOWNLOAD: &str = "updates.auto_download";
 const SETTING_UPDATES_SKIPPED_VERSION: &str = "updates.skipped_version";
 const SETTING_STEALTH_ENABLED: &str = "stealth.enabled";
 const SETTING_ENCRYPTION_MODE: &str = "encryption.mode";
+const SETTING_APPEARANCE_ACCENT_COLOR: &str = "accent_color";
 const SETTING_THEME_BASE_ACCENT: &str = "theme.base_accent";
 const SETTING_ACTIVE_THEME: &str = "active_theme";
 const SETTING_ZONE_DISPLAY_MODE: &str = "zone_display_mode";
@@ -5869,182 +7704,625 @@ fn restore_general_bool_cell(
 /// runs when `settings_dirty` is true; clean Save short-circuits). After
 /// the write completes the dirty flag clears, leaving the panel in a
 /// "just-saved" state until the next toggle.
-fn save_settings_general(root: &AppRoot) {
-    let (dirty, values, perf_startup, accent_draft, path_drafts) = {
-        let app = root.app.borrow();
-        let dirty = app.settings_dirty.get();
-        let values = (
-            app.setting_desktop_embed.get(),
-            app.setting_autostart.get(),
-            app.setting_show_in_taskbar.get(),
-            app.setting_smart_layout.get(),
-            app.setting_portable_mode.get(),
-        );
-        // M1d — Performance §5 + Startup management §6 values, captured under
-        // the same borrow so Save persists General + Performance + Startup in
-        // one batched flush.
-        let perf_startup = (
-            app.expand_delay_ms.get(),
-            app.collapse_delay_ms.get(),
-            app.icon_cache_size.get(),
-            app.startup_high_priority.get(),
-            app.crash_restart_enabled.get(),
-            app.crash_max_retries.get(),
-            app.crash_window_secs.get(),
-            app.safe_start_after_hibernation.get(),
-            app.hibernate_resume_delay_ms.get(),
-        );
-        // M6-UI — §3 Appearance accent draft, captured under the same borrow so
-        // Save flushes it in the same batch as the General/Perf/Startup rows.
-        let accent_draft = app.settings_draft_accent_color.borrow().clone();
-        // W1 (#7 fix wave) — the §2 Paths drafts were never persisted before this
-        // fix, so path/watch edits were silently dropped on flush and reverted on
-        // next launch. Capture them under the same borrow and flush in the batch.
-        let path_drafts = (
-            app.desktop_path_draft.borrow().clone(),
-            app.watch_paths_draft.borrow().clone(),
-        );
-        (dirty, values, perf_startup, accent_draft, path_drafts)
-    };
-    if !dirty {
+fn persist_settings_accent_to_vault(
+    vault: &mut bento_nano_backend::config_vault::Vault,
+    accent_draft: Option<&SmolStr>,
+    clear_requested: bool,
+) {
+    if clear_requested {
+        vault.remove_setting(SETTING_APPEARANCE_ACCENT_COLOR);
+        vault.remove_setting(SETTING_THEME_BASE_ACCENT);
         return;
     }
-    let Some(mtx) = bento_nano_backend::config_vault::Vault::global() else {
-        // Early-startup or vault-init-failure path: the user could still
-        // open Settings via the K1 paint paths before `init_global` runs.
-        // Tracing keeps an audit trail; the AppState mutation already
-        // happened in-memory so the visible toggles match what Save would
-        // have written.
-        tracing::warn!(
-            target: "bentodesk::vault",
-            "settings: SaveSettings dropped — vault global not installed"
-        );
-        let app = root.app.borrow();
-        app.settings_dirty.set(false);
-        app.settings_snapshot.borrow_mut().take();
-        app.settings_draft_accent_color.borrow_mut().take();
+    let Some(accent) = accent_draft else {
         return;
     };
-    let Ok(mut vault) = mtx.lock() else {
-        tracing::warn!(
-            target: "bentodesk::vault",
-            "settings: SaveSettings dropped — vault mutex poisoned"
-        );
-        let app = root.app.borrow();
-        app.settings_dirty.set(false);
-        app.settings_snapshot.borrow_mut().take();
-        app.settings_draft_accent_color.borrow_mut().take();
+    vault.set_setting(
+        SETTING_APPEARANCE_ACCENT_COLOR,
+        bento_nano_backend::config_vault::SettingValue::Str(accent.clone()),
+    );
+    vault.set_setting(
+        SETTING_THEME_BASE_ACCENT,
+        bento_nano_backend::config_vault::SettingValue::Str(accent.clone()),
+    );
+}
+
+const SETTINGS_PROTECTED_PREFIXES: &[&str] = &[
+    r"c:\windows",
+    r"c:\program files",
+    r"c:\program files (x86)",
+    r"c:\programdata",
+    r"c:\$recycle.bin",
+    r"c:\system volume information",
+];
+
+const SETTINGS_TRANSACTION_KEYS: &[&str] = &[
+    SETTING_GENERAL_GHOST_LAYER_ENABLED,
+    SETTING_GENERAL_LAUNCH_AT_STARTUP,
+    SETTING_GENERAL_SHOW_IN_TASKBAR,
+    SETTING_GENERAL_AUTO_GROUP_ENABLED,
+    SETTING_GENERAL_PORTABLE_MODE,
+    SETTING_PERF_EXPAND_DELAY_MS,
+    SETTING_PERF_COLLAPSE_DELAY_MS,
+    SETTING_PERF_ICON_CACHE_SIZE,
+    SETTING_STARTUP_HIGH_PRIORITY,
+    SETTING_STARTUP_CRASH_RESTART_ENABLED,
+    SETTING_STARTUP_CRASH_MAX_RETRIES,
+    SETTING_STARTUP_CRASH_WINDOW_SECS,
+    SETTING_STARTUP_SAFE_AFTER_HIBERNATION,
+    SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS,
+    SETTING_PATHS_DESKTOP_PATH,
+    SETTING_PATHS_WATCH_PATHS,
+    SETTING_APPEARANCE_ACCENT_COLOR,
+    SETTING_THEME_BASE_ACCENT,
+    SETTING_ACTIVE_THEME,
+    SETTING_ZONE_DISPLAY_MODE,
+];
+
+fn settings_save_failure(root: &AppRoot, message: impl Into<SmolStr>) -> bool {
+    let message = message.into();
+    tracing::warn!(target: "bentodesk::settings", error = %message, "settings save rejected");
+    let app = root.app.borrow();
+    app.settings_dirty.set(true);
+    app.settings_save_error.borrow_mut().replace(message);
+    false
+}
+
+fn strip_windows_extended_path(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+fn settings_path_is_within_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('\\'))
+}
+
+fn validate_settings_directory(raw: &str, label: &str) -> Result<PathBuf, SmolStr> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(SmolStr::new(format!("{label}不能为空")));
+    }
+    let path = Path::new(raw);
+    if !path.exists() {
+        return Err(SmolStr::new(format!("{label}不存在：{raw}")));
+    }
+    if !path.is_dir() {
+        return Err(SmolStr::new(format!("{label}不是文件夹：{raw}")));
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| SmolStr::new(format!("{label}无法解析：{error}")))?;
+    let canonical_lower = strip_windows_extended_path(canonical.to_string_lossy().as_ref())
+        .replace('/', "\\")
+        .to_lowercase();
+    if let Some(prefix) = SETTINGS_PROTECTED_PREFIXES
+        .iter()
+        .find(|prefix| settings_path_is_within_prefix(&canonical_lower, prefix))
+    {
+        return Err(SmolStr::new(format!("{label}不能位于系统目录 {prefix} 内")));
+    }
+    Ok(canonical)
+}
+
+fn push_unique_settings_source(sources: &mut Vec<PathBuf>, candidate: PathBuf) {
+    let folded = candidate
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_lowercase();
+    if sources
+        .iter()
+        .any(|path| path.to_string_lossy().replace('/', "\\").to_lowercase() == folded)
+    {
         return;
+    }
+    sources.push(candidate);
+}
+
+fn validate_settings_sources(snapshot: &SettingsSnapshot) -> Result<Vec<PathBuf>, SmolStr> {
+    let desktop = validate_settings_directory(snapshot.desktop_path_draft.as_str(), "桌面路径")?;
+    let desktop_text = desktop.to_string_lossy();
+    let mut sources = Vec::new();
+    for source in bento_nano_backend::desktop_sources::all_desktop_dirs(Some(&desktop_text)) {
+        if source.is_dir() {
+            push_unique_settings_source(
+                &mut sources,
+                std::fs::canonicalize(&source).unwrap_or(source),
+            );
+        }
+    }
+    // `all_desktop_dirs` deliberately filters missing paths. Keep the validated
+    // custom path even if it was folded out as a duplicate.
+    push_unique_settings_source(&mut sources, desktop);
+
+    for (index, raw) in snapshot.watch_paths_draft.lines().enumerate() {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let label = format!("监控路径第 {} 行", index + 1);
+        let path = validate_settings_directory(raw, label.as_str())?;
+        push_unique_settings_source(&mut sources, path);
+    }
+    if sources.is_empty() {
+        return Err(SmolStr::new_static("没有可用的桌面监控路径"));
+    }
+    Ok(sources)
+}
+
+fn rebuild_desktop_watcher(root: &AppRoot, sources: &[PathBuf]) -> Result<(), SmolStr> {
+    if startup_diag_skip("desktop_watcher") {
+        tracing::info!(
+            target: "bentodesk::watcher",
+            "desktop watcher rebuild skipped by startup diagnostics"
+        );
+        return Ok(());
+    }
+    let replacement =
+        bento_nano_backend::watcher::setup_file_watcher(sources, root.desktop_event_tx.clone())
+            .map_err(|error| SmolStr::new(format!("无法监控桌面路径：{error}")))?;
+    let previous = root.desktop_watcher.replace(Some(replacement));
+    drop(previous);
+    tracing::info!(
+        target: "bentodesk::watcher",
+        sources = sources.len(),
+        "desktop watcher rebuilt from saved Settings paths"
+    );
+    Ok(())
+}
+
+fn copy_state_dir_recursive(source: &Path, target: &Path) -> Result<(), SmolStr> {
+    if source == target || !source.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(target)
+        .map_err(|error| SmolStr::new(format!("无法创建便携数据目录：{error}")))?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| SmolStr::new(format!("无法读取当前数据目录：{error}")))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| SmolStr::new(format!("无法读取数据目录项：{error}")))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| SmolStr::new(format!("无法读取数据目录项类型：{error}")))?;
+        let destination = target.join(entry.file_name());
+        if file_type.is_symlink() {
+            return Err(SmolStr::new(format!(
+                "便携迁移拒绝符号链接：{}",
+                entry.path().display()
+            )));
+        }
+        if file_type.is_dir() {
+            copy_state_dir_recursive(entry.path().as_path(), destination.as_path())?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &destination).map_err(|error| {
+                SmolStr::new(format!(
+                    "无法复制便携数据 {}：{error}",
+                    entry.path().display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_portable_state(previous: bool, desired: bool) -> Result<(), SmolStr> {
+    if previous == desired {
+        return Ok(());
+    }
+    let source = storage::state_dir_for_portable_mode(previous)
+        .map_err(|error| SmolStr::new(format!("无法定位当前数据目录：{error}")))?;
+    let target = storage::state_dir_for_portable_mode(desired)
+        .map_err(|error| SmolStr::new(format!("无法定位目标数据目录：{error}")))?;
+    copy_state_dir_recursive(source.as_path(), target.as_path())?;
+    storage::set_portable_mode_enabled(desired)
+        .map_err(|error| SmolStr::new(format!("无法切换便携模式：{error}")))?;
+    tracing::info!(
+        target: "bentodesk::settings",
+        previous,
+        desired,
+        source = %source.display(),
+        target_dir = %target.display(),
+        "portable mode state synchronized for next launch"
+    );
+    Ok(())
+}
+
+fn apply_show_in_taskbar(hwnd: HWND, show: bool) -> Result<(), SmolStr> {
+    if hwnd.is_null() {
+        return Err(SmolStr::new_static("主窗口不存在，无法更新任务栏状态"));
+    }
+    let _guard = bento_nano_backend::ghost_layer::bypass_subclass_guard();
+    // SAFETY: `hwnd` is the live Main HWND. The hide/style/frame/show sequence
+    // matches the Tauri baseline and avoids stale taskbar buttons.
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE);
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let desired = if show {
+            (current | WS_EX_APPWINDOW as isize) & !(WS_EX_TOOLWINDOW as isize)
+        } else {
+            (current | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize)
+        };
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired);
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let applied = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let correct = if show {
+            applied & WS_EX_APPWINDOW as isize != 0 && applied & WS_EX_TOOLWINDOW as isize == 0
+        } else {
+            applied & WS_EX_TOOLWINDOW as isize != 0 && applied & WS_EX_APPWINDOW as isize == 0
+        };
+        if !correct {
+            return Err(SmolStr::new_static("Windows 未接受任务栏窗口样式"));
+        }
+    }
+    Ok(())
+}
+
+fn apply_desktop_embed(hwnd: HWND, enabled: bool) -> Result<(), SmolStr> {
+    let result = if enabled {
+        bento_nano_backend::ghost_layer::attach_selected_stack(hwnd)
+    } else {
+        bento_nano_backend::ghost_layer::detach(hwnd)
     };
-    let (ghost, startup, taskbar, auto_group, portable) = values;
+    result.map_err(|error| SmolStr::new(format!("桌面嵌入切换失败：{error}")))
+}
+
+fn apply_process_priority(high_priority: bool) -> Result<(), SmolStr> {
+    let priority = if high_priority {
+        ABOVE_NORMAL_PRIORITY_CLASS
+    } else {
+        NORMAL_PRIORITY_CLASS
+    };
+    // SAFETY: GetCurrentProcess returns a process pseudo-handle valid for
+    // SetPriorityClass. No ownership is transferred.
+    if unsafe { SetPriorityClass(GetCurrentProcess(), priority) } == 0 {
+        return Err(SmolStr::new(format!(
+            "进程优先级切换失败：Win32 {}",
+            unsafe { GetLastError() }
+        )));
+    }
+    Ok(())
+}
+
+fn restart_arg_value(args: &[String], prefix: &str) -> Option<u64> {
+    args.iter()
+        .find_map(|arg| arg.strip_prefix(prefix)?.parse::<u64>().ok())
+}
+
+fn restart_registration_command(
+    enabled: bool,
+    max_retries: u32,
+    window_secs: u64,
+    now_secs: u64,
+    args: &[String],
+) -> Option<String> {
+    if !enabled || max_retries == 0 {
+        return None;
+    }
+    let mut attempt = restart_arg_value(args, RESTART_ATTEMPT_ARG).unwrap_or(0);
+    let mut window_start = restart_arg_value(args, RESTART_WINDOW_START_ARG).unwrap_or(now_secs);
+    if now_secs.saturating_sub(window_start) > window_secs {
+        attempt = 0;
+        window_start = now_secs;
+    }
+    if attempt >= u64::from(max_retries) {
+        return None;
+    }
+    Some(format!(
+        "{RESTART_ATTEMPT_ARG}{} {RESTART_WINDOW_START_ARG}{window_start}",
+        attempt + 1
+    ))
+}
+
+fn configure_application_restart(snapshot: &SettingsSnapshot) -> Result<(), SmolStr> {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let args: Vec<String> = std::env::args().collect();
+    let command = restart_registration_command(
+        snapshot.crash_restart_enabled,
+        snapshot.crash_max_retries.max(0) as u32,
+        snapshot.crash_window_secs.max(0) as u64,
+        now_secs,
+        &args,
+    );
+    let hr = match command {
+        Some(command) => {
+            let wide = widen_dynamic(command.as_str());
+            // SAFETY: `wide` is NUL-terminated and alive for the call.
+            unsafe {
+                RegisterApplicationRestart(
+                    wide.as_ptr(),
+                    RESTART_NO_HANG | RESTART_NO_PATCH | RESTART_NO_REBOOT,
+                )
+            }
+        }
+        None => {
+            // SAFETY: process-scoped unregister has no arguments.
+            unsafe { UnregisterApplicationRestart() }
+        }
+    };
+    if hr < 0 {
+        return Err(SmolStr::new(format!(
+            "崩溃自动重启配置失败：HRESULT 0x{:08X}",
+            hr as u32
+        )));
+    }
+    Ok(())
+}
+
+fn settings_paths_changed(previous: &SettingsSnapshot, desired: &SettingsSnapshot) -> bool {
+    previous.desktop_path_draft != desired.desktop_path_draft
+        || previous.watch_paths_draft != desired.watch_paths_draft
+}
+
+fn apply_runtime_settings(
+    root: &AppRoot,
+    previous: &SettingsSnapshot,
+    desired: &SettingsSnapshot,
+    desired_sources: &[PathBuf],
+) -> Result<(), SmolStr> {
+    if previous.launch_at_startup != desired.launch_at_startup {
+        bento_nano_backend::autostart::set_enabled(desired.launch_at_startup)
+            .map_err(|error| SmolStr::new(format!("开机启动配置失败：{error}")))?;
+        if bento_nano_backend::autostart::is_enabled() != desired.launch_at_startup {
+            return Err(SmolStr::new_static("开机启动注册表状态校验失败"));
+        }
+    }
+
+    let main_hwnd = find_main_hwnd(root);
+    if previous.show_in_taskbar != desired.show_in_taskbar {
+        apply_show_in_taskbar(
+            main_hwnd.ok_or_else(|| SmolStr::new_static("主窗口尚未创建"))?,
+            desired.show_in_taskbar,
+        )?;
+    }
+    if previous.icon_cache_size != desired.icon_cache_size {
+        let Some(cache) = bento_nano_backend::icon::cache_handle() else {
+            return Err(SmolStr::new_static("图标缓存尚未初始化"));
+        };
+        cache.resize(desired.icon_cache_size.max(1) as usize);
+    }
+    if previous.ghost_layer_enabled != desired.ghost_layer_enabled {
+        apply_desktop_embed(
+            main_hwnd.ok_or_else(|| SmolStr::new_static("主窗口尚未创建"))?,
+            desired.ghost_layer_enabled,
+        )?;
+    }
+    if previous.startup_high_priority != desired.startup_high_priority {
+        apply_process_priority(desired.startup_high_priority)?;
+    }
+    if previous.crash_restart_enabled != desired.crash_restart_enabled
+        || previous.crash_max_retries != desired.crash_max_retries
+        || previous.crash_window_secs != desired.crash_window_secs
+    {
+        configure_application_restart(desired)?;
+    }
+    if settings_paths_changed(previous, desired) {
+        rebuild_desktop_watcher(root, desired_sources)?;
+    }
+    sync_portable_state(previous.portable_mode, desired.portable_mode)?;
+    Ok(())
+}
+
+fn snapshot_vault_settings(
+    vault: &bento_nano_backend::config_vault::Vault,
+) -> Vec<(
+    &'static str,
+    Option<bento_nano_backend::config_vault::SettingValue>,
+)> {
+    SETTINGS_TRANSACTION_KEYS
+        .iter()
+        .map(|key| (*key, vault.get_setting(key)))
+        .collect()
+}
+
+fn restore_vault_settings(
+    vault: &mut bento_nano_backend::config_vault::Vault,
+    values: &[(
+        &'static str,
+        Option<bento_nano_backend::config_vault::SettingValue>,
+    )],
+) {
+    for (key, value) in values {
+        match value {
+            Some(value) => vault.set_setting(key, value.clone()),
+            None => {
+                vault.remove_setting(key);
+            }
+        }
+    }
+}
+
+fn persist_settings_snapshot_to_vault(
+    vault: &mut bento_nano_backend::config_vault::Vault,
+    snapshot: &SettingsSnapshot,
+    accent_draft: Option<&SmolStr>,
+    accent_clear_requested: bool,
+) {
     vault.set_setting(
         SETTING_GENERAL_GHOST_LAYER_ENABLED,
-        bento_nano_backend::config_vault::SettingValue::Bool(ghost),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.ghost_layer_enabled),
     );
     vault.set_setting(
         SETTING_GENERAL_LAUNCH_AT_STARTUP,
-        bento_nano_backend::config_vault::SettingValue::Bool(startup),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.launch_at_startup),
     );
     vault.set_setting(
         SETTING_GENERAL_SHOW_IN_TASKBAR,
-        bento_nano_backend::config_vault::SettingValue::Bool(taskbar),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.show_in_taskbar),
     );
     vault.set_setting(
         SETTING_GENERAL_AUTO_GROUP_ENABLED,
-        bento_nano_backend::config_vault::SettingValue::Bool(auto_group),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.auto_group_enabled),
     );
     vault.set_setting(
         SETTING_GENERAL_PORTABLE_MODE,
-        bento_nano_backend::config_vault::SettingValue::Bool(portable),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.portable_mode),
     );
-    // M1d — Performance §5 + Startup management §6.
-    let (
-        expand_delay,
-        collapse_delay,
-        icon_cache,
-        high_priority,
-        crash_restart,
-        crash_retries,
-        crash_window,
-        safe_start,
-        hibernate_delay,
-    ) = perf_startup;
     vault.set_setting(
         SETTING_PERF_EXPAND_DELAY_MS,
-        bento_nano_backend::config_vault::SettingValue::Int(expand_delay as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(snapshot.expand_delay_ms as i64),
     );
     vault.set_setting(
         SETTING_PERF_COLLAPSE_DELAY_MS,
-        bento_nano_backend::config_vault::SettingValue::Int(collapse_delay as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(snapshot.collapse_delay_ms as i64),
     );
     vault.set_setting(
         SETTING_PERF_ICON_CACHE_SIZE,
-        bento_nano_backend::config_vault::SettingValue::Int(icon_cache as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(snapshot.icon_cache_size as i64),
     );
     vault.set_setting(
         SETTING_STARTUP_HIGH_PRIORITY,
-        bento_nano_backend::config_vault::SettingValue::Bool(high_priority),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.startup_high_priority),
     );
     vault.set_setting(
         SETTING_STARTUP_CRASH_RESTART_ENABLED,
-        bento_nano_backend::config_vault::SettingValue::Bool(crash_restart),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.crash_restart_enabled),
     );
     vault.set_setting(
         SETTING_STARTUP_CRASH_MAX_RETRIES,
-        bento_nano_backend::config_vault::SettingValue::Int(crash_retries as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(snapshot.crash_max_retries as i64),
     );
     vault.set_setting(
         SETTING_STARTUP_CRASH_WINDOW_SECS,
-        bento_nano_backend::config_vault::SettingValue::Int(crash_window as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(snapshot.crash_window_secs as i64),
     );
     vault.set_setting(
         SETTING_STARTUP_SAFE_AFTER_HIBERNATION,
-        bento_nano_backend::config_vault::SettingValue::Bool(safe_start),
+        bento_nano_backend::config_vault::SettingValue::Bool(snapshot.safe_start_after_hibernation),
     );
     vault.set_setting(
         SETTING_STARTUP_HIBERNATE_RESUME_DELAY_MS,
-        bento_nano_backend::config_vault::SettingValue::Int(hibernate_delay as i64),
+        bento_nano_backend::config_vault::SettingValue::Int(
+            snapshot.hibernate_resume_delay_ms as i64,
+        ),
     );
-    // M6-UI — §3 Appearance accent colour. Tauri persists the picked hex under
-    // the `accent_color` settings key (`tauri_settings.rs` migrates it on load).
-    // Only write when the user actually picked a swatch this session.
-    if let Some(accent) = accent_draft.as_ref() {
-        vault.set_setting(
-            "accent_color",
-            bento_nano_backend::config_vault::SettingValue::Str(accent.clone()),
-        );
-    }
-    // W1 (#7 fix wave) — persist the two §2 Paths drafts in the same batch.
-    // `desktop_path` is the raw single-line string; `watch_paths` is the
-    // newline-joined draft (one path per line, the in-memory shape).
-    let (desktop_path_draft, watch_paths_draft) = path_drafts;
+    persist_settings_accent_to_vault(vault, accent_draft, accent_clear_requested);
     vault.set_setting(
         SETTING_PATHS_DESKTOP_PATH,
-        bento_nano_backend::config_vault::SettingValue::Str(desktop_path_draft),
+        bento_nano_backend::config_vault::SettingValue::Str(snapshot.desktop_path_draft.clone()),
     );
     vault.set_setting(
         SETTING_PATHS_WATCH_PATHS,
-        bento_nano_backend::config_vault::SettingValue::Str(watch_paths_draft),
+        bento_nano_backend::config_vault::SettingValue::Str(snapshot.watch_paths_draft.clone()),
     );
-    if let Err(error) = vault.flush() {
+    vault.set_setting(
+        SETTING_ACTIVE_THEME,
+        bento_nano_backend::config_vault::SettingValue::Str(snapshot.active_theme_id.clone()),
+    );
+    vault.set_setting(
+        SETTING_ZONE_DISPLAY_MODE,
+        bento_nano_backend::config_vault::SettingValue::Str(SmolStr::new_static(
+            snapshot.zone_display_mode.as_wire(),
+        )),
+    );
+}
+
+fn save_settings_general(root: &AppRoot, _settings_hwnd: HWND) -> bool {
+    let (dirty, desired, previous, accent_draft, accent_clear_requested) = {
+        let app = root.app.borrow();
+        (
+            app.settings_dirty.get(),
+            app.snapshot_settings(),
+            app.settings_snapshot
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| app.snapshot_settings()),
+            app.settings_valid_accent_draft(),
+            app.settings_accent_clear_requested.get(),
+        )
+    };
+    if !dirty {
+        return false;
+    }
+    {
+        let app = root.app.borrow();
+        app.settings_save_error.borrow_mut().take();
+    }
+    let desired_sources = match validate_settings_sources(&desired) {
+        Ok(sources) => sources,
+        Err(error) => return settings_save_failure(root, error),
+    };
+
+    let Some(mtx) = bento_nano_backend::config_vault::Vault::global() else {
         tracing::warn!(
             target: "bentodesk::vault",
-            %error,
-            "settings: SaveSettings flush failed"
+            "settings: SaveSettings rejected — vault global not installed"
         );
+        return settings_save_failure(root, "设置存储尚未初始化");
+    };
+    let original_values = {
+        let Ok(mut vault) = mtx.lock() else {
+            return settings_save_failure(root, "设置存储锁已损坏");
+        };
+        if vault.is_locked_passphrase() {
+            return settings_save_failure(root, "请先解锁设置加密，再保存");
+        }
+        let original_values = snapshot_vault_settings(&vault);
+        persist_settings_snapshot_to_vault(
+            &mut vault,
+            &desired,
+            accent_draft.as_ref(),
+            accent_clear_requested,
+        );
+        if let Err(error) = vault.flush() {
+            restore_vault_settings(&mut vault, &original_values);
+            let _ = vault.flush();
+            return settings_save_failure(root, format!("设置写入失败：{error}"));
+        }
+        original_values
+    };
+
+    if let Err(error) = apply_runtime_settings(root, &previous, &desired, &desired_sources) {
+        if let Ok(mut vault) = mtx.lock() {
+            restore_vault_settings(&mut vault, &original_values);
+            if let Err(rollback_error) = vault.flush() {
+                tracing::error!(
+                    target: "bentodesk::vault",
+                    %rollback_error,
+                    "settings rollback flush failed"
+                );
+            }
+        }
+        let previous_sources =
+            validate_settings_sources(&previous).unwrap_or_else(|_| desired_sources.clone());
+        if let Err(rollback_error) =
+            apply_runtime_settings(root, &desired, &previous, &previous_sources)
+        {
+            tracing::error!(
+                target: "bentodesk::settings",
+                %rollback_error,
+                "native Settings side-effect rollback failed"
+            );
+        }
+        return settings_save_failure(root, error);
     }
-    drop(vault);
 
     let app = root.app.borrow();
     app.settings_dirty.set(false);
     app.settings_snapshot.borrow_mut().take();
+    app.settings_save_error.borrow_mut().take();
     // M6-UI — fold the saved accent into the live `theme_base_accent` so the
     // ringed swatch + zone accents reflect the persisted value, then clear the
     // in-flight draft (Save consumes it).
-    if let Some(accent) = accent_draft {
+    if accent_clear_requested {
+        *app.theme_base_accent.borrow_mut() = None;
+    } else if let Some(accent) = accent_draft {
         *app.theme_base_accent.borrow_mut() = Some(accent);
     }
     app.settings_draft_accent_color.borrow_mut().take();
+    app.settings_accent_clear_requested.set(false);
+    true
 }
 
 /// M1a 2026-05-29 — discard pending General-section edits by replaying the
@@ -6053,19 +8331,35 @@ fn save_settings_general(root: &AppRoot) {
 /// toggles into the vault on next save. Idempotent when no snapshot
 /// exists (first call clears it).
 fn cancel_settings_general(root: &AppRoot) {
-    let app = root.app.borrow();
-    let snapshot = app.settings_snapshot.borrow_mut().take();
-    if let Some(snap) = snapshot {
-        app.restore_settings(&snap);
+    let snapshot = {
+        let app = root.app.borrow();
+        let snapshot = app.settings_snapshot.borrow_mut().take();
+        if let Some(snap) = snapshot.as_ref() {
+            app.restore_settings(snap);
+        }
+        app.settings_dirty.set(false);
+        app.settings_save_error.borrow_mut().take();
+        // M6-UI — discard the in-flight §3 Appearance accent draft (Cancel reverts
+        // the edit; the persisted `theme_base_accent` is untouched).
+        app.settings_draft_accent_color.borrow_mut().take();
+        app.settings_accent_clear_requested.set(false);
+        // W-minor (#7 fix wave) — clear the focused-field caret on Cancel/Escape so
+        // a stale focus/caret never leaks past the dismissal.
+        app.settings_focused_field
+            .set(bento_nano_app::SettingsTextField::None);
+        snapshot
+    };
+    if let Some(snapshot) = snapshot {
+        if let Err(error) = apply_active_theme_to_app(root, snapshot.active_theme_id.clone()) {
+            tracing::warn!(
+                target: "bentodesk::themes",
+                theme_id = %snapshot.active_theme_id,
+                %error,
+                "Settings Cancel could not restore custom theme"
+            );
+        }
+        request_theme_surface_redraw(root, false);
     }
-    app.settings_dirty.set(false);
-    // M6-UI — discard the in-flight §3 Appearance accent draft (Cancel reverts
-    // the edit; the persisted `theme_base_accent` is untouched).
-    app.settings_draft_accent_color.borrow_mut().take();
-    // W-minor (#7 fix wave) — clear the focused-field caret on Cancel/Escape so
-    // a stale focus/caret never leaks past the dismissal.
-    app.settings_focused_field
-        .set(bento_nano_app::SettingsTextField::None);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6419,7 +8713,7 @@ fn queue_active_theme_cycle(root: &AppRoot, hwnd: HWND) {
         )
     };
     if themes.is_empty() {
-        set_theme_setting_error(root, SmolStr::new_static("No themes available"));
+        set_theme_setting_error(root, SmolStr::new_static(no_themes_available_message()));
         request_redraw(hwnd);
         return;
     }
@@ -6434,21 +8728,21 @@ fn queue_active_theme_cycle(root: &AppRoot, hwnd: HWND) {
     }
 }
 
-// M6-UI (2026-05-29) — the Wave J1b popup picker↔backend mapping table
+// M6-UI (2026-05-29) — the Wave J1b popup picker→backend mapping table
 // (`PICKER_TO_BACKEND`) and its three lookup helpers
 // (`backend_theme_id_for_picker_index` / `picker_index_for_backend_id` /
 // `picker_preset_display_name`) were removed: §3 Appearance is now the inline
 // grid. Each ThemeCard carries its own stable `theme_id`
 // (`theme_picker::BUILTIN_THEMES[i].theme_id`) which routes straight through
 // M6a's `apply_active_theme_by_id` (all 17 builtins, no partial-preview
-// fallback), so no index↔id translation table is needed.
+// fallback), so no index→id translation table is needed.
 
 fn queue_zone_display_mode_cycle(root: &AppRoot) {
-    let next_mode = root.app.borrow().zone_display_mode.get().next();
-    root.dispatcher.push(Command::SetSetting {
-        key: SmolStr::new_static(SETTING_ZONE_DISPLAY_MODE),
-        value: bento_nano_app::SettingValue::Str(SmolStr::new_static(next_mode.as_wire())),
-    });
+    let app = root.app.borrow();
+    let next_mode = app.zone_display_mode.get().next();
+    app.set_zone_display_mode(next_mode);
+    app.settings_dirty.set(true);
+    app.settings_save_error.borrow_mut().take();
 }
 
 /// α4 (Wave I-α, 2026-05-25) — dispatch `Command::SetSetting` with an
@@ -6456,10 +8750,10 @@ fn queue_zone_display_mode_cycle(root: &AppRoot) {
 /// cycling). Mirrors `queue_zone_display_mode_cycle` byte-for-byte except
 /// for the source of `next_mode`.
 fn queue_zone_display_mode_set(root: &AppRoot, mode: bento_nano_app::ZoneDisplayMode) {
-    root.dispatcher.push(Command::SetSetting {
-        key: SmolStr::new_static(SETTING_ZONE_DISPLAY_MODE),
-        value: bento_nano_app::SettingValue::Str(SmolStr::new_static(mode.as_wire())),
-    });
+    let app = root.app.borrow();
+    app.set_zone_display_mode(mode);
+    app.settings_dirty.set(true);
+    app.settings_save_error.borrow_mut().take();
 }
 
 fn update_frequency_setting_command_for(frequency: UpdateCheckFrequency) -> Command {
@@ -6481,8 +8775,8 @@ fn encryption_mode_setting_command_for(mode: SettingsEncryptionMode) -> Command 
 /// P2 (#7 fix wave 2026-06-01) — the user-visible mode label that MATCHES the
 /// mode-button TITLES (Tauri uses one `modeLabel()` for the current-mode value,
 /// the buttons, AND the applied banner). Passphrase maps to the FULL token
-/// (`ENCRYPTION_MODE_PASSPHRASE_FULL`, id 236 = 自定义口令), NOT the short
-/// `ENCRYPTION_MODE_PASSPHRASE` (id 86 = 密码) the renderer's
+/// (`ENCRYPTION_MODE_PASSPHRASE_FULL`, id 236 = 自定义口令, NOT the short
+/// `ENCRYPTION_MODE_PASSPHRASE` (id 86 = 瀵嗙爜) the renderer's
 /// `localized_encryption_mode` used. None/DPAPI reuse the shared button ids.
 fn localized_encryption_mode_button_label(mode: SettingsEncryptionMode) -> &'static str {
     use bento_nano_style::i18n_zh_cn::ids;
@@ -6518,10 +8812,10 @@ fn focus_passphrase_field(app: &AppState) {
 /// P15 (#7 fix wave 2026-06-01) — PURE apply seam for the Passphrase BUTTON
 /// (`SelectEncryptionModePassphrase`), mirroring Tauri `applyMode("Passphrase")`.
 /// Reads the already-typed draft:
-///   • empty → sets the localized `ENCRYPTION_REQUIRED` error banner + returns
+///   — empty → sets the localized `ENCRYPTION_REQUIRED` error banner + returns
 ///     `None` (no command — the apply is refused, exactly like Tauri's early
 ///     `setError(encryptionPassphraseRequired)` return);
-///   • non-empty → clears the in-flight capture (the button commits the typed
+///   — non-empty → clears the in-flight capture (the button commits the typed
 ///     draft directly) + returns the verify-probe→apply `Command`
 ///     (`SetEncryptionPassphrase` on Set, `UnlockEncryptionPassphrase` on
 ///     Unlock). The command's vault reopen IS the probe — a bad passphrase
@@ -6819,10 +9113,12 @@ fn apply_available_themes_to_app(root: &AppRoot) -> Result<bool, ThemeError> {
 }
 
 fn plugin_type_label(plugin_type: &PluginType) -> SmolStr {
+    use bento_nano_style::i18n_zh_cn::ids;
+
     match plugin_type {
-        PluginType::Theme => SmolStr::new_static("theme"),
-        PluginType::Widget => SmolStr::new_static("widget"),
-        PluginType::Organizer => SmolStr::new_static("organizer"),
+        PluginType::Theme => SmolStr::new(bento_nano_style::t(ids::PLUGIN_TYPE_THEME)),
+        PluginType::Widget => SmolStr::new(bento_nano_style::t(ids::PLUGIN_TYPE_WIDGET)),
+        PluginType::Organizer => SmolStr::new(bento_nano_style::t(ids::PLUGIN_TYPE_ORGANIZER)),
     }
 }
 
@@ -6854,6 +9150,7 @@ fn list_plugins_for_root(root: &AppRoot) -> Result<Vec<SettingsPluginEntry>, Str
 fn refresh_settings_plugins_for_root(root: &AppRoot) -> Result<bool, String> {
     let entries = list_plugins_for_root(root)?;
     let app = root.app.borrow();
+    app.settings_plugin_uninstall_confirm.set(None);
     Ok(app.set_settings_plugins(entries))
 }
 
@@ -6864,12 +9161,20 @@ fn apply_theme_after_plugin_mutation(root: &AppRoot) -> Result<bool, String> {
     };
     let loaded = load_themes_for_root(root).map_err(|error| error.to_string())?;
     let options = theme_options_from_themes(&loaded);
+    if active_theme_id_is_builtin(current_id.as_str()) {
+        let app = root.app.borrow();
+        let mut changed = app.set_available_themes(options);
+        drop(app);
+        changed |=
+            apply_active_theme_to_app(root, current_id).map_err(|error| error.to_string())?;
+        return Ok(changed);
+    }
     let theme = loaded
         .iter()
         .find(|theme| theme.id == current_id)
         .or_else(|| loaded.iter().find(|theme| theme.is_builtin))
         .cloned()
-        .ok_or_else(|| "No themes available after plugin mutation".to_owned())?;
+        .ok_or_else(|| no_themes_available_message().to_owned())?;
     if theme.id != current_id {
         if let Some(mtx) = bento_nano_backend::config_vault::Vault::global() {
             if let Ok(mut vault) = mtx.lock() {
@@ -6900,6 +9205,13 @@ fn set_plugin_setting_success(root: &AppRoot, message: SmolStr) {
         .replace(SettingsBackupStatus::Success(message));
 }
 
+fn localized_plugin_message(
+    prefix_id: bento_nano_style::StringId,
+    detail: impl core::fmt::Display,
+) -> SmolStr {
+    SmolStr::new(format!("{}{detail}", bento_nano_style::t(prefix_id)))
+}
+
 fn load_theme_selection_for_root(
     root: &AppRoot,
     id: &str,
@@ -6924,13 +9236,34 @@ fn apply_active_theme_selection_to_app(
     app.settings_theme_status
         .borrow_mut()
         .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-            "Theme {}",
+            "{} {}",
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_THEME_HEADING),
             theme.name
         ))));
     Ok(changed)
 }
 
+fn active_theme_id_is_builtin(id: &str) -> bool {
+    bento_nano_style::tokens::palette_tauri_for_theme(id).is_some()
+}
+
+fn apply_builtin_active_theme_to_app(root: &AppRoot, id: &str) -> Option<bool> {
+    let app = root.app.borrow();
+    let changed = app.apply_active_theme_by_id(id)?;
+    let name = app.active_theme_name.borrow().clone();
+    app.settings_theme_status
+        .borrow_mut()
+        .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
+            "{} {name}",
+            bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SETTINGS_THEME_HEADING)
+        ))));
+    Some(changed)
+}
+
 fn apply_active_theme_to_app(root: &AppRoot, id: SmolStr) -> Result<bool, ThemeError> {
+    if let Some(changed) = apply_builtin_active_theme_to_app(root, id.as_str()) {
+        return Ok(changed);
+    }
     let (options, theme) = load_theme_selection_for_root(root, id.as_str())?;
     apply_active_theme_selection_to_app(root, options, theme)
 }
@@ -6974,6 +9307,14 @@ fn set_theme_setting_error(root: &AppRoot, message: SmolStr) {
     app.settings_theme_status
         .borrow_mut()
         .replace(SettingsBackupStatus::Error(message));
+}
+
+fn no_themes_available_message() -> &'static str {
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        "没有可用主题"
+    } else {
+        "No themes available"
+    }
 }
 
 fn set_theme_setting_success(root: &AppRoot, message: SmolStr) {
@@ -7833,7 +10174,7 @@ fn display_name_from_context_capsule_id(capsule_id: &str) -> SmolStr {
     }
     let display = output.trim();
     if display.is_empty() {
-        SmolStr::new_static("Context Capsule")
+        SmolStr::new_static(context_menu_text("场景胶囊", "Context Capsule"))
     } else {
         SmolStr::new(display)
     }
@@ -7841,7 +10182,8 @@ fn display_name_from_context_capsule_id(capsule_id: &str) -> SmolStr {
 
 fn default_context_capsule_name() -> SmolStr {
     SmolStr::new(format!(
-        "Context Capsule {}",
+        "{} {}",
+        context_menu_text("场景胶囊", "Context Capsule"),
         bento_nano_backend::time::now_compact_rfc3339()
     ))
 }
@@ -8757,7 +11099,13 @@ fn save_layout_snapshot(
     refresh_snapshot_picker(root)?;
     set_snapshot_picker_status(
         root,
-        SmolStr::new(format!("Saved snapshot {}", snapshot.id)),
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已保存当前布局快照".to_owned()
+            } else {
+                format!("Saved snapshot {}", snapshot.id)
+            },
+        ),
     );
     Ok(snapshot)
 }
@@ -8778,7 +11126,13 @@ fn load_layout_snapshot(
     refresh_snapshot_picker(root)?;
     set_snapshot_picker_status(
         root,
-        SmolStr::new(format!("Loaded snapshot {}", snapshot.id)),
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已载入布局快照".to_owned()
+            } else {
+                format!("Loaded snapshot {}", snapshot.id)
+            },
+        ),
     );
     Ok(snapshot)
 }
@@ -8788,7 +11142,16 @@ fn delete_layout_snapshot(root: &AppRoot, snapshot_id: &str) -> Result<(), Snaps
     let stable_id = resolve_snapshot_id(&manager, snapshot_id)?;
     manager.delete(stable_id.as_str())?;
     refresh_snapshot_picker(root)?;
-    set_snapshot_picker_status(root, SmolStr::new(format!("Deleted snapshot {stable_id}")));
+    set_snapshot_picker_status(
+        root,
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已删除布局快照".to_owned()
+            } else {
+                format!("Deleted snapshot {stable_id}")
+            },
+        ),
+    );
     Ok(())
 }
 
@@ -8842,7 +11205,13 @@ fn save_timeline_checkpoint(
     sync_timeline_panel_from_buffer(root)?;
     set_timeline_status(
         root,
-        SmolStr::new(format!("Saved checkpoint {}", checkpoint.id)),
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已保存当前布局记录".to_owned()
+            } else {
+                format!("Saved checkpoint {}", checkpoint.id)
+            },
+        ),
     );
     Ok(checkpoint)
 }
@@ -9024,7 +11393,13 @@ fn record_rule_execution_timeline_pair(
             "Rule execution post-checkpoint failed"
         );
     } else {
-        set_timeline_status(root, SmolStr::new_static("Rule execution checkpointed"));
+        set_timeline_status(
+            root,
+            SmolStr::new_static(context_menu_text(
+                "已记录规则运行前后的布局",
+                "Rule execution checkpointed",
+            )),
+        );
     }
 }
 
@@ -9041,7 +11416,13 @@ fn restore_timeline_checkpoint(
     sync_timeline_panel_from_buffer(root)?;
     set_timeline_status(
         root,
-        SmolStr::new(format!("Restored checkpoint {}", target.id)),
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已恢复所选布局记录".to_owned()
+            } else {
+                format!("Restored checkpoint {}", target.id)
+            },
+        ),
     );
     Ok(target.id)
 }
@@ -9051,12 +11432,27 @@ fn undo_timeline_checkpoint(root: &AppRoot) -> Result<Option<SmolStr>, TimelineE
     ensure_timeline_loaded(root, &store);
     let target = root.timeline_buffer.borrow_mut().step_back();
     let Some(target) = target else {
-        set_timeline_status(root, SmolStr::new_static("No earlier checkpoint to undo"));
+        set_timeline_status(
+            root,
+            SmolStr::new_static(context_menu_text(
+                "没有更早的布局记录可撤销",
+                "No earlier checkpoint to undo",
+            )),
+        );
         return Ok(None);
     };
     apply_timeline_checkpoint(root, &target);
     sync_timeline_panel_from_buffer(root)?;
-    set_timeline_status(root, SmolStr::new(format!("Undo restored {}", target.id)));
+    set_timeline_status(
+        root,
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已撤销到上一条布局记录".to_owned()
+            } else {
+                format!("Undo restored {}", target.id)
+            },
+        ),
+    );
     Ok(Some(target.id))
 }
 
@@ -9065,12 +11461,27 @@ fn redo_timeline_checkpoint(root: &AppRoot) -> Result<Option<SmolStr>, TimelineE
     ensure_timeline_loaded(root, &store);
     let target = root.timeline_buffer.borrow_mut().step_forward();
     let Some(target) = target else {
-        set_timeline_status(root, SmolStr::new_static("No later checkpoint to redo"));
+        set_timeline_status(
+            root,
+            SmolStr::new_static(context_menu_text(
+                "没有更晚的布局记录可重做",
+                "No later checkpoint to redo",
+            )),
+        );
         return Ok(None);
     };
     apply_timeline_checkpoint(root, &target);
     sync_timeline_panel_from_buffer(root)?;
-    set_timeline_status(root, SmolStr::new(format!("Redo restored {}", target.id)));
+    set_timeline_status(
+        root,
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已重做到下一条布局记录".to_owned()
+            } else {
+                format!("Redo restored {}", target.id)
+            },
+        ),
+    );
     Ok(Some(target.id))
 }
 
@@ -9092,7 +11503,13 @@ fn delete_timeline_checkpoint(root: &AppRoot, checkpoint_id: &str) -> Result<(),
     sync_timeline_panel_from_buffer(root)?;
     set_timeline_status(
         root,
-        SmolStr::new(format!("Deleted checkpoint {checkpoint_id}")),
+        SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "已删除布局记录".to_owned()
+            } else {
+                format!("Deleted checkpoint {checkpoint_id}")
+            },
+        ),
     );
     Ok(())
 }
@@ -9207,7 +11624,7 @@ const MIN_MIGRATED_ZONE_DIMENSION: i32 = 48;
 /// Clamp a zone's rect so it lies FULLY within `[0, viewport)` (ROOT-CAUSE
 /// -corrupt-zone-geometry.md Part 3). At startup-migration time `app.viewport`
 /// is often 0, so the migration falls back to `default_size(Main)` =
-/// 1920×1080; on a smaller logical screen that oversizes zones and pushes
+/// 1920× 1080; on a smaller logical screen that oversizes zones and pushes
 /// high-`x_percent` zones off the right/bottom edge. This guarantees:
 /// `x >= 0`, `y >= 0`, `x + w <= vp_w`, `y + h <= vp_h`. Width/height are
 /// shrunk only as much as needed (never below `MIN_MIGRATED_ZONE_DIMENSION`),
@@ -9883,11 +12300,20 @@ unsafe fn select_theme_file_from_dialog(owner: HWND) -> Result<Option<PathBuf>, 
 }
 
 unsafe fn select_plugin_file_from_dialog(owner: HWND) -> Result<Option<PathBuf>, String> {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     unsafe {
         select_file_from_dialog(
             owner,
-            "BentoDesk plugin (*.bdplugin;*.zip)\0*.bdplugin;*.zip\0All files (*.*)\0*.*\0",
-            "Install BentoDesk plugin",
+            if zh {
+                "BentoDesk 插件 (*.bdplugin;*.zip)\0*.bdplugin;*.zip\0所有文件 (*.*)\0*.*\0"
+            } else {
+                "BentoDesk plugin (*.bdplugin;*.zip)\0*.bdplugin;*.zip\0All files (*.*)\0*.*\0"
+            },
+            if zh {
+                "安装 BentoDesk 插件"
+            } else {
+                "Install BentoDesk plugin"
+            },
             "bdplugin",
             "plugin",
         )
@@ -10160,9 +12586,13 @@ fn refresh_rules_wizard(root: &AppRoot) -> Result<usize, RulesWizardError> {
         let cursor = app.rules_wizard_rule_cursor.get().min(count - 1);
         app.rules_wizard_rule_cursor.set(cursor);
     }
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Loaded {count} persisted rules")));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已载入 {count} 条规则")
+        } else {
+            format!("Loaded {count} saved rules")
+        },
+    ));
     Ok(count)
 }
 
@@ -10173,12 +12603,13 @@ fn persist_rule_for_wizard(root: &AppRoot, rule: Rule) -> Result<(), RulesWizard
     let app = root.app.borrow();
     app.rules_wizard.borrow_mut().load_rule(saved.clone());
     app.rules_wizard.borrow_mut().set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Saved rule '{}' ({count} total)",
-            saved.name
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已保存规则“{}”（共 {count} 条）", saved.name)
+        } else {
+            format!("Saved rule '{}' ({count} total)", saved.name)
+        },
+    ));
     Ok(())
 }
 
@@ -10188,11 +12619,13 @@ fn delete_rule_for_wizard(root: &AppRoot, rule_id: &str) -> Result<(), RulesWiza
     let count = refresh_rules_wizard(root)?;
     let app = root.app.borrow();
     app.rules_wizard.borrow_mut().set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Deleted rule {rule_id} ({count} total)"
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已删除规则（剩余 {count} 条）")
+        } else {
+            format!("Deleted rule {rule_id} ({count} total)")
+        },
+    ));
     Ok(())
 }
 
@@ -10227,11 +12660,13 @@ fn confirm_rules_wizard_delete_or_arm(root: &AppRoot, rule_id: &SmolStr) -> bool
         true
     } else {
         pending.replace(rule_id.clone());
-        app.rules_wizard_status
-            .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Press Delete again to permanently remove rule {rule_id}"
-            )));
+        app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                "再次选择“删除”以确认移除该规则".to_owned()
+            } else {
+                format!("Press Delete again to permanently remove rule {rule_id}")
+            },
+        ));
         false
     }
 }
@@ -10244,14 +12679,21 @@ fn select_rules_wizard_rule(root: &AppRoot, index: usize) {
         app.rules_wizard_rule_cursor.set(0);
         app.rules_wizard_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No persisted rule at clicked row"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "该位置没有可选择的规则",
+                "No persisted rule at clicked row",
+            )));
         return;
     }
     app.rules_wizard_rule_cursor.set(index);
     app.rules_wizard.borrow_mut().set_error(None);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Selected rule {}", index + 1)));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已选择第 {} 条规则", index + 1)
+        } else {
+            format!("Selected rule {}", index + 1)
+        },
+    ));
 }
 
 fn select_prev_rules_wizard_rule(root: &AppRoot) {
@@ -10262,14 +12704,21 @@ fn select_prev_rules_wizard_rule(root: &AppRoot) {
         app.rules_wizard_rule_cursor.set(0);
         app.rules_wizard_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No persisted rules to select"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "暂无可选择的已保存规则",
+                "No persisted rules to select",
+            )));
         return;
     }
     let cursor = app.rules_wizard_rule_cursor.get().saturating_sub(1);
     app.rules_wizard_rule_cursor.set(cursor);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Selected rule {}", cursor + 1)));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已选择第 {} 条规则", cursor + 1)
+        } else {
+            format!("Selected rule {}", cursor + 1)
+        },
+    ));
 }
 
 fn select_next_rules_wizard_rule(root: &AppRoot) {
@@ -10280,14 +12729,21 @@ fn select_next_rules_wizard_rule(root: &AppRoot) {
         app.rules_wizard_rule_cursor.set(0);
         app.rules_wizard_status
             .borrow_mut()
-            .replace(SmolStr::new_static("No persisted rules to select"));
+            .replace(SmolStr::new_static(context_menu_text(
+                "暂无可选择的已保存规则",
+                "No persisted rules to select",
+            )));
         return;
     }
     let cursor = (app.rules_wizard_rule_cursor.get() + 1).min(len - 1);
     app.rules_wizard_rule_cursor.set(cursor);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Selected rule {}", cursor + 1)));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("已选择第 {} 条规则", cursor + 1)
+        } else {
+            format!("Selected rule {}", cursor + 1)
+        },
+    ));
 }
 
 fn load_selected_rules_wizard_rule(root: &AppRoot) {
@@ -10302,16 +12758,23 @@ fn load_selected_rules_wizard_rule(root: &AppRoot) {
         drop(rules);
         app.rules_wizard
             .borrow_mut()
-            .set_error(Some(SmolStr::new_static("No persisted rule selected")));
+            .set_error(Some(SmolStr::new_static(context_menu_text(
+                "尚未选择已保存规则",
+                "No persisted rule selected",
+            ))));
         app.rules_wizard_status.borrow_mut().take();
         return;
     };
     let name = rule.name.clone();
     drop(rules);
     app.rules_wizard.borrow_mut().load_rule(rule);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!("Editing rule '{name}'")));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("正在编辑规则“{name}”")
+        } else {
+            format!("Editing rule '{name}'")
+        },
+    ));
 }
 
 fn drain_rules_wizard_action(root: &AppRoot, hwnd: HWND) {
@@ -10333,15 +12796,15 @@ fn drain_rules_wizard_action(root: &AppRoot, hwnd: HWND) {
     }
 }
 
-fn first_desktop_source_for_rules_preview() -> Result<PathBuf, RulesWizardError> {
-    bento_nano_backend::desktop_sources::all_desktop_dirs(None)
+fn first_desktop_source_for_rules_preview(root: &AppRoot) -> Result<PathBuf, RulesWizardError> {
+    configured_desktop_sources_for_app(&root.app.borrow())
         .into_iter()
         .next()
         .ok_or(RulesWizardError::NoDesktopSource)
 }
 
 fn preview_rule_for_wizard(root: &AppRoot, rule: &Rule) -> Result<usize, RulesWizardError> {
-    let desktop = first_desktop_source_for_rules_preview()?;
+    let desktop = first_desktop_source_for_rules_preview(root)?;
     let desktop_string = desktop.to_string_lossy().to_string();
     let preview_zones = {
         let app = root.app.borrow();
@@ -10355,11 +12818,13 @@ fn preview_rule_for_wizard(root: &AppRoot, rule: &Rule) -> Result<usize, RulesWi
     wizard.set_preview_hits(hits);
     wizard.set_error(None);
     drop(wizard);
-    app.rules_wizard_status
-        .borrow_mut()
-        .replace(SmolStr::new(format!(
-            "Preview matched {count} desktop files"
-        )));
+    app.rules_wizard_status.borrow_mut().replace(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("预览命中 {count} 个桌面文件")
+        } else {
+            format!("Preview matched {count} desktop files")
+        },
+    ));
     Ok(count)
 }
 
@@ -10372,7 +12837,7 @@ fn run_rule_now_for_wizard(
         .into_iter()
         .find(|rule| rule.id == *rule_id)
         .ok_or_else(|| RulesWizardError::RuleNotFound(rule_id.clone()))?;
-    let desktop = first_desktop_source_for_rules_preview()?;
+    let desktop = first_desktop_source_for_rules_preview(root)?;
     let desktop_string = desktop.to_string_lossy().to_string();
     let preview_zones = {
         let app = root.app.borrow();
@@ -10678,7 +13143,7 @@ fn run_interval_rule_for_scheduler_event(
     root: &AppRoot,
     event: &SchedulerEvent,
 ) -> Result<ScheduledRulesOutcome, RulesWizardError> {
-    let desktop = first_desktop_source_for_rules_preview()?;
+    let desktop = first_desktop_source_for_rules_preview(root)?;
     run_interval_rule_for_scheduler_event_with_desktop(root, event, &desktop)
 }
 
@@ -11480,10 +13945,19 @@ const DEFAULT_BACKUP_RETAINED: usize = 10;
 const MAX_BACKUP_RETAINED: usize = 100;
 
 fn settings_backup_id_now() -> SmolStr {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    SmolStr::new(format!("{seconds}-{}", std::process::id()))
+    SmolStr::new(bento_nano_backend::time::now_compact_rfc3339())
+}
+
+fn settings_backup_status_text(
+    zh_prefix: &str,
+    en_prefix: &str,
+    detail: impl std::fmt::Display,
+) -> SmolStr {
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        SmolStr::new(format!("{zh_prefix}：{detail}"))
+    } else {
+        SmolStr::new(format!("{en_prefix}: {detail}"))
+    }
 }
 
 fn settings_backup_file_name(backup_id: &str) -> String {
@@ -11724,18 +14198,11 @@ fn run_settings_backup_list(root: &AppRoot) {
     let app = root.app.borrow();
     match result {
         Ok(entries) => {
-            let latest_name = entries
-                .first()
-                .map(|entry| entry.file_name.clone())
-                .unwrap_or_else(|| SmolStr::new_static("none"));
             app.settings_backup_entries.replace(entries);
-            app.settings_backup_status
-                .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Backups listed: {}; latest {}",
-                    app.settings_backup_entries.borrow().len(),
-                    latest_name
-                ))));
+            // Refresh-on-open is background synchronisation, not a user action.
+            // Match Tauri: an ordinary successful list must not leak a green
+            // diagnostic line into the Settings UI.
+            app.settings_backup_status.borrow_mut().take();
         }
         Err(e) => {
             tracing::warn!(
@@ -11745,9 +14212,11 @@ fn run_settings_backup_list(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Backup list failed: {e}"
-                ))));
+                .replace(SettingsBackupStatus::Error(settings_backup_status_text(
+                    "读取备份失败",
+                    "Backup list failed",
+                    e,
+                )));
         }
     }
 }
@@ -11783,10 +14252,11 @@ fn run_settings_backup_restore_latest(root: &AppRoot) {
             app.settings_backup_entries.replace(entries);
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Backup restored: {}",
-                    entry.file_name
-                ))));
+                .replace(SettingsBackupStatus::Success(settings_backup_status_text(
+                    "备份已恢复",
+                    "Backup restored",
+                    entry.file_name,
+                )));
         }
         Err(e) => {
             tracing::warn!(
@@ -11796,9 +14266,11 @@ fn run_settings_backup_restore_latest(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Backup restore failed: {e}"
-                ))));
+                .replace(SettingsBackupStatus::Error(settings_backup_status_text(
+                    "恢复备份失败",
+                    "Backup restore failed",
+                    e,
+                )));
         }
     }
 }
@@ -11834,10 +14306,11 @@ fn run_settings_backup_restore_selected(root: &AppRoot, backup_id: &str) {
             app.settings_backup_entries.replace(entries);
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Backup restored: {}",
-                    entry.file_name
-                ))));
+                .replace(SettingsBackupStatus::Success(settings_backup_status_text(
+                    "备份已恢复",
+                    "Backup restored",
+                    entry.file_name,
+                )));
         }
         Err(e) => {
             tracing::warn!(
@@ -11848,9 +14321,11 @@ fn run_settings_backup_restore_selected(root: &AppRoot, backup_id: &str) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Backup restore failed: {e}"
-                ))));
+                .replace(SettingsBackupStatus::Error(settings_backup_status_text(
+                    "恢复备份失败",
+                    "Backup restore failed",
+                    e,
+                )));
         }
     }
 }
@@ -11891,12 +14366,13 @@ fn run_settings_backup(root: &AppRoot) {
             app.settings_backup_entries.replace(entries);
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Success(SmolStr::new(format!(
-                    "Backup created: {}",
+                .replace(SettingsBackupStatus::Success(settings_backup_status_text(
+                    "备份已创建",
+                    "Backup created",
                     path.file_name()
                         .and_then(|name| name.to_str())
-                        .unwrap_or("vault backup")
-                ))));
+                        .unwrap_or("vault backup"),
+                )));
         }
         Err(e) => {
             tracing::warn!(
@@ -11906,9 +14382,11 @@ fn run_settings_backup(root: &AppRoot) {
             );
             app.settings_backup_status
                 .borrow_mut()
-                .replace(SettingsBackupStatus::Error(SmolStr::new(format!(
-                    "Backup failed: {e}"
-                ))));
+                .replace(SettingsBackupStatus::Error(settings_backup_status_text(
+                    "创建备份失败",
+                    "Backup failed",
+                    e,
+                )));
         }
     }
 }
@@ -12537,6 +15015,115 @@ fn next_palette_accent(current: Option<&str>) -> Option<SmolStr> {
     }
 }
 
+const DEFAULT_ACCENT_COLORREF: COLORREF = 0x00F6_823B;
+
+fn accent_hex_to_colorref(hex: &str) -> Option<COLORREF> {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 7 || bytes[0] != b'#' {
+        return None;
+    }
+    let r = hex_pair_to_u8(bytes[1], bytes[2])?;
+    let g = hex_pair_to_u8(bytes[3], bytes[4])?;
+    let b = hex_pair_to_u8(bytes[5], bytes[6])?;
+    Some(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16))
+}
+
+fn hex_pair_to_u8(high: u8, low: u8) -> Option<u8> {
+    Some((hex_nibble(high)? << 4) | hex_nibble(low)?)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn colorref_to_accent_hex(color: COLORREF) -> SmolStr {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let r = (color & 0xFF) as u8;
+    let g = ((color >> 8) & 0xFF) as u8;
+    let b = ((color >> 16) & 0xFF) as u8;
+    let text = [
+        b'#',
+        HEX[(r >> 4) as usize],
+        HEX[(r & 0x0F) as usize],
+        HEX[(g >> 4) as usize],
+        HEX[(g & 0x0F) as usize],
+        HEX[(b >> 4) as usize],
+        HEX[(b & 0x0F) as usize],
+    ];
+    // SAFETY: `text` is built only from `#` and lowercase ASCII hex nibbles.
+    let hex = unsafe { core::str::from_utf8_unchecked(&text) };
+    SmolStr::new(hex)
+}
+
+fn settings_accent_custom_colors() -> [COLORREF; 16] {
+    let mut colors = [DEFAULT_ACCENT_COLORREF; 16];
+    let mut idx = 0usize;
+    while idx < bento_nano_app::theme_picker::ACCENT_SWATCH_COUNT {
+        if let Some(hex) = bento_nano_app::theme_picker::accent_swatch_hex(idx)
+            && let Some(color) = accent_hex_to_colorref(hex)
+        {
+            colors[idx] = color;
+        }
+        idx += 1;
+    }
+    colors
+}
+
+fn choose_native_accent_color(hwnd: HWND, initial_hex: &str) -> Option<SmolStr> {
+    let mut custom_colors = settings_accent_custom_colors();
+    let initial = accent_hex_to_colorref(initial_hex).unwrap_or(DEFAULT_ACCENT_COLORREF);
+    // SAFETY: CHOOSECOLORW is a plain C struct. We set lStructSize and every
+    // pointer field that ChooseColorW reads; `custom_colors` stays live until
+    // the modal dialog returns.
+    let mut dialog = unsafe { core::mem::zeroed::<CHOOSECOLORW>() };
+    dialog.lStructSize = core::mem::size_of::<CHOOSECOLORW>() as u32;
+    dialog.hwndOwner = hwnd;
+    dialog.rgbResult = initial;
+    dialog.lpCustColors = custom_colors.as_mut_ptr();
+    dialog.Flags = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR;
+
+    // SAFETY: dialog points to a valid CHOOSECOLORW and its custom-colour
+    // array remains allocated for the whole synchronous common-dialog call.
+    let accepted = unsafe { ChooseColorW(&mut dialog) };
+    if accepted != 0 {
+        return Some(colorref_to_accent_hex(dialog.rgbResult));
+    }
+
+    // SAFETY: CommDlgExtendedError is the documented way to distinguish a
+    // cancelled common dialog from a ChooseColorW failure.
+    let error = unsafe { CommDlgExtendedError() };
+    if error != 0 {
+        log_static(format!("settings: native accent picker failed error={error}\n").as_str());
+    } else {
+        log_static("settings: native accent picker cancelled\n");
+    }
+    None
+}
+
+fn open_settings_native_accent_picker(root: &AppRoot, hwnd: HWND) -> bool {
+    let initial = {
+        let app = root.app.borrow();
+        app.settings_accent_editor_value()
+    };
+    let selected = choose_native_accent_color(hwnd, initial.as_str());
+    arm_settings_owned_dialog_release_guard(root);
+    let Some(hex) = selected else {
+        return false;
+    };
+    log_static(format!("settings: OpenAccentColorPicker selected={hex}\n").as_str());
+    {
+        let app = root.app.borrow();
+        app.set_settings_accent_color_from_picker(hex);
+        app.passphrase_entry_active.set(false);
+    }
+    true
+}
+
 // -----------------------------------------------------------------------------
 // Tray icon registration (Ruling B)
 // -----------------------------------------------------------------------------
@@ -12546,9 +15133,11 @@ unsafe fn register_tray_icon(root: &AppRoot, hwnd: HWND) {
         return;
     }
 
-    let icon = unsafe { LoadIconW(ptr::null_mut(), IDI_APPLICATION) };
+    let icon = bento_nano_platform::window::load_tray_icon();
     if icon.is_null() {
-        log_tray_error("LoadIconW", unsafe { GetLastError() });
+        log_tray_error("LoadIconW(BentoDesk tray resource)", unsafe {
+            GetLastError()
+        });
         schedule_tray_retry(root, hwnd);
         return;
     }
@@ -12762,7 +15351,7 @@ fn pin_zone_minibar_state(root: &AppRoot, zone_id: ZoneId) -> Option<MinibarPinS
     let label = {
         let app = root.app.borrow();
         match app.zones.get(zone_id) {
-            Some(zone) => SmolStr::new(zone.title.as_ref()),
+            Some(zone) => SmolStr::new(zone.display_title()),
             None => {
                 tracing::warn!(
                     target: "bentodesk::dispatcher",
@@ -12884,28 +15473,61 @@ fn tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Option<SmolStr> {
     let item = zone.item(item_id)?;
     let display_path = item_file_display_path(item);
     if item.file_missing {
-        return Some(SmolStr::new(format!("Missing: {display_path}")));
+        return Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("文件已丢失：{display_path}")
+            } else {
+                format!("Missing: {display_path}")
+            },
+        ));
     }
     if display_path == item.name.as_ref() {
         Some(SmolStr::new(item.name.as_ref()))
     } else {
-        Some(SmolStr::new(format!("{} — {display_path}", item.name)))
+        Some(SmolStr::new(format!("{} —{display_path}", item.name)))
     }
+}
+
+fn stack_bloom_hover_suppresses_main_tooltip(app: &AppState, x: f32, y: f32) -> bool {
+    if app.stack_tray.borrow().is_some() || app.selected_zone.get().is_some() {
+        return false;
+    }
+    ui::hit_test_zone(app, x, y)
+        .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
+        .is_some()
 }
 
 fn toolbar_tooltip_text_for_event(app: &AppState, event_id: u32) -> Option<SmolStr> {
     match event_id {
         ui::events::PIN => {
             if app.is_pinned.get() {
-                Some(SmolStr::new_static("Unpin window"))
+                Some(SmolStr::new_static(context_menu_text(
+                    "取消固定窗口",
+                    "Unpin window",
+                )))
             } else {
-                Some(SmolStr::new_static("Pin window"))
+                Some(SmolStr::new_static(context_menu_text(
+                    "固定窗口",
+                    "Pin window",
+                )))
             }
         }
-        ui::events::SETTINGS => Some(SmolStr::new_static("Open settings")),
-        ui::events::HIDE => Some(SmolStr::new_static("Hide BentoDesk")),
-        ui::events::ADD_ZONE => Some(SmolStr::new_static("Create zone")),
-        ui::events::EXIT => Some(SmolStr::new_static("Quit BentoDesk")),
+        ui::events::SETTINGS => Some(SmolStr::new_static(context_menu_text(
+            "打开设置",
+            "Open settings",
+        ))),
+        ui::events::HIDE => Some(SmolStr::new_static(context_menu_text(
+            "隐藏 BentoDesk",
+            "Hide BentoDesk",
+        ))),
+        ui::events::ADD_ZONE => Some(SmolStr::new_static(context_menu_text(
+            "创建区域",
+            "Create zone",
+        ))),
+        ui::events::EXIT => Some(SmolStr::new_static(context_menu_text(
+            "退出 BentoDesk",
+            "Quit BentoDesk",
+        ))),
         _ => None,
     }
 }
@@ -12930,142 +15552,20 @@ fn tooltip_text_for_main_hover(
     x: f32,
     y: f32,
 ) -> Option<SmolStr> {
-    toolbar_tooltip_text_for_hover(app, win, x, y).or_else(|| tooltip_text_for_hover(app, x, y))
+    toolbar_tooltip_text_for_hover(app, win, x, y).or_else(|| {
+        if stack_bloom_hover_suppresses_main_tooltip(app, x, y) {
+            None
+        } else {
+            tooltip_text_for_hover(app, x, y)
+        }
+    })
 }
 
-fn settings_tooltip_text_for_hit(app: &AppState, hit: ui::SettingsHit) -> Option<SmolStr> {
-    match hit {
-        ui::SettingsHit::SwitchLocale => Some(SmolStr::new_static("Switch display language")),
-        ui::SettingsHit::OpenKeybindings => Some(SmolStr::new_static("Edit keyboard shortcuts")),
-        ui::SettingsHit::CloseKeybindings => Some(SmolStr::new_static("Close keyboard shortcuts")),
-        // M1h — `OpenPlugins` / `ClosePlugins` / `RefreshPlugins` removed: the
-        // Plugins surface is inline (no modal) and refreshes on Settings open.
-        ui::SettingsHit::InstallPlugin => Some(SmolStr::new_static("Install plugin archive")),
-        ui::SettingsHit::TogglePlugin(_) => Some(SmolStr::new_static("Enable or disable plugin")),
-        ui::SettingsHit::UninstallPlugin(_) => Some(SmolStr::new_static("Remove installed plugin")),
-        ui::SettingsHit::RecordKeybinding(_) => Some(SmolStr::new_static("Record this shortcut")),
-        ui::SettingsHit::ResetKeybinding(_) => Some(SmolStr::new_static("Reset this shortcut")),
-        ui::SettingsHit::CycleUpdateFrequency => {
-            Some(SmolStr::new_static("Cycle update check frequency"))
-        }
-        ui::SettingsHit::CheckForUpdates => Some(SmolStr::new_static("Check for updates")),
-        ui::SettingsHit::ToggleUpdateAutoDownload => {
-            if app.update_auto_download.get() {
-                Some(SmolStr::new_static("Disable automatic update downloads"))
-            } else {
-                Some(SmolStr::new_static("Enable automatic update downloads"))
-            }
-        }
-        ui::SettingsHit::RunUpdateAction => Some(SmolStr::new_static("Run pending update action")),
-        ui::SettingsHit::SkipCurrentUpdate => Some(SmolStr::new_static("Skip current update")),
-        ui::SettingsHit::ToggleStealthEnabled => {
-            if app.stealth_enabled.get() {
-                Some(SmolStr::new_static("Disable stealth storage"))
-            } else {
-                Some(SmolStr::new_static("Enable stealth storage"))
-            }
-        }
-        ui::SettingsHit::SelectEncryptionModeNone => {
-            Some(SmolStr::new_static("Disable settings encryption"))
-        }
-        ui::SettingsHit::SelectEncryptionModeDpapi => {
-            Some(SmolStr::new_static("Encrypt settings with Windows DPAPI"))
-        }
-        ui::SettingsHit::SelectEncryptionModePassphrase => {
-            Some(SmolStr::new_static("Encrypt settings with a passphrase"))
-        }
-        ui::SettingsHit::FocusPassphraseField => {
-            Some(SmolStr::new_static("Enter the encryption passphrase"))
-        }
-        ui::SettingsHit::OpenThemeBasePalette => Some(SmolStr::new_static("Choose theme accent")),
-        ui::SettingsHit::ImportTheme => Some(SmolStr::new_static("Import theme JSON file")),
-        // M6-UI — inline §3 Appearance grid hover tooltips (replaces the
-        // removed `CycleActiveTheme` / `Picker*` arms).
-        ui::SettingsHit::SelectTheme(_) => Some(SmolStr::new_static("Apply this theme")),
-        ui::SettingsHit::SelectAccent(_) => Some(SmolStr::new_static("Set accent color")),
-        ui::SettingsHit::CycleZoneDisplayMode => {
-            Some(SmolStr::new_static("Cycle zone display mode"))
-        }
-        ui::SettingsHit::SetZoneDisplayMode(_mode) => {
-            Some(SmolStr::new_static("Set zone display mode"))
-        }
-        ui::SettingsHit::CreateSettingsBackup => {
-            Some(SmolStr::new_static("Create settings backup"))
-        }
-        ui::SettingsHit::ListSettingsBackups => Some(SmolStr::new_static("Refresh backup list")),
-        ui::SettingsHit::RestoreLatestSettingsBackup => {
-            Some(SmolStr::new_static("Restore latest settings backup"))
-        }
-        ui::SettingsHit::RestoreSettingsBackup(_) => {
-            Some(SmolStr::new_static("Restore selected settings backup"))
-        }
-        ui::SettingsHit::CreateRecoveryBundle => {
-            Some(SmolStr::new_static("Create recovery bundle"))
-        }
-        ui::SettingsHit::ExportRecoveryDiagnostics => {
-            Some(SmolStr::new_static("Export recovery diagnostics"))
-        }
-        ui::SettingsHit::RestoreRecoveryBundle => {
-            Some(SmolStr::new_static("Restore recovery bundle"))
-        }
-        ui::SettingsHit::Close => Some(SmolStr::new_static("Close settings")),
-        ui::SettingsHit::ToggleDesktopEmbed => Some(SmolStr::new_static("Toggle desktop embed")),
-        ui::SettingsHit::ToggleAutostart => Some(SmolStr::new_static("Toggle run-at-startup")),
-        ui::SettingsHit::ToggleShowInTaskbar => Some(SmolStr::new_static("Toggle show in taskbar")),
-        ui::SettingsHit::ToggleSmartLayout => Some(SmolStr::new_static("Toggle smart auto-group")),
-        ui::SettingsHit::TogglePortableMode => Some(SmolStr::new_static("Toggle portable mode")),
-        ui::SettingsHit::OpenLocaleMenu => Some(SmolStr::new_static("Switch language")),
-        ui::SettingsHit::CancelSettings => Some(SmolStr::new_static("Cancel and close settings")),
-        ui::SettingsHit::SaveSettings => Some(SmolStr::new_static("Save settings")),
-        ui::SettingsHit::ScrollBodyDelta(_) => None,
-        ui::SettingsHit::RefreshDesktopSources => {
-            Some(SmolStr::new_static("Refresh desktop sources"))
-        }
-        ui::SettingsHit::EditDesktopPath => Some(SmolStr::new_static("Edit desktop path")),
-        ui::SettingsHit::EditWatchValues => Some(SmolStr::new_static("Edit watch values")),
-        ui::SettingsHit::DragPerformanceSlider { index, .. } => match index {
-            0 => Some(SmolStr::new_static("Adjust expand delay")),
-            1 => Some(SmolStr::new_static("Adjust collapse delay")),
-            _ => Some(SmolStr::new_static("Adjust icon cache size")),
-        },
-        ui::SettingsHit::ToggleStartupHighPriority => {
-            if app.startup_high_priority.get() {
-                Some(SmolStr::new_static("Disable high priority startup"))
-            } else {
-                Some(SmolStr::new_static("Enable high priority startup"))
-            }
-        }
-        ui::SettingsHit::ToggleCrashRestart => {
-            if app.crash_restart_enabled.get() {
-                Some(SmolStr::new_static("Disable crash auto restart"))
-            } else {
-                Some(SmolStr::new_static("Enable crash auto restart"))
-            }
-        }
-        ui::SettingsHit::IncCrashMaxRetries => Some(SmolStr::new_static("Increase max retries")),
-        ui::SettingsHit::DecCrashMaxRetries => Some(SmolStr::new_static("Decrease max retries")),
-        ui::SettingsHit::IncCrashWindowSecs => Some(SmolStr::new_static("Increase crash window")),
-        ui::SettingsHit::DecCrashWindowSecs => Some(SmolStr::new_static("Decrease crash window")),
-        ui::SettingsHit::ToggleSafeStartHibernation => {
-            if app.safe_start_after_hibernation.get() {
-                Some(SmolStr::new_static("Disable safe start after hibernation"))
-            } else {
-                Some(SmolStr::new_static("Enable safe start after hibernation"))
-            }
-        }
-        ui::SettingsHit::DragHibernateDelay(_) => {
-            Some(SmolStr::new_static("Adjust hibernate resume delay"))
-        }
-        ui::SettingsHit::RefreshStealth => Some(SmolStr::new_static("Refresh stealth status")),
-        ui::SettingsHit::ReapplyStealth => Some(SmolStr::new_static(
-            "Re-apply stealth attributes to .bentodesk/",
-        )),
-        ui::SettingsHit::Body | ui::SettingsHit::Outside => None,
-    }
-}
-
-fn settings_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Option<SmolStr> {
-    settings_tooltip_text_for_hit(app, ui::settings_hit(app, x, y))
+fn settings_tooltip_text_for_hit(_app: &AppState, _hit: ui::SettingsHit) -> Option<SmolStr> {
+    // The Tauri Settings surface uses inline labels/descriptions and does not
+    // spawn hover tooltips. Native tooltip HWNDs also escape the clipped aux
+    // panel and read as stray "Enable high" windows, so Settings clears them.
+    None
 }
 
 fn search_tooltip_text_for_result(hit: &search_bar::SearchHit) -> SmolStr {
@@ -13078,7 +15578,14 @@ fn search_tooltip_text_for_result(hit: &search_bar::SearchHit) -> SmolStr {
 
 fn search_tooltip_text_for_hit(app: &AppState, hit: SearchBarPointerHit) -> Option<SmolStr> {
     match hit {
-        SearchBarPointerHit::Close => Some(SmolStr::new_static("Close search")),
+        SearchBarPointerHit::Close => {
+            let label = bento_nano_style::t(bento_nano_style::i18n_zh_cn::ids::SEARCH_CLOSE);
+            Some(SmolStr::new_static(if label.is_empty() {
+                "Close search"
+            } else {
+                label
+            }))
+        }
         SearchBarPointerHit::Row(row_index) => {
             let search = app.search_bar.borrow();
             search
@@ -13103,9 +15610,21 @@ fn icon_picker_tooltip_text_for_hit(app: &AppState, hit: IconPickerHit) -> Optio
         .as_ref()
         .is_some_and(|session| session.selected_icon == icon);
     if selected {
-        Some(SmolStr::new(format!("Selected icon {icon}")))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("当前图标：{icon}")
+            } else {
+                format!("Selected icon {icon}")
+            },
+        ))
     } else {
-        Some(SmolStr::new(format!("Choose icon {icon}")))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("选择图标：{icon}")
+            } else {
+                format!("Choose icon {icon}")
+            },
+        ))
     }
 }
 
@@ -13125,15 +15644,21 @@ fn palette_picker_tooltip_text_for_hit(app: &AppState, hit: PalettePickerHit) ->
                 .and_then(|session| session.selected_accent.as_ref())
                 .is_some_and(|accent| accent == &swatch.hex);
             if selected {
-                Some(SmolStr::new(format!(
-                    "Selected color {} {}",
-                    swatch.slug, swatch.hex
-                )))
+                Some(SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("当前颜色：{}", swatch.hex)
+                    } else {
+                        format!("Selected color {} {}", swatch.slug, swatch.hex)
+                    },
+                ))
             } else {
-                Some(SmolStr::new(format!(
-                    "Choose color {} {}",
-                    swatch.slug, swatch.hex
-                )))
+                Some(SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("选择颜色：{}", swatch.hex)
+                    } else {
+                        format!("Choose color {} {}", swatch.slug, swatch.hex)
+                    },
+                ))
             }
         }
         PalettePickerHit::Clear => {
@@ -13144,9 +15669,15 @@ fn palette_picker_tooltip_text_for_hit(app: &AppState, hit: PalettePickerHit) ->
                 .and_then(|session| session.selected_accent.as_ref())
                 .is_some();
             if has_accent {
-                Some(SmolStr::new_static("Clear accent color"))
+                Some(SmolStr::new_static(context_menu_text(
+                    "清除强调色",
+                    "Clear accent color",
+                )))
             } else {
-                Some(SmolStr::new_static("Accent color already clear"))
+                Some(SmolStr::new_static(context_menu_text(
+                    "当前未设置强调色",
+                    "Accent color already clear",
+                )))
             }
         }
     }
@@ -13163,41 +15694,38 @@ fn palette_picker_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Opti
 }
 
 fn suggestor_file_count_label(count: usize) -> String {
-    if count == 1 {
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        format!("{count} 个文件")
+    } else if count == 1 {
         "1 file".to_owned()
     } else {
         format!("{count} files")
     }
 }
 
-fn suggestor_row_tooltip_text(app: &AppState, row_index: usize) -> Option<SmolStr> {
-    let suggestor = app.suggestor.borrow();
-    let entry = suggestor.entries().get(row_index)?;
-    let verb = if suggestor.selected_index() == row_index {
-        "Selected"
-    } else {
-        "Select"
-    };
-    Some(SmolStr::new(format!(
-        "{verb} suggestion {} ({}/{})",
-        entry.suggestion.name,
-        entry.selected_path_count(),
-        suggestor_file_count_label(entry.total_path_count())
-    )))
-}
-
 fn suggestor_action_row_tooltip_text(
     app: &AppState,
     row_index: usize,
-    action: &str,
+    action_zh: &str,
+    action_en: &str,
 ) -> Option<SmolStr> {
     let suggestor = app.suggestor.borrow();
     let entry = suggestor.entries().get(row_index)?;
-    Some(SmolStr::new(format!(
-        "{action} suggestion {} ({})",
-        entry.suggestion.name,
-        suggestor_file_count_label(entry.selected_path_count())
-    )))
+    Some(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "{action_zh}：{}（{}）",
+                entry.suggestion.name,
+                suggestor_file_count_label(entry.selected_path_count())
+            )
+        } else {
+            format!(
+                "{action_en} suggestion {} ({})",
+                entry.suggestion.name,
+                suggestor_file_count_label(entry.selected_path_count())
+            )
+        },
+    ))
 }
 
 fn suggestor_preview_file_tooltip_text(app: &AppState, preview_offset: usize) -> Option<SmolStr> {
@@ -13205,36 +15733,53 @@ fn suggestor_preview_file_tooltip_text(app: &AppState, preview_offset: usize) ->
     let entry = suggestor.selected_entry()?;
     let path_index = entry.preview_path_index(preview_offset)?;
     let path = entry.suggestion.matching_files.get(path_index)?;
-    let verb = if entry.is_path_selected(path_index) {
+    let selected = entry.is_path_selected(path_index);
+    let verb = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        if selected { "取消选择" } else { "选择" }
+    } else if selected {
         "Deselect"
     } else {
         "Select"
     };
-    Some(SmolStr::new(format!(
-        "{verb} preview file {}",
-        smart_group_suggestor::path_basename(path)
-    )))
+    Some(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("{verb}文件：{}", smart_group_suggestor::path_basename(path))
+        } else {
+            format!(
+                "{verb} preview file {}",
+                smart_group_suggestor::path_basename(path)
+            )
+        },
+    ))
 }
 
 fn suggestor_tooltip_text_for_hit(app: &AppState, hit: SuggestorPointerHit) -> Option<SmolStr> {
     match hit {
         SuggestorPointerHit::Apply(row_index) => {
-            suggestor_action_row_tooltip_text(app, row_index, "Apply")
+            suggestor_action_row_tooltip_text(app, row_index, "应用建议", "Apply")
         }
         SuggestorPointerHit::Dismiss(row_index) => {
-            suggestor_action_row_tooltip_text(app, row_index, "Dismiss")
+            suggestor_action_row_tooltip_text(app, row_index, "忽略建议", "Dismiss")
         }
-        SuggestorPointerHit::Row(row_index) => suggestor_row_tooltip_text(app, row_index),
-        SuggestorPointerHit::SelectAllFiles => {
-            Some(SmolStr::new_static("Select all preview files"))
-        }
-        SuggestorPointerHit::SelectNoFiles => {
-            Some(SmolStr::new_static("Clear preview file selection"))
-        }
+        // The row itself is already a large, fully labelled card. A delayed
+        // tooltip here produced the stray “选择建议：” mini-window under the
+        // native suggestor; keep tooltips only on compact action affordances.
+        SuggestorPointerHit::Row(_) => None,
+        SuggestorPointerHit::SelectAllFiles => Some(SmolStr::new_static(context_menu_text(
+            "选择所有匹配文件",
+            "Select all preview files",
+        ))),
+        SuggestorPointerHit::SelectNoFiles => Some(SmolStr::new_static(context_menu_text(
+            "清空文件选择",
+            "Clear preview file selection",
+        ))),
         SuggestorPointerHit::TogglePreviewFile(preview_offset) => {
             suggestor_preview_file_tooltip_text(app, preview_offset)
         }
-        SuggestorPointerHit::Close => Some(SmolStr::new_static("Close smart suggestions")),
+        SuggestorPointerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭智能分组建议",
+            "Close smart suggestions",
+        ))),
     }
 }
 
@@ -13259,20 +15804,31 @@ fn suggestor_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Option<Sm
 fn bulk_manager_row_tooltip_text(app: &AppState, row_index: usize) -> Option<SmolStr> {
     let manager = app.bulk_manager.borrow();
     let row = manager.visible_rows().get(row_index).cloned()?;
-    let selection_action = if manager.is_selected(row.id) {
+    let selected = manager.is_selected(row.id);
+    let selection_action = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        if selected { "取消选择" } else { "选择" }
+    } else if selected {
         "Deselect"
     } else {
         "Select"
     };
-    let item_label = if row.item_count == 1 {
+    let item_label = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        format!("{} 个项目", row.item_count)
+    } else if row.item_count == 1 {
         "1 item".to_owned()
     } else {
         format!("{} items", row.item_count)
     };
-    Some(SmolStr::new(format!(
-        "{selection_action} {} ({item_label})",
-        row.display_name
-    )))
+    Some(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!(
+                "{selection_action}区域：{}（{item_label}）",
+                row.display_name
+            )
+        } else {
+            format!("{selection_action} {} ({item_label})", row.display_name)
+        },
+    ))
 }
 
 fn bulk_manager_tooltip_text_for_hit(
@@ -13280,30 +15836,81 @@ fn bulk_manager_tooltip_text_for_hit(
     hit: BulkManagerPointerHit,
 ) -> Option<SmolStr> {
     match hit {
-        BulkManagerPointerHit::SearchInput => Some(SmolStr::new_static("Filter bulk zone rows")),
-        BulkManagerPointerHit::Sort(key) => {
-            Some(SmolStr::new(format!("Sort bulk rows by {}", key.label())))
-        }
-        BulkManagerPointerHit::SelectAll => Some(SmolStr::new_static("Select all visible zones")),
-        BulkManagerPointerHit::Invert => Some(SmolStr::new_static("Invert visible selection")),
-        BulkManagerPointerHit::Hide => Some(SmolStr::new_static("Hide selected zones")),
-        BulkManagerPointerHit::Show => Some(SmolStr::new_static("Show selected zones")),
-        BulkManagerPointerHit::LayoutGrid => Some(SmolStr::new_static("Apply grid layout")),
-        BulkManagerPointerHit::LayoutRow => Some(SmolStr::new_static("Apply row layout")),
-        BulkManagerPointerHit::LayoutColumn => Some(SmolStr::new_static("Apply column layout")),
-        BulkManagerPointerHit::LayoutSpiral => Some(SmolStr::new_static("Apply spiral layout")),
-        BulkManagerPointerHit::LayoutOrganic => Some(SmolStr::new_static("Apply organic layout")),
-        BulkManagerPointerHit::Update => Some(SmolStr::new_static("Apply metadata updates")),
-        BulkManagerPointerHit::TextEdit => Some(SmolStr::new_static("Edit selected zone text")),
-        BulkManagerPointerHit::IconPicker => {
-            Some(SmolStr::new_static("Choose selected zone icons"))
-        }
-        BulkManagerPointerHit::AccentPicker => {
-            Some(SmolStr::new_static("Choose selected zone colors"))
-        }
-        BulkManagerPointerHit::Delete => Some(SmolStr::new_static("Delete selected zones")),
-        BulkManagerPointerHit::Move => Some(SmolStr::new_static("Move selected zones")),
-        BulkManagerPointerHit::Close => Some(SmolStr::new_static("Close bulk manager")),
+        BulkManagerPointerHit::SearchInput => Some(SmolStr::new_static(context_menu_text(
+            "筛选区域",
+            "Filter bulk zone rows",
+        ))),
+        BulkManagerPointerHit::Sort(key) => Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("按{}排序", bulk_sort_key_text(key))
+            } else {
+                format!("Sort bulk rows by {}", key.label())
+            },
+        )),
+        BulkManagerPointerHit::SelectAll => Some(SmolStr::new_static(context_menu_text(
+            "选择所有可见区域",
+            "Select all visible zones",
+        ))),
+        BulkManagerPointerHit::Invert => Some(SmolStr::new_static(context_menu_text(
+            "反选可见区域",
+            "Invert visible selection",
+        ))),
+        BulkManagerPointerHit::Hide => Some(SmolStr::new_static(context_menu_text(
+            "隐藏已选区域",
+            "Hide selected zones",
+        ))),
+        BulkManagerPointerHit::Show => Some(SmolStr::new_static(context_menu_text(
+            "显示已选区域",
+            "Show selected zones",
+        ))),
+        BulkManagerPointerHit::LayoutGrid => Some(SmolStr::new_static(context_menu_text(
+            "应用网格布局",
+            "Apply grid layout",
+        ))),
+        BulkManagerPointerHit::LayoutRow => Some(SmolStr::new_static(context_menu_text(
+            "应用横排布局",
+            "Apply row layout",
+        ))),
+        BulkManagerPointerHit::LayoutColumn => Some(SmolStr::new_static(context_menu_text(
+            "应用纵列布局",
+            "Apply column layout",
+        ))),
+        BulkManagerPointerHit::LayoutSpiral => Some(SmolStr::new_static(context_menu_text(
+            "应用环绕布局",
+            "Apply spiral layout",
+        ))),
+        BulkManagerPointerHit::LayoutOrganic => Some(SmolStr::new_static(context_menu_text(
+            "应用自然布局",
+            "Apply organic layout",
+        ))),
+        BulkManagerPointerHit::Update => Some(SmolStr::new_static(context_menu_text(
+            "应用属性修改",
+            "Apply metadata updates",
+        ))),
+        BulkManagerPointerHit::TextEdit => Some(SmolStr::new_static(context_menu_text(
+            "编辑已选区域文字",
+            "Edit selected zone text",
+        ))),
+        BulkManagerPointerHit::IconPicker => Some(SmolStr::new_static(context_menu_text(
+            "修改已选区域图标",
+            "Choose selected zone icons",
+        ))),
+        BulkManagerPointerHit::AccentPicker => Some(SmolStr::new_static(context_menu_text(
+            "修改已选区域颜色",
+            "Choose selected zone colors",
+        ))),
+        BulkManagerPointerHit::Delete => Some(SmolStr::new_static(context_menu_text(
+            "删除已选区域",
+            "Delete selected zones",
+        ))),
+        BulkManagerPointerHit::Move => Some(SmolStr::new_static(context_menu_text(
+            "移动已选区域",
+            "Move selected zones",
+        ))),
+        BulkManagerPointerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭批量管理器",
+            "Close bulk manager",
+        ))),
         BulkManagerPointerHit::Row(row_index) => bulk_manager_row_tooltip_text(app, row_index),
     }
 }
@@ -13327,11 +15934,22 @@ fn bulk_manager_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Option
 
 fn rules_wizard_next_save_tooltip_text(app: &AppState) -> SmolStr {
     match app.rules_wizard.borrow().step() {
-        WizardStep::Conditions => SmolStr::new_static("Continue to rule action"),
-        WizardStep::Action => SmolStr::new_static("Preview matching files"),
-        WizardStep::Preview => SmolStr::new_static("Continue to rule details"),
-        WizardStep::Name => SmolStr::new_static("Review rule before saving"),
-        WizardStep::Review => SmolStr::new_static("Save rule"),
+        WizardStep::Conditions => SmolStr::new_static(context_menu_text(
+            "继续设置执行操作",
+            "Continue to rule action",
+        )),
+        WizardStep::Action => {
+            SmolStr::new_static(context_menu_text("预览匹配文件", "Preview matching files"))
+        }
+        WizardStep::Preview => SmolStr::new_static(context_menu_text(
+            "继续填写规则详情",
+            "Continue to rule details",
+        )),
+        WizardStep::Name => SmolStr::new_static(context_menu_text(
+            "保存前检查规则",
+            "Review rule before saving",
+        )),
+        WizardStep::Review => SmolStr::new_static(context_menu_text("保存规则", "Save rule")),
     }
 }
 
@@ -13339,9 +15957,21 @@ fn rules_wizard_row_tooltip_text(app: &AppState, row_index: usize) -> Option<Smo
     let rules = app.rules_wizard_rules.borrow();
     let rule = rules.get(row_index)?;
     if app.rules_wizard_rule_cursor.get() == row_index {
-        Some(SmolStr::new(format!("Selected rule {}", rule.name)))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("当前规则：{}", rule.name)
+            } else {
+                format!("Selected rule {}", rule.name)
+            },
+        ))
     } else {
-        Some(SmolStr::new(format!("Select rule {}", rule.name)))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("选择规则：{}", rule.name)
+            } else {
+                format!("Select rule {}", rule.name)
+            },
+        ))
     }
 }
 
@@ -13351,17 +15981,27 @@ fn rules_wizard_condition_row_tooltip_text(
 ) -> Option<SmolStr> {
     let wizard = app.rules_wizard.borrow();
     let row = wizard.conditions().get(condition_index)?;
-    let predicate = predicate_kind_name(row.kind);
-    if wizard.condition_cursor() == condition_index {
-        Some(SmolStr::new(format!(
-            "Editing condition {} ({predicate})",
-            condition_index + 1
-        )))
+    let predicate = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        predicate_kind_display_text(row.kind)
     } else {
-        Some(SmolStr::new(format!(
-            "Edit condition {} ({predicate})",
-            condition_index + 1
-        )))
+        predicate_kind_name(row.kind)
+    };
+    if wizard.condition_cursor() == condition_index {
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("正在编辑条件 {}（{predicate}）", condition_index + 1)
+            } else {
+                format!("Editing condition {} ({predicate})", condition_index + 1)
+            },
+        ))
+    } else {
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("编辑条件 {}（{predicate}）", condition_index + 1)
+            } else {
+                format!("Edit condition {} ({predicate})", condition_index + 1)
+            },
+        ))
     }
 }
 
@@ -13371,21 +16011,50 @@ fn rules_wizard_tooltip_text_for_hit(
 ) -> Option<SmolStr> {
     match hit {
         RulesWizardPointerHit::NextSave => Some(rules_wizard_next_save_tooltip_text(app)),
-        RulesWizardPointerHit::Predicate => Some(SmolStr::new_static("Cycle condition predicate")),
-        RulesWizardPointerHit::Action => Some(SmolStr::new_static("Cycle rule action")),
-        RulesWizardPointerHit::RunMode => Some(SmolStr::new_static("Cycle run mode")),
-        RulesWizardPointerHit::Combine => Some(SmolStr::new_static("Toggle all/any conditions")),
-        RulesWizardPointerHit::AddCondition => Some(SmolStr::new_static("Add condition row")),
-        RulesWizardPointerHit::RemoveCondition => {
-            Some(SmolStr::new_static("Remove current condition row"))
-        }
-        RulesWizardPointerHit::NextCondition => {
-            Some(SmolStr::new_static("Edit next condition row"))
-        }
-        RulesWizardPointerHit::Edit => Some(SmolStr::new_static("Edit selected rule")),
-        RulesWizardPointerHit::Run => Some(SmolStr::new_static("Run selected rule now")),
-        RulesWizardPointerHit::Delete => Some(SmolStr::new_static("Delete selected rule")),
-        RulesWizardPointerHit::Close => Some(SmolStr::new_static("Close rules wizard")),
+        RulesWizardPointerHit::Predicate => Some(SmolStr::new_static(context_menu_text(
+            "切换条件类型",
+            "Cycle condition predicate",
+        ))),
+        RulesWizardPointerHit::Action => Some(SmolStr::new_static(context_menu_text(
+            "切换执行操作",
+            "Cycle rule action",
+        ))),
+        RulesWizardPointerHit::RunMode => Some(SmolStr::new_static(context_menu_text(
+            "切换运行方式",
+            "Cycle run mode",
+        ))),
+        RulesWizardPointerHit::Combine => Some(SmolStr::new_static(context_menu_text(
+            "切换全部/任一条件",
+            "Toggle all/any conditions",
+        ))),
+        RulesWizardPointerHit::AddCondition => Some(SmolStr::new_static(context_menu_text(
+            "添加条件",
+            "Add condition row",
+        ))),
+        RulesWizardPointerHit::RemoveCondition => Some(SmolStr::new_static(context_menu_text(
+            "移除当前条件",
+            "Remove current condition row",
+        ))),
+        RulesWizardPointerHit::NextCondition => Some(SmolStr::new_static(context_menu_text(
+            "编辑下一个条件",
+            "Edit next condition row",
+        ))),
+        RulesWizardPointerHit::Edit => Some(SmolStr::new_static(context_menu_text(
+            "编辑已选规则",
+            "Edit selected rule",
+        ))),
+        RulesWizardPointerHit::Run => Some(SmolStr::new_static(context_menu_text(
+            "立即运行已选规则",
+            "Run selected rule now",
+        ))),
+        RulesWizardPointerHit::Delete => Some(SmolStr::new_static(context_menu_text(
+            "删除已选规则",
+            "Delete selected rule",
+        ))),
+        RulesWizardPointerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭自动整理规则",
+            "Close rules wizard",
+        ))),
         RulesWizardPointerHit::ConditionRow(condition_index) => {
             rules_wizard_condition_row_tooltip_text(app, condition_index)
         }
@@ -13430,19 +16099,46 @@ fn timeline_row_tooltip_text(app: &AppState, row_index: usize) -> Option<SmolStr
         entry.delta_summary.as_str()
     };
     if panel.cursor_index() == row_index {
-        Some(SmolStr::new(format!("Selected checkpoint {label}")))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("当前时间线记录：{label}")
+            } else {
+                format!("Selected checkpoint {label}")
+            },
+        ))
     } else {
-        Some(SmolStr::new(format!("Select checkpoint {label}")))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("选择时间线记录：{label}")
+            } else {
+                format!("Select checkpoint {label}")
+            },
+        ))
     }
 }
 
 fn timeline_tooltip_text_for_hit(app: &AppState, hit: TimelinePointerHit) -> Option<SmolStr> {
     match hit {
-        TimelinePointerHit::Save => Some(SmolStr::new_static("Save manual checkpoint")),
-        TimelinePointerHit::Pin => Some(SmolStr::new_static("Pin selected checkpoint")),
-        TimelinePointerHit::Restore => Some(SmolStr::new_static("Restore selected checkpoint")),
-        TimelinePointerHit::Delete => Some(SmolStr::new_static("Delete selected checkpoint")),
-        TimelinePointerHit::Close => Some(SmolStr::new_static("Close timeline")),
+        TimelinePointerHit::Save => Some(SmolStr::new_static(context_menu_text(
+            "保存当前布局记录",
+            "Save manual checkpoint",
+        ))),
+        TimelinePointerHit::Pin => Some(SmolStr::new_static(context_menu_text(
+            "固定已选记录",
+            "Pin selected checkpoint",
+        ))),
+        TimelinePointerHit::Restore => Some(SmolStr::new_static(context_menu_text(
+            "恢复已选记录",
+            "Restore selected checkpoint",
+        ))),
+        TimelinePointerHit::Delete => Some(SmolStr::new_static(context_menu_text(
+            "删除已选记录",
+            "Delete selected checkpoint",
+        ))),
+        TimelinePointerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭时间线",
+            "Close timeline",
+        ))),
         TimelinePointerHit::Row(row_index) => timeline_row_tooltip_text(app, row_index),
     }
 }
@@ -13457,9 +16153,21 @@ fn snapshot_picker_row_tooltip_text(app: &AppState, row_index: usize) -> Option<
     let picker = app.snapshot_picker.borrow();
     let entry = picker.entries().get(row_index)?;
     if picker.cursor_index() == row_index {
-        Some(SmolStr::new(format!("Selected snapshot {}", entry.name)))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("当前布局快照：{}", entry.name)
+            } else {
+                format!("Selected snapshot {}", entry.name)
+            },
+        ))
     } else {
-        Some(SmolStr::new(format!("Select snapshot {}", entry.name)))
+        Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("选择布局快照：{}", entry.name)
+            } else {
+                format!("Select snapshot {}", entry.name)
+            },
+        ))
     }
 }
 
@@ -13468,11 +16176,26 @@ fn snapshot_picker_tooltip_text_for_hit(
     hit: SnapshotPickerPointerHit,
 ) -> Option<SmolStr> {
     match hit {
-        SnapshotPickerPointerHit::Save => Some(SmolStr::new_static("Save layout snapshot")),
-        SnapshotPickerPointerHit::Load => Some(SmolStr::new_static("Load selected snapshot")),
-        SnapshotPickerPointerHit::Delete => Some(SmolStr::new_static("Delete selected snapshot")),
-        SnapshotPickerPointerHit::Timeline => Some(SmolStr::new_static("Open timeline")),
-        SnapshotPickerPointerHit::Close => Some(SmolStr::new_static("Close snapshot picker")),
+        SnapshotPickerPointerHit::Save => Some(SmolStr::new_static(context_menu_text(
+            "保存布局快照",
+            "Save layout snapshot",
+        ))),
+        SnapshotPickerPointerHit::Load => Some(SmolStr::new_static(context_menu_text(
+            "载入已选快照",
+            "Load selected snapshot",
+        ))),
+        SnapshotPickerPointerHit::Delete => Some(SmolStr::new_static(context_menu_text(
+            "删除已选快照",
+            "Delete selected snapshot",
+        ))),
+        SnapshotPickerPointerHit::Timeline => Some(SmolStr::new_static(context_menu_text(
+            "打开桌面时间线",
+            "Open timeline",
+        ))),
+        SnapshotPickerPointerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭布局快照",
+            "Close snapshot picker",
+        ))),
         SnapshotPickerPointerHit::Row(row_index) => {
             snapshot_picker_row_tooltip_text(app, row_index)
         }
@@ -13488,30 +16211,65 @@ fn snapshot_picker_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Opt
 fn capsule_picker_row_tooltip_text(app: &AppState, row_index: usize) -> Option<SmolStr> {
     let picker = app.capsule_picker.borrow();
     let entry = picker.entries().get(row_index)?;
-    let verb = if picker.selected_index() == row_index {
+    let selected = picker.selected_index() == row_index;
+    let verb = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        if selected {
+            "当前胶囊"
+        } else {
+            "选择胶囊"
+        }
+    } else if selected {
         "Selected"
     } else {
         "Select"
     };
-    Some(SmolStr::new(format!(
-        "{verb} capsule {} captured {}",
-        entry.name, entry.captured_at
-    )))
+    Some(SmolStr::new(
+        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+            format!("{verb}：{}（保存于 {}）", entry.name, entry.captured_at)
+        } else {
+            format!(
+                "{verb} capsule {} captured {}",
+                entry.name, entry.captured_at
+            )
+        },
+    ))
 }
 
 fn capsule_picker_tooltip_text_for_hit(app: &AppState, hit: CapsulePickerHit) -> Option<SmolStr> {
     match hit {
-        CapsulePickerHit::Hint => Some(SmolStr::new_static(
+        CapsulePickerHit::Capture => Some(SmolStr::new_static(context_menu_text(
+            "保存当前桌面布局",
+            "Save the current Desktop layout",
+        ))),
+        CapsulePickerHit::Restore => Some(SmolStr::new_static(context_menu_text(
+            "恢复选中的场景胶囊",
+            "Restore the selected context capsule",
+        ))),
+        CapsulePickerHit::Delete => Some(SmolStr::new_static(context_menu_text(
+            "删除选中的场景胶囊",
+            "Delete the selected context capsule",
+        ))),
+        CapsulePickerHit::Close => Some(SmolStr::new_static(context_menu_text(
+            "关闭场景胶囊",
+            "Close context capsules",
+        ))),
+        CapsulePickerHit::Hint => Some(SmolStr::new_static(context_menu_text(
+            "C 保存当前布局，Enter 恢复，Delete 删除",
             "Capsule shortcuts: C capture, Enter/R restore, D/Delete delete",
-        )),
-        CapsulePickerHit::Error => app
-            .capsule_picker
-            .borrow()
-            .last_error()
-            .map(|error| SmolStr::new(format!("Capsule error: {error}"))),
-        CapsulePickerHit::Empty => Some(SmolStr::new_static(
+        ))),
+        CapsulePickerHit::Error => app.capsule_picker.borrow().last_error().map(|error| {
+            SmolStr::new(
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    format!("场景胶囊错误：{error}")
+                } else {
+                    format!("Capsule error: {error}")
+                },
+            )
+        }),
+        CapsulePickerHit::Empty => Some(SmolStr::new_static(context_menu_text(
+            "暂无场景胶囊；按 C 保存当前布局",
             "No capsules yet; press C to capture the current layout",
-        )),
+        ))),
         CapsulePickerHit::Row(row_index) => capsule_picker_row_tooltip_text(app, row_index),
     }
 }
@@ -13526,70 +16284,6 @@ fn capsule_picker_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Opti
     capsule_picker_tooltip_text_for_hit(app, hit)
 }
 
-fn zone_editor_tooltip_text_for_hit(app: &AppState, hit: ZoneEditorHit) -> Option<SmolStr> {
-    match hit {
-        ZoneEditorHit::Icon => {
-            let icon = app
-                .zone_editor
-                .borrow()
-                .as_ref()
-                .map(|session| session.draft_icon.to_string())
-                .unwrap_or_else(|| DEFAULT_ZONE_ICON.to_owned());
-            Some(SmolStr::new(format!("Cycle zone icon (current {icon})")))
-        }
-        ZoneEditorHit::Accent => {
-            let accent = app
-                .zone_editor
-                .borrow()
-                .as_ref()
-                .and_then(|session| session.draft_accent_color.as_ref().map(ToString::to_string))
-                .unwrap_or_else(|| "None".to_owned());
-            Some(SmolStr::new(format!(
-                "Cycle zone accent (current {accent})"
-            )))
-        }
-        ZoneEditorHit::GridColumns => {
-            let columns = app
-                .zone_editor
-                .borrow()
-                .as_ref()
-                .map_or(DEFAULT_ZONE_GRID_COLUMNS, |session| {
-                    session.draft_grid_columns
-                });
-            Some(SmolStr::new(format!(
-                "Cycle grid columns (current {columns})"
-            )))
-        }
-        ZoneEditorHit::CapsuleSize => {
-            let size = app
-                .zone_editor
-                .borrow()
-                .as_ref()
-                .map(|session| session.draft_capsule_size.to_string())
-                .unwrap_or_else(|| DEFAULT_ZONE_CAPSULE_SIZE.to_owned());
-            Some(SmolStr::new(format!("Cycle capsule size (current {size})")))
-        }
-        ZoneEditorHit::CapsuleShape => {
-            let shape = app
-                .zone_editor
-                .borrow()
-                .as_ref()
-                .map(|session| session.draft_capsule_shape.to_string())
-                .unwrap_or_else(|| DEFAULT_ZONE_CAPSULE_SHAPE.to_owned());
-            Some(SmolStr::new(format!(
-                "Cycle capsule shape (current {shape})"
-            )))
-        }
-        ZoneEditorHit::Save => Some(SmolStr::new_static("Save zone editor changes")),
-        ZoneEditorHit::Cancel => Some(SmolStr::new_static("Cancel zone editing")),
-    }
-}
-
-fn zone_editor_tooltip_text_for_hover(app: &AppState, x: f32, y: f32) -> Option<SmolStr> {
-    let hit = zone_editor_geometry::zone_editor_hit_test(app.viewport, x, y)?;
-    zone_editor_tooltip_text_for_hit(app, hit)
-}
-
 fn item_file_rename_tooltip_text_for_hit(
     app: &AppState,
     hit: ItemFileRenameHit,
@@ -13597,28 +16291,62 @@ fn item_file_rename_tooltip_text_for_hit(
     let session = app.item_file_rename.borrow();
     let Some(session) = session.as_ref() else {
         return match hit {
-            ItemFileRenameHit::CurrentPath => Some(SmolStr::new_static("No item selected")),
-            ItemFileRenameHit::Input => Some(SmolStr::new_static("Type the new filename")),
-            ItemFileRenameHit::Status => Some(SmolStr::new_static("Enter to rename; Esc cancels")),
+            ItemFileRenameHit::CurrentPath => Some(SmolStr::new_static(context_menu_text(
+                "未选择任何项目",
+                "No item selected",
+            ))),
+            ItemFileRenameHit::Input => Some(SmolStr::new_static(context_menu_text(
+                "输入新的文件名",
+                "Type the new filename",
+            ))),
+            ItemFileRenameHit::Status => Some(SmolStr::new_static(context_menu_text(
+                "Enter 确认重命名，Esc 取消",
+                "Enter to rename; Esc cancels",
+            ))),
         };
     };
     match hit {
-        ItemFileRenameHit::CurrentPath => Some(SmolStr::new(format!(
-            "Current file {}",
-            session.current_path
-        ))),
+        ItemFileRenameHit::CurrentPath => Some(SmolStr::new(
+            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                format!("当前文件：{}", session.current_path)
+            } else {
+                format!("Current file {}", session.current_path)
+            },
+        )),
         ItemFileRenameHit::Input => {
             if session.draft_name.trim().is_empty() {
-                Some(SmolStr::new_static("Type the new filename"))
+                Some(SmolStr::new_static(context_menu_text(
+                    "输入新的文件名",
+                    "Type the new filename",
+                )))
             } else {
-                Some(SmolStr::new(format!("Rename to {}", session.draft_name)))
+                Some(SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("重命名为：{}", session.draft_name)
+                    } else {
+                        format!("Rename to {}", session.draft_name)
+                    },
+                ))
             }
         }
         ItemFileRenameHit::Status => session
             .status
             .as_ref()
-            .map(|status| SmolStr::new(format!("Rename validation: {status}")))
-            .or_else(|| Some(SmolStr::new_static("Enter to rename; Esc cancels"))),
+            .map(|status| {
+                SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("重命名校验：{status}")
+                    } else {
+                        format!("Rename validation: {status}")
+                    },
+                )
+            })
+            .or_else(|| {
+                Some(SmolStr::new_static(context_menu_text(
+                    "Enter 确认重命名，Esc 取消",
+                    "Enter to rename; Esc cancels",
+                )))
+            }),
     }
 }
 
@@ -13664,16 +16392,6 @@ fn tooltip_command_for_main_hover(
     y: f32,
 ) -> Option<Command> {
     let desired = tooltip_text_for_main_hover(app, win, x, y);
-    tooltip_command_for_text(app, anchor, desired)
-}
-
-fn tooltip_command_for_settings_hover(
-    app: &AppState,
-    anchor: bento_nano_app::WindowHandle,
-    x: f32,
-    y: f32,
-) -> Option<Command> {
-    let desired = settings_tooltip_text_for_hover(app, x, y);
     tooltip_command_for_text(app, anchor, desired)
 }
 
@@ -13770,11 +16488,13 @@ fn tooltip_command_for_capsule_picker_hover(
 fn tooltip_command_for_zone_editor_hover(
     app: &AppState,
     anchor: bento_nano_app::WindowHandle,
-    x: f32,
-    y: f32,
+    _x: f32,
+    _y: f32,
 ) -> Option<Command> {
-    let desired = zone_editor_tooltip_text_for_hover(app, x, y);
-    tooltip_command_for_text(app, anchor, desired)
+    // The compact editor labels every control in-place. Hover tooltips were
+    // rendered as a detached black strip below the dialog and obscured the
+    // desktop, so this surface only clears a stale tooltip from another HWND.
+    tooltip_command_for_text(app, anchor, None)
 }
 
 fn tooltip_command_for_item_file_rename_hover(
@@ -13798,12 +16518,89 @@ fn tooltip_command_for_minibar_hover(
     tooltip_command_for_text(app, anchor, desired)
 }
 
+fn panel_header_button_hover_for_hit(
+    hit: Option<(ZoneId, ui::HeaderButton)>,
+) -> Option<PanelHeaderButtonHover> {
+    let (zone_id, button) = hit?;
+    let button = match button {
+        ui::HeaderButton::Search => PanelHeaderButtonKind::Search,
+        ui::HeaderButton::Close => PanelHeaderButtonKind::Close,
+    };
+    Some(PanelHeaderButtonHover::new(zone_id, button))
+}
+
+fn update_panel_header_button_hover(app: &AppState, x: f32, y: f32) -> bool {
+    let hover = panel_header_button_hover_for_hit(ui::hit_test_zone_header_button(app, x, y));
+    app.set_panel_header_button_hover(hover)
+}
+
+fn settings_encryption_mode_hover_for_hit(hit: ui::SettingsHit) -> Option<SettingsEncryptionMode> {
+    match hit {
+        ui::SettingsHit::SelectEncryptionModeNone => Some(SettingsEncryptionMode::None),
+        ui::SettingsHit::SelectEncryptionModeDpapi => Some(SettingsEncryptionMode::Dpapi),
+        ui::SettingsHit::SelectEncryptionModePassphrase => Some(SettingsEncryptionMode::Passphrase),
+        _ => None,
+    }
+}
+
+fn update_settings_encryption_mode_hover_for_hit(app: &AppState, hit: ui::SettingsHit) -> bool {
+    app.set_settings_encryption_mode_hover(settings_encryption_mode_hover_for_hit(hit))
+}
+
+fn settings_appearance_hover_for_hit(
+    hit: ui::SettingsHit,
+) -> Option<bento_nano_app::theme_picker::AppearanceHit> {
+    match hit {
+        ui::SettingsHit::SelectTheme(id) => {
+            Some(bento_nano_app::theme_picker::AppearanceHit::Card(id))
+        }
+        ui::SettingsHit::SelectAccent(idx) => {
+            Some(bento_nano_app::theme_picker::AppearanceHit::Accent(idx))
+        }
+        ui::SettingsHit::EditAccentColor => {
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentEditor)
+        }
+        ui::SettingsHit::OpenAccentColorPicker => {
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentPicker)
+        }
+        ui::SettingsHit::ClearAccentColor => {
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentClear)
+        }
+        _ => None,
+    }
+}
+
+fn update_settings_appearance_hover_for_hit(app: &AppState, hit: ui::SettingsHit) -> bool {
+    app.set_settings_appearance_hover(settings_appearance_hover_for_hit(hit))
+}
+
+fn settings_close_hover_for_hit(hit: ui::SettingsHit) -> bool {
+    matches!(hit, ui::SettingsHit::Close)
+}
+
+fn update_settings_close_hover_for_hit(app: &AppState, hit: ui::SettingsHit) -> bool {
+    app.set_settings_close_hover(settings_close_hover_for_hit(hit))
+}
+
+fn tooltip_command_for_settings_hit(
+    app: &AppState,
+    anchor: bento_nano_app::WindowHandle,
+    hit: ui::SettingsHit,
+) -> Option<Command> {
+    let desired = settings_tooltip_text_for_hit(app, hit);
+    tooltip_command_for_text(app, anchor, desired)
+}
+
 fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
     // #5 drag motion arbitration (2026-06-08) — once a normal zone/resize/item
     // drag is armed, the captured pointer owns the move stream. Apply live
     // drag geometry before any hover/tooltip producer can retarget morph,
     // bloom, or item-hover channels. Persistence still waits until mouse-up.
     if handle_active_pointer_drag(root, slot, x, y) {
+        return;
+    }
+    if root.app.borrow().active_context_menu.borrow().is_some() {
+        handle_context_menu_mouse_move(root, slot.hwnd, x, y);
         return;
     }
     {
@@ -13942,15 +16739,43 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
             }
             return;
         }
-        if app.settings_open.get() {
-            if let Some(command) = tooltip_command_for_settings_hover(
+        let settings_open = app.settings_open.get();
+        let settings_pointer_active = settings_open
+            && window_kind_routes_settings_pointer(slot.kind, settings_aux_registered(root));
+        if settings_pointer_active {
+            drop(app);
+            sync_app_viewport_from_window_slot(root, slot);
+            let app = root.app.borrow();
+            let hit = ui::settings_hit(&app, x, y);
+            let encryption_hover_target = settings_encryption_mode_hover_for_hit(hit);
+            let appearance_hover_target = settings_appearance_hover_for_hit(hit);
+            let close_hover_target = settings_close_hover_for_hit(hit);
+            let hover_changed = update_settings_encryption_mode_hover_for_hit(&app, hit)
+                | update_settings_appearance_hover_for_hit(&app, hit)
+                | update_settings_close_hover_for_hit(&app, hit);
+            if animation_proof_log_enabled() {
+                log_static(
+                    format!(
+                        "settings_hover: x={x:.1} y={y:.1} viewport={:.1}x{:.1} hit={hit:?} encryption_hover={encryption_hover_target:?} appearance_hover={appearance_hover_target:?} close_hover={close_hover_target} changed={hover_changed}\n",
+                        app.viewport.width,
+                        app.viewport.height,
+                    )
+                    .as_str(),
+                );
+            }
+            if hover_changed {
+                request_redraw(slot.hwnd);
+            }
+            if let Some(command) = tooltip_command_for_settings_hit(
                 &app,
                 bento_nano_app::WindowHandle(slot.hwnd as isize),
-                x,
-                y,
+                hit,
             ) {
                 root.dispatcher.push(command);
             }
+            return;
+        }
+        if settings_open {
             return;
         }
         if let Some(command) = tooltip_command_for_main_hover(
@@ -13962,18 +16787,16 @@ fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) {
         ) {
             root.dispatcher.push(command);
         }
-        let hover_zone = ui::hit_test_zone(&app, x, y)
-            .or_else(|| stack_bloom_hover_anchor_for_point(&app, x, y));
-        if app.hovered_zone.get() != hover_zone {
-            // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
-            let now_ms = unsafe { GetTickCount() };
-            // #2 step 5 (2026-06-02) — ONE consolidated hover entry point that
-            // branches by zone type so a single move arms exactly one channel
-            // (stack anchor → bloom; normal zone → pill-hover + expand
-            // scheduler). It samples the pill animator before writing
-            // hovered_zone (V-8 ordering) and defers the structural morph to
-            // the per-frame `poll_hover_scheduler` (A3 grace timer).
-            on_hover_target_changed(&app, hover_zone, now_ms);
+        if update_panel_header_button_hover(&app, x, y) {
+            request_redraw(slot.hwnd);
+        }
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        let now_ms = unsafe { GetTickCount() };
+        if update_main_zone_hover_for_point(&app, x, y, now_ms) {
+            // The shared update also tracks petal-to-petal movement while the
+            // stack anchor itself stays unchanged, so hover intent cannot be
+            // skipped merely because both petals map to the same ZoneId.
+            arm_hover_frame_timer(slot.hwnd);
             request_redraw(slot.hwnd);
         }
         // M3-A2 (2026-05-29) — per-item hover scale. Runs on EVERY move (not
@@ -14045,6 +16868,62 @@ fn refresh_ghost_cursor_passthrough(
     Some((x, y, passthrough))
 }
 
+fn should_clear_stale_main_hover(
+    has_hover: bool,
+    pointer_drag_active: bool,
+    cursor_window: HWND,
+    main_window: HWND,
+) -> bool {
+    has_hover && !pointer_drag_active && cursor_window != main_window
+}
+
+fn reconcile_main_hover_from_cursor(root: &AppRoot, slot: &WindowSlot, hwnd: HWND) -> bool {
+    if slot.kind != WindowKind::Main {
+        return false;
+    }
+    let (has_hover, pointer_drag_active) = {
+        let app = root.app.borrow();
+        (
+            app.hovered_zone.get().is_some(),
+            normal_pointer_drag_active(&app),
+        )
+    };
+    if !has_hover || pointer_drag_active {
+        return false;
+    }
+
+    let mut screen_point = POINT { x: 0, y: 0 };
+    // SAFETY: both APIs only inspect the current desktop cursor/window state.
+    if unsafe { GetCursorPos(&mut screen_point) } == 0 {
+        return false;
+    }
+    let cursor_window = unsafe { WindowFromPoint(screen_point) };
+    if should_clear_stale_main_hover(has_hover, pointer_drag_active, cursor_window, hwnd) {
+        clear_hover(root);
+        arm_hover_frame_timer(hwnd);
+        return true;
+    }
+
+    let mut client_point = screen_point;
+    // SAFETY: `hwnd` is the live Main HWND currently owning `slot`.
+    if unsafe { ScreenToClient(hwnd, &mut client_point) } == 0 {
+        return false;
+    }
+    let dpi = slot.state.dpi.get();
+    let x = bento_nano_style::dpi::device_to_logical_f32(client_point.x as f32, dpi);
+    let y = bento_nano_style::dpi::device_to_logical_f32(client_point.y as f32, dpi);
+    let actual_hover = {
+        let app = root.app.borrow();
+        stack_aware_hover_zone_for_point(&app, x, y)
+    };
+    let current_hover = root.app.borrow().hovered_zone.get();
+    if current_hover == actual_hover {
+        return false;
+    }
+    handle_mouse_move(root, slot, x, y);
+    true
+}
+
 fn apply_ghost_cursor_passthrough_for_point(
     root: &AppRoot,
     slot: &WindowSlot,
@@ -14073,6 +16952,7 @@ fn clear_hover(root: &AppRoot) {
     if normal_pointer_drag_active(&app) {
         let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
         reset_pointer_drag_hover_channels(&app, dragged_zone, now_ms);
+        app.set_panel_header_button_hover(None);
         drop(app);
         if should_hide_tooltip {
             root.dispatcher.push(Command::HideTooltip);
@@ -14090,8 +16970,20 @@ fn clear_hover(root: &AppRoot) {
         app.item_hover.set(state);
     }
     app.hovered_zone.set(None);
-    app.stack_bloom_anchor.set(None);
-    app.stack_bloom_progress.set(1.0);
+    app.set_panel_header_button_hover(None);
+    app.set_settings_encryption_mode_hover(None);
+    app.set_settings_close_hover(false);
+    update_stack_bloom_hover(&app, None, now_ms);
+    {
+        let mut interaction = app.stack_bloom_interaction.get();
+        if interaction.active_member.is_some()
+            && interaction.active_member_leave_started_ms.is_none()
+        {
+            interaction.active_member_leave_started_ms = Some(now_ms);
+            interaction.hover_preview_opened = true;
+            app.stack_bloom_interaction.set(interaction);
+        }
+    }
     // A3 (2026-05-29) — pointer left the overlay. Do NOT collapse the open
     // zone instantly; arm the grace-collapse so a transient twitch off a pill
     // (or a brief WS_EX_TRANSPARENT passthrough flicker) doesn't drop the
@@ -14117,6 +17009,9 @@ fn clear_hover(root: &AppRoot) {
 }
 
 fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f32) {
+    if root.app.borrow().active_context_menu.borrow().is_some() {
+        return;
+    }
     if should_ignore_main_pointer_while_settings_aux_open(root, slot.kind) {
         return;
     }
@@ -14129,10 +17024,29 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
     let app = root.app.borrow();
 
     if app.about_open.get() && matches!(slot.kind, WindowKind::Main | WindowKind::About) {
-        match bento_nano_app::business::about::hit_test(app.viewport, x, y) {
+        let viewport = window_slot_logical_viewport(slot);
+        let about_hit = bento_nano_app::business::about::hit_test(viewport, x, y);
+        drop(app);
+        match about_hit {
             bento_nano_app::business::about::AboutHit::Close
             | bento_nano_app::business::about::AboutHit::Outside => {
                 root.dispatcher.push(Command::CloseAbout);
+            }
+            bento_nano_app::business::about::AboutHit::Project => {
+                if let Err(code) = shell_execute_path(
+                    "open",
+                    bento_nano_app::business::about::PROJECT_URL_FULL,
+                    None,
+                ) {
+                    log_static(format!("about: open_project failed code={code}\n").as_str());
+                }
+            }
+            bento_nano_app::business::about::AboutHit::Author => {
+                if let Err(code) =
+                    shell_execute_path("open", bento_nano_app::business::about::GITHUB_URL, None)
+                {
+                    log_static(format!("about: open_author failed code={code}\n").as_str());
+                }
             }
             bento_nano_app::business::about::AboutHit::Body => {}
         }
@@ -14150,6 +17064,9 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             .as_str(),
         );
         drop(app);
+        // A tooltip is a hover affordance, not a second persistent window.
+        // Dismiss it as soon as the represented Settings control is clicked.
+        hide_tooltip(root);
         match settings_hit {
             ui::SettingsHit::SwitchLocale => {
                 queue_locale_setting_toggle(root);
@@ -14173,30 +17090,43 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 app.settings_keybinding_recording.borrow_mut().take();
                 request_redraw(hwnd);
             }
-            ui::SettingsHit::InstallPlugin => match unsafe { select_plugin_file_from_dialog(hwnd) }
-            {
-                Ok(Some(path)) => {
-                    root.dispatcher
-                        .push(Command::InstallPlugin(SmolStr::new(path.to_string_lossy())));
+            ui::SettingsHit::InstallPlugin => {
+                root.app
+                    .borrow()
+                    .settings_plugin_uninstall_confirm
+                    .set(None);
+                let selected = unsafe { select_plugin_file_from_dialog(hwnd) };
+                arm_settings_owned_dialog_release_guard(root);
+                match selected {
+                    Ok(Some(path)) => {
+                        root.dispatcher
+                            .push(Command::InstallPlugin(SmolStr::new(path.to_string_lossy())));
+                    }
+                    Ok(None) => {
+                        set_plugin_setting_success(
+                            root,
+                            SmolStr::new(bento_nano_style::t(
+                                bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_INSTALL_CANCELLED,
+                            )),
+                        );
+                        request_redraw(hwnd);
+                    }
+                    Err(error) => {
+                        set_plugin_setting_error(
+                            root,
+                            localized_plugin_message(
+                                bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_INSTALL_FAILED_PREFIX,
+                                error,
+                            ),
+                        );
+                        request_redraw(hwnd);
+                    }
                 }
-                Ok(None) => {
-                    set_plugin_setting_success(
-                        root,
-                        SmolStr::new_static("Plugin install cancelled"),
-                    );
-                    request_redraw(hwnd);
-                }
-                Err(error) => {
-                    set_plugin_setting_error(
-                        root,
-                        SmolStr::new(format!("Plugin picker failed: {error}")),
-                    );
-                    request_redraw(hwnd);
-                }
-            },
+            }
             ui::SettingsHit::TogglePlugin(row_index) => {
                 let target = {
                     let app = root.app.borrow();
+                    app.settings_plugin_uninstall_confirm.set(None);
                     app.settings_plugin_entries
                         .borrow()
                         .get(row_index)
@@ -14208,8 +17138,25 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 }
             }
             ui::SettingsHit::UninstallPlugin(row_index) => {
+                let exists = {
+                    let app = root.app.borrow();
+                    app.settings_plugin_entries
+                        .borrow()
+                        .get(row_index)
+                        .is_some()
+                };
+                if exists {
+                    root.app
+                        .borrow()
+                        .settings_plugin_uninstall_confirm
+                        .set(Some(row_index));
+                    request_redraw(hwnd);
+                }
+            }
+            ui::SettingsHit::ConfirmUninstallPlugin(row_index) => {
                 let plugin_id = {
                     let app = root.app.borrow();
+                    app.settings_plugin_uninstall_confirm.set(None);
                     app.settings_plugin_entries
                         .borrow()
                         .get(row_index)
@@ -14218,6 +17165,13 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 if let Some(plugin_id) = plugin_id {
                     root.dispatcher.push(Command::UninstallPlugin(plugin_id));
                 }
+            }
+            ui::SettingsHit::CancelUninstallPlugin => {
+                root.app
+                    .borrow()
+                    .settings_plugin_uninstall_confirm
+                    .set(None);
+                request_redraw(hwnd);
             }
             ui::SettingsHit::RecordKeybinding(row_index) => {
                 if let Some(action) = keybinding_action_at(row_index) {
@@ -14299,8 +17253,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             ui::SettingsHit::SelectEncryptionModePassphrase => {
                 // P15 (#7 fix wave) — the Passphrase BUTTON applies, mirroring
                 // Tauri `applyMode("Passphrase")`. Delegates to the pure
-                // `passphrase_button_command` seam (unit-tested): empty draft →
-                // sets the localized ENCRYPTION_REQUIRED error + returns `None`;
+                // `passphrase_button_command` seam (unit-tested): empty draft →                // sets the localized ENCRYPTION_REQUIRED error + returns `None`;
                 // otherwise clears the in-flight capture + returns the
                 // verify-probe→apply command (`SetEncryptionPassphrase` reopens the
                 // vault with the passphrase, which IS the probe — a bad passphrase
@@ -14321,23 +17274,30 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     target: PaletteTarget::ThemeBase,
                 });
             }
-            ui::SettingsHit::ImportTheme => match unsafe { select_theme_file_from_dialog(hwnd) } {
-                Ok(Some(path)) => {
-                    root.dispatcher
-                        .push(Command::ImportTheme(SmolStr::new(path.to_string_lossy())));
+            ui::SettingsHit::ImportTheme => {
+                let selected = unsafe { select_theme_file_from_dialog(hwnd) };
+                arm_settings_owned_dialog_release_guard(root);
+                match selected {
+                    Ok(Some(path)) => {
+                        root.dispatcher
+                            .push(Command::ImportTheme(SmolStr::new(path.to_string_lossy())));
+                    }
+                    Ok(None) => {
+                        set_theme_setting_success(
+                            root,
+                            SmolStr::new_static("Theme import cancelled"),
+                        );
+                        request_redraw(hwnd);
+                    }
+                    Err(error) => {
+                        set_theme_setting_error(
+                            root,
+                            SmolStr::new(format!("Theme import failed: {error}")),
+                        );
+                        request_redraw(hwnd);
+                    }
                 }
-                Ok(None) => {
-                    set_theme_setting_success(root, SmolStr::new_static("Theme import cancelled"));
-                    request_redraw(hwnd);
-                }
-                Err(error) => {
-                    set_theme_setting_error(
-                        root,
-                        SmolStr::new(format!("Theme import failed: {error}")),
-                    );
-                    request_redraw(hwnd);
-                }
-            },
+            }
             ui::SettingsHit::SelectTheme(id) => {
                 // M6-UI — §3 Appearance grid: a ThemeCard click re-skins the
                 // app live end-to-end. Resolve the preset's stable string
@@ -14351,14 +17311,28 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                     .find(|p| p.id == id)
                 {
                     let theme_id = preset.theme_id;
+                    // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+                    let now_ms = unsafe { GetTickCount() };
                     let app = root.app.borrow();
+                    let transition_from = app.active_theme_card_id();
                     let changed = app.apply_active_theme_by_id(theme_id).unwrap_or(false);
+                    let transition_started =
+                        changed && app.start_theme_transition_from(transition_from, now_ms);
                     app.settings_dirty.set(true);
                     drop(app);
-                    // Persist via the backend loader (writes `active_theme`).
-                    root.dispatcher
-                        .push(Command::SetActiveTheme(SmolStr::new_static(theme_id)));
                     if changed {
+                        if transition_started {
+                            log_static(
+                                format!(
+                                    "theme: transition start id={theme_id} duration_ms={}\n",
+                                    bento_nano_app::state::THEME_TRANSITION_MS
+                                )
+                                .as_str(),
+                            );
+                            request_theme_surface_redraw(root, true);
+                        } else {
+                            request_theme_surface_redraw(root, false);
+                        }
                         request_redraw(hwnd);
                     } else {
                         // Re-selecting the active theme still re-arms Save +
@@ -14374,11 +17348,36 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 // (wired in the SaveSettings path below).
                 if let Some(hex) = bento_nano_app::theme_picker::accent_swatch_hex(index as usize) {
                     let app = root.app.borrow();
-                    *app.settings_draft_accent_color.borrow_mut() = Some(SmolStr::new_static(hex));
-                    app.settings_dirty.set(true);
+                    app.set_settings_accent_color_from_picker(SmolStr::new_static(hex));
                     drop(app);
                     request_redraw(hwnd);
                 }
+            }
+            ui::SettingsHit::EditAccentColor => {
+                // V21-N15 — focus the inline `#rrggbb` accent editor. It shares
+                // the Settings text-field producer path with Paths, but filters
+                // input in AppState so only valid hex can persist on Save.
+                {
+                    let app = root.app.borrow();
+                    app.focus_settings_accent_color();
+                    app.passphrase_entry_active.set(false);
+                }
+                request_redraw(hwnd);
+            }
+            ui::SettingsHit::OpenAccentColorPicker => {
+                log_static("settings: OpenAccentColorPicker producer\n");
+                if open_settings_native_accent_picker(root, hwnd) {
+                    request_redraw(hwnd);
+                }
+            }
+            ui::SettingsHit::ClearAccentColor => {
+                log_static("settings: ClearAccentColor producer\n");
+                {
+                    let app = root.app.borrow();
+                    app.request_settings_accent_clear();
+                    app.passphrase_entry_active.set(false);
+                }
+                request_redraw(hwnd);
             }
             ui::SettingsHit::CycleZoneDisplayMode => {
                 queue_zone_display_mode_cycle(root);
@@ -14438,8 +17437,11 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 // only when `settings_dirty` flips true. Save dims (alpha
                 // 0.4) in the renderer when clean — clicking it through is
                 // a no-op short-circuit, matching Tauri `disabled={!dirty()}`.
-                save_settings_general(root);
-                root.dispatcher.push(Command::CloseSettings);
+                if save_settings_general(root, hwnd) {
+                    root.dispatcher.push(Command::CloseSettings);
+                } else {
+                    request_redraw(hwnd);
+                }
             }
             ui::SettingsHit::ToggleDesktopEmbed => {
                 let app = root.app.borrow();
@@ -14451,18 +17453,12 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             }
             ui::SettingsHit::ToggleAutostart => {
                 let app = root.app.borrow();
-                // Mc-3 #12 — the toggle previously only flipped this Cell and
-                // never touched the registry, so "run at startup" was a lie.
-                // Best-effort write HKCU\Run, then set the Cell from the actual
-                // registry state so the toggle can never lie again.
-                let new_val = !app.setting_autostart.get();
-                if let Err(e) = bento_nano_backend::autostart::set_enabled(new_val) {
-                    log_static(&format!("autostart: set_enabled({new_val}) failed: {e}\n"));
-                }
-                // Reflect actual registry state, not just intent.
-                app.setting_autostart
-                    .set(bento_nano_backend::autostart::is_enabled());
+                // Save-gated like the Tauri panel: Cancel must never leave an
+                // HKCU\Run mutation behind. The real registry side effect is
+                // applied transactionally by `save_settings_general`.
+                app.setting_autostart.set(!app.setting_autostart.get());
                 app.settings_dirty.set(true);
+                app.settings_save_error.borrow_mut().take();
                 drop(app);
                 request_redraw(hwnd);
             }
@@ -14503,7 +17499,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 request_redraw(hwnd);
             }
             ui::SettingsHit::EditDesktopPath => {
-                // M7 — focus the 桌面路径 single-line input for live keyboard
+                // M7 — focus the 妗岄潰璺緞 single-line input for live keyboard
                 // editing. Mutually exclusive with passphrase capture.
                 {
                     let app = root.app.borrow();
@@ -14514,7 +17510,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 request_redraw(hwnd);
             }
             ui::SettingsHit::EditWatchValues => {
-                // M7 — focus the 监控值 multi-line textarea for live keyboard
+                // M7 — focus the 鐩戞帶鍊?multi-line textarea for live keyboard
                 // editing. Mutually exclusive with passphrase capture.
                 {
                     let app = root.app.borrow();
@@ -14658,7 +17654,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
                 request_redraw(hwnd);
             }
             ui::SettingsHit::ReapplyStealth => {
-                // M1e — 重新应用: build the live StealthConfig and re-write the
+                // M1e —重新应用: build the live StealthConfig and re-write the
                 // HIDDEN+SYSTEM attributes via `reapply_hidden_on_startup`,
                 // then refresh the cached status so the pill/rows update.
                 // Graceful on a missing config (no panic): log + skip the
@@ -14698,11 +17694,18 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
         return;
     }
 
+    if handle_stack_bloom_preview_lbutton_down(&app, hwnd, x, y) {
+        return;
+    }
+
     if handle_stack_tray_lbutton_down(root, x, y) {
         return;
     }
 
     let clicked_zone = ui::hit_test_zone(&app, x, y);
+    let clicked_zone_is_stack_anchor = clicked_zone
+        .and_then(|id| app.zones.get(id))
+        .is_some_and(|zone| zone.is_stack_anchor());
     let clicked_zone_body_visible_before_select = clicked_zone
         .and_then(|id| {
             app.zones
@@ -14711,7 +17714,11 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
         })
         .unwrap_or(false);
     let selected_zone_before_mouse_down = app.selected_zone.get();
-    if app.selected_zone.get() != clicked_zone {
+    if clicked_zone_is_stack_anchor {
+        // `StackCapsule.tsx` owns click/hover itself. Selecting the anchor here
+        // would incorrectly replace the compact capsule with a full Zone panel.
+        app.selected_zone.set(None);
+    } else if app.selected_zone.get() != clicked_zone {
         app.selected_zone.set(clicked_zone);
     }
 
@@ -14724,6 +17731,21 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             push_button_command(root, event_id);
             return;
         }
+    }
+
+    if let Some(hit) = ui::hit_test_inline_zone_search(&app, x, y) {
+        match hit {
+            ui::InlineZoneSearchHit::Clear => {
+                app.search_bar.borrow_mut().clear();
+                app.reset_zone_content_scroll();
+            }
+            ui::InlineZoneSearchHit::Body => set_main_inline_search_keyboard_focus(hwnd, true),
+        }
+        // SAFETY: GetTickCount is total and thread-safe.
+        touch_inline_zone_search(&app, unsafe { GetTickCount() });
+        drop(app);
+        request_redraw(hwnd);
+        return;
     }
 
     if let Some((zone_id, item_id, path)) = ui::hit_test_zone_item(&app, x, y) {
@@ -14752,7 +17774,7 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
         // (`release_item_press_animator`) so a drag-off still tidies the
         // press. Mirrors the pill `start_pill_press_animator` contract.
         // SAFETY: GetTickCount is total + thread-safe.
-        let now_ms = unsafe { GetTickCount() };
+        let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
         start_item_press_animator(&app, zone_id, item_id, now_ms);
         unsafe { SetCapture(hwnd) };
         return;
@@ -14763,36 +17785,39 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
 
     // GROUP-4 (2026-06-01, 1:1) — the expanded `PanelHeader` search + close
     // action buttons. Checked BEFORE the resize-corner / zone-drag paths so a
-    // click on a 28×28 button never falls through to a zone drag. Tauri
+    // click on a 28× 28 button never falls through to a zone drag. Tauri
     // `PanelHeader.tsx`: search → `openSearch(zone.id)`; close → `onClose()`
     // (collapses the panel back to its pill).
-    if let Some((_zone_id, button)) = ui::hit_test_zone_header_button(&app, x, y) {
+    if let Some((zone_id, button)) = ui::hit_test_zone_header_button(&app, x, y) {
         match button {
             ui::HeaderButton::Search => {
-                // Reuse the existing OpenSearch command — nano's search is a
-                // single global Search HWND (no per-zone search window), so
-                // this is the closest existing "open search" dispatch. (Tauri
-                // scopes it to `zone.id`; nano's search bar queries all live
-                // zones, so the global open matches the user intent 1:1.)
+                let already_open =
+                    app.zone_search_target.get() == Some(zone_id) && !app.zone_search_closing.get();
                 drop(app);
-                root.dispatcher.push(Command::OpenSearch);
+                if already_open {
+                    close_inline_zone_search(root, hwnd);
+                } else {
+                    open_inline_zone_search(root, zone_id, hwnd);
+                }
                 return;
             }
             ui::HeaderButton::Close => {
-                // Collapse the expanded panel back to its pill via the SAME
-                // path the hover-grace `HoverAction::Collapse` uses
-                // (`update_zone_pill_hover(app, None, ..)`), then clear the
-                // scheduler's expanded marker + pending timers so the panel
-                // does not immediately re-expand under the still-hovering
-                // cursor. No new Command is invented — this mirrors the
-                // existing collapse morph trigger.
+                // Collapse through one path that also clears the mouse-down
+                // selection; otherwise selected_zone forces the body visible
+                // again as soon as the morph settles.
                 // SAFETY: GetTickCount is total + thread-safe.
                 let now_ms = unsafe { GetTickCount() };
-                let mut scheduler = app.hover_scheduler.get();
-                scheduler.reset();
-                app.hover_scheduler.set(scheduler);
-                update_zone_pill_hover(&app, None, now_ms);
-                update_pill_hover_animator(&app, None, now_ms);
+                let closes_search = app.zone_search_target.get() == Some(zone_id);
+                if closes_search {
+                    drop(app);
+                    close_inline_zone_search(root, hwnd);
+                    let app = root.app.borrow();
+                    collapse_zone_from_header(&app, zone_id, now_ms);
+                    drop(app);
+                    request_redraw(hwnd);
+                    return;
+                }
+                collapse_zone_from_header(&app, zone_id, now_ms);
                 drop(app);
                 request_redraw(hwnd);
                 return;
@@ -14825,8 +17850,13 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             if z.locked {
                 return;
             }
-            let dx = x as i32 - z.x;
-            let dy = y as i32 - z.y;
+            // Tauri v8 centers the painted zen/stack capsule under the
+            // pointer once drag latches. Persisted `w/h` are expanded-panel
+            // dimensions and the click position inside that panel must not
+            // become the drag offset.
+            let Some((dx, dy)) = zone_drag_pointer_offset(&app, id) else {
+                return;
+            };
             app.zone_drag.set(Some((id, dx, dy)));
             app.zone_drag_body_visible_at_start
                 .set(Some((id, clicked_zone_body_visible_before_select)));
@@ -14838,7 +17868,12 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
             app.zone_drag_origin.set(Some((x as i32, y as i32, false)));
             // SAFETY: GetTickCount is total + thread-safe.
             let now_ms = unsafe { GetTickCount() };
-            reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
+            // Keep an already-open Bloom alive for a sub-threshold capsule
+            // click so mouse-up can toggle it. A real drag still clears every
+            // hover channel at the threshold latch in `handle_active_pointer_drag`.
+            if !z.is_stack_anchor() {
+                reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
+            }
             // V-8 — fire press-down animator unless this is a stack anchor
             // (which paints via its own chrome and doesn't run the V-8 path).
             if !z.is_stack_anchor() {
@@ -14852,6 +17887,21 @@ fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y:
     }
 }
 
+fn handle_lbutton_double_click(root: &AppRoot, slot: &WindowSlot, _hwnd: HWND, x: f32, y: f32) {
+    if slot.kind != WindowKind::Main
+        || should_ignore_main_pointer_while_settings_aux_open(root, slot.kind)
+    {
+        return;
+    }
+    let command = {
+        let app = root.app.borrow();
+        item_open_command_for_double_click(&app, x, y)
+    };
+    if let Some(command) = command {
+        root.dispatcher.push(command);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragSelectionRelease {
     KeepCurrent,
@@ -14859,17 +17909,27 @@ enum DragSelectionRelease {
 }
 
 fn drag_selection_release(app: &AppState, moved: bool) -> DragSelectionRelease {
-    let Some((_, body_visible_at_start)) = app.zone_drag_body_visible_at_start.get() else {
+    let Some((dragged, _body_visible_at_start)) = app.zone_drag_body_visible_at_start.get() else {
         return DragSelectionRelease::KeepCurrent;
     };
-    if moved && !body_visible_at_start {
-        DragSelectionRelease::Restore(app.zone_drag_selected_before_start.get())
-    } else {
-        DragSelectionRelease::KeepCurrent
+    if !moved {
+        return DragSelectionRelease::KeepCurrent;
     }
+    // Tauri's drag model is collapse-to-zen with no automatic re-expand at
+    // release. Restore an unrelated prior selection, but clear the dragged
+    // zone itself if it was the panel selected before mouse-down.
+    DragSelectionRelease::Restore(
+        app.zone_drag_selected_before_start
+            .get()
+            .filter(|selected| *selected != dragged),
+    )
 }
 
 fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f32) {
+    if root.app.borrow().active_context_menu.borrow().is_some() {
+        handle_context_menu_lbutton_up(root, hwnd, x, y);
+        return;
+    }
     if slot.kind == WindowKind::MiniBar && handle_minibar_lbutton_up(root, slot, x, y) {
         return;
     }
@@ -14880,6 +17940,10 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         return;
     }
     if slot.kind == WindowKind::PalettePicker && handle_palette_picker_lbutton_up(root, hwnd, x, y)
+    {
+        return;
+    }
+    if slot.kind == WindowKind::CapsulePicker && handle_capsule_picker_lbutton_up(root, hwnd, x, y)
     {
         return;
     }
@@ -14906,6 +17970,9 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     if should_ignore_main_pointer_while_settings_aux_open(root, slot.kind) {
         return;
     }
+    if slot.kind == WindowKind::Main && handle_stack_bloom_preview_lbutton_up(root, hwnd, x, y) {
+        return;
+    }
     if slot.kind == WindowKind::Main && handle_stack_tray_lbutton_up(root, hwnd, x, y) {
         return;
     }
@@ -14915,21 +17982,23 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     let app = root.app.borrow();
     let was_drag = app.zone_drag.get().is_some();
     let was_resize = app.zone_resize.get().is_some();
+    let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
+    let zone_drag_moved = was_drag
+        && app
+            .zone_drag_origin
+            .get()
+            .map(|(_, _, moved)| moved)
+            .unwrap_or(false);
     // M4 F2 — a drop that overlaps another zone forms a stack. Only when an
     // actual drag latched (moved past the 4-DIP threshold), never a
     // sub-threshold click-release. Compute the target BEFORE clearing
     // zone_drag; the dragged zone's live rect is already written into
     // app.zones by the drag mouse-move hot path. Anchor = the overlapped
-    // zone, member = the dragged zone ⇒ Command::StackZone(anchor, dragged)
+    // zone, member = the dragged zone 鈬?Command::StackZone(anchor, dragged)
     // (matches the (parent, child) reducer contract and the context-menu push
     // at the StackWith arm).
     let stack_command = if was_drag {
-        let moved = app
-            .zone_drag_origin
-            .get()
-            .map(|(_, _, m)| m)
-            .unwrap_or(false);
-        if moved {
+        if zone_drag_moved {
             app.zone_drag.get().and_then(|(dragged, _, _)| {
                 bento_nano_app::zone_gesture_geometry::stack_target_for_drop(&app.zones, dragged)
                     .map(|anchor| Command::StackZone(anchor, dragged))
@@ -14940,15 +18009,43 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     } else {
         None
     };
+    let stack_drop_anchor = stack_command.as_ref().and_then(|command| match command {
+        Command::StackZone(anchor, _) => Some(*anchor),
+        _ => None,
+    });
+    let stack_capsule_click_anchor = if was_drag && !zone_drag_moved {
+        dragged_zone.filter(|id| {
+            app.zones
+                .get(*id)
+                .is_some_and(|zone| zone.is_stack_anchor())
+        })
+    } else {
+        None
+    };
+    let stack_drag_settle_anchor = if zone_drag_moved {
+        stack_drop_anchor.or_else(|| {
+            dragged_zone.filter(|id| {
+                app.zones
+                    .get(*id)
+                    .is_some_and(|zone| zone.is_stack_anchor())
+            })
+        })
+    } else {
+        None
+    };
     let selection_release = if was_drag {
-        let moved = app
-            .zone_drag_origin
-            .get()
-            .map(|(_, _, m)| m)
-            .unwrap_or(false);
-        drag_selection_release(&app, moved)
+        drag_selection_release(&app, zone_drag_moved)
     } else {
         DragSelectionRelease::KeepCurrent
+    };
+    let click_expand_zone = if was_drag && !zone_drag_moved {
+        app.zone_drag_body_visible_at_start
+            .get()
+            .and_then(|(zone_id, body_was_visible)| {
+                zone_accepts_click_expand(&app, zone_id, body_was_visible).then_some(zone_id)
+            })
+    } else {
+        None
     };
     if was_drag {
         if let DragSelectionRelease::Restore(selection) = selection_release {
@@ -14964,11 +18061,47 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         app.zone_resize.set(None);
         app.mark_dirty();
     }
+    let click_expand_changed = if let Some(zone_id) = click_expand_zone {
+        // A sub-threshold pill click selects the Zone. Animate that selection
+        // from the capsule instead of letting `selected_zone` expose a full
+        // panel for one frame on mouse-up.
+        let now_ms = unsafe { GetTickCount() };
+        begin_zone_pill_segment(&app, zone_id, 0.0, true, now_ms);
+        true
+    } else {
+        false
+    };
+    let stack_bloom_click_changed = if let Some(anchor) = stack_capsule_click_anchor {
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        let now_ms = unsafe { GetTickCount() };
+        toggle_stack_bloom_from_capsule_click(&app, anchor, now_ms)
+    } else {
+        false
+    };
+    let mut stack_drop_surface_changed = false;
+    if zone_drag_moved {
+        if let Some(anchor) = stack_drop_anchor {
+            // The queued StackZone command owns the model mutation. Preserve
+            // the unchanged release hover now, then reveal only after the
+            // dispatcher has created a resolvable stack relation.
+            hold_free_zone_drag_result_collapsed_until_reentry(&app, anchor, true);
+            root.pending_stack_drop_bloom.set(Some(anchor));
+        } else if let Some(anchor) = stack_drag_settle_anchor {
+            // Moving an existing stack leaves the pointer over an already-valid
+            // StackWrapper, so Tauri blooms it on this same release turn.
+            // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+            let now_ms = unsafe { GetTickCount() };
+            reveal_stack_at_drop_pointer(&app, anchor, now_ms);
+            stack_drop_surface_changed = true;
+        } else if let Some(dragged) = dragged_zone {
+            hold_free_zone_drag_result_collapsed_until_reentry(&app, dragged, false);
+        }
+    }
     // V-8 — release any in-flight pill press regardless of release location.
     // M3-A2 — and any in-flight item-card press, on the same up event.
     // SAFETY: GetTickCount is total + thread-safe.
     let press_released = {
-        let now_ms = unsafe { GetTickCount() };
+        let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
         let pill = release_pill_press_animator(&app, now_ms);
         let item = release_item_press_animator(&app, now_ms);
         pill || item
@@ -14979,6 +18112,9 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
     let item_drag = app.item_drag.borrow_mut().take();
     let was_item_drag = item_drag.is_some();
     if was_drag || was_resize || was_item_drag {
+        if drag_proof_log_enabled() {
+            log_static("drag: release_cleared active_drag=none\n");
+        }
         // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
         let now_ms = unsafe { GetTickCount() };
         log_animation_proof_state(&app, "lbutton_up_after_clear", now_ms, Some(x), Some(y));
@@ -14987,7 +18123,7 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         if !candidate.is_internal_dragging {
             return None;
         }
-        let target_zone_id = ui::hit_test_zone(&app, x, y)?;
+        let target_zone_id = item_drag_target_zone_for_point(&app, x, y)?;
         if target_zone_id != candidate.zone_id {
             return Some(Command::MoveItemToZone(
                 candidate.zone_id,
@@ -14995,7 +18131,7 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
                 bento_nano_app::ItemId(candidate.item_id.0),
             ));
         }
-        let (grid_x, grid_y) = ui::item_grid_position_for_point(&app, target_zone_id, x, y)?;
+        let (grid_x, grid_y) = item_grid_position_for_drag_point(&app, target_zone_id, x, y)?;
         Some(Command::MoveItem(
             candidate.zone_id,
             bento_nano_app::ItemId(candidate.item_id.0),
@@ -15016,6 +18152,10 @@ fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x: f32, y: f
         // SAFETY: ReleaseCapture canonical.
         unsafe { ReleaseCapture() };
     }
+    if stack_bloom_click_changed || stack_drop_surface_changed || click_expand_changed {
+        arm_hover_frame_timer(hwnd);
+        request_redraw(hwnd);
+    }
 }
 
 fn should_start_item_drag_out(
@@ -15029,7 +18169,7 @@ fn should_start_item_drag_out(
         || y < 0.0
         || x >= app.viewport.width
         || y >= app.viewport.height
-        || ui::hit_test_zone(app, x, y).is_none()
+        || item_drag_target_zone_for_point(app, x, y).is_none()
 }
 
 fn handle_active_pointer_drag(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32) -> bool {
@@ -15052,7 +18192,8 @@ fn handle_active_pointer_drag(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32)
             if dx >= ITEM_DRAG_THRESHOLD_DIP || dy >= ITEM_DRAG_THRESHOLD_DIP {
                 candidate.last_x = x as i32;
                 candidate.last_y = y as i32;
-                if should_start_item_drag_out(&app, x, y, item_external_drag_modifier_down()) {
+                let copy_only = item_external_drag_modifier_down();
+                if should_start_item_drag_out(&app, x, y, copy_only) {
                     if drag_proof_log_enabled() {
                         log_static(
                             format!(
@@ -15066,7 +18207,12 @@ fn handle_active_pointer_drag(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32)
                     drop(app);
                     root.pending_item_drag_out
                         .borrow_mut()
-                        .replace(candidate.path);
+                        .replace(PendingItemDragOut {
+                            zone_id: candidate.zone_id,
+                            item_id: candidate.item_id,
+                            path: candidate.path,
+                            copy_only,
+                        });
                     // SAFETY: `slot.hwnd` is the live source HWND and the
                     // message only carries process-local state stored above.
                     unsafe {
@@ -15110,11 +18256,13 @@ fn handle_active_pointer_drag(root: &AppRoot, slot: &WindowSlot, x: f32, y: f32)
             let nx = x as i32 - dx;
             let ny = y as i32 - dy;
             let (cx, cy) = if let Some(z) = app.zones.get(id) {
+                let (_, _, drag_w, drag_h) =
+                    bento_nano_app::zone_gesture_geometry::zone_drag_capsule_rect(&app.zones, z);
                 bento_nano_platform::clamp_rect_into_union_bounds(
                     nx,
                     ny,
-                    z.w,
-                    z.h,
+                    drag_w,
+                    drag_h,
                     &slot.state.monitors,
                 )
             } else {
@@ -15177,11 +18325,12 @@ fn with_item_drag_out_guard<T>(root: &AppRoot, drag: impl FnOnce() -> T) -> T {
     drag()
 }
 
-fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, path: String) {
-    if path.is_empty() {
+fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, request: PendingItemDragOut) {
+    if request.path.is_empty() {
         return;
     }
     let hwnd_bits = source_hwnd as isize;
+    let path = request.path.to_string();
     let leaf = item_operation_leaf(path.as_str()).to_owned();
     log_static(format!("items: drag-out started path={path}\n").as_str());
     set_item_operation_status(
@@ -15213,10 +18362,7 @@ fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, path: String) {
                 )
                 .as_str(),
             );
-            set_item_operation_status(
-                root,
-                SmolStr::new(item_drag_out_status_for_outcome(leaf.as_str(), outcome)),
-            );
+            finalize_item_drag_out(root, &request, leaf.as_str(), outcome);
         }
         Err(error) => {
             tracing::warn!(
@@ -15239,6 +18385,70 @@ fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, path: String) {
         // SAFETY: hwnd_bits came from a live process-owned HWND. Invalidating
         // after the Shell drag loop returns updates the visible status.
         unsafe { InvalidateRect(hwnd_bits as HWND, ptr::null(), 0) };
+    }
+}
+
+fn finalize_item_drag_out(
+    root: &AppRoot,
+    request: &PendingItemDragOut,
+    leaf: &str,
+    outcome: bento_nano_backend::drag_drop::DragOutcome,
+) {
+    match outcome {
+        bento_nano_backend::drag_drop::DragOutcome::Dropped if request.copy_only => {
+            set_item_operation_status(root, SmolStr::new(format!("Copied out: {leaf}")));
+        }
+        bento_nano_backend::drag_drop::DragOutcome::Dropped => {
+            // The Shell has already completed the MOVE represented by
+            // `DROPEFFECT_MOVE`. For stealth-backed items that means the hidden
+            // source path no longer exists: routing through ordinary RemoveItem
+            // would try to restore that already-moved file, fail, and leave a
+            // ghost card in the Zone. This completion path owns model cleanup
+            // only; filesystem ownership has transferred to the drop target.
+            remove_item_model_after_shell_move(root, request.zone_id, request.item_id);
+            let removed = root
+                .app
+                .borrow()
+                .zones
+                .item(request.zone_id, request.item_id)
+                .is_none();
+            if removed {
+                flush_dirty_zones(root);
+                set_item_operation_status(root, SmolStr::new(format!("Moved out: {leaf}")));
+                log_static(
+                    format!(
+                        "items: drag-out model-removed zone={} item={} path={}\n",
+                        request.zone_id.0, request.item_id.0, request.path
+                    )
+                    .as_str(),
+                );
+            } else {
+                log_static(
+                    format!(
+                        "items: drag-out model-kept zone={} item={} path={}\n",
+                        request.zone_id.0, request.item_id.0, request.path
+                    )
+                    .as_str(),
+                );
+            }
+        }
+        bento_nano_backend::drag_drop::DragOutcome::Cancelled => {
+            set_item_operation_status(
+                root,
+                SmolStr::new(item_drag_out_status_for_outcome(leaf, outcome)),
+            );
+        }
+    }
+}
+
+fn remove_item_model_after_shell_move(
+    root: &AppRoot,
+    zone_id: ZoneId,
+    item_id: bento_nano_zone::ZoneItemId,
+) {
+    let mut app = root.app.borrow_mut();
+    if app.zones.remove_item(zone_id, item_id) {
+        app.mark_dirty();
     }
 }
 
@@ -15661,19 +18871,54 @@ fn is_readable_memory_protect(protect: u32) -> bool {
     )
 }
 
-fn handle_rbutton_up(root: &AppRoot, x: f32, y: f32) {
+fn handle_rbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) {
     let app = root.app.borrow();
     if app.settings_open.get() {
         return;
     }
+    if app
+        .active_context_menu
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| popover::context_menu_contains(session, x, y))
+    {
+        return;
+    }
+    if app.active_context_menu.borrow().is_some() {
+        drop(app);
+        close_context_menu_surface(root);
+        return handle_rbutton_up(root, hwnd, x, y);
+    }
+    if let Some((_, zone_id, item_id)) = stack_bloom_preview_item_hit_for_point(&app, x, y) {
+        let path = app.zones.get(zone_id).and_then(|zone| {
+            zone.items
+                .iter()
+                .find(|item| item.id == item_id)
+                .map(|item| item.path.to_string())
+        });
+        drop(app);
+        if let Some(path) = path {
+            show_item_context_menu(root, hwnd, x, y, zone_id, item_id, &path);
+        }
+        return;
+    }
     if let Some((zone_id, item_id, path)) = ui::hit_test_zone_item(&app, x, y) {
         drop(app);
-        unsafe { show_item_context_menu(root, zone_id, item_id, &path) };
+        show_item_context_menu(root, hwnd, x, y, zone_id, item_id, &path);
         return;
     }
     if let Some(id) = ui::hit_test_zone(&app, x, y) {
         drop(app);
-        unsafe { show_zone_context_menu(root, id) };
+        show_zone_context_menu(root, hwnd, x, y, id);
+    }
+}
+
+#[inline]
+fn context_menu_text(zh_cn: &'static str, en_us: &'static str) -> &'static str {
+    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        zh_cn
+    } else {
+        en_us
     }
 }
 
@@ -15689,7 +18934,118 @@ const ZONE_CONTEXT_BIND_LIVE_FOLDER_ID: usize = 9;
 const ZONE_CONTEXT_REFRESH_LIVE_FOLDER_ID: usize = 10;
 const ZONE_CONTEXT_UNBIND_LIVE_FOLDER_ID: usize = 11;
 const ZONE_CONTEXT_OPEN_STACK_TRAY_ID: usize = 12;
+const ZONE_CONTEXT_SEARCH_ID: usize = 13;
+const ZONE_CONTEXT_CAPSULES_ID: usize = 14;
+const ZONE_CONTEXT_BULK_MANAGER_ID: usize = 15;
 const ZONE_CONTEXT_STACK_BASE_ID: usize = 100;
+
+fn zone_context_menu_rows(
+    live_folder_bound: bool,
+    stack_tray_available: bool,
+    has_stack_targets: bool,
+) -> popover::ContextMenuRows {
+    let mut entries = popover::ContextMenuRows::new();
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_EDIT_ID,
+        context_menu_text("编辑区域与样式", "Edit zone & style"),
+        IconKind::Edit,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_SEARCH_ID,
+        context_menu_text("在区域内搜索", "Search in zone"),
+        IconKind::Search,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_SMART_SUGGESTOR_ID,
+        context_menu_text("智能分组建议", "Smart suggestions"),
+        IconKind::Lightning,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_AUTO_ORGANIZE_ID,
+        context_menu_text("自动排列项目", "Auto organize items"),
+        IconKind::Grid,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_PIN_MINIBAR_ID,
+        context_menu_text("固定为迷你栏", "Pin as minibar"),
+        IconKind::Pin,
+    ));
+
+    entries.push(popover::ContextMenuRow::separator());
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
+        if live_folder_bound {
+            context_menu_text("更换绑定文件夹…", "Change bound folder…")
+        } else {
+            context_menu_text("绑定文件夹…", "Bind folder…")
+        },
+        IconKind::FolderOpen,
+    ));
+    if live_folder_bound {
+        entries.push(popover::ContextMenuRow::command(
+            ZONE_CONTEXT_REFRESH_LIVE_FOLDER_ID,
+            context_menu_text("刷新文件夹内容", "Refresh folder contents"),
+            IconKind::Folder,
+        ));
+        entries.push(popover::ContextMenuRow::command(
+            ZONE_CONTEXT_UNBIND_LIVE_FOLDER_ID,
+            context_menu_text("解除文件夹绑定", "Unbind folder"),
+            IconKind::X,
+        ));
+    }
+
+    if has_stack_targets || stack_tray_available {
+        entries.push(popover::ContextMenuRow::separator());
+        if has_stack_targets {
+            entries.push(popover::ContextMenuRow::submenu(
+                context_menu_text("与其他 Zone 叠放", "Stack with another Zone"),
+                IconKind::Columns,
+            ));
+        }
+        if stack_tray_available {
+            entries.push(popover::ContextMenuRow::command(
+                ZONE_CONTEXT_OPEN_STACK_TRAY_ID,
+                context_menu_text("打开集合托盘", "Open stack tray"),
+                IconKind::Columns,
+            ));
+            entries.push(popover::ContextMenuRow::command(
+                ZONE_CONTEXT_UNSTACK_ID,
+                context_menu_text("解除集合", "Unstack"),
+                IconKind::Square,
+            ));
+        }
+    }
+
+    entries.push(popover::ContextMenuRow::separator());
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_BULK_MANAGER_ID,
+        context_menu_text("批量管理项目…", "Bulk manage items…"),
+        IconKind::Grid,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_CAPSULES_ID,
+        context_menu_text("上下文胶囊…", "Context capsules…"),
+        IconKind::Archive,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_SAVE_SNAPSHOT_ID,
+        context_menu_text("保存布局快照", "Save layout snapshot"),
+        IconKind::Camera,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ZONE_CONTEXT_OPEN_SNAPSHOT_PICKER_ID,
+        context_menu_text("浏览布局快照…", "Browse layout snapshots…"),
+        IconKind::Archive,
+    ));
+
+    entries.push(popover::ContextMenuRow::separator());
+    entries.push(popover::ContextMenuRow::danger(
+        ZONE_CONTEXT_DELETE_ID,
+        context_menu_text("删除区域…", "Delete zone…"),
+        IconKind::Trash,
+    ));
+    entries
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingZoneContextMenu {
@@ -15714,6 +19070,7 @@ struct PendingTrayContextMenu {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ZoneContextAction {
     Edit,
+    Search,
     SmartSuggestor,
     AutoOrganize,
     PinMinibar,
@@ -15724,6 +19081,8 @@ enum ZoneContextAction {
     Unstack,
     SaveSnapshot,
     OpenSnapshotPicker,
+    OpenCapsules,
+    OpenBulkManager,
     StackWith(ZoneId),
     Delete,
 }
@@ -15736,6 +19095,56 @@ const ITEM_CONTEXT_DELETE_FILE_ID: usize = 5;
 const ITEM_CONTEXT_TOGGLE_WIDE_ID: usize = 6;
 const ITEM_CONTEXT_REMOVE_ID: usize = 7;
 const ITEM_CONTEXT_MOVE_ZONE_BASE_ID: usize = 100;
+
+fn item_context_menu_rows(has_move_targets: bool) -> popover::ContextMenuRows {
+    let mut entries = popover::ContextMenuRows::new();
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_OPEN_ID,
+        context_menu_text("打开", "Open"),
+        IconKind::ExternalLink,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_REVEAL_ID,
+        context_menu_text("在资源管理器中显示", "Show in File Explorer"),
+        IconKind::FolderOpen,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_COPY_PATH_ID,
+        context_menu_text("复制路径", "Copy path"),
+        IconKind::Copy,
+    ));
+
+    entries.push(popover::ContextMenuRow::separator());
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_RENAME_FILE_ID,
+        context_menu_text("重命名文件…", "Rename file…"),
+        IconKind::Edit,
+    ));
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_TOGGLE_WIDE_ID,
+        context_menu_text("切换宽卡片", "Toggle wide card"),
+        IconKind::Columns,
+    ));
+    if has_move_targets {
+        entries.push(popover::ContextMenuRow::submenu(
+            context_menu_text("移动到 Zone", "Move to Zone"),
+            IconKind::ArrowRight,
+        ));
+    }
+    entries.push(popover::ContextMenuRow::command(
+        ITEM_CONTEXT_REMOVE_ID,
+        context_menu_text("从当前区域移除", "Remove from this Zone"),
+        IconKind::X,
+    ));
+
+    entries.push(popover::ContextMenuRow::separator());
+    entries.push(popover::ContextMenuRow::danger(
+        ITEM_CONTEXT_DELETE_FILE_ID,
+        context_menu_text("移入回收站…", "Move to Recycle Bin…"),
+        IconKind::Trash,
+    ));
+    entries
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ItemContextAction {
@@ -15756,9 +19165,10 @@ enum ItemContextDispatch {
     Command(Command),
 }
 
+#[cfg(test)]
 fn item_context_action_for_choice(
     choice: usize,
-    move_targets: &[(usize, ZoneId, Vec<u16>)],
+    move_targets: &[(usize, ZoneId, SmolStr)],
 ) -> Option<ItemContextAction> {
     item_context_action_for_choice_with(choice, |command_id| {
         move_targets
@@ -15884,12 +19294,17 @@ fn apply_zone_context_action(root: &AppRoot, zone_id: ZoneId, action: ZoneContex
         ZoneContextAction::Edit => {
             root.dispatcher.push(Command::OpenZoneEditor(zone_id));
         }
+        ZoneContextAction::Search => {
+            if let Some(hwnd) = find_main_hwnd(root) {
+                open_inline_zone_search(root, zone_id, hwnd);
+            }
+        }
         ZoneContextAction::SmartSuggestor => {
             root.app.borrow().selected_zone.set(Some(zone_id));
             root.dispatcher.push(Command::ShowSuggestor);
         }
         ZoneContextAction::AutoOrganize => {
-            root.dispatcher.push(Command::AutoOrganize);
+            root.dispatcher.push(Command::AutoArrangeZone(zone_id));
         }
         ZoneContextAction::PinMinibar => {
             root.dispatcher.push(Command::PinZoneAsMinibar(zone_id));
@@ -15917,6 +19332,13 @@ fn apply_zone_context_action(root: &AppRoot, zone_id: ZoneId, action: ZoneContex
         ZoneContextAction::OpenSnapshotPicker => {
             root.dispatcher.push(Command::OpenSnapshotPicker);
         }
+        ZoneContextAction::OpenCapsules => {
+            root.dispatcher.push(Command::OpenCapsulePicker);
+        }
+        ZoneContextAction::OpenBulkManager => {
+            root.app.borrow().selected_zone.set(Some(zone_id));
+            root.dispatcher.push(Command::OpenBulkManager);
+        }
         ZoneContextAction::StackWith(target_zone_id) => {
             root.dispatcher
                 .push(Command::StackZone(zone_id, target_zone_id));
@@ -15927,15 +19349,13 @@ fn apply_zone_context_action(root: &AppRoot, zone_id: ZoneId, action: ZoneContex
     }
 }
 
-unsafe fn zone_context_action_for_choice(
-    _root: &AppRoot,
-    _owner: HWND,
-    _zone_id: ZoneId,
+fn zone_context_action_for_choice(
     choice: usize,
     stack_targets: &[(usize, ZoneId)],
 ) -> Option<ZoneContextAction> {
     match choice {
         ZONE_CONTEXT_EDIT_ID => Some(ZoneContextAction::Edit),
+        ZONE_CONTEXT_SEARCH_ID => Some(ZoneContextAction::Search),
         ZONE_CONTEXT_SMART_SUGGESTOR_ID => Some(ZoneContextAction::SmartSuggestor),
         ZONE_CONTEXT_AUTO_ORGANIZE_ID => Some(ZoneContextAction::AutoOrganize),
         ZONE_CONTEXT_PIN_MINIBAR_ID => Some(ZoneContextAction::PinMinibar),
@@ -15946,6 +19366,8 @@ unsafe fn zone_context_action_for_choice(
         ZONE_CONTEXT_UNSTACK_ID => Some(ZoneContextAction::Unstack),
         ZONE_CONTEXT_SAVE_SNAPSHOT_ID => Some(ZoneContextAction::SaveSnapshot),
         ZONE_CONTEXT_OPEN_SNAPSHOT_PICKER_ID => Some(ZoneContextAction::OpenSnapshotPicker),
+        ZONE_CONTEXT_CAPSULES_ID => Some(ZoneContextAction::OpenCapsules),
+        ZONE_CONTEXT_BULK_MANAGER_ID => Some(ZoneContextAction::OpenBulkManager),
         choice if choice >= ZONE_CONTEXT_STACK_BASE_ID => stack_targets
             .iter()
             .find(|(command_id, _)| *command_id == choice)
@@ -15955,86 +19377,449 @@ unsafe fn zone_context_action_for_choice(
     }
 }
 
-fn handle_zone_context_wm_command(root: &AppRoot, owner: HWND, choice: usize) -> bool {
-    let Some(pending) = root.zone_context_menu.borrow().clone() else {
-        return false;
-    };
-    let action = unsafe {
-        zone_context_action_for_choice(root, owner, pending.zone_id, choice, &pending.stack_targets)
-    };
-    let Some(action) = action else {
-        return false;
-    };
-    root.zone_context_menu_consumed.set(true);
-    root.zone_context_menu_deferred
+fn close_context_menu_surface(root: &AppRoot) {
+    let changed = root
+        .app
+        .borrow()
+        .active_context_menu
         .borrow_mut()
-        .replace((pending.zone_id, action));
-    request_redraw(owner);
-    log_static(
-        format!(
-            "zone_menu: wm_command={} zone_id={}\n",
-            choice, pending.zone_id.0
-        )
-        .as_str(),
-    );
-    true
+        .take()
+        .is_some();
+    root.zone_context_menu.borrow_mut().take();
+    root.item_context_menu.borrow_mut().take();
+    if let Some(hwnd) = find_main_hwnd(root) {
+        unsafe {
+            KillTimer(hwnd, CONTEXT_MENU_INPUT_TIMER_ID);
+            if changed {
+                ReleaseCapture();
+            }
+        };
+        if changed {
+            request_redraw(hwnd);
+        }
+    }
 }
 
-fn handle_item_context_wm_command(root: &AppRoot, owner: HWND, choice: usize) -> bool {
-    let Some(pending) = root.item_context_menu.borrow().clone() else {
-        return false;
-    };
-    let action = item_context_action_for_choice_with(choice, |command_id| {
-        pending
-            .move_targets
-            .iter()
-            .find(|(target_command_id, _)| *target_command_id == command_id)
-            .map(|(_, zone_id)| *zone_id)
-    });
-    let Some(action) = action else {
-        return false;
-    };
-    root.item_context_menu_consumed.set(true);
-    apply_item_context_dispatch(
-        root,
-        item_context_dispatch_for_action(
-            pending.zone_id,
-            pending.item_id,
-            pending.path.as_str(),
-            action,
-        ),
-    );
-    request_redraw(owner);
-    log_static(
-        format!(
-            "item_menu: wm_command={} zone_id={} item_id={}\n",
-            choice, pending.zone_id.0, pending.item_id.0
-        )
-        .as_str(),
-    );
-    true
+fn resize_context_menu_for_submenu(root: &AppRoot, hwnd: HWND, open: bool) {
+    {
+        let app = root.app.borrow();
+        let viewport = app.viewport;
+        let mut active = app.active_context_menu.borrow_mut();
+        let Some(session) = active.as_mut() else {
+            return;
+        };
+        let open = open && !session.submenu_rows.is_empty();
+        if session.submenu_open == open {
+            return;
+        }
+        let previous = popover::context_menu_window_size(session);
+        session.submenu_open = open;
+        if !open
+            && session
+                .hovered
+                .is_some_and(|hit| hit.column == popover::ContextMenuColumn::Submenu)
+        {
+            session.hovered = session
+                .main_rows
+                .iter()
+                .position(|row| row.kind == popover::ContextMenuRowKind::Submenu)
+                .map(|row| popover::ContextMenuHit {
+                    column: popover::ContextMenuColumn::Main,
+                    row,
+                });
+        }
+        let next = popover::context_menu_window_size(session);
+        if session.submenu_on_left {
+            session.origin_x -= (next.width - previous.width).round() as i32;
+        }
+        session.origin_x = session
+            .origin_x
+            .clamp(0, (viewport.width - next.width).max(0.0).round() as i32);
+        session.origin_y = session
+            .origin_y
+            .clamp(0, (viewport.height - next.height).max(0.0).round() as i32);
+    }
+    request_redraw(hwnd);
 }
 
-unsafe fn show_zone_context_menu(root: &AppRoot, zone_id: ZoneId) {
-    let menu = unsafe { CreatePopupMenu() };
-    if menu.is_null() {
-        tracing::warn!(target: "bentodesk::context_menu", "CreatePopupMenu returned NULL for zone menu");
+fn show_active_context_menu(
+    root: &AppRoot,
+    hwnd: HWND,
+    cursor_x: f32,
+    cursor_y: f32,
+) -> Option<HWND> {
+    {
+        let app = root.app.borrow();
+        let viewport = app.viewport;
+        let mut active = app.active_context_menu.borrow_mut();
+        let session = active.as_mut()?;
+        session.submenu_open = false;
+        session.hovered = None;
+        session.submenu_scroll = 0;
+        let closed = popover::context_menu_window_size(session);
+        let expanded_width = if session.submenu_rows.is_empty() {
+            closed.width
+        } else {
+            closed.width + popover::CONTEXT_MENU_SUBMENU_GAP + popover::CONTEXT_MENU_WIDTH
+        };
+        let submenu_on_left = !session.submenu_rows.is_empty()
+            && cursor_x + expanded_width > viewport.width
+            && cursor_x - expanded_width >= 0.0;
+        session.submenu_on_left = submenu_on_left;
+        let mut x = if submenu_on_left {
+            cursor_x - closed.width
+        } else {
+            cursor_x
+        };
+        if expanded_width > viewport.width {
+            x = 0.0;
+        }
+        x = x.clamp(0.0, (viewport.width - closed.width).max(0.0));
+        let y = cursor_y.clamp(0.0, (viewport.height - closed.height).max(0.0));
+        session.set_origin(x, y);
+    }
+    unsafe {
+        for key in [
+            0x01,
+            0x02,
+            VK_ESCAPE_KEY as i32,
+            VK_LEFT_KEY as i32,
+            VK_RIGHT_KEY as i32,
+            VK_UP_KEY as i32,
+            VK_DOWN_KEY as i32,
+            VK_ENTER as i32,
+        ] {
+            let _ = GetAsyncKeyState(key);
+        }
+        SetTimer(
+            hwnd,
+            CONTEXT_MENU_INPUT_TIMER_ID,
+            CONTEXT_MENU_INPUT_POLL_MS,
+            None,
+        );
+        // Native popup semantics without native popup chrome: capture keeps
+        // fast clicks outside the clipped Main window region routable to the
+        // menu's existing pointer handlers. GetAsyncKeyState's low bit alone
+        // is process-global and can be consumed by another thread.
+        SetCapture(hwnd);
+    }
+    request_redraw(hwnd);
+    Some(hwnd)
+}
+
+fn poll_context_menu_input(root: &AppRoot, hwnd: HWND) {
+    if root.app.borrow().active_context_menu.borrow().is_none() {
+        unsafe { KillTimer(hwnd, CONTEXT_MENU_INPUT_TIMER_ID) };
         return;
     }
-    let edit = widen_static::<24>("Edit zone");
-    let smart_suggestor = widen_static::<40>("Smart suggestions...");
-    let organize = widen_static::<32>("Auto organize");
-    let pin = widen_static::<32>("Pin as minibar");
-    let unstack = widen_static::<24>("Unstack");
-    let save_snapshot = widen_static::<40>("Save layout snapshot");
-    let open_snapshots = widen_static::<40>("Layout snapshots...");
-    let bind_live_folder = widen_static::<40>("Bind live folder...");
-    let rebind_live_folder = widen_static::<40>("Rebind live folder...");
-    let refresh_live_folder = widen_static::<40>("Refresh live folder");
-    let unbind_live_folder = widen_static::<40>("Unbind live folder");
-    let delete = widen_static::<24>("Delete zone");
-    let open_stack_tray = widen_static::<40>("Open stack tray");
-    type ZoneStackMenuTargets = Vec<(usize, ZoneId, Vec<u16>)>;
+    // SetCapture called from WM_RBUTTONUP can be released when that native
+    // button sequence unwinds. Reassert it from the later timer tick so fast
+    // clicks outside Main's clipped region are delivered to this HWND.
+    unsafe { SetCapture(hwnd) };
+
+    for vk in [
+        VK_ESCAPE_KEY,
+        VK_LEFT_KEY,
+        VK_RIGHT_KEY,
+        VK_UP_KEY,
+        VK_DOWN_KEY,
+        VK_ENTER,
+    ] {
+        if unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x0001 != 0 } {
+            handle_context_menu_keydown(root, hwnd, vk);
+            return;
+        }
+    }
+
+    let clicked = unsafe {
+        async_mouse_button_active(GetAsyncKeyState(0x01))
+            || async_mouse_button_active(GetAsyncKeyState(0x02))
+    };
+    if !clicked {
+        return;
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut point) } == 0 || unsafe { ScreenToClient(hwnd, &mut point) } == 0
+    {
+        return;
+    }
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd).max(96);
+    let x = bento_nano_style::dpi::device_to_logical_f32(point.x as f32, dpi);
+    let y = bento_nano_style::dpi::device_to_logical_f32(point.y as f32, dpi);
+    let inside = root
+        .app
+        .borrow()
+        .active_context_menu
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| popover::context_menu_contains(session, x, y));
+    if !inside {
+        close_context_menu_surface(root);
+    }
+}
+
+#[inline]
+fn async_mouse_button_active(state: i16) -> bool {
+    // High bit is the current physical-down state and cannot be consumed by
+    // another caller; low bit preserves sub-tick clicks observed since the
+    // previous query.
+    state as u16 & 0x8001 != 0
+}
+
+fn context_menu_row_for_hit(
+    session: &popover::ContextMenuSession,
+    hit: popover::ContextMenuHit,
+) -> Option<&popover::ContextMenuRow> {
+    match hit.column {
+        popover::ContextMenuColumn::Main => session.main_rows.get(hit.row),
+        popover::ContextMenuColumn::Submenu => session.submenu_rows.get(hit.row),
+    }
+}
+
+fn context_menu_next_hit(
+    session: &popover::ContextMenuSession,
+    column: popover::ContextMenuColumn,
+    current: Option<usize>,
+    forward: bool,
+) -> Option<popover::ContextMenuHit> {
+    let (start, end) = match column {
+        popover::ContextMenuColumn::Main => (0, session.main_rows.len()),
+        popover::ContextMenuColumn::Submenu => {
+            let range = session.visible_submenu_range();
+            (range.start, range.end)
+        }
+    };
+    let len = end.saturating_sub(start);
+    if len == 0 {
+        return None;
+    }
+    let base = current.filter(|row| *row >= start && *row < end);
+    for step in 1..=len {
+        let offset = match (base, forward) {
+            (Some(row), true) => (row - start + step) % len,
+            (Some(row), false) => (row - start + len - (step % len)) % len,
+            (None, true) => step - 1,
+            (None, false) => len - step,
+        };
+        let row = start + offset;
+        let candidate = popover::ContextMenuHit { column, row };
+        if context_menu_row_for_hit(session, candidate)
+            .is_some_and(|entry| entry.kind != popover::ContextMenuRowKind::Separator)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn activate_context_menu_hit(root: &AppRoot, hwnd: HWND, hit: popover::ContextMenuHit) {
+    let (kind, command_id) = {
+        let app = root.app.borrow();
+        let active = app.active_context_menu.borrow();
+        let Some(session) = active.as_ref() else {
+            return;
+        };
+        let Some(row) = context_menu_row_for_hit(session, hit) else {
+            return;
+        };
+        (row.kind, row.command_id)
+    };
+    if kind == popover::ContextMenuRowKind::Submenu {
+        resize_context_menu_for_submenu(root, hwnd, true);
+        return;
+    }
+    if kind != popover::ContextMenuRowKind::Command {
+        return;
+    }
+
+    let zone_pending = root.zone_context_menu.borrow().clone();
+    let item_pending = root.item_context_menu.borrow().clone();
+    let zone_action = zone_pending
+        .as_ref()
+        .and_then(|pending| zone_context_action_for_choice(command_id, &pending.stack_targets));
+    let item_action = item_pending.as_ref().and_then(|pending| {
+        item_context_action_for_choice_with(command_id, |target_command_id| {
+            pending
+                .move_targets
+                .iter()
+                .find(|(candidate, _)| *candidate == target_command_id)
+                .map(|(_, zone_id)| *zone_id)
+        })
+    });
+    close_context_menu_surface(root);
+
+    if let (Some(pending), Some(action)) = (zone_pending, zone_action) {
+        log_static(
+            format!(
+                "zone_menu: chosen={} zone_id={} style=d2d submenu_targets={}\n",
+                command_id,
+                pending.zone_id.0,
+                pending.stack_targets.len()
+            )
+            .as_str(),
+        );
+        apply_zone_context_action(root, pending.zone_id, action);
+    } else if let (Some(pending), Some(action)) = (item_pending, item_action) {
+        log_static(
+            format!(
+                "item_menu: chosen={} zone_id={} item_id={} style=d2d submenu_targets={}\n",
+                command_id,
+                pending.zone_id.0,
+                pending.item_id.0,
+                pending.move_targets.len()
+            )
+            .as_str(),
+        );
+        apply_item_context_dispatch(
+            root,
+            item_context_dispatch_for_action(
+                pending.zone_id,
+                pending.item_id,
+                pending.path.as_str(),
+                action,
+            ),
+        );
+    }
+    let redraw = find_main_hwnd(root).unwrap_or(hwnd);
+    consume_dispatcher(root, redraw);
+    request_redraw(redraw);
+}
+
+fn handle_context_menu_mouse_move(root: &AppRoot, hwnd: HWND, x: f32, y: f32) {
+    let (changed, open_submenu) = {
+        let app = root.app.borrow();
+        let mut active = app.active_context_menu.borrow_mut();
+        let Some(session) = active.as_mut() else {
+            return;
+        };
+        let hit = popover::context_menu_hit_test(session, x, y);
+        let changed = session.hovered != hit;
+        session.hovered = hit;
+        let open_submenu = hit
+            .and_then(|candidate| context_menu_row_for_hit(session, candidate))
+            .is_some_and(|row| row.kind == popover::ContextMenuRowKind::Submenu);
+        (changed, open_submenu)
+    };
+    if open_submenu {
+        resize_context_menu_for_submenu(root, hwnd, true);
+    }
+    if changed {
+        request_redraw(hwnd);
+    }
+}
+
+fn handle_context_menu_lbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) {
+    let hit = {
+        let app = root.app.borrow();
+        let active = app.active_context_menu.borrow();
+        active
+            .as_ref()
+            .and_then(|session| popover::context_menu_hit_test(session, x, y))
+    };
+    if let Some(hit) = hit {
+        activate_context_menu_hit(root, hwnd, hit);
+    } else {
+        close_context_menu_surface(root);
+    }
+}
+
+fn handle_context_menu_mousewheel(root: &AppRoot, hwnd: HWND, wparam: WPARAM) -> bool {
+    let Some(delta) = settings_wheel_scroll_delta_from_wparam(wparam) else {
+        return false;
+    };
+    let changed = {
+        let app = root.app.borrow();
+        let mut active = app.active_context_menu.borrow_mut();
+        let Some(session) = active.as_mut() else {
+            return false;
+        };
+        if !session.submenu_open
+            || session.submenu_rows.len() <= popover::CONTEXT_MENU_MAX_SUBMENU_ROWS
+        {
+            return true;
+        }
+        let before = session.submenu_scroll;
+        if delta > 0 {
+            session.submenu_scroll = session.submenu_scroll.saturating_add(1);
+        } else {
+            session.submenu_scroll = session.submenu_scroll.saturating_sub(1);
+        }
+        session.clamp_submenu_scroll();
+        before != session.submenu_scroll
+    };
+    if changed {
+        request_redraw(hwnd);
+    }
+    true
+}
+
+fn handle_context_menu_keydown(root: &AppRoot, hwnd: HWND, vk: u32) -> LRESULT {
+    if vk == VK_ESCAPE_KEY {
+        close_context_menu_surface(root);
+        return 0;
+    }
+    if vk == VK_LEFT_KEY {
+        resize_context_menu_for_submenu(root, hwnd, false);
+        return 0;
+    }
+
+    let mut activate = None;
+    let mut open_submenu = false;
+    let changed = {
+        let app = root.app.borrow();
+        let mut active = app.active_context_menu.borrow_mut();
+        let Some(session) = active.as_mut() else {
+            return 0;
+        };
+        match vk {
+            VK_UP_KEY | VK_DOWN_KEY => {
+                let column = session
+                    .hovered
+                    .map(|hit| hit.column)
+                    .unwrap_or(popover::ContextMenuColumn::Main);
+                let next = context_menu_next_hit(
+                    session,
+                    column,
+                    session.hovered.map(|hit| hit.row),
+                    vk == VK_DOWN_KEY,
+                );
+                let changed = session.hovered != next;
+                session.hovered = next;
+                changed
+            }
+            VK_RIGHT_KEY => {
+                open_submenu = session
+                    .hovered
+                    .and_then(|hit| context_menu_row_for_hit(session, hit))
+                    .is_some_and(|row| row.kind == popover::ContextMenuRowKind::Submenu);
+                false
+            }
+            VK_ENTER => {
+                activate = session.hovered;
+                false
+            }
+            _ => false,
+        }
+    };
+    if open_submenu {
+        resize_context_menu_for_submenu(root, hwnd, true);
+        let app = root.app.borrow();
+        let mut active = app.active_context_menu.borrow_mut();
+        if let Some(session) = active.as_mut() {
+            session.hovered =
+                context_menu_next_hit(session, popover::ContextMenuColumn::Submenu, None, true);
+        }
+        request_redraw(hwnd);
+    } else if let Some(hit) = activate {
+        activate_context_menu_hit(root, hwnd, hit);
+    } else if changed {
+        request_redraw(hwnd);
+    }
+    0
+}
+
+fn show_zone_context_menu(root: &AppRoot, hwnd: HWND, x: f32, y: f32, zone_id: ZoneId) {
+    type ZoneStackMenuTargets = Vec<(usize, ZoneId, SmolStr)>;
     let (live_folder_bound, stack_tray_available, stack_targets): (
         bool,
         bool,
@@ -16054,98 +19839,28 @@ unsafe fn show_zone_context_menu(root: &AppRoot, zone_id: ZoneId) {
             .take(64)
             .enumerate()
             .map(|(idx, zone)| {
-                let label = format!("Stack with {}", zone.title);
                 (
                     ZONE_CONTEXT_STACK_BASE_ID + idx,
                     zone.id,
-                    widen_dynamic(&label),
+                    SmolStr::new(zone.display_title()),
                 )
             })
             .collect();
         (live_folder_bound, stack_tray_available, stack_targets)
     };
 
-    unsafe {
-        AppendMenuW(menu, MF_STRING, ZONE_CONTEXT_EDIT_ID, edit.as_ptr());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ZONE_CONTEXT_SMART_SUGGESTOR_ID,
-            smart_suggestor.as_ptr(),
-        );
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ZONE_CONTEXT_AUTO_ORGANIZE_ID,
-            organize.as_ptr(),
-        );
-        AppendMenuW(menu, MF_STRING, ZONE_CONTEXT_PIN_MINIBAR_ID, pin.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
-            if live_folder_bound {
-                rebind_live_folder.as_ptr()
-            } else {
-                bind_live_folder.as_ptr()
-            },
-        );
-        if live_folder_bound {
-            AppendMenuW(
-                menu,
-                MF_STRING,
-                ZONE_CONTEXT_REFRESH_LIVE_FOLDER_ID,
-                refresh_live_folder.as_ptr(),
-            );
-            AppendMenuW(
-                menu,
-                MF_STRING,
-                ZONE_CONTEXT_UNBIND_LIVE_FOLDER_ID,
-                unbind_live_folder.as_ptr(),
-            );
-        }
-        if !stack_targets.is_empty() {
-            AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-            for (command_id, _, label) in &stack_targets {
-                AppendMenuW(menu, MF_STRING, *command_id, label.as_ptr());
-            }
-        }
-        if stack_tray_available {
-            AppendMenuW(
-                menu,
-                MF_STRING,
-                ZONE_CONTEXT_OPEN_STACK_TRAY_ID,
-                open_stack_tray.as_ptr(),
-            );
-        }
-        AppendMenuW(menu, MF_STRING, ZONE_CONTEXT_UNSTACK_ID, unstack.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ZONE_CONTEXT_SAVE_SNAPSHOT_ID,
-            save_snapshot.as_ptr(),
-        );
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ZONE_CONTEXT_OPEN_SNAPSHOT_PICKER_ID,
-            open_snapshots.as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        AppendMenuW(menu, MF_STRING, ZONE_CONTEXT_DELETE_ID, delete.as_ptr());
-    }
-
-    let owner = find_main_hwnd(root).or_else(|| find_aux_window(root, WindowKind::ContextMenu));
-    let Some(owner) = owner else {
-        unsafe { DestroyMenu(menu) };
-        return;
-    };
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe {
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(owner);
+    let top_entries = zone_context_menu_rows(
+        live_folder_bound,
+        stack_tray_available,
+        !stack_targets.is_empty(),
+    );
+    let mut submenu_entries = popover::ContextMenuRows::new();
+    for (command_id, _, label) in &stack_targets {
+        submenu_entries.push(popover::ContextMenuRow::command(
+            *command_id,
+            label.as_str(),
+            IconKind::Grid,
+        ));
     }
     let stack_command_targets: Vec<(usize, ZoneId)> = stack_targets
         .iter()
@@ -16157,62 +19872,40 @@ unsafe fn show_zone_context_menu(root: &AppRoot, zone_id: ZoneId) {
             zone_id,
             stack_targets: stack_command_targets.clone(),
         });
-    root.zone_context_menu_consumed.set(false);
-    root.zone_context_menu_deferred.borrow_mut().take();
-    let chosen = unsafe {
-        TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            owner,
-            ptr::null(),
+    root.item_context_menu.borrow_mut().take();
+    root.app
+        .borrow()
+        .active_context_menu
+        .borrow_mut()
+        .replace(popover::ContextMenuSession::new(
+            top_entries,
+            submenu_entries,
+        ));
+    let shown = show_active_context_menu(root, hwnd, x, y).is_some();
+    log_static(
+        format!(
+            "zone_menu: opened={} zone_id={} style=d2d submenu_targets={}\n",
+            shown,
+            zone_id.0,
+            stack_command_targets.len()
         )
-    };
-    log_static(format!("zone_menu: chosen={} zone_id={}\n", chosen, zone_id.0).as_str());
-    unsafe { DestroyMenu(menu) };
-
-    let action = if root.zone_context_menu_consumed.get() {
-        root.zone_context_menu_deferred.borrow_mut().take()
-    } else {
-        unsafe {
-            zone_context_action_for_choice(
-                root,
-                owner,
-                zone_id,
-                chosen as usize,
-                &stack_command_targets,
-            )
-        }
-        .map(|action| (zone_id, action))
-    };
-    root.zone_context_menu.borrow_mut().take();
-    if let Some((action_zone_id, action)) = action {
-        apply_zone_context_action(root, action_zone_id, action);
-        request_redraw(owner);
+        .as_str(),
+    );
+    if !shown {
+        close_context_menu_surface(root);
     }
 }
 
-unsafe fn show_item_context_menu(
+fn show_item_context_menu(
     root: &AppRoot,
+    hwnd: HWND,
+    x: f32,
+    y: f32,
     zone_id: ZoneId,
     item_id: bento_nano_zone::ZoneItemId,
     path: &str,
 ) {
-    let menu = unsafe { CreatePopupMenu() };
-    if menu.is_null() {
-        tracing::warn!(target: "bentodesk::context_menu", "CreatePopupMenu returned NULL for item menu");
-        return;
-    }
-    let open = widen_static::<16>("Open");
-    let reveal = widen_static::<24>("Reveal");
-    let copy_path = widen_static::<24>("Copy path");
-    let rename_file = widen_static::<32>("Rename file...");
-    let delete_file = widen_static::<32>("Delete file");
-    let toggle_wide = widen_static::<32>("Toggle wide");
-    let remove = widen_static::<24>("Remove");
-    let move_targets: Vec<(usize, ZoneId, Vec<u16>)> = {
+    let move_targets: Vec<(usize, ZoneId, SmolStr)> = {
         let app = root.app.borrow();
         app.zones
             .iter()
@@ -16220,59 +19913,22 @@ unsafe fn show_item_context_menu(
             .take(64)
             .enumerate()
             .map(|(idx, zone)| {
-                let label = format!("Move to {}", zone.title);
                 (
                     ITEM_CONTEXT_MOVE_ZONE_BASE_ID + idx,
                     zone.id,
-                    widen_dynamic(&label),
+                    SmolStr::new(zone.display_title()),
                 )
             })
             .collect()
     };
-    unsafe {
-        AppendMenuW(menu, MF_STRING, ITEM_CONTEXT_OPEN_ID, open.as_ptr());
-        AppendMenuW(menu, MF_STRING, ITEM_CONTEXT_REVEAL_ID, reveal.as_ptr());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ITEM_CONTEXT_COPY_PATH_ID,
-            copy_path.as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ITEM_CONTEXT_RENAME_FILE_ID,
-            rename_file.as_ptr(),
-        );
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ITEM_CONTEXT_DELETE_FILE_ID,
-            delete_file.as_ptr(),
-        );
-        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            ITEM_CONTEXT_TOGGLE_WIDE_ID,
-            toggle_wide.as_ptr(),
-        );
-        for (command_id, _, label) in &move_targets {
-            AppendMenuW(menu, MF_STRING, *command_id, label.as_ptr());
-        }
-        AppendMenuW(menu, MF_STRING, ITEM_CONTEXT_REMOVE_ID, remove.as_ptr());
-    }
-
-    let owner = find_main_hwnd(root).or_else(|| find_aux_window(root, WindowKind::ContextMenu));
-    let Some(owner) = owner else {
-        unsafe { DestroyMenu(menu) };
-        return;
-    };
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe {
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(owner);
+    let top_entries = item_context_menu_rows(!move_targets.is_empty());
+    let mut submenu_entries = popover::ContextMenuRows::new();
+    for (command_id, _, label) in &move_targets {
+        submenu_entries.push(popover::ContextMenuRow::command(
+            *command_id,
+            label.as_str(),
+            IconKind::Grid,
+        ));
     }
     let move_command_targets: Vec<(usize, ZoneId)> = move_targets
         .iter()
@@ -16286,39 +19942,28 @@ unsafe fn show_item_context_menu(
             path: SmolStr::new(path),
             move_targets: move_command_targets.clone(),
         });
-    root.item_context_menu_consumed.set(false);
-    let chosen = unsafe {
-        TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            owner,
-            ptr::null(),
-        )
-    };
+    root.zone_context_menu.borrow_mut().take();
+    root.app
+        .borrow()
+        .active_context_menu
+        .borrow_mut()
+        .replace(popover::ContextMenuSession::new(
+            top_entries,
+            submenu_entries,
+        ));
+    let shown = show_active_context_menu(root, hwnd, x, y).is_some();
     log_static(
         format!(
-            "item_menu: chosen={} zone_id={} item_id={}\n",
-            chosen, zone_id.0, item_id.0
+            "item_menu: opened={} zone_id={} item_id={} style=d2d submenu_targets={}\n",
+            shown,
+            zone_id.0,
+            item_id.0,
+            move_command_targets.len()
         )
         .as_str(),
     );
-    unsafe { DestroyMenu(menu) };
-    root.item_context_menu.borrow_mut().take();
-
-    let action = if root.item_context_menu_consumed.get() {
-        None
-    } else {
-        item_context_action_for_choice(chosen as usize, &move_targets)
-    };
-    if let Some(action) = action {
-        apply_item_context_dispatch(
-            root,
-            item_context_dispatch_for_action(zone_id, item_id, path, action),
-        );
-        request_redraw(owner);
+    if !shown {
+        close_context_menu_surface(root);
     }
 }
 
@@ -17014,6 +20659,383 @@ fn find_main_hwnd(root: &AppRoot) -> Option<HWND> {
         .map(|s| s.hwnd)
 }
 
+/// Focusable workspace tools are mutually exclusive.  They are separate
+/// native HWNDs (rather than pages inside one web overlay), so leaving an old
+/// tool visible while centring the next one makes the two rounded dialogs sit
+/// exactly on top of each other.  The result looks like a nested browser modal
+/// with duplicate titles and close buttons.  Pickers are intentionally not
+/// triggers: they may sit above their ZoneEditor/BulkManager parent while the
+/// user chooses a value.  A subsequent workspace-tool open does dismiss any
+/// stale picker along with the superseded tool.
+#[inline]
+fn is_workspace_aux_surface(kind: WindowKind) -> bool {
+    matches!(
+        kind,
+        WindowKind::RulesWizard
+            | WindowKind::BulkManager
+            | WindowKind::ZoneEditor
+            | WindowKind::ItemFileRename
+            | WindowKind::Suggestor
+            | WindowKind::Timeline
+            | WindowKind::SnapshotPicker
+            | WindowKind::Search
+    )
+}
+
+#[inline]
+fn hides_when_workspace_aux_opens(kind: WindowKind) -> bool {
+    is_workspace_aux_surface(kind)
+        || matches!(
+            kind,
+            WindowKind::IconPicker | WindowKind::CapsulePicker | WindowKind::PalettePicker
+        )
+}
+
+fn hide_superseded_workspace_aux_windows(root: &AppRoot, next_kind: WindowKind) {
+    if !is_workspace_aux_surface(next_kind) {
+        return;
+    }
+
+    // Copy handles before calling ShowWindow: WM_SHOWWINDOW may re-enter the
+    // UI pump, so never hold the registry RefCell borrow across the Win32 call.
+    let handles = root
+        .registry
+        .borrow()
+        .iter()
+        .filter(|slot| slot.kind != next_kind && hides_when_workspace_aux_opens(slot.kind))
+        .map(|slot| slot.hwnd)
+        .collect::<smallvec::SmallVec<[HWND; 12]>>();
+    for hwnd in handles {
+        // SAFETY: every handle came from this process-owned WindowRegistry.
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    }
+}
+
+#[inline]
+fn tooltip_uses_aux_surface(
+    _anchor: bento_nano_app::WindowHandle,
+    _main_anchor: Option<bento_nano_app::WindowHandle>,
+    _context_menu_open: bool,
+) -> bool {
+    // Tooltip text must never allocate a second native HWND beside an already
+    // self-contained panel. The old auxiliary surface outlived hover changes
+    // and appeared as the detached black strip reported below Bulk Manager,
+    // Editor, Settings and Suggestor. Inline labels/status own that feedback.
+    false
+}
+
+fn settings_aux_host_rect(work: bento_nano_platform::RectI32, dpi: u32) -> (i32, i32, i32, i32) {
+    // Settings is an ordinary panel-sized native popup, not a draggable
+    // work-area overlay.  Returning the complete work area here made
+    // HTCAPTION move a screen-sized HWND beyond the monitor while the painted
+    // card appeared to detach from its backdrop.  Keep the Tauri 480-DIP card
+    // and 80-vh height contract, but make those dimensions the HWND itself.
+    let scale = dpi.max(96) as f32 / 96.0;
+    let work_logical_height = work.height().max(1) as f32 / scale;
+    let logical_height = bento_nano_app::settings_panel::SETTINGS_PANEL_HEIGHT_MAX.min(
+        work_logical_height * bento_nano_app::settings_panel::SETTINGS_PANEL_MAX_WORKAREA_FRAC,
+    );
+    centered_fixed_aux_host_rect(
+        work,
+        dpi,
+        bento_nano_app::settings_panel::SETTINGS_PANEL_WIDTH_M1,
+        logical_height,
+    )
+}
+
+fn center_settings_aux_window(hwnd: HWND) {
+    let mut cursor = POINT { x: 0, y: 0 };
+    let monitor = if unsafe { GetCursorPos(&mut cursor) } != 0 {
+        bento_nano_platform::monitor_from_point(cursor.x, cursor.y)
+    } else {
+        bento_nano_platform::primary_monitor()
+    };
+    let work = monitor.rect_work;
+    // Move first so GetDpiForWindow resolves the target monitor on mixed-DPI
+    // desktops, matching the About-window path below.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            work.left,
+            work.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd).max(96);
+    let (x, y, width, height) = settings_aux_host_rect(work, dpi);
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn center_about_aux_window(hwnd: HWND) {
+    let mut cursor = POINT { x: 0, y: 0 };
+    let monitor = if unsafe { GetCursorPos(&mut cursor) } != 0 {
+        bento_nano_platform::monitor_from_point(cursor.x, cursor.y)
+    } else {
+        bento_nano_platform::primary_monitor()
+    };
+    let work = monitor.rect_work;
+
+    // Move onto the target monitor before asking Windows for the effective
+    // per-monitor DPI. This keeps 640×520 DIPs stable on mixed-DPI desktops.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            work.left,
+            work.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd).max(96);
+    let scale = dpi as f32 / 96.0;
+    let width = ((bento_nano_app::business::about::WINDOW_WIDTH * scale).round() as i32)
+        .clamp(1, work.width().max(1));
+    let height = ((bento_nano_app::business::about::WINDOW_HEIGHT * scale).round() as i32)
+        .clamp(1, work.height().max(1));
+    let x = work.left + (work.width() - width) / 2;
+    let y = work.top + (work.height() - height) / 2;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn centered_fixed_aux_host_rect(
+    work: bento_nano_platform::RectI32,
+    dpi: u32,
+    logical_width: f32,
+    logical_height: f32,
+) -> (i32, i32, i32, i32) {
+    let scale = dpi.max(96) as f32 / 96.0;
+    let width = ((logical_width * scale).round() as i32).clamp(1, work.width().max(1));
+    let height = ((logical_height * scale).round() as i32).clamp(1, work.height().max(1));
+    (
+        work.left + (work.width() - width) / 2,
+        work.top + (work.height() - height) / 2,
+        width,
+        height,
+    )
+}
+
+fn center_fixed_aux_window(hwnd: HWND, kind: WindowKind) {
+    let mut cursor = POINT { x: 0, y: 0 };
+    let monitor = if unsafe { GetCursorPos(&mut cursor) } != 0 {
+        bento_nano_platform::monitor_from_point(cursor.x, cursor.y)
+    } else {
+        bento_nano_platform::primary_monitor()
+    };
+    let work = monitor.rect_work;
+
+    // Resolve per-monitor DPI after moving the hidden borderless host onto the
+    // monitor where the user invoked the auxiliary surface.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            work.left,
+            work.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd).max(96);
+    let (logical_width, logical_height) = default_size(kind);
+    let (x, y, width, height) =
+        centered_fixed_aux_host_rect(work, dpi, logical_width as f32, logical_height as f32);
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            ptr::null_mut(),
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+fn center_aux_window_for_open(hwnd: HWND, kind: WindowKind) {
+    match kind {
+        WindowKind::Settings => center_settings_aux_window(hwnd),
+        WindowKind::About => center_about_aux_window(hwnd),
+        WindowKind::IconPicker
+        | WindowKind::CapsulePicker
+        | WindowKind::PalettePicker
+        | WindowKind::RulesWizard
+        | WindowKind::BulkManager
+        | WindowKind::ZoneEditor
+        | WindowKind::ItemFileRename
+        | WindowKind::Suggestor
+        | WindowKind::Timeline
+        | WindowKind::SnapshotPicker
+        | WindowKind::Search => center_fixed_aux_window(hwnd, kind),
+        WindowKind::Main
+        | WindowKind::ContextMenu
+        | WindowKind::Tooltip
+        | WindowKind::DragPreview
+        | WindowKind::MiniBar => {}
+    }
+}
+
+fn arm_settings_outside_click_timer(hwnd: HWND) {
+    // Consume the click that opened Settings so the first poll cannot dismiss
+    // the freshly shown panel. Subsequent low-bit transitions represent new
+    // clicks even when Explorer keeps the desktop rather than a normal app as
+    // the foreground window.
+    unsafe {
+        let _ = GetAsyncKeyState(0x01);
+        SetTimer(
+            hwnd,
+            SETTINGS_OUTSIDE_CLICK_TIMER_ID,
+            SETTINGS_OUTSIDE_CLICK_POLL_MS,
+            None,
+        );
+    }
+}
+
+fn arm_settings_owned_dialog_release_guard(root: &AppRoot) {
+    root.app
+        .borrow()
+        .settings_owned_dialog_release_guard
+        .set(true);
+}
+
+fn settings_panel_client_device_rect(client: RECT, dpi: u32) -> RECT {
+    let scale = bento_nano_style::dpi::scale_factor(dpi);
+    let viewport = bento_nano_style::Size {
+        width: bento_nano_style::dpi::device_to_logical_f32(
+            (client.right - client.left).max(0) as f32,
+            dpi,
+        ),
+        height: bento_nano_style::dpi::device_to_logical_f32(
+            (client.bottom - client.top).max(0) as f32,
+            dpi,
+        ),
+    };
+    let panel = bento_nano_app::settings_panel::settings_panel_rect_m1(viewport);
+    RECT {
+        left: client.left + (panel.x * scale).round() as i32,
+        top: client.top + (panel.y * scale).round() as i32,
+        right: client.left + (panel.right() * scale).round() as i32,
+        bottom: client.top + (panel.bottom() * scale).round() as i32,
+    }
+}
+
+#[inline]
+fn settings_outside_click_should_close(
+    target_is_settings: bool,
+    target_is_main: bool,
+    target_is_same_process: bool,
+    point_inside_panel: bool,
+) -> bool {
+    !target_is_same_process || target_is_main || (target_is_settings && !point_inside_panel)
+}
+
+#[inline]
+fn settings_owned_dialog_guard_transition(armed: bool, currently_pressed: bool) -> (bool, bool) {
+    if armed {
+        // Suppress this poll; remain armed only while the accepting/cancelling
+        // mouse press is still physically held.
+        (true, currently_pressed)
+    } else {
+        (false, false)
+    }
+}
+
+fn poll_settings_outside_click(root: &AppRoot, hwnd: HWND) {
+    let left_button_state = unsafe { GetAsyncKeyState(0x01) as u16 };
+    let pressed_since_last_poll = left_button_state & 0x0001 != 0;
+    let currently_pressed = left_button_state & 0x8000 != 0;
+    {
+        let app = root.app.borrow();
+        let (suppress, keep_armed) = settings_owned_dialog_guard_transition(
+            app.settings_owned_dialog_release_guard.get(),
+            currently_pressed,
+        );
+        if suppress {
+            app.settings_owned_dialog_release_guard.set(keep_armed);
+            // The GetAsyncKeyState read above also consumes the low-bit click
+            // transition that accepted/cancelled the owned picker. Never treat
+            // that dialog-space click as a Settings outside click.
+            return;
+        }
+    }
+    if !pressed_since_last_poll && !currently_pressed {
+        return;
+    }
+
+    let mut point = POINT { x: 0, y: 0 };
+    let mut client: RECT = unsafe { core::mem::zeroed() };
+    if unsafe { GetCursorPos(&mut point) } == 0 || unsafe { GetClientRect(hwnd, &mut client) } == 0
+    {
+        return;
+    }
+    let dpi = bento_nano_platform::dpi::get_dpi_for_window(hwnd).max(96);
+    let panel = settings_panel_client_device_rect(client, dpi);
+    let mut panel_top_left = POINT {
+        x: panel.left,
+        y: panel.top,
+    };
+    let mut panel_bottom_right = POINT {
+        x: panel.right,
+        y: panel.bottom,
+    };
+    if unsafe { ClientToScreen(hwnd, &mut panel_top_left) } == 0
+        || unsafe { ClientToScreen(hwnd, &mut panel_bottom_right) } == 0
+    {
+        return;
+    }
+    let point_inside_panel = point.x >= panel_top_left.x
+        && point.x < panel_bottom_right.x
+        && point.y >= panel_top_left.y
+        && point.y < panel_bottom_right.y;
+
+    // Keep same-process native dialogs/pickers usable. A desktop or unrelated
+    // application click is observed without intercepting it, then dismisses
+    // Settings on this timer tick.
+    let target = unsafe { WindowFromPoint(point) };
+    let mut target_process_id = 0_u32;
+    if !target.is_null() {
+        unsafe { GetWindowThreadProcessId(target, &mut target_process_id) };
+    }
+    if !settings_outside_click_should_close(
+        target == hwnd,
+        find_main_hwnd(root) == Some(target),
+        target_process_id == std::process::id(),
+        point_inside_panel,
+    ) {
+        return;
+    }
+
+    cancel_settings_general(root);
+    close_settings_surface(root);
+    log_static("settings: close reason=outside_click\n");
+}
+
 /// Lazily construct an auxiliary HWND of `kind` and pre-build its
 /// `WindowSlot` so the first WM_PAINT pumps straight through the existing
 /// paint path without the seed branch (which is reserved for the Main
@@ -17029,7 +21051,9 @@ fn ensure_aux_window(root: &AppRoot, kind: WindowKind) -> Option<HWND> {
     if kind == WindowKind::Main {
         return find_main_hwnd(root);
     }
+    hide_superseded_workspace_aux_windows(root, kind);
     if let Some(h) = find_aux_window(root, kind) {
+        center_aux_window_for_open(h, kind);
         return Some(h);
     }
 
@@ -17050,6 +21074,11 @@ fn ensure_aux_window(root: &AppRoot, kind: WindowKind) -> Option<HWND> {
             return None;
         }
     };
+
+    // Every self-painted focusable auxiliary starts hidden and receives its
+    // final monitor-aware rect before Renderer::create. This prevents a native
+    // caption/0,0 flash and creates the swapchain at the actual client size.
+    center_aux_window_for_open(hwnd, kind);
 
     // Pre-build the per-window slot now (vs the lazy first-paint path used
     // by Main) so we can stash the slot pointer in GWLP_USERDATA before the
@@ -17106,38 +21135,6 @@ fn ensure_aux_window(root: &AppRoot, kind: WindowKind) -> Option<HWND> {
     };
     // SAFETY: stash the registry-stable slot pointer for the wndproc to find.
     unsafe { set_slot_ptr(hwnd, raw) };
-
-    // V-2 (TL ruling 2026-05-21) — Settings must open centered on the primary
-    // monitor, not at CW_USEDEFAULT (top-left of the work area). Tauri 1.2.4
-    // frame_060 shows the dark modal floating in the middle of the desktop.
-    // Other aux HWNDs keep their default positions (caller-controlled).
-    if kind == WindowKind::Settings {
-        let primary = bento_nano_platform::primary_monitor();
-        let work = primary.rect_work;
-        let (dip_w, dip_h) = bento_nano_platform::default_size(WindowKind::Settings);
-        // Convert the 96-DPI device-pixel logical size to this monitor's DPI.
-        let dev_w = ((dip_w as f32) * (dpi as f32) / 96.0).round() as i32;
-        let dev_h = ((dip_h as f32) * (dpi as f32) / 96.0).round() as i32;
-        let work_w = work.width().max(dev_w);
-        let work_h = work.height().max(dev_h);
-        let x = work.left + (work_w - dev_w) / 2;
-        let y = work.top + (work_h - dev_h) / 2;
-        // SAFETY: hwnd just created and registered; SWP_NOZORDER preserves
-        // the TOPMOST bit set by `ex_style_for(Settings)`; SWP_NOACTIVATE
-        // prevents focus theft; we explicitly set both position and size to
-        // catch the cold-start CW_USEDEFAULT geometry too.
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                ptr::null_mut(),
-                x,
-                y,
-                dev_w,
-                dev_h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
-    }
 
     Some(hwnd)
 }
@@ -17276,17 +21273,127 @@ unsafe extern "system" fn aux_wnd_proc(
             }
             0
         }
+        WM_ACTIVATE => {
+            // A context menu owns keyboard focus while open. Losing activation
+            // is the native outside-click signal; dismiss only this auxiliary
+            // surface and leave every other owned window untouched.
+            if (wparam as u32 & 0xFFFF) == WA_INACTIVE {
+                unsafe {
+                    let p = get_slot_ptr(hwnd);
+                    if !p.is_null() && (*p).kind == WindowKind::ContextMenu {
+                        if let Some(root) = app_root() {
+                            close_context_menu_surface(root);
+                        }
+                        return 0;
+                    }
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_SHOWWINDOW => {
             // T-099 hibernation entry — eligible for non-Main kinds, so the
             // swap chain releases ~500 ms after the window is hidden.
             // SAFETY: slot pointer fetched from window data — null-checked.
-            unsafe {
+            let hidden_kind = unsafe {
                 let p = get_slot_ptr(hwnd);
                 if !p.is_null() {
                     let visible = wparam != 0;
                     let slot = &*p;
                     slot.set_visible(visible, GetTickCount());
+                    (!visible).then_some(slot.kind)
+                } else {
+                    None
                 }
+            };
+            if hidden_kind.is_some_and(|kind| kind != WindowKind::Tooltip) {
+                if let Some(root) = app_root() {
+                    // Tooltips belong to their anchor surface. Hiding any
+                    // focusable auxiliary must also retire the tooltip HWND;
+                    // otherwise its 200×40 dark host survives as the reported
+                    // stray "little black bar" on the desktop.
+                    hide_tooltip(root);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_NCHITTEST => unsafe {
+            let p = get_slot_ptr(hwnd);
+            if p.is_null() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let slot = &*p;
+            let root = match app_root() {
+                Some(root) => root,
+                None => return DefWindowProcW(hwnd, msg, wparam, lparam),
+            };
+            let mut point = POINT {
+                x: (lparam as i32 & 0xFFFF) as i16 as i32,
+                y: ((lparam as i32 >> 16) & 0xFFFF) as i16 as i32,
+            };
+            ScreenToClient(hwnd, &mut point);
+            let dpi = slot.state.dpi.get();
+            let x = bento_nano_style::dpi::device_to_logical_f32(point.x as f32, dpi);
+            let y = bento_nano_style::dpi::device_to_logical_f32(point.y as f32, dpi);
+            let kind = with_window_slot_viewport(root, slot, || {
+                let app = root.app.borrow();
+                match slot.kind {
+                    WindowKind::ContextMenu => app
+                        .active_context_menu
+                        .borrow()
+                        .as_ref()
+                        .map(|session| {
+                            if popover::context_menu_contains(session, x, y) {
+                                ui::HitKind::Client
+                            } else {
+                                ui::HitKind::Transparent
+                            }
+                        })
+                        .unwrap_or(ui::HitKind::Transparent),
+                    WindowKind::Settings => {
+                        ui::settings_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    WindowKind::Search => {
+                        ui::search_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    WindowKind::About => {
+                        ui::about_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    WindowKind::ZoneEditor => {
+                        ui::zone_editor_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    WindowKind::BulkManager => {
+                        ui::bulk_manager_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    WindowKind::IconPicker
+                    | WindowKind::CapsulePicker
+                    | WindowKind::PalettePicker
+                    | WindowKind::RulesWizard
+                    | WindowKind::ItemFileRename
+                    | WindowKind::Suggestor
+                    | WindowKind::Timeline
+                    | WindowKind::SnapshotPicker => {
+                        ui::auxiliary_panel_nchittest_kind(window_slot_logical_viewport(slot), x, y)
+                    }
+                    _ => ui::nchittest_kind(&app, &slot.state, x, y),
+                }
+            });
+            use windows_sys::Win32::UI::WindowsAndMessaging::{HTCAPTION, HTCLIENT};
+            match kind {
+                ui::HitKind::Caption => HTCAPTION as LRESULT,
+                ui::HitKind::Client => HTCLIENT as LRESULT,
+                ui::HitKind::Transparent => HTTRANSPARENT as LRESULT,
+            }
+        },
+        WM_TIMER => {
+            if wparam == SETTINGS_OUTSIDE_CLICK_TIMER_ID {
+                if let Some(root) = app_root() {
+                    poll_settings_outside_click(root, hwnd);
+                }
+                return 0;
+            }
+            if wparam == HOVER_FRAME_TIMER_ID {
+                handle_hover_frame_timer(hwnd);
+                return 0;
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -17305,7 +21412,9 @@ unsafe extern "system" fn aux_wnd_proc(
                     let x = bento_nano_style::dpi::device_to_logical_f32(dx, dpi);
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
-                        handle_mouse_move(root, slot, x, y);
+                        with_window_slot_viewport(root, slot, || {
+                            handle_mouse_move(root, slot, x, y);
+                        });
                         request_redraw(hwnd);
                     }
                 }
@@ -17317,7 +21426,15 @@ unsafe extern "system" fn aux_wnd_proc(
             if !p.is_null() {
                 let slot = &*p;
                 if let Some(root) = app_root() {
-                    if handle_settings_mousewheel(root, slot, hwnd, wparam) {
+                    let handled = with_window_slot_viewport(root, slot, || {
+                        if root.app.borrow().active_context_menu.borrow().is_some()
+                            && handle_context_menu_mousewheel(root, hwnd, wparam)
+                        {
+                            return true;
+                        }
+                        handle_settings_mousewheel(root, slot, hwnd, wparam)
+                    });
+                    if handled {
                         return 0;
                     }
                 }
@@ -17335,7 +21452,14 @@ unsafe extern "system" fn aux_wnd_proc(
                     let x = bento_nano_style::dpi::device_to_logical_f32(dx, dpi);
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
-                        handle_lbutton_down(root, slot, hwnd, x, y);
+                        with_window_slot_viewport(root, slot, || {
+                            handle_lbutton_down(root, slot, hwnd, x, y);
+                        });
+                        // Auxiliary pointer surfaces are command producers just
+                        // like Main. Reduce the queue before repainting so an
+                        // editor Save or Settings click cannot leave one stale
+                        // visible frame waiting for a later Main-window input.
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -17353,7 +21477,10 @@ unsafe extern "system" fn aux_wnd_proc(
                     let x = bento_nano_style::dpi::device_to_logical_f32(dx, dpi);
                     let y = bento_nano_style::dpi::device_to_logical_f32(dy, dpi);
                     if let Some(root) = app_root() {
-                        handle_lbutton_up(root, slot, hwnd, x, y);
+                        with_window_slot_viewport(root, slot, || {
+                            handle_lbutton_up(root, slot, hwnd, x, y);
+                        });
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                     }
                 }
@@ -17372,7 +21499,15 @@ unsafe extern "system" fn aux_wnd_proc(
                 }
                 let slot = &*p;
                 match app_root() {
-                    Some(root) => handle_keydown(hwnd, wparam as u32, msg, root, slot, lparam),
+                    Some(root) => {
+                        let result = with_window_slot_viewport(root, slot, || {
+                            handle_keydown(hwnd, wparam as u32, msg, root, slot, lparam)
+                        });
+                        // Enter/Escape handlers on editor/search/rules surfaces
+                        // may enqueue their business command and return early.
+                        consume_dispatcher(root, hwnd);
+                        result
+                    }
                     None => DefWindowProcW(hwnd, msg, wparam, lparam),
                 }
             }
@@ -17416,6 +21551,9 @@ unsafe extern "system" fn aux_wnd_proc(
             if slot.kind == WindowKind::Search {
                 if let Some(root) = app_root() {
                     if handle_search_char(root, wparam as u32, hwnd) {
+                        // QuerySearch must be applied per character; otherwise
+                        // Enter can race a batch of stale queued query states.
+                        consume_dispatcher(root, hwnd);
                         request_redraw(hwnd);
                         return 0;
                     }
@@ -17473,11 +21611,18 @@ unsafe extern "system" fn aux_wnd_proc(
 fn reset_settings_transient_state(app: &AppState) {
     app.settings_keybindings_open.set(false);
     // M1h — `settings_plugins_open` removed (Plugins is inline, no modal).
+    app.settings_plugin_uninstall_confirm.set(None);
+    app.settings_owned_dialog_release_guard.set(false);
     app.settings_keybinding_recording.borrow_mut().take();
+    app.set_settings_encryption_mode_hover(None);
+    app.set_settings_close_hover(false);
     // W-minor (#7 fix wave) — clear the focused-field caret so a stale focus
     // (and its blinking caret) never persists across Settings opens.
     app.settings_focused_field
         .set(bento_nano_app::SettingsTextField::None);
+    // Tauri unmounts Settings on dismiss, so a later open starts at the top.
+    // The reusable native HWND must explicitly reset the retained scroll Cell.
+    app.scroll_offset_y.set(0.0);
 }
 
 fn show_settings_surface(root: &AppRoot) -> bool {
@@ -17493,6 +21638,9 @@ fn show_settings_surface(root: &AppRoot) -> bool {
         // resets here too so the Save button reads as clean on each open.
         *app.settings_snapshot.borrow_mut() = Some(app.snapshot_settings());
         app.settings_dirty.set(false);
+        app.settings_save_error.borrow_mut().take();
+        app.set_settings_encryption_mode_hover(None);
+        app.set_settings_close_hover(false);
     }
     // M1i — populate the §2 Paths desktop-source list on open (mirrors Tauri's
     // `getDesktopSources()` on mount) so the dynamic read-only cards reflect the
@@ -17510,15 +21658,21 @@ fn show_settings_surface(root: &AppRoot) -> bool {
     // M1h — populate the Plugins §11 list on open (mirrors Tauri's
     // `loadPlugins()` on mount) so the inline plugin cards reflect the real
     // registry on first paint. Reads installed plugins via the existing
-    // `refresh_settings_plugins_for_root` (→ `list_plugins_for_root`) and sets a
-    // visible success/error status line; replaces the old OpenPlugins modal arm.
+    // `refresh_settings_plugins_for_root` (→ `list_plugins_for_root`). A normal
+    // successful refresh stays visually quiet; only real lifecycle feedback or
+    // an error occupies the inline status row.
     match refresh_settings_plugins_for_root(root) {
         Ok(_changed) => {
-            let count = root.app.borrow().settings_plugin_entries.borrow().len();
-            set_plugin_setting_success(root, SmolStr::new(format!("Loaded {count} plugin(s)")));
+            root.app.borrow().settings_plugin_status.borrow_mut().take();
         }
         Err(error) => {
-            set_plugin_setting_error(root, SmolStr::new(format!("Plugin list failed: {error}")));
+            set_plugin_setting_error(
+                root,
+                localized_plugin_message(
+                    bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_LIST_FAILED_PREFIX,
+                    error,
+                ),
+            );
         }
     }
     // Round-2 RC-2 — DO NOT mount the K1 `business::settings::panel` widget
@@ -17533,12 +21687,20 @@ fn show_settings_surface(root: &AppRoot) -> bool {
     // visible side-effect — keep it inert until M4 deletes the card files
     // outright.
     if let Some(target) = ensure_aux_window(root, WindowKind::Settings) {
-        // SAFETY: ShowWindow + SetForegroundWindow canonical for an owned
-        // focusable Settings HWND.
+        {
+            let app = root.app.borrow();
+            // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+            let now_ms = unsafe { GetTickCount() };
+            app.start_settings_open_animation(now_ms);
+        }
+        center_settings_aux_window(target);
+        // SAFETY: target is the live, process-owned Settings HWND.
         unsafe {
             ShowWindow(target, SW_SHOW);
-            SetForegroundWindow(target);
         }
+        focus_window_for_keyboard(target);
+        arm_settings_outside_click_timer(target);
+        arm_hover_frame_timer(target);
         request_redraw(target);
         true
     } else {
@@ -17552,9 +21714,16 @@ fn close_settings_surface(root: &AppRoot) -> bool {
         app.settings_open.set(false);
         reset_settings_transient_state(&app);
     }
+    // Settings hover tooltips are anchored to the aux surface. Clear them
+    // before the panel disappears so the main surface cannot inherit a stale
+    // "Save settings" tip after Save/Cancel/Close.
+    hide_tooltip(root);
     if let Some(target) = find_aux_window(root, WindowKind::Settings) {
         // SAFETY: target is a process-owned Settings HWND.
-        unsafe { ShowWindow(target, SW_HIDE) };
+        unsafe {
+            KillTimer(target, SETTINGS_OUTSIDE_CLICK_TIMER_ID);
+            ShowWindow(target, SW_HIDE);
+        }
         request_redraw(target);
         true
     } else {
@@ -17564,371 +21733,417 @@ fn close_settings_surface(root: &AppRoot) -> bool {
 
 fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
     let mut buf: smallvec::SmallVec<[Command; 8]> = smallvec::SmallVec::new();
-    let _n = root.dispatcher.drain_into(&mut buf);
-
     let mut needs_redraw = false;
     let mut quit_after_drain = false;
-    for cmd in buf.drain(..) {
-        match cmd {
-            Command::TogglePin => {
-                let app = root.app.borrow();
-                let next = !app.is_pinned.get();
-                app.is_pinned.set(next);
-                let z = if next { HWND_TOPMOST } else { HWND_NOTOPMOST };
-                // SAFETY: SetWindowPos canonical; flags skip move/size/activate.
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        z,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                    );
-                }
-            }
-            Command::ToggleSettings => {
-                let next_open = !root.app.borrow().settings_open.get();
-                if next_open {
-                    let _shown = show_settings_surface(root);
-                } else {
-                    let _hidden = close_settings_surface(root);
-                }
-                needs_redraw = true;
-            }
-            Command::CloseSettings => {
-                let _hidden = close_settings_surface(root);
-                needs_redraw = true;
-            }
-            Command::OpenSettings => {
-                let _shown = show_settings_surface(root);
-                needs_redraw = true;
-            }
-            Command::OpenAbout => {
-                {
+    // Commands handled below may synchronously enqueue a follow-up command.
+    // Search actions are one concrete example: ActivateSearchResult resolves
+    // `action:open_about` and pushes OpenAbout. Drain until the UI-thread queue
+    // is stable so one physical click/Enter completes the whole action rather
+    // than leaving its second half parked until an unrelated future input.
+    while root.dispatcher.drain_into(&mut buf) > 0 {
+        for cmd in buf.drain(..) {
+            match cmd {
+                Command::TogglePin => {
                     let app = root.app.borrow();
-                    app.about_open.set(true);
-                    app.settings_open.set(false);
-                }
-                let _about = bento_nano_app::business::about::build();
-                if let Some(target) = ensure_aux_window(root, WindowKind::About) {
-                    // SAFETY: ShowWindow + SetForegroundWindow canonical for
-                    //         an owned focusable dialog HWND.
+                    let next = !app.is_pinned.get();
+                    app.is_pinned.set(next);
+                    let z = if next { HWND_TOPMOST } else { HWND_NOTOPMOST };
+                    // SAFETY: SetWindowPos canonical; flags skip move/size/activate.
                     unsafe {
-                        ShowWindow(target, SW_SHOW);
-                        SetForegroundWindow(target);
+                        SetWindowPos(
+                            hwnd,
+                            z,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        );
                     }
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::about",
-                        "OpenAbout: ensure_aux_window failed; overlay remains visible on main window"
-                    );
                 }
-                needs_redraw = true;
-            }
-            Command::CloseAbout => {
-                {
-                    let app = root.app.borrow();
-                    app.about_open.set(false);
+                Command::ToggleSettings => {
+                    let next_open = !root.app.borrow().settings_open.get();
+                    if next_open {
+                        let _shown = show_settings_surface(root);
+                    } else {
+                        let _hidden = close_settings_surface(root);
+                    }
+                    needs_redraw = true;
                 }
-                if let Some(target) = find_aux_window(root, WindowKind::About) {
-                    // SAFETY: ShowWindow with SW_HIDE on a HWND we own.
-                    unsafe { ShowWindow(target, SW_HIDE) };
+                Command::CloseSettings => {
+                    let _hidden = close_settings_surface(root);
+                    needs_redraw = true;
                 }
-                needs_redraw = true;
-            }
-            Command::ToggleDebugOverlay => {
-                let next_visible = {
-                    let app = root.app.borrow();
-                    let mut overlay = app.debug_overlay.borrow_mut();
-                    overlay.toggle();
-                    overlay.visible
-                };
-                if let Some(mtx) = bento_nano_backend::config_vault::Vault::global() {
-                    match mtx.lock() {
-                        Ok(mut vault) => {
-                            vault.set_setting(
-                                SETTING_DEBUG_OVERLAY,
-                                bento_nano_backend::config_vault::SettingValue::Bool(next_visible),
-                            );
-                            if let Err(e) = vault.flush() {
+                Command::OpenSettings => {
+                    let _shown = show_settings_surface(root);
+                    needs_redraw = true;
+                }
+                Command::OpenAbout => {
+                    {
+                        let app = root.app.borrow();
+                        app.about_open.set(true);
+                        app.settings_open.set(false);
+                        reset_settings_transient_state(&app);
+                    }
+                    let _about = bento_nano_app::business::about::build();
+                    if let Some(target) = ensure_aux_window(root, WindowKind::About) {
+                        center_about_aux_window(target);
+                        // SAFETY: target is a live About HWND owned by this UI
+                        // thread. The shared focus helper handles foreground input
+                        // queue attachment and detaches immediately afterwards.
+                        unsafe { ShowWindow(target, SW_SHOW) };
+                        focus_window_for_keyboard(target);
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::about",
+                            "OpenAbout: ensure_aux_window failed; overlay remains visible on main window"
+                        );
+                    }
+                    needs_redraw = true;
+                }
+                Command::CloseAbout => {
+                    {
+                        let app = root.app.borrow();
+                        app.about_open.set(false);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::About) {
+                        // SAFETY: ShowWindow with SW_HIDE on a HWND we own.
+                        unsafe { ShowWindow(target, SW_HIDE) };
+                    }
+                    needs_redraw = true;
+                }
+                Command::ToggleDebugOverlay => {
+                    let next_visible = {
+                        let app = root.app.borrow();
+                        let mut overlay = app.debug_overlay.borrow_mut();
+                        overlay.toggle();
+                        overlay.visible
+                    };
+                    if let Some(mtx) = bento_nano_backend::config_vault::Vault::global() {
+                        match mtx.lock() {
+                            Ok(mut vault) => {
+                                vault.set_setting(
+                                    SETTING_DEBUG_OVERLAY,
+                                    bento_nano_backend::config_vault::SettingValue::Bool(
+                                        next_visible,
+                                    ),
+                                );
+                                if let Err(e) = vault.flush() {
+                                    tracing::warn!(
+                                        target: "bentodesk::debug_overlay",
+                                        error = %e,
+                                        "ToggleDebugOverlay: persisted setting flush failed"
+                                    );
+                                }
+                            }
+                            Err(_poisoned) => {
                                 tracing::warn!(
                                     target: "bentodesk::debug_overlay",
-                                    error = %e,
-                                    "ToggleDebugOverlay: persisted setting flush failed"
+                                    "ToggleDebugOverlay: vault mutex poisoned; runtime toggle kept"
                                 );
                             }
                         }
-                        Err(_poisoned) => {
-                            tracing::warn!(
-                                target: "bentodesk::debug_overlay",
-                                "ToggleDebugOverlay: vault mutex poisoned; runtime toggle kept"
-                            );
-                        }
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::debug_overlay",
+                            "ToggleDebugOverlay: vault not initialised; runtime toggle kept"
+                        );
                     }
-                } else {
-                    tracing::warn!(
+                    tracing::info!(
                         target: "bentodesk::debug_overlay",
-                        "ToggleDebugOverlay: vault not initialised; runtime toggle kept"
+                        "ToggleDebugOverlay: visible={}",
+                        next_visible
                     );
+                    log_static(format!("ToggleDebugOverlay: visible={next_visible}\n").as_str());
+                    needs_redraw = true;
                 }
-                tracing::info!(
-                    target: "bentodesk::debug_overlay",
-                    "ToggleDebugOverlay: visible={}",
-                    next_visible
-                );
-                log_static(format!("ToggleDebugOverlay: visible={next_visible}\n").as_str());
-                needs_redraw = true;
-            }
-            Command::ToggleLocale => {
-                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
-                    bento_nano_style::set_locale(&bento_nano_style::EN_US);
-                } else {
-                    bento_nano_style::set_locale(&bento_nano_style::ZH_CN);
+                Command::ToggleLocale => {
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        bento_nano_style::set_locale(&bento_nano_style::EN_US);
+                    } else {
+                        bento_nano_style::set_locale(&bento_nano_style::ZH_CN);
+                    }
+                    needs_redraw = true;
                 }
-                needs_redraw = true;
-            }
-            Command::HideWindow(kind) => {
-                match kind {
-                    WindowKind::Main => {
-                        // SAFETY: ShowWindow canonical. Tray icon survives.
-                        unsafe { ShowWindow(hwnd, SW_HIDE) };
-                    }
-                    // F2-02 — aux windows: hide via SW_HIDE so the slot
-                    // stays registered and T-099 hibernates the swap chain
-                    // ~500 ms later. A subsequent ShowWindow(kind) reuses
-                    // the same HWND without paying the create cost again.
-                    other => {
-                        if let Some(target) = find_aux_window(root, other) {
-                            // SAFETY: ShowWindow canonical for any owned HWND.
-                            unsafe { ShowWindow(target, SW_HIDE) };
-                        } else {
-                            tracing::debug!(
-                                target: "bentodesk::dispatcher",
-                                ?other,
-                                "HideWindow: no aux HWND of this kind currently registered"
-                            );
+                Command::HideWindow(kind) => {
+                    match kind {
+                        WindowKind::Main => {
+                            // SAFETY: ShowWindow canonical. Tray icon survives.
+                            unsafe { ShowWindow(hwnd, SW_HIDE) };
                         }
-                    }
-                }
-            }
-            Command::ShowWindow(kind) => {
-                match kind {
-                    WindowKind::Main => {
-                        // Frosted-backdrop — the Main overlay is transitioning to
-                        // visible (tray click / hotkey ToggleMain). The desktop
-                        // behind it may have changed while it was hidden (the
-                        // user switched apps / wallpaper / virtual desktop), so
-                        // mark the captured snapshot stale; the next Main paint
-                        // re-captures. Reach the Main renderer via the registry
-                        // by kind (robust to whichever HWND is pumping).
-                        if let Some(slot) = root
-                            .registry
-                            .borrow_mut()
-                            .iter_mut()
-                            .find(|slot| slot.kind == WindowKind::Main)
-                        {
-                            slot.renderer.mark_backdrop_dirty();
-                        }
-                        // SAFETY: canonical sequence — show then bring to front.
-                        unsafe {
-                            ShowWindow(hwnd, SW_SHOW);
-                            SetForegroundWindow(hwnd);
-                        }
-                    }
-                    // F2-02 — aux windows: lazy-spawn on first show via the
-                    // factory; subsequent shows reuse the registered HWND.
-                    // ContextMenu / Tooltip / DragPreview / MiniBar use
-                    // WS_EX_NOACTIVATE so SetForegroundWindow is skipped
-                    // (the kind picks WS_EX_NOACTIVATE in `ex_style_for`,
-                    // and SetForegroundWindow on a NoActivate window is a
-                    // no-op that still steals the activation tick).
-                    other => {
-                        if let Some(target) = ensure_aux_window(root, other) {
-                            // SAFETY: ShowWindow canonical for any owned HWND.
-                            unsafe { ShowWindow(target, SW_SHOW) };
-                            if !matches!(
-                                other,
-                                WindowKind::ContextMenu
-                                    | WindowKind::Tooltip
-                                    | WindowKind::DragPreview
-                                    | WindowKind::MiniBar
-                            ) {
-                                // SAFETY: SetForegroundWindow canonical for
-                                //         focusable kinds (Picker / Settings).
-                                unsafe { SetForegroundWindow(target) };
+                        // F2-02 — aux windows: hide via SW_HIDE so the slot
+                        // stays registered and T-099 hibernates the swap chain
+                        // ~500 ms later. A subsequent ShowWindow(kind) reuses
+                        // the same HWND without paying the create cost again.
+                        other => {
+                            if let Some(target) = find_aux_window(root, other) {
+                                // SAFETY: ShowWindow canonical for any owned HWND.
+                                unsafe { ShowWindow(target, SW_HIDE) };
+                            } else {
+                                tracing::debug!(
+                                    target: "bentodesk::dispatcher",
+                                    ?other,
+                                    "HideWindow: no aux HWND of this kind currently registered"
+                                );
                             }
                         }
                     }
                 }
-            }
-            Command::ShowTrayMenu => {
-                // SAFETY: TrackPopupMenu loop is canonical — see Ruling B.
-                unsafe { show_tray_menu(root, hwnd) };
-            }
-            Command::CreateZone(spec) => {
-                let mut app = root.app.borrow_mut();
-                let id = app.alloc_zone_id();
-                let zone = bento_nano_zone::Zone::new(
-                    id,
-                    std::borrow::Cow::Owned(spec.name.to_string()),
-                    spec.origin.x,
-                    spec.origin.y,
-                    spec.size.width,
-                    spec.size.height,
-                );
-                app.zones.add(zone);
-                app.mark_dirty();
-                needs_redraw = true;
-            }
-            Command::DeleteZone(id) => {
-                let mut app = root.app.borrow_mut();
-                if app.zones.remove(id) {
+                Command::ShowWindow(kind) => {
+                    match kind {
+                        WindowKind::Main => {
+                            // Frosted-backdrop — the Main overlay is transitioning to
+                            // visible (tray click / hotkey ToggleMain). The desktop
+                            // behind it may have changed while it was hidden (the
+                            // user switched apps / wallpaper / virtual desktop), so
+                            // mark the captured snapshot stale; the next Main paint
+                            // re-captures. Reach the Main renderer via the registry
+                            // by kind (robust to whichever HWND is pumping).
+                            if let Some(slot) = root
+                                .registry
+                                .borrow_mut()
+                                .iter_mut()
+                                .find(|slot| slot.kind == WindowKind::Main)
+                            {
+                                slot.renderer.mark_backdrop_dirty();
+                            }
+                            // SAFETY: canonical sequence — show then bring to front.
+                            unsafe {
+                                ShowWindow(hwnd, SW_SHOW);
+                                SetForegroundWindow(hwnd);
+                            }
+                        }
+                        // F2-02 — aux windows: lazy-spawn on first show via the
+                        // factory; subsequent shows reuse the registered HWND.
+                        // ContextMenu / Tooltip / DragPreview / MiniBar use
+                        // WS_EX_NOACTIVATE so SetForegroundWindow is skipped
+                        // (the kind picks WS_EX_NOACTIVATE in `ex_style_for`,
+                        // and SetForegroundWindow on a NoActivate window is a
+                        // no-op that still steals the activation tick).
+                        other => {
+                            if let Some(target) = ensure_aux_window(root, other) {
+                                // SAFETY: ShowWindow canonical for any owned HWND.
+                                unsafe { ShowWindow(target, SW_SHOW) };
+                                if !matches!(
+                                    other,
+                                    WindowKind::ContextMenu
+                                        | WindowKind::Tooltip
+                                        | WindowKind::DragPreview
+                                        | WindowKind::MiniBar
+                                ) {
+                                    // SAFETY: SetForegroundWindow canonical for
+                                    //         focusable kinds (Picker / Settings).
+                                    unsafe { SetForegroundWindow(target) };
+                                }
+                            }
+                        }
+                    }
+                }
+                Command::ShowTrayMenu => {
+                    // SAFETY: TrackPopupMenu loop is canonical — see Ruling B.
+                    unsafe { show_tray_menu(root, hwnd) };
+                }
+                Command::CreateZone(spec) => {
+                    let mut app = root.app.borrow_mut();
+                    let id = app.alloc_zone_id();
+                    let zone = bento_nano_zone::Zone::new(
+                        id,
+                        std::borrow::Cow::Owned(spec.name.to_string()),
+                        spec.origin.x,
+                        spec.origin.y,
+                        spec.size.width,
+                        spec.size.height,
+                    );
+                    app.zones.add(zone);
                     app.mark_dirty();
-                }
-                needs_redraw = true;
-            }
-            Command::RenameZone(id, name) => {
-                let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.title = std::borrow::Cow::Owned(name.to_string());
-                    app.mark_dirty();
                     needs_redraw = true;
                 }
-            }
-            Command::MoveZone(id, point) => {
-                let mut app = root.app.borrow_mut();
-                if move_zone_live(&mut app, id, point) {
-                    // Phase 2.5 — cross-monitor drag clamping. The
-                    // monitor cache lives on `WindowSlot.state`, which we
-                    // can't reach without an HWND here. Per-window clamp
-                    // happens in the slot's WM_MOVE / WM_SIZE; the bus
-                    // path stays geometry-only. F2 may add a clamp here
-                    // once the slot routing per command is wired.
+                Command::DeleteZone(id) => {
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.remove(id) {
+                        app.mark_dirty();
+                    }
                     needs_redraw = true;
                 }
-            }
-            Command::ResizeZone(id, size) => {
-                let mut app = root.app.borrow_mut();
-                if resize_zone_live(&mut app, id, size) {
-                    needs_redraw = true;
-                }
-            }
-            Command::SetZoneAlias(id, alias) => {
-                let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    let trimmed = alias.trim();
-                    let next = if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(std::borrow::Cow::Owned(trimmed.to_owned()))
-                    };
-                    if z.set_alias(next) {
+                Command::RenameZone(id, name) => {
+                    let mut app = root.app.borrow_mut();
+                    if let Some(z) = app.zones.get_mut(id) {
+                        z.title = std::borrow::Cow::Owned(name.to_string());
                         app.mark_dirty();
                         needs_redraw = true;
                     }
                 }
-            }
-            Command::SetZoneIcon(id, icon) => {
-                let mut app = root.app.borrow_mut();
-                let normalized_icon = normalize_icon_slug(icon.as_str());
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.set_icon(std::borrow::Cow::Owned(normalized_icon.to_string()));
-                    if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
-                        if session.zone_id == id {
-                            session.draft_icon = normalized_icon;
+                Command::MoveZone(id, point) => {
+                    let mut app = root.app.borrow_mut();
+                    if move_zone_live(&mut app, id, point) {
+                        // Phase 2.5 — cross-monitor drag clamping. The
+                        // monitor cache lives on `WindowSlot.state`, which we
+                        // can't reach without an HWND here. Per-window clamp
+                        // happens in the slot's WM_MOVE / WM_SIZE; the bus
+                        // path stays geometry-only. F2 may add a clamp here
+                        // once the slot routing per command is wired.
+                        needs_redraw = true;
+                    }
+                }
+                Command::ResizeZone(id, size) => {
+                    let mut app = root.app.borrow_mut();
+                    if resize_zone_live(&mut app, id, size) {
+                        needs_redraw = true;
+                    }
+                }
+                Command::SetZoneAlias(id, alias) => {
+                    let mut app = root.app.borrow_mut();
+                    if let Some(z) = app.zones.get_mut(id) {
+                        let trimmed = alias.trim();
+                        let next = if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(std::borrow::Cow::Owned(trimmed.to_owned()))
+                        };
+                        if z.set_alias(next) {
+                            app.mark_dirty();
+                            needs_redraw = true;
                         }
                     }
-                    app.mark_dirty();
-                    needs_redraw = true;
                 }
-            }
-            Command::SetZoneAccent(id, accent) => {
-                let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.set_accent_color(
-                        accent.map(|value| std::borrow::Cow::Owned(value.to_string())),
-                    );
-                    app.mark_dirty();
-                    needs_redraw = true;
-                }
-            }
-            Command::SetThemeBase(accent) => {
-                match bento_nano_backend::config_vault::Vault::global() {
-                    Some(mtx) => match mtx.lock() {
-                        Ok(mut vault) => {
-                            match persist_theme_base_accent_to_vault(&mut vault, accent.as_ref()) {
-                                Ok(true) => {
-                                    let app = root.app.borrow();
-                                    if apply_theme_base_accent_to_app(&app, accent) {
-                                        needs_redraw = true;
-                                    }
-                                    log_static(
-                                        format!(
-                                            "picker: SetThemeBase persisted accent={}\n",
-                                            app.theme_base_accent
-                                                .borrow()
-                                                .as_deref()
-                                                .unwrap_or("default")
-                                        )
-                                        .as_str(),
-                                    );
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "bentodesk::vault",
-                                        error = %e,
-                                        "SetThemeBase flush failed; runtime accent not updated"
-                                    );
-                                }
+                Command::SetZoneIcon(id, icon) => {
+                    let mut app = root.app.borrow_mut();
+                    let normalized_icon = normalize_icon_slug(icon.as_str());
+                    if let Some(z) = app.zones.get_mut(id) {
+                        z.set_icon(std::borrow::Cow::Owned(normalized_icon.to_string()));
+                        if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
+                            if session.zone_id == id {
+                                session.draft_icon = normalized_icon;
                             }
                         }
-                        Err(_poisoned) => {
-                            tracing::warn!(
-                                target: "bentodesk::vault",
-                                "SetThemeBase: vault mutex poisoned"
-                            );
-                        }
-                    },
-                    None => {
-                        tracing::warn!(
-                            target: "bentodesk::vault",
-                            "SetThemeBase: vault not initialised"
-                        );
+                        app.mark_dirty();
+                        needs_redraw = true;
                     }
                 }
-            }
-            Command::SetActiveTheme(theme_id) => {
-                match load_theme_selection_for_root(root, theme_id.as_str()) {
-                    Ok((options, theme)) => {
-                        match bento_nano_backend::config_vault::Vault::global() {
+                Command::SetZoneAccent(id, accent) => {
+                    let mut app = root.app.borrow_mut();
+                    if let Some(z) = app.zones.get_mut(id) {
+                        z.set_accent_color(
+                            accent.map(|value| std::borrow::Cow::Owned(value.to_string())),
+                        );
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    }
+                }
+                Command::SetThemeBase(accent) => {
+                    match bento_nano_backend::config_vault::Vault::global() {
+                        Some(mtx) => match mtx.lock() {
+                            Ok(mut vault) => {
+                                match persist_theme_base_accent_to_vault(
+                                    &mut vault,
+                                    accent.as_ref(),
+                                ) {
+                                    Ok(true) => {
+                                        let app = root.app.borrow();
+                                        if apply_theme_base_accent_to_app(&app, accent) {
+                                            needs_redraw = true;
+                                        }
+                                        log_static(
+                                            format!(
+                                                "picker: SetThemeBase persisted accent={}\n",
+                                                app.theme_base_accent
+                                                    .borrow()
+                                                    .as_deref()
+                                                    .unwrap_or("default")
+                                            )
+                                            .as_str(),
+                                        );
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            target: "bentodesk::vault",
+                                            error = %e,
+                                            "SetThemeBase flush failed; runtime accent not updated"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_poisoned) => {
+                                tracing::warn!(
+                                    target: "bentodesk::vault",
+                                    "SetThemeBase: vault mutex poisoned"
+                                );
+                            }
+                        },
+                        None => {
+                            tracing::warn!(
+                                target: "bentodesk::vault",
+                                "SetThemeBase: vault not initialised"
+                            );
+                        }
+                    }
+                }
+                Command::SetActiveTheme(theme_id) => {
+                    let validation_error = if active_theme_id_is_builtin(theme_id.as_str()) {
+                        None
+                    } else {
+                        load_theme_selection_for_root(root, theme_id.as_str()).err()
+                    };
+                    match validation_error {
+                        None => match bento_nano_backend::config_vault::Vault::global() {
                             Some(mtx) => match mtx.lock() {
                                 Ok(mut vault) => {
                                     match persist_active_theme_to_vault(&mut vault, &theme_id) {
-                                        Ok(true) => match apply_active_theme_selection_to_app(
-                                            root, options, theme,
-                                        ) {
-                                            Ok(changed) => {
-                                                log_static(
-                                                    format!(
-                                                        "theme: SetActiveTheme applied id={theme_id}\n"
-                                                    )
-                                                    .as_str(),
-                                                );
-                                                needs_redraw |= changed;
+                                        Ok(true) => {
+                                            // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+                                            let now_ms = unsafe { GetTickCount() };
+                                            let transition_from = {
+                                                let app = root.app.borrow();
+                                                app.active_theme_card_id()
+                                            };
+                                            match apply_active_theme_to_app(root, theme_id.clone())
+                                            {
+                                                Ok(changed) => {
+                                                    log_static(
+                                                format!(
+                                                    "theme: SetActiveTheme applied id={theme_id}\n"
+                                                )
+                                                .as_str(),
+                                            );
+                                                    if changed {
+                                                        let transition_started = {
+                                                            let app = root.app.borrow();
+                                                            app.start_theme_transition_from(
+                                                                transition_from,
+                                                                now_ms,
+                                                            )
+                                                        };
+                                                        if transition_started {
+                                                            log_static(
+                                                            format!(
+                                                                "theme: transition start id={theme_id} duration_ms={}\n",
+                                                                bento_nano_app::state::THEME_TRANSITION_MS
+                                                            )
+                                                            .as_str(),
+                                                        );
+                                                            request_theme_surface_redraw(
+                                                                root, true,
+                                                            );
+                                                        } else {
+                                                            request_theme_surface_redraw(
+                                                                root, false,
+                                                            );
+                                                        }
+                                                    }
+                                                    needs_redraw |= changed;
+                                                }
+                                                Err(error) => {
+                                                    set_theme_setting_error(
+                                                        root,
+                                                        SmolStr::new(format!(
+                                                            "Theme apply failed: {error}"
+                                                        )),
+                                                    );
+                                                    needs_redraw = true;
+                                                }
                                             }
-                                            Err(error) => {
-                                                set_theme_setting_error(
-                                                    root,
-                                                    SmolStr::new(format!(
-                                                        "Theme apply failed: {error}"
-                                                    )),
-                                                );
-                                                needs_redraw = true;
-                                            }
-                                        },
+                                        }
                                         Ok(false) => {}
                                         Err(error) => {
                                             tracing::warn!(
@@ -17960,303 +22175,353 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                                 );
                                 needs_redraw = true;
                             }
+                        },
+                        Some(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::themes",
+                                %theme_id,
+                                error = %error,
+                                "SetActiveTheme rejected"
+                            );
+                            set_theme_setting_error(
+                                root,
+                                SmolStr::new(format!("Theme rejected: {theme_id}")),
+                            );
+                            needs_redraw = true;
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::themes",
-                            %theme_id,
-                            error = %error,
-                            "SetActiveTheme rejected"
-                        );
-                        set_theme_setting_error(
-                            root,
-                            SmolStr::new(format!("Theme rejected: {theme_id}")),
-                        );
-                        needs_redraw = true;
-                    }
                 }
-            }
-            Command::ImportTheme(theme_path) => {
-                let source_path = PathBuf::from(theme_path.as_str());
-                match import_theme_for_root(root, &source_path) {
-                    Ok(imported) => {
-                        let imported_id = imported.id.clone();
-                        match load_theme_selection_for_root(root, imported_id.as_str()) {
-                            Ok((options, theme)) => {
-                                let theme_name = theme.name.clone();
-                                match bento_nano_backend::config_vault::Vault::global() {
-                                    Some(mtx) => match mtx.lock() {
-                                        Ok(mut vault) => match persist_active_theme_to_vault(
-                                            &mut vault,
-                                            &imported_id,
-                                        ) {
-                                            Ok(true) => match apply_active_theme_selection_to_app(
-                                                root, options, theme,
+                Command::ImportTheme(theme_path) => {
+                    let source_path = PathBuf::from(theme_path.as_str());
+                    match import_theme_for_root(root, &source_path) {
+                        Ok(imported) => {
+                            let imported_id = imported.id.clone();
+                            match load_theme_selection_for_root(root, imported_id.as_str()) {
+                                Ok((options, theme)) => {
+                                    let theme_name = theme.name.clone();
+                                    match bento_nano_backend::config_vault::Vault::global() {
+                                        Some(mtx) => match mtx.lock() {
+                                            Ok(mut vault) => match persist_active_theme_to_vault(
+                                                &mut vault,
+                                                &imported_id,
                                             ) {
-                                                Ok(changed) => {
-                                                    set_theme_setting_success(
-                                                        root,
-                                                        SmolStr::new(format!(
-                                                            "Theme imported: {theme_name}"
-                                                        )),
-                                                    );
-                                                    needs_redraw |= changed;
+                                                Ok(true) => {
+                                                    match apply_active_theme_selection_to_app(
+                                                        root, options, theme,
+                                                    ) {
+                                                        Ok(changed) => {
+                                                            set_theme_setting_success(
+                                                                root,
+                                                                SmolStr::new(format!(
+                                                                    "Theme imported: {theme_name}"
+                                                                )),
+                                                            );
+                                                            needs_redraw |= changed;
+                                                        }
+                                                        Err(error) => {
+                                                            set_theme_setting_error(
+                                                                root,
+                                                                SmolStr::new(format!(
+                                                                    "Theme apply failed: {error}"
+                                                                )),
+                                                            );
+                                                            needs_redraw = true;
+                                                        }
+                                                    }
                                                 }
+                                                Ok(false) => {}
                                                 Err(error) => {
+                                                    let app = root.app.borrow();
+                                                    let _changed =
+                                                        app.set_available_themes(options);
+                                                    drop(app);
                                                     set_theme_setting_error(
                                                         root,
                                                         SmolStr::new(format!(
-                                                            "Theme apply failed: {error}"
+                                                            "Theme imported; activation save failed: {error}"
                                                         )),
                                                     );
                                                     needs_redraw = true;
                                                 }
                                             },
-                                            Ok(false) => {}
-                                            Err(error) => {
+                                            Err(_poisoned) => {
                                                 let app = root.app.borrow();
                                                 let _changed = app.set_available_themes(options);
                                                 drop(app);
                                                 set_theme_setting_error(
                                                     root,
-                                                    SmolStr::new(format!(
-                                                        "Theme imported; activation save failed: {error}"
-                                                    )),
+                                                    SmolStr::new_static(
+                                                        "Theme imported; activation save failed: vault lock",
+                                                    ),
                                                 );
                                                 needs_redraw = true;
                                             }
                                         },
-                                        Err(_poisoned) => {
+                                        None => {
                                             let app = root.app.borrow();
                                             let _changed = app.set_available_themes(options);
                                             drop(app);
                                             set_theme_setting_error(
                                                 root,
                                                 SmolStr::new_static(
-                                                    "Theme imported; activation save failed: vault lock",
+                                                    "Theme imported; activation save failed: vault unavailable",
                                                 ),
                                             );
                                             needs_redraw = true;
                                         }
-                                    },
-                                    None => {
-                                        let app = root.app.borrow();
-                                        let _changed = app.set_available_themes(options);
-                                        drop(app);
-                                        set_theme_setting_error(
-                                            root,
-                                            SmolStr::new_static(
-                                                "Theme imported; activation save failed: vault unavailable",
-                                            ),
-                                        );
-                                        needs_redraw = true;
                                     }
                                 }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "bentodesk::themes",
+                                        %imported_id,
+                                        error = %error,
+                                        "ImportTheme copied but reload rejected imported theme"
+                                    );
+                                    set_theme_setting_error(
+                                        root,
+                                        SmolStr::new(format!("Theme reload failed: {error}")),
+                                    );
+                                    needs_redraw = true;
+                                }
                             }
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "bentodesk::themes",
-                                    %imported_id,
-                                    error = %error,
-                                    "ImportTheme copied but reload rejected imported theme"
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::themes",
+                                path = %theme_path,
+                                error = %error,
+                                "ImportTheme rejected"
+                            );
+                            set_theme_setting_error(
+                                root,
+                                SmolStr::new(format!("Theme import failed: {error}")),
+                            );
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                Command::ListPlugins => match refresh_settings_plugins_for_root(root) {
+                    Ok(_changed) => {
+                        let count = root.app.borrow().settings_plugin_entries.borrow().len();
+                        root.app.borrow().settings_plugin_status.borrow_mut().take();
+                        log_static(format!("plugins: ListPlugins count={count}\n").as_str());
+                        needs_redraw = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "bentodesk::plugins",
+                            error = %error,
+                            "ListPlugins failed"
+                        );
+                        set_plugin_setting_error(
+                            root,
+                            localized_plugin_message(
+                                bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_LIST_FAILED_PREFIX,
+                                error,
+                            ),
+                        );
+                        needs_redraw = true;
+                    }
+                },
+                Command::InstallPlugin(plugin_path) => {
+                    let source_path = PathBuf::from(plugin_path.as_str());
+                    let state_dir = state_dir_for_root(root);
+                    match plugins::install_from_zip(&state_dir, &source_path) {
+                        Ok(manifest) => match refresh_plugin_dependent_state(root) {
+                            Ok(_changed) => {
+                                log_static(
+                                    format!(
+                                        "plugins: InstallPlugin installed id={} name={}\n",
+                                        manifest.id, manifest.name
+                                    )
+                                    .as_str(),
                                 );
-                                set_theme_setting_error(
+                                set_plugin_setting_success(
                                     root,
-                                    SmolStr::new(format!("Theme reload failed: {error}")),
+                                    localized_plugin_message(
+                                        bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_INSTALLED_PREFIX,
+                                        manifest.name,
+                                    ),
                                 );
                                 needs_redraw = true;
                             }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::themes",
-                            path = %theme_path,
-                            error = %error,
-                            "ImportTheme rejected"
-                        );
-                        set_theme_setting_error(
-                            root,
-                            SmolStr::new(format!("Theme import failed: {error}")),
-                        );
-                        needs_redraw = true;
-                    }
-                }
-            }
-            Command::ListPlugins => match refresh_settings_plugins_for_root(root) {
-                Ok(_changed) => {
-                    let count = root.app.borrow().settings_plugin_entries.borrow().len();
-                    set_plugin_setting_success(
-                        root,
-                        SmolStr::new(format!("Loaded {count} plugin(s)")),
-                    );
-                    log_static(format!("plugins: ListPlugins count={count}\n").as_str());
-                    needs_redraw = true;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "bentodesk::plugins",
-                        error = %error,
-                        "ListPlugins failed"
-                    );
-                    set_plugin_setting_error(
-                        root,
-                        SmolStr::new(format!("Plugin list failed: {error}")),
-                    );
-                    needs_redraw = true;
-                }
-            },
-            Command::InstallPlugin(plugin_path) => {
-                let source_path = PathBuf::from(plugin_path.as_str());
-                let state_dir = state_dir_for_root(root);
-                match plugins::install_from_zip(&state_dir, &source_path) {
-                    Ok(manifest) => match refresh_plugin_dependent_state(root) {
-                        Ok(_changed) => {
-                            log_static(
-                                format!(
-                                    "plugins: InstallPlugin installed id={} name={}\n",
-                                    manifest.id, manifest.name
-                                )
-                                .as_str(),
-                            );
-                            set_plugin_setting_success(
-                                root,
-                                SmolStr::new(format!("Plugin installed: {}", manifest.name)),
-                            );
-                            needs_redraw = true;
-                        }
+                            Err(error) => {
+                                set_plugin_setting_error(
+                                    root,
+                                    localized_plugin_message(
+                                        bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_INSTALL_FAILED_PREFIX,
+                                        error,
+                                    ),
+                                );
+                                needs_redraw = true;
+                            }
+                        },
                         Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::plugins",
+                                path = %plugin_path,
+                                error = %error,
+                                "InstallPlugin rejected"
+                            );
                             set_plugin_setting_error(
                                 root,
-                                SmolStr::new(format!("Plugin installed; refresh failed: {error}")),
+                                localized_plugin_message(
+                                    bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_INSTALL_FAILED_PREFIX,
+                                    error,
+                                ),
                             );
                             needs_redraw = true;
                         }
-                    },
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::plugins",
-                            path = %plugin_path,
-                            error = %error,
-                            "InstallPlugin rejected"
-                        );
-                        set_plugin_setting_error(
-                            root,
-                            SmolStr::new(format!("Plugin install failed: {error}")),
-                        );
-                        needs_redraw = true;
                     }
                 }
-            }
-            Command::TogglePlugin(plugin_id, enabled) => {
-                let state_dir = state_dir_for_root(root);
-                match plugins::toggle_enabled(plugin_id.as_str(), enabled, &state_dir) {
-                    Ok(plugin) => match refresh_plugin_dependent_state(root) {
-                        Ok(_changed) => {
-                            log_static(
-                                format!(
-                                    "plugins: TogglePlugin id={} enabled={enabled}\n",
-                                    plugin.id
-                                )
-                                .as_str(),
-                            );
-                            set_plugin_setting_success(
-                                root,
-                                SmolStr::new(format!(
-                                    "Plugin {} {}",
-                                    plugin.name,
-                                    if enabled { "enabled" } else { "disabled" }
-                                )),
-                            );
-                            needs_redraw = true;
-                        }
-                        Err(error) => {
-                            set_plugin_setting_error(
-                                root,
-                                SmolStr::new(format!("Plugin toggled; refresh failed: {error}")),
-                            );
-                            needs_redraw = true;
-                        }
-                    },
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::plugins",
-                            %plugin_id,
-                            enabled,
-                            error = %error,
-                            "TogglePlugin failed"
-                        );
-                        set_plugin_setting_error(
-                            root,
-                            SmolStr::new(format!("Plugin toggle failed: {error}")),
-                        );
-                        needs_redraw = true;
-                    }
-                }
-            }
-            Command::UninstallPlugin(plugin_id) => {
-                let state_dir = state_dir_for_root(root);
-                match plugins::uninstall(plugin_id.as_str(), &state_dir) {
-                    Ok(()) => match refresh_plugin_dependent_state(root) {
-                        Ok(_changed) => {
-                            log_static(
-                                format!("plugins: UninstallPlugin removed id={plugin_id}\n")
+                Command::TogglePlugin(plugin_id, enabled) => {
+                    let state_dir = state_dir_for_root(root);
+                    match plugins::toggle_enabled(plugin_id.as_str(), enabled, &state_dir) {
+                        Ok(plugin) => match refresh_plugin_dependent_state(root) {
+                            Ok(_changed) => {
+                                log_static(
+                                    format!(
+                                        "plugins: TogglePlugin id={} enabled={enabled}\n",
+                                        plugin.id
+                                    )
                                     .as_str(),
-                            );
-                            set_plugin_setting_success(
-                                root,
-                                SmolStr::new(format!("Plugin removed: {plugin_id}")),
-                            );
-                            needs_redraw = true;
-                        }
+                                );
+                                set_plugin_setting_success(
+                                    root,
+                                    SmolStr::new(format!(
+                                        "{}{}",
+                                        plugin.name,
+                                        bento_nano_style::t(if enabled {
+                                            bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_ENABLED_SUFFIX
+                                        } else {
+                                            bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_DISABLED_SUFFIX
+                                        })
+                                    )),
+                                );
+                                needs_redraw = true;
+                            }
+                            Err(error) => {
+                                set_plugin_setting_error(
+                                    root,
+                                    localized_plugin_message(
+                                        bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_TOGGLE_FAILED_PREFIX,
+                                        error,
+                                    ),
+                                );
+                                needs_redraw = true;
+                            }
+                        },
                         Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::plugins",
+                                %plugin_id,
+                                enabled,
+                                error = %error,
+                                "TogglePlugin failed"
+                            );
                             set_plugin_setting_error(
                                 root,
-                                SmolStr::new(format!("Plugin removed; refresh failed: {error}")),
+                                localized_plugin_message(
+                                    bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_TOGGLE_FAILED_PREFIX,
+                                    error,
+                                ),
                             );
                             needs_redraw = true;
                         }
-                    },
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::plugins",
-                            %plugin_id,
-                            error = %error,
-                            "UninstallPlugin failed"
-                        );
-                        set_plugin_setting_error(
-                            root,
-                            SmolStr::new(format!("Plugin remove failed: {error}")),
-                        );
+                    }
+                }
+                Command::UninstallPlugin(plugin_id) => {
+                    let state_dir = state_dir_for_root(root);
+                    match plugins::uninstall(plugin_id.as_str(), &state_dir) {
+                        Ok(()) => match refresh_plugin_dependent_state(root) {
+                            Ok(_changed) => {
+                                log_static(
+                                    format!("plugins: UninstallPlugin removed id={plugin_id}\n")
+                                        .as_str(),
+                                );
+                                set_plugin_setting_success(
+                                    root,
+                                    localized_plugin_message(
+                                        bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_REMOVED_PREFIX,
+                                        plugin_id,
+                                    ),
+                                );
+                                needs_redraw = true;
+                            }
+                            Err(error) => {
+                                set_plugin_setting_error(
+                                    root,
+                                    localized_plugin_message(
+                                        bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_UNINSTALL_FAILED_PREFIX,
+                                        error,
+                                    ),
+                                );
+                                needs_redraw = true;
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::plugins",
+                                %plugin_id,
+                                error = %error,
+                                "UninstallPlugin failed"
+                            );
+                            set_plugin_setting_error(
+                                root,
+                                localized_plugin_message(
+                                    bento_nano_style::i18n_zh_cn::ids::PLUGIN_STATUS_UNINSTALL_FAILED_PREFIX,
+                                    error,
+                                ),
+                            );
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                Command::SetZoneGridColumns(id, columns) => {
+                    let mut app = root.app.borrow_mut();
+                    if let Some(z) = app.zones.get_mut(id) {
+                        z.set_grid_columns(columns);
+                        app.mark_dirty();
                         needs_redraw = true;
                     }
                 }
-            }
-            Command::SetZoneGridColumns(id, columns) => {
-                let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.set_grid_columns(columns);
-                    app.mark_dirty();
-                    needs_redraw = true;
+                Command::SetZoneCapsule(id, size, shape) => {
+                    let mut app = root.app.borrow_mut();
+                    if let Some(z) = app.zones.get_mut(id) {
+                        z.set_capsule(
+                            std::borrow::Cow::Owned(size.to_string()),
+                            std::borrow::Cow::Owned(shape.to_string()),
+                        );
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    }
                 }
-            }
-            Command::SetZoneCapsule(id, size, shape) => {
-                let mut app = root.app.borrow_mut();
-                if let Some(z) = app.zones.get_mut(id) {
-                    z.set_capsule(
-                        std::borrow::Cow::Owned(size.to_string()),
-                        std::borrow::Cow::Owned(shape.to_string()),
-                    );
-                    app.mark_dirty();
-                    needs_redraw = true;
+                Command::OpenLiveFolderPicker(id) => {
+                    needs_redraw |= open_live_folder_picker(root, id);
                 }
-            }
-            Command::OpenLiveFolderPicker(id) => {
-                needs_redraw |= open_live_folder_picker(root, id);
-            }
-            Command::BindZoneToFolder(id, folder) => {
-                match bind_zone_to_folder(root, id, folder.as_str()) {
+                Command::BindZoneToFolder(id, folder) => {
+                    match bind_zone_to_folder(root, id, folder.as_str()) {
+                        Ok(changed) => {
+                            needs_redraw |= changed;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::live_folder",
+                                zone_id = id.0,
+                                folder = %folder,
+                                error = %error,
+                                "BindZoneToFolder failed"
+                            );
+                            set_live_folder_error(
+                                root,
+                                format!("Bind live folder failed for zone {}: {error}", id.0),
+                            );
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                Command::UnbindZoneFolder(id) => match unbind_zone_folder(root, id) {
                     Ok(changed) => {
                         needs_redraw |= changed;
                     }
@@ -18264,625 +22529,836 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         tracing::warn!(
                             target: "bentodesk::live_folder",
                             zone_id = id.0,
-                            folder = %folder,
                             error = %error,
-                            "BindZoneToFolder failed"
+                            "UnbindZoneFolder failed"
                         );
                         set_live_folder_error(
                             root,
-                            format!("Bind live folder failed for zone {}: {error}", id.0),
+                            format!("Unbind live folder failed for zone {}: {error}", id.0),
                         );
                         needs_redraw = true;
                     }
+                },
+                Command::RefreshLiveFolder(id) => match refresh_live_folder_zone(root, id) {
+                    Ok(changed) => {
+                        needs_redraw |= changed;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "bentodesk::live_folder",
+                            zone_id = id.0,
+                            error = %error,
+                            "RefreshLiveFolder failed"
+                        );
+                        set_live_folder_error(
+                            root,
+                            format!("Refresh live folder failed for zone {}: {error}", id.0),
+                        );
+                        needs_redraw = true;
+                    }
+                },
+                Command::ReorderZone(id, idx) => {
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.move_to_index(id, idx as usize) {
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    }
                 }
-            }
-            Command::UnbindZoneFolder(id) => match unbind_zone_folder(root, id) {
-                Ok(changed) => {
-                    needs_redraw |= changed;
+                Command::AutoArrangeZone(id) => {
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.auto_arrange_items(id) {
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "bentodesk::live_folder",
-                        zone_id = id.0,
-                        error = %error,
-                        "UnbindZoneFolder failed"
-                    );
-                    set_live_folder_error(
-                        root,
-                        format!("Unbind live folder failed for zone {}: {error}", id.0),
-                    );
+                Command::DuplicateZone => {
+                    if duplicate_selected_zone(root) {
+                        needs_redraw = true;
+                    }
+                }
+                Command::ToggleSelectedZoneLock => {
+                    queue_toggle_selected_zone_lock(root);
                     needs_redraw = true;
                 }
-            },
-            Command::RefreshLiveFolder(id) => match refresh_live_folder_zone(root, id) {
-                Ok(changed) => {
-                    needs_redraw |= changed;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "bentodesk::live_folder",
-                        zone_id = id.0,
-                        error = %error,
-                        "RefreshLiveFolder failed"
-                    );
-                    set_live_folder_error(
-                        root,
-                        format!("Refresh live folder failed for zone {}: {error}", id.0),
-                    );
+                Command::ToggleAllZonesVisible => {
+                    queue_toggle_all_zones_visible(root);
                     needs_redraw = true;
                 }
-            },
-            Command::ReorderZone(id, idx) => {
-                let mut app = root.app.borrow_mut();
-                if app.zones.move_to_index(id, idx as usize) {
-                    app.mark_dirty();
+                Command::ReflowVisibleZones => {
+                    queue_reflow_visible_zones(root);
                     needs_redraw = true;
                 }
-            }
-            Command::DuplicateZone => {
-                if duplicate_selected_zone(root) {
-                    needs_redraw = true;
+                Command::FocusNextZone => {
+                    if focus_visible_zone(root, true) {
+                        needs_redraw = true;
+                    }
                 }
-            }
-            Command::ToggleSelectedZoneLock => {
-                queue_toggle_selected_zone_lock(root);
-                needs_redraw = true;
-            }
-            Command::ToggleAllZonesVisible => {
-                queue_toggle_all_zones_visible(root);
-                needs_redraw = true;
-            }
-            Command::ReflowVisibleZones => {
-                queue_reflow_visible_zones(root);
-                needs_redraw = true;
-            }
-            Command::FocusNextZone => {
-                if focus_visible_zone(root, true) {
-                    needs_redraw = true;
+                Command::FocusPreviousZone => {
+                    if focus_visible_zone(root, false) {
+                        needs_redraw = true;
+                    }
                 }
-            }
-            Command::FocusPreviousZone => {
-                if focus_visible_zone(root, false) {
-                    needs_redraw = true;
+                Command::StackZone(parent, child) => {
+                    let reveal_at_drop = root.pending_stack_drop_bloom.get() == Some(parent);
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.stack(parent, child) {
+                        log_static(
+                            format!("stack: StackZone anchor={} child={}\n", parent.0, child.0)
+                                .as_str(),
+                        );
+                        // Tauri mounts the replacement StackCapsule with
+                        // `.spring-emerge` (240 ms). Reuse the bounded pill
+                        // animator instead of adding another timer/state path.
+                        let now_ms = unsafe { GetTickCount() };
+                        app.pill_animator.borrow_mut().start(
+                            parent,
+                            bento_nano_app::animator::AnimChannel::StackEmerge,
+                            now_ms,
+                            bento_nano_app::animator::STACK_EMERGE_DURATION_MS,
+                            1.0,
+                            0.0,
+                            bento_nano_app::animator::Easing::Linear,
+                        );
+                        // A pointer drop leaves the new StackWrapper under the
+                        // cursor, so Tauri immediately blooms its petals. This
+                        // does not open the management tray or focused preview;
+                        // the latter still needs the existing petal-hover intent.
+                        if reveal_at_drop {
+                            root.pending_stack_drop_bloom.set(None);
+                            reveal_stack_at_drop_pointer(&app, parent, now_ms);
+                            log_static(
+                                format!("stack: DropBloom anchor={} child={}\n", parent.0, child.0)
+                                    .as_str(),
+                            );
+                        }
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    } else {
+                        if reveal_at_drop {
+                            root.pending_stack_drop_bloom.set(None);
+                        }
+                        tracing::warn!(
+                            target: "bentodesk::dispatcher",
+                            ?parent, ?child,
+                            "StackZone rejected missing/self stack target"
+                        );
+                    }
                 }
-            }
-            Command::StackZone(parent, child) => {
-                let mut app = root.app.borrow_mut();
-                if app.zones.stack(parent, child) {
-                    log_static(
-                        format!("stack: StackZone anchor={} child={}\n", parent.0, child.0)
-                            .as_str(),
-                    );
-                    // Stack creation must NOT auto-open the management tray. The collapsed
-                    // anchor simply re-renders as the compact stack pill (render.rs pill
-                    // branch). Command::OpenStackTray is the sole explicit opener (reached
-                    // via the context-menu action or a bloom-petal click).
-                    app.mark_dirty();
-                    needs_redraw = true;
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::dispatcher",
-                        ?parent, ?child,
-                        "StackZone rejected missing/self stack target"
-                    );
+                Command::UnstackZone(id) => {
+                    let mut app = root.app.borrow_mut();
+                    let viewport_w = app.viewport.width.max(1.0).round() as i32;
+                    let viewport_h = app.viewport.height.max(1.0).round() as i32;
+                    if app.zones.unstack_with_scatter(id, viewport_w, viewport_h) {
+                        log_static(format!("stack: UnstackZone id={}\n", id.0).as_str());
+                        app.stack_tray.borrow_mut().take();
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    } else {
+                        tracing::debug!(
+                            target: "bentodesk::dispatcher",
+                            ?id,
+                            "UnstackZone no-op: zone was not stacked"
+                        );
+                    }
                 }
-            }
-            Command::UnstackZone(id) => {
-                let mut app = root.app.borrow_mut();
-                let viewport_w = app.viewport.width.max(1.0).round() as i32;
-                let viewport_h = app.viewport.height.max(1.0).round() as i32;
-                if app.zones.unstack_with_scatter(id, viewport_w, viewport_h) {
-                    log_static(format!("stack: UnstackZone id={}\n", id.0).as_str());
-                    app.stack_tray.borrow_mut().take();
-                    app.mark_dirty();
-                    needs_redraw = true;
-                } else {
-                    tracing::debug!(
-                        target: "bentodesk::dispatcher",
-                        ?id,
-                        "UnstackZone no-op: zone was not stacked"
-                    );
+                Command::OpenStackTray(id) => {
+                    let app = root.app.borrow();
+                    if let Some(anchor) = app.zones.stack_anchor_for(id) {
+                        if let Some(members) = app.zones.stack_member_ids(anchor) {
+                            let selected = if members.contains(&id) { id } else { anchor };
+                            log_static(
+                                format!(
+                                    "stack: OpenStackTray anchor={} selected={} members={}\n",
+                                    anchor.0,
+                                    selected.0,
+                                    members.len()
+                                )
+                                .as_str(),
+                            );
+                            clear_stack_tray_open_hover_state(&app);
+                            app.stack_tray.borrow_mut().replace(
+                                StackTrayState::new(anchor, selected)
+                                    .with_status(SmolStr::new_static("Stack tray opened")),
+                            );
+                            arm_stack_tray_memory_trim(hwnd);
+                            needs_redraw = true;
+                        }
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::stack",
+                            ?id,
+                            "OpenStackTray rejected: zone is not in a stack"
+                        );
+                    }
                 }
-            }
-            Command::OpenStackTray(id) => {
-                let app = root.app.borrow();
-                if let Some(anchor) = app.zones.stack_anchor_for(id) {
-                    if let Some(members) = app.zones.stack_member_ids(anchor) {
-                        let selected = if members.contains(&id) { id } else { anchor };
+                Command::CloseStackTray => {
+                    let app = root.app.borrow();
+                    app.stack_tray_drag.set(None);
+                    if app.stack_tray.borrow_mut().take().is_some() {
+                        arm_resident_memory_trim(hwnd);
+                        needs_redraw = true;
+                    }
+                }
+                Command::PreviewStackMember(anchor, member) => {
+                    let app = root.app.borrow();
+                    let valid = app
+                        .zones
+                        .stack_member_ids(anchor)
+                        .map(|members| members.contains(&member))
+                        .unwrap_or(false);
+                    if valid {
+                        let title = app
+                            .zones
+                            .get(member)
+                            .map(|zone| SmolStr::new(format!("Previewing {}", zone.title)))
+                            .unwrap_or_else(|| SmolStr::new_static("Previewing stack member"));
                         log_static(
                             format!(
-                                "stack: OpenStackTray anchor={} selected={} members={}\n",
-                                anchor.0,
-                                selected.0,
-                                members.len()
+                                "stack: PreviewStackMember anchor={} member={}\n",
+                                anchor.0, member.0
                             )
                             .as_str(),
                         );
+                        let mut state = app.stack_tray.borrow_mut();
+                        let next = match state.as_ref() {
+                            Some(current) if current.is_management() => {
+                                Some(StackTrayState::new(anchor, member).with_status(title))
+                            }
+                            Some(current)
+                                if current.is_bloom_preview()
+                                    && current.anchor_zone_id == anchor
+                                    && current.selected_member_id == member =>
+                            {
+                                None
+                            }
+                            _ => Some(StackTrayState::bloom_preview(anchor, member)),
+                        };
+                        *state = next;
+                        needs_redraw = true;
+                    } else {
                         app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(anchor, selected)
-                                .with_status(SmolStr::new_static("Stack tray opened")),
+                            StackTrayState::new(anchor, anchor)
+                                .with_status(SmolStr::new_static("Stack member no longer exists")),
                         );
                         needs_redraw = true;
                     }
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::stack",
-                        ?id,
-                        "OpenStackTray rejected: zone is not in a stack"
-                    );
                 }
-            }
-            Command::CloseStackTray => {
-                let app = root.app.borrow();
-                app.stack_tray_drag.set(None);
-                if app.stack_tray.borrow_mut().take().is_some() {
-                    needs_redraw = true;
-                }
-            }
-            Command::PreviewStackMember(anchor, member) => {
-                let app = root.app.borrow();
-                let valid = app
-                    .zones
-                    .stack_member_ids(anchor)
-                    .map(|members| members.contains(&member))
-                    .unwrap_or(false);
-                if valid {
-                    let title = app
-                        .zones
-                        .get(member)
-                        .map(|zone| SmolStr::new(format!("Previewing {}", zone.title)))
-                        .unwrap_or_else(|| SmolStr::new_static("Previewing stack member"));
-                    log_static(
-                        format!(
-                            "stack: PreviewStackMember anchor={} member={}\n",
-                            anchor.0, member.0
-                        )
-                        .as_str(),
-                    );
-                    app.stack_tray
-                        .borrow_mut()
-                        .replace(StackTrayState::new(anchor, member).with_status(title));
-                    needs_redraw = true;
-                } else {
-                    app.stack_tray.borrow_mut().replace(
-                        StackTrayState::new(anchor, anchor)
-                            .with_status(SmolStr::new_static("Stack member no longer exists")),
-                    );
-                    needs_redraw = true;
-                }
-            }
-            Command::DetachStackMember(anchor, member) => {
-                let mut app = root.app.borrow_mut();
-                let member_belongs_to_anchor = app
-                    .zones
-                    .stack_member_ids(anchor)
-                    .map(|members| members.contains(&member))
-                    .unwrap_or(false);
-                if !member_belongs_to_anchor {
-                    app.stack_tray.borrow_mut().replace(
-                        StackTrayState::new(anchor, anchor)
-                            .with_status(SmolStr::new_static("Cannot detach stale stack member")),
-                    );
-                    needs_redraw = true;
-                    continue;
-                }
-                if let Some(outcome) = app.zones.detach_from_stack(member) {
-                    log_static(
-                        format!(
-                            "stack: DetachStackMember anchor={} member={} new_anchor={}\n",
-                            anchor.0,
-                            member.0,
-                            outcome.new_anchor.map(|id| id.0).unwrap_or(0)
-                        )
-                        .as_str(),
-                    );
-                    if let Some(new_anchor) = outcome.new_anchor {
-                        app.stack_tray.borrow_mut().replace(
-                            StackTrayState::new(new_anchor, new_anchor)
-                                .with_status(SmolStr::new_static("Detached stack member")),
-                        );
-                    } else {
-                        app.stack_tray.borrow_mut().take();
-                    }
-                    app.stack_tray_drag.set(None);
-                    app.mark_dirty();
-                    needs_redraw = true;
-                }
-            }
-            Command::DissolveStack(id) => {
-                let mut app = root.app.borrow_mut();
-                let anchor = app.zones.stack_anchor_for(id).unwrap_or(id);
-                let viewport_w = app.viewport.width.max(1.0).round() as i32;
-                let viewport_h = app.viewport.height.max(1.0).round() as i32;
-                if app
-                    .zones
-                    .dissolve_stack_scattered(anchor, viewport_w, viewport_h)
-                {
-                    log_static(format!("stack: DissolveStack anchor={}\n", anchor.0).as_str());
-                    app.stack_tray.borrow_mut().take();
-                    app.stack_tray_drag.set(None);
-                    app.mark_dirty();
-                    needs_redraw = true;
-                } else {
-                    app.stack_tray.borrow_mut().replace(
-                        StackTrayState::new(anchor, anchor)
-                            .with_status(SmolStr::new_static("Stack is already dissolved")),
-                    );
-                    needs_redraw = true;
-                }
-            }
-            Command::ReorderStackMember(anchor, member, target_index) => {
-                let mut app = root.app.borrow_mut();
-                if app.zones.reorder_stack_member(anchor, member, target_index) {
-                    log_static(
-                        format!(
-                            "stack: ReorderStackMember anchor={} member={} target_index={}\n",
-                            anchor.0, member.0, target_index
-                        )
-                        .as_str(),
-                    );
-                    let status = app
-                        .zones
-                        .get(member)
-                        .map(|zone| SmolStr::new(format!("Moved {}", zone.title)))
-                        .unwrap_or_else(|| SmolStr::new_static("Stack order updated"));
-                    app.stack_tray
-                        .borrow_mut()
-                        .replace(StackTrayState::new(anchor, member).with_status(status));
-                    app.stack_tray_drag.set(None);
-                    app.mark_dirty();
-                    needs_redraw = true;
-                } else {
-                    app.stack_tray.borrow_mut().replace(
-                        StackTrayState::new(anchor, anchor)
-                            .with_status(SmolStr::new_static("Stack reorder ignored")),
-                    );
-                    app.stack_tray_drag.set(None);
-                    needs_redraw = true;
-                }
-            }
-            Command::AddItem(zone_id, path) => {
-                needs_redraw |= add_item_to_zone(root, zone_id, path.0.as_str());
-            }
-            Command::RemoveItem(zone_id, item_id) => {
-                needs_redraw |= remove_item_from_zone(root, zone_id, item_id);
-            }
-            Command::OpenItemFile(zone_id, item_id) => {
-                needs_redraw |= open_item_file_from_zone(root, zone_id, item_id);
-            }
-            Command::OpenItemFileRename(zone_id, item_id) => {
-                open_item_file_rename(root, zone_id, item_id);
-                needs_redraw = true;
-            }
-            Command::RenameItemFile(zone_id, item_id, new_leaf) => {
-                needs_redraw |= rename_item_file(root, zone_id, item_id, new_leaf.as_str());
-            }
-            Command::DeleteItemFileToRecycleBin(zone_id, item_id) => {
-                needs_redraw |= delete_item_file_to_recycle_bin(root, zone_id, item_id);
-            }
-            Command::CopyItemPath(path) => {
-                let _copied = copy_item_path_with(root, path.0.as_str(), copy_text_to_clipboard);
-            }
-            Command::MoveItem(zone_id, item_id, point) => {
-                let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
-                let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
-                let Some(item) = item else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?zone_id,
-                        ?item_id,
-                        ?point,
-                        "MoveItem rejected: zone/item missing"
-                    );
-                    set_item_operation_status(
-                        root,
-                        SmolStr::new(format!(
-                            "Move item rejected: zone {} item {}",
-                            zone_id.0, item_id.0
-                        )),
-                    );
-                    needs_redraw = true;
-                    continue;
-                };
-                let display_path = item_file_display_path(&item);
-                let leaf = item_operation_leaf(display_path.as_str()).to_owned();
-                let mut app = root.app.borrow_mut();
-                if app.zones.move_item(zone_id, zone_item_id, point.x, point.y) {
-                    app.mark_dirty();
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "Moved item: {leaf} ({}, {})",
-                            point.x, point.y
-                        )));
-                    needs_redraw = true;
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?zone_id,
-                        ?item_id,
-                        ?point,
-                        "MoveItem rejected: zone/item missing"
-                    );
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
-                    needs_redraw = true;
-                }
-            }
-            Command::ToggleItemWide(zone_id, item_id) => {
-                let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
-                let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
-                let Some(item) = item else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?zone_id,
-                        ?item_id,
-                        "ToggleItemWide rejected: zone/item missing"
-                    );
-                    set_item_operation_status(
-                        root,
-                        SmolStr::new(format!(
-                            "Toggle wide rejected: zone {} item {}",
-                            zone_id.0, item_id.0
-                        )),
-                    );
-                    needs_redraw = true;
-                    continue;
-                };
-                let display_path = item_file_display_path(&item);
-                let leaf = item_operation_leaf(display_path.as_str()).to_owned();
-                let mut app = root.app.borrow_mut();
-                if app.zones.toggle_item_wide(zone_id, zone_item_id) {
-                    let is_wide = app
-                        .zones
-                        .item(zone_id, zone_item_id)
-                        .is_some_and(|item| item.is_wide);
-                    app.mark_dirty();
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "Item wide {}: {leaf}",
-                            if is_wide { "enabled" } else { "disabled" }
-                        )));
-                    needs_redraw = true;
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?zone_id,
-                        ?item_id,
-                        "ToggleItemWide rejected: zone/item missing"
-                    );
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!("Toggle wide rejected: {leaf}")));
-                    needs_redraw = true;
-                }
-            }
-            Command::MoveItemToZone(from_zone_id, to_zone_id, item_id) => {
-                let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
-                let item = root
-                    .app
-                    .borrow()
-                    .zones
-                    .item(from_zone_id, zone_item_id)
-                    .cloned();
-                let Some(item) = item else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?from_zone_id,
-                        ?to_zone_id,
-                        ?item_id,
-                        "MoveItemToZone rejected: source item missing"
-                    );
-                    set_item_operation_status(
-                        root,
-                        SmolStr::new(format!(
-                            "Move item rejected: zone {} item {}",
-                            from_zone_id.0, item_id.0
-                        )),
-                    );
-                    needs_redraw = true;
-                    continue;
-                };
-                let display_path = item_file_display_path(&item);
-                let leaf = item_operation_leaf(display_path.as_str()).to_owned();
-                let had_hidden_file = item.hidden_path.is_some();
-                let moved_paths = move_hidden_item_file_between_zones(root, &item, to_zone_id);
-                let moved_hidden_file = moved_paths.is_some();
-                let mut app = root.app.borrow_mut();
-                if app.zones.move_item_to_zone(
-                    from_zone_id,
-                    to_zone_id,
-                    zone_item_id,
-                    moved_paths
-                        .as_ref()
-                        .map(|paths| std::borrow::Cow::Owned(paths.effective_path.clone())),
-                    moved_paths
-                        .as_ref()
-                        .map(|paths| std::borrow::Cow::Owned(paths.hidden_path.clone())),
-                ) {
-                    app.mark_dirty();
-                    let status = if had_hidden_file && moved_hidden_file {
-                        format!("Moved hidden item to zone: {leaf}")
-                    } else if had_hidden_file {
-                        format!("Moved item to zone without hidden move: {leaf}")
-                    } else {
-                        format!("Moved item to zone: {leaf}")
-                    };
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(status));
-                    needs_redraw = true;
-                } else {
-                    tracing::warn!(
-                        target: "bentodesk::items",
-                        ?from_zone_id,
-                        ?to_zone_id,
-                        ?item_id,
-                        "MoveItemToZone rejected: zone/item missing"
-                    );
-                    app.item_operation_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
-                    needs_redraw = true;
-                }
-            }
-            Command::SetSetting { key, value } => {
-                // F2-03 — round-trip `Command::SetSetting` through the
-                // process-global vault. The two SettingValue enums (one in
-                // app::dispatcher, one in backend::config_vault) are
-                // byte-equivalent by serde shape (see `f1-delivery.md` §6
-                // gap 8), so the variant-by-variant translation here is
-                // load-bearing for the cross-crate layering rule (backend
-                // can't depend on app).
-                if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
+                Command::ToggleStackBloomPreview(anchor, member) => {
                     let app = root.app.borrow();
-                    match &value {
-                        bento_nano_app::SettingValue::Str(chord)
-                            if keybindings_section::is_reserved_chord(chord.as_str()) =>
-                        {
-                            set_keybinding_feedback(
-                                &app,
-                                action,
-                                SmolStr::new_static("Reserved by Windows"),
-                                true,
+                    let valid = app
+                        .zones
+                        .stack_member_ids(anchor)
+                        .is_some_and(|members| members.contains(&member));
+                    if valid {
+                        let mut interaction = app.stack_bloom_interaction.get();
+                        let close_same_sticky = interaction.preview_sticky
+                            && app.stack_tray.borrow().as_ref().is_some_and(|state| {
+                                state.is_bloom_preview()
+                                    && state.anchor_zone_id == anchor
+                                    && state.selected_member_id == member
+                            });
+                        if close_same_sticky {
+                            app.stack_tray.borrow_mut().take();
+                            interaction.active_member = None;
+                            interaction.active_member_leave_started_ms = None;
+                            interaction.preview_sticky = false;
+                            interaction.hover_preview_opened = true;
+                            log_static(
+                                format!(
+                                    "stack: CloseStickyBloomPreview anchor={} member={}\n",
+                                    anchor.0, member.0
+                                )
+                                .as_str(),
                             );
-                            needs_redraw = true;
-                            continue;
-                        }
-                        bento_nano_app::SettingValue::Str(chord) => {
-                            match validate_keybinding_candidate(root, action, chord.as_str()) {
-                                Ok(()) => {}
-                                Err(hotkey::BindingValidationError::UnsupportedActionOrChord) => {
-                                    set_keybinding_feedback(
-                                        &app,
-                                        action,
-                                        SmolStr::new_static("Unsupported shortcut"),
-                                        true,
-                                    );
-                                    needs_redraw = true;
-                                    continue;
-                                }
-                                Err(hotkey::BindingValidationError::ChordAlreadyAssigned) => {
-                                    set_keybinding_feedback(
-                                        &app,
-                                        action,
-                                        SmolStr::new_static("Already in use"),
-                                        true,
-                                    );
-                                    needs_redraw = true;
-                                    continue;
-                                }
-                            }
-                        }
-                        _ => {
-                            set_keybinding_feedback(
-                                &app,
-                                action,
-                                SmolStr::new_static("Shortcut must be text"),
-                                true,
+                        } else {
+                            // A hover-open preview is committed in place on the
+                            // first click; only a second click on that same
+                            // sticky petal closes it.
+                            app.stack_tray
+                                .borrow_mut()
+                                .replace(StackTrayState::bloom_preview(anchor, member));
+                            interaction.active_member = Some(member);
+                            interaction.active_member_started_ms = 0;
+                            interaction.active_member_leave_started_ms = None;
+                            interaction.preview_sticky = true;
+                            interaction.hover_preview_opened = true;
+                            log_static(
+                                format!(
+                                    "stack: CommitStickyBloomPreview anchor={} member={}\n",
+                                    anchor.0, member.0
+                                )
+                                .as_str(),
                             );
-                            needs_redraw = true;
-                            continue;
                         }
+                        app.stack_bloom_interaction.set(interaction);
+                        needs_redraw = true;
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::stack",
+                            ?anchor,
+                            ?member,
+                            "ToggleStackBloomPreview rejected: stale member"
+                        );
                     }
                 }
-                let mut stored_in_vault = false;
-                match bento_nano_backend::config_vault::Vault::global() {
-                    Some(mtx) => match mtx.lock() {
-                        Ok(mut vault) => {
-                            if key.as_str() == SETTING_ENCRYPTION_MODE
-                                || key.as_str() == SETTING_ZONE_DISPLAY_MODE
+                Command::DetachStackMember(anchor, member) => {
+                    let mut app = root.app.borrow_mut();
+                    let member_belongs_to_anchor = app
+                        .zones
+                        .stack_member_ids(anchor)
+                        .map(|members| members.contains(&member))
+                        .unwrap_or(false);
+                    if !member_belongs_to_anchor {
+                        app.stack_tray.borrow_mut().replace(
+                            StackTrayState::new(anchor, anchor).with_status(SmolStr::new_static(
+                                "Cannot detach stale stack member",
+                            )),
+                        );
+                        needs_redraw = true;
+                        continue;
+                    }
+                    if let Some(outcome) = app.zones.detach_from_stack(member) {
+                        log_static(
+                            format!(
+                                "stack: DetachStackMember anchor={} member={} new_anchor={}\n",
+                                anchor.0,
+                                member.0,
+                                outcome.new_anchor.map(|id| id.0).unwrap_or(0)
+                            )
+                            .as_str(),
+                        );
+                        if let Some(new_anchor) = outcome.new_anchor {
+                            app.stack_tray.borrow_mut().replace(
+                                StackTrayState::new(new_anchor, new_anchor)
+                                    .with_status(SmolStr::new_static("Detached stack member")),
+                            );
+                        } else {
+                            app.stack_tray.borrow_mut().take();
+                        }
+                        app.stack_tray_drag.set(None);
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    }
+                }
+                Command::DissolveStack(id) => {
+                    let mut app = root.app.borrow_mut();
+                    let anchor = app.zones.stack_anchor_for(id).unwrap_or(id);
+                    let viewport_w = app.viewport.width.max(1.0).round() as i32;
+                    let viewport_h = app.viewport.height.max(1.0).round() as i32;
+                    if app
+                        .zones
+                        .dissolve_stack_scattered(anchor, viewport_w, viewport_h)
+                    {
+                        log_static(format!("stack: DissolveStack anchor={}\n", anchor.0).as_str());
+                        app.stack_tray.borrow_mut().take();
+                        app.stack_tray_drag.set(None);
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    } else {
+                        app.stack_tray.borrow_mut().replace(
+                            StackTrayState::new(anchor, anchor)
+                                .with_status(SmolStr::new_static("Stack is already dissolved")),
+                        );
+                        needs_redraw = true;
+                    }
+                }
+                Command::ReorderStackMember(anchor, member, target_index) => {
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.reorder_stack_member(anchor, member, target_index) {
+                        log_static(
+                            format!(
+                                "stack: ReorderStackMember anchor={} member={} target_index={}\n",
+                                anchor.0, member.0, target_index
+                            )
+                            .as_str(),
+                        );
+                        let status = app
+                            .zones
+                            .get(member)
+                            .map(|zone| SmolStr::new(format!("Moved {}", zone.title)))
+                            .unwrap_or_else(|| SmolStr::new_static("Stack order updated"));
+                        app.stack_tray
+                            .borrow_mut()
+                            .replace(StackTrayState::new(anchor, member).with_status(status));
+                        app.stack_tray_drag.set(None);
+                        app.mark_dirty();
+                        needs_redraw = true;
+                    } else {
+                        app.stack_tray.borrow_mut().replace(
+                            StackTrayState::new(anchor, anchor)
+                                .with_status(SmolStr::new_static("Stack reorder ignored")),
+                        );
+                        app.stack_tray_drag.set(None);
+                        needs_redraw = true;
+                    }
+                }
+                Command::AddItem(zone_id, path) => {
+                    needs_redraw |= add_item_to_zone(root, zone_id, path.0.as_str());
+                }
+                Command::RemoveItem(zone_id, item_id) => {
+                    needs_redraw |= remove_item_from_zone(root, zone_id, item_id);
+                }
+                Command::OpenItemFile(zone_id, item_id) => {
+                    needs_redraw |= open_item_file_from_zone(root, zone_id, item_id);
+                }
+                Command::OpenItemFileRename(zone_id, item_id) => {
+                    open_item_file_rename(root, zone_id, item_id);
+                    needs_redraw = true;
+                }
+                Command::RenameItemFile(zone_id, item_id, new_leaf) => {
+                    needs_redraw |= rename_item_file(root, zone_id, item_id, new_leaf.as_str());
+                }
+                Command::DeleteItemFileToRecycleBin(zone_id, item_id) => {
+                    needs_redraw |= delete_item_file_to_recycle_bin(root, zone_id, item_id);
+                }
+                Command::CopyItemPath(path) => {
+                    let _copied =
+                        copy_item_path_with(root, path.0.as_str(), copy_text_to_clipboard);
+                }
+                Command::MoveItem(zone_id, item_id, point) => {
+                    let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
+                    let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
+                    let Some(item) = item else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?zone_id,
+                            ?item_id,
+                            ?point,
+                            "MoveItem rejected: zone/item missing"
+                        );
+                        set_item_operation_status(
+                            root,
+                            SmolStr::new(format!(
+                                "Move item rejected: zone {} item {}",
+                                zone_id.0, item_id.0
+                            )),
+                        );
+                        needs_redraw = true;
+                        continue;
+                    };
+                    let display_path = item_file_display_path(&item);
+                    let leaf = item_operation_leaf(display_path.as_str()).to_owned();
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.move_item(zone_id, zone_item_id, point.x, point.y) {
+                        app.mark_dirty();
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(format!(
+                                "Moved item: {leaf} ({}, {})",
+                                point.x, point.y
+                            )));
+                        needs_redraw = true;
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?zone_id,
+                            ?item_id,
+                            ?point,
+                            "MoveItem rejected: zone/item missing"
+                        );
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
+                        needs_redraw = true;
+                    }
+                }
+                Command::ToggleItemWide(zone_id, item_id) => {
+                    let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
+                    let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
+                    let Some(item) = item else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?zone_id,
+                            ?item_id,
+                            "ToggleItemWide rejected: zone/item missing"
+                        );
+                        set_item_operation_status(
+                            root,
+                            SmolStr::new(format!(
+                                "Toggle wide rejected: zone {} item {}",
+                                zone_id.0, item_id.0
+                            )),
+                        );
+                        needs_redraw = true;
+                        continue;
+                    };
+                    let display_path = item_file_display_path(&item);
+                    let leaf = item_operation_leaf(display_path.as_str()).to_owned();
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.toggle_item_wide(zone_id, zone_item_id) {
+                        let is_wide = app
+                            .zones
+                            .item(zone_id, zone_item_id)
+                            .is_some_and(|item| item.is_wide);
+                        app.mark_dirty();
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(format!(
+                                "Item wide {}: {leaf}",
+                                if is_wide { "enabled" } else { "disabled" }
+                            )));
+                        needs_redraw = true;
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?zone_id,
+                            ?item_id,
+                            "ToggleItemWide rejected: zone/item missing"
+                        );
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(format!("Toggle wide rejected: {leaf}")));
+                        needs_redraw = true;
+                    }
+                }
+                Command::MoveItemToZone(from_zone_id, to_zone_id, item_id) => {
+                    let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
+                    let item = root
+                        .app
+                        .borrow()
+                        .zones
+                        .item(from_zone_id, zone_item_id)
+                        .cloned();
+                    let Some(item) = item else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?from_zone_id,
+                            ?to_zone_id,
+                            ?item_id,
+                            "MoveItemToZone rejected: source item missing"
+                        );
+                        set_item_operation_status(
+                            root,
+                            SmolStr::new(format!(
+                                "Move item rejected: zone {} item {}",
+                                from_zone_id.0, item_id.0
+                            )),
+                        );
+                        needs_redraw = true;
+                        continue;
+                    };
+                    let display_path = item_file_display_path(&item);
+                    let leaf = item_operation_leaf(display_path.as_str()).to_owned();
+                    let had_hidden_file = item.hidden_path.is_some();
+                    let moved_paths = move_hidden_item_file_between_zones(root, &item, to_zone_id);
+                    let moved_hidden_file = moved_paths.is_some();
+                    let mut app = root.app.borrow_mut();
+                    if app.zones.move_item_to_zone(
+                        from_zone_id,
+                        to_zone_id,
+                        zone_item_id,
+                        moved_paths
+                            .as_ref()
+                            .map(|paths| std::borrow::Cow::Owned(paths.effective_path.clone())),
+                        moved_paths
+                            .as_ref()
+                            .map(|paths| std::borrow::Cow::Owned(paths.hidden_path.clone())),
+                    ) {
+                        app.mark_dirty();
+                        let status = if had_hidden_file && moved_hidden_file {
+                            format!("Moved hidden item to zone: {leaf}")
+                        } else if had_hidden_file {
+                            format!("Moved item to zone without hidden move: {leaf}")
+                        } else {
+                            format!("Moved item to zone: {leaf}")
+                        };
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        needs_redraw = true;
+                    } else {
+                        tracing::warn!(
+                            target: "bentodesk::items",
+                            ?from_zone_id,
+                            ?to_zone_id,
+                            ?item_id,
+                            "MoveItemToZone rejected: zone/item missing"
+                        );
+                        app.item_operation_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(format!("Move item rejected: {leaf}")));
+                        needs_redraw = true;
+                    }
+                }
+                Command::SetSetting { key, value } => {
+                    // F2-03 — round-trip `Command::SetSetting` through the
+                    // process-global vault. The two SettingValue enums (one in
+                    // app::dispatcher, one in backend::config_vault) are
+                    // byte-equivalent by serde shape (see `f1-delivery.md` §6
+                    // gap 8), so the variant-by-variant translation here is
+                    // load-bearing for the cross-crate layering rule (backend
+                    // can't depend on app).
+                    if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
+                        let app = root.app.borrow();
+                        match &value {
+                            bento_nano_app::SettingValue::Str(chord)
+                                if keybindings_section::is_reserved_chord(chord.as_str()) =>
                             {
-                                match persist_setting_to_vault(&mut vault, key.as_str(), &value) {
-                                    Ok(true) => {
-                                        let app = root.app.borrow();
-                                        if apply_setting_value_to_app(&app, key.as_str(), &value) {
-                                            needs_redraw = true;
-                                        }
-                                        // P9 (#7 fix wave 2026-06-01) — mirror Tauri
-                                        // `applyMode`: after a SUCCESSFUL None/DPAPI
-                                        // mode change set the §10 success banner
-                                        // `${ENCRYPTION_MODE_APPLIED} ${modeLabel}`
-                                        // (green #34d399). `persist_setting_to_vault`
-                                        // returns `Ok(true)` ONLY on a valid, flushed
-                                        // None/DPAPI change (Passphrase + rejects are
-                                        // `Ok(false)`), so this never fires a false
-                                        // success.
-                                        if key.as_str() == SETTING_ENCRYPTION_MODE {
-                                            set_encryption_mode_applied_banner(&app);
-                                            needs_redraw = true;
-                                        }
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            target: "bentodesk::vault",
-                                            %key, error = %e,
-                                            "SetSetting validated setting flush failed; runtime state not updated"
-                                        );
-                                    }
-                                }
+                                set_keybinding_feedback(
+                                    &app,
+                                    action,
+                                    SmolStr::new_static("Reserved by Windows"),
+                                    true,
+                                );
+                                needs_redraw = true;
                                 continue;
                             }
-                            let backend_value = backend_setting_value_from_app(&value);
-                            vault.set_setting(&key, backend_value);
-                            stored_in_vault = true;
-                            if let Err(e) = vault.flush() {
+                            bento_nano_app::SettingValue::Str(chord) => {
+                                match validate_keybinding_candidate(root, action, chord.as_str()) {
+                                    Ok(()) => {}
+                                    Err(
+                                        hotkey::BindingValidationError::UnsupportedActionOrChord,
+                                    ) => {
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action,
+                                            SmolStr::new_static("Unsupported shortcut"),
+                                            true,
+                                        );
+                                        needs_redraw = true;
+                                        continue;
+                                    }
+                                    Err(hotkey::BindingValidationError::ChordAlreadyAssigned) => {
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action,
+                                            SmolStr::new_static("Already in use"),
+                                            true,
+                                        );
+                                        needs_redraw = true;
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {
+                                set_keybinding_feedback(
+                                    &app,
+                                    action,
+                                    SmolStr::new_static("Shortcut must be text"),
+                                    true,
+                                );
+                                needs_redraw = true;
+                                continue;
+                            }
+                        }
+                    }
+                    let mut stored_in_vault = false;
+                    match bento_nano_backend::config_vault::Vault::global() {
+                        Some(mtx) => match mtx.lock() {
+                            Ok(mut vault) => {
+                                if key.as_str() == SETTING_ENCRYPTION_MODE
+                                    || key.as_str() == SETTING_ZONE_DISPLAY_MODE
+                                {
+                                    match persist_setting_to_vault(&mut vault, key.as_str(), &value)
+                                    {
+                                        Ok(true) => {
+                                            let app = root.app.borrow();
+                                            if apply_setting_value_to_app(
+                                                &app,
+                                                key.as_str(),
+                                                &value,
+                                            ) {
+                                                needs_redraw = true;
+                                            }
+                                            // P9 (#7 fix wave 2026-06-01) — mirror Tauri
+                                            // `applyMode`: after a SUCCESSFUL None/DPAPI
+                                            // mode change set the §10 success banner
+                                            // `${ENCRYPTION_MODE_APPLIED} ${modeLabel}`
+                                            // (green #34d399). `persist_setting_to_vault`
+                                            // returns `Ok(true)` ONLY on a valid, flushed
+                                            // None/DPAPI change (Passphrase + rejects are
+                                            // `Ok(false)`), so this never fires a false
+                                            // success.
+                                            if key.as_str() == SETTING_ENCRYPTION_MODE {
+                                                set_encryption_mode_applied_banner(&app);
+                                                needs_redraw = true;
+                                            }
+                                        }
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "bentodesk::vault",
+                                                %key, error = %e,
+                                                "SetSetting validated setting flush failed; runtime state not updated"
+                                            );
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let backend_value = backend_setting_value_from_app(&value);
+                                vault.set_setting(&key, backend_value);
+                                stored_in_vault = true;
+                                if let Err(e) = vault.flush() {
+                                    tracing::warn!(
+                                        target: "bentodesk::vault",
+                                        %key, error = %e,
+                                        "SetSetting flush failed — value retained in memory"
+                                    );
+                                    if let Some(action) =
+                                        key.as_str().strip_prefix(KEYBINDING_PREFIX)
+                                    {
+                                        stored_in_vault = false;
+                                        let app = root.app.borrow();
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action,
+                                            SmolStr::new(format!("Save failed: {e}")),
+                                            true,
+                                        );
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
+                            Err(_poisoned) => {
+                                // Poisoned mutex — another thread panicked while
+                                // holding the lock. Drop this set rather than
+                                // recover the inner Vault (an inconsistent vault
+                                // is worse than a missed write).
                                 tracing::warn!(
                                     target: "bentodesk::vault",
-                                    %key, error = %e,
-                                    "SetSetting flush failed — value retained in memory"
+                                    %key,
+                                    "SetSetting: vault mutex poisoned"
                                 );
                                 if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
-                                    stored_in_vault = false;
                                     let app = root.app.borrow();
                                     set_keybinding_feedback(
                                         &app,
                                         action,
-                                        SmolStr::new(format!("Save failed: {e}")),
+                                        SmolStr::new_static("Vault lock failed"),
                                         true,
                                     );
                                     needs_redraw = true;
                                 }
                             }
-                        }
-                        Err(_poisoned) => {
-                            // Poisoned mutex — another thread panicked while
-                            // holding the lock. Drop this set rather than
-                            // recover the inner Vault (an inconsistent vault
-                            // is worse than a missed write).
+                        },
+                        None => {
+                            // init_global never ran (resolver failed at startup);
+                            // log + continue so the dispatcher pump stays live.
                             tracing::warn!(
                                 target: "bentodesk::vault",
                                 %key,
-                                "SetSetting: vault mutex poisoned"
+                                "SetSetting: vault not initialised"
                             );
                             if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
                                 let app = root.app.borrow();
                                 set_keybinding_feedback(
                                     &app,
                                     action,
-                                    SmolStr::new_static("Vault lock failed"),
+                                    SmolStr::new_static("Vault unavailable"),
                                     true,
                                 );
                                 needs_redraw = true;
                             }
                         }
-                    },
-                    None => {
-                        // init_global never ran (resolver failed at startup);
-                        // log + continue so the dispatcher pump stays live.
-                        tracing::warn!(
-                            target: "bentodesk::vault",
-                            %key,
-                            "SetSetting: vault not initialised"
-                        );
+                    }
+                    if stored_in_vault {
+                        let hotkey_changed =
+                            apply_hotkey_setting_to_runtime(root, key.as_str(), &value);
+                        let app = root.app.borrow();
                         if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
+                            if let bento_nano_app::SettingValue::Str(chord) = &value {
+                                set_keybinding_feedback(
+                                    &app,
+                                    action,
+                                    SmolStr::new(format!("Saved {chord}")),
+                                    false,
+                                );
+                                needs_redraw = true;
+                            }
+                        }
+                        if apply_setting_value_to_app(&app, key.as_str(), &value) || hotkey_changed
+                        {
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                Command::ResetKeybinding { action } => {
+                    let Some(default_chord) = hotkey::default_chord_for_action(action.as_str())
+                    else {
+                        let app = root.app.borrow();
+                        set_keybinding_feedback(
+                            &app,
+                            action.as_str(),
+                            SmolStr::new_static("Unsupported action"),
+                            true,
+                        );
+                        needs_redraw = true;
+                        continue;
+                    };
+                    if let Err(error) =
+                        validate_keybinding_candidate(root, action.as_str(), default_chord)
+                    {
+                        let app = root.app.borrow();
+                        let message = match error {
+                            hotkey::BindingValidationError::UnsupportedActionOrChord => {
+                                SmolStr::new_static("Unsupported default")
+                            }
+                            hotkey::BindingValidationError::ChordAlreadyAssigned => {
+                                SmolStr::new_static("Default already in use")
+                            }
+                        };
+                        set_keybinding_feedback(&app, action.as_str(), message, true);
+                        needs_redraw = true;
+                        continue;
+                    }
+                    match bento_nano_backend::config_vault::Vault::global() {
+                        Some(mtx) => match mtx.lock() {
+                            Ok(mut vault) => {
+                                match persist_keybinding_reset_to_vault(&mut vault, action.as_str())
+                                {
+                                    Ok(true) => {
+                                        let _changed = apply_hotkey_binding(
+                                            root,
+                                            action.as_str(),
+                                            default_chord,
+                                        );
+                                        let app = root.app.borrow();
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action.as_str(),
+                                            SmolStr::new(format!("Reset to {default_chord}")),
+                                            false,
+                                        );
+                                        needs_redraw = true;
+                                    }
+                                    Ok(false) => {
+                                        let app = root.app.borrow();
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action.as_str(),
+                                            SmolStr::new_static("Unsupported action"),
+                                            true,
+                                        );
+                                        needs_redraw = true;
+                                    }
+                                    Err(error) => {
+                                        let app = root.app.borrow();
+                                        set_keybinding_feedback(
+                                            &app,
+                                            action.as_str(),
+                                            SmolStr::new(format!("Reset failed: {error}")),
+                                            true,
+                                        );
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
+                            Err(_poisoned) => {
+                                let app = root.app.borrow();
+                                set_keybinding_feedback(
+                                    &app,
+                                    action.as_str(),
+                                    SmolStr::new_static("Vault lock failed"),
+                                    true,
+                                );
+                                needs_redraw = true;
+                            }
+                        },
+                        None => {
                             let app = root.app.borrow();
                             set_keybinding_feedback(
                                 &app,
-                                action,
+                                action.as_str(),
                                 SmolStr::new_static("Vault unavailable"),
                                 true,
                             );
@@ -18890,1098 +23366,1090 @@ fn consume_dispatcher(root: &AppRoot, hwnd: HWND) {
                         }
                     }
                 }
-                if stored_in_vault {
-                    let hotkey_changed =
-                        apply_hotkey_setting_to_runtime(root, key.as_str(), &value);
+                Command::CreateSettingsBackup => {
+                    run_settings_backup(root);
+                    needs_redraw = true;
+                }
+                Command::ListSettingsBackups => {
+                    run_settings_backup_list(root);
+                    needs_redraw = true;
+                }
+                Command::RestoreLatestSettingsBackup => {
+                    run_settings_backup_restore_latest(root);
+                    needs_redraw = true;
+                }
+                Command::RestoreSettingsBackup(backup_id) => {
+                    run_settings_backup_restore_selected(root, backup_id.as_str());
+                    needs_redraw = true;
+                }
+                Command::CreateRecoveryBundle => {
+                    run_recovery_bundle_capture(root);
+                    needs_redraw = true;
+                }
+                Command::ExportRecoveryDiagnostics => {
+                    run_recovery_diagnostics_export(root);
+                    needs_redraw = true;
+                }
+                Command::RestoreRecoveryBundle => {
+                    run_recovery_bundle_restore(root);
+                    needs_redraw = true;
+                }
+                Command::SetEncryptionPassphrase(passphrase) => {
+                    let result = match bento_nano_backend::config_vault::Vault::global() {
+                        Some(mtx) => match mtx.lock() {
+                            Ok(mut vault) => {
+                                persist_passphrase_to_vault(&mut vault, passphrase.as_str())
+                            }
+                            Err(_poisoned) => {
+                                Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet)
+                            }
+                        },
+                        None => Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet),
+                    };
                     let app = root.app.borrow();
-                    if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
-                        if let bento_nano_app::SettingValue::Str(chord) = &value {
-                            set_keybinding_feedback(
-                                &app,
-                                action,
-                                SmolStr::new(format!("Saved {chord}")),
-                                false,
+                    match result {
+                        Ok(()) => {
+                            app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
+                            app.passphrase_unlock_required.set(false);
+                            app.settings_encryption_status.borrow_mut().replace(
+                                SettingsBackupStatus::Success(SmolStr::new_static(
+                                    "Passphrase verified",
+                                )),
                             );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "bentodesk::vault",
+                                error = %e,
+                                "SetEncryptionPassphrase failed"
+                            );
+                            app.settings_encryption_status.borrow_mut().replace(
+                                SettingsBackupStatus::Error(SmolStr::new(format!(
+                                    "Passphrase failed: {e}"
+                                ))),
+                            );
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                Command::UnlockEncryptionPassphrase(passphrase) => {
+                    let result = match bento_nano_backend::config_vault::Vault::global() {
+                        Some(mtx) => match mtx.lock() {
+                            Ok(mut vault) => {
+                                unlock_passphrase_vault(&mut vault, passphrase.as_str())
+                            }
+                            Err(_poisoned) => {
+                                Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet)
+                            }
+                        },
+                        None => Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet),
+                    };
+                    if result.is_ok() {
+                        apply_persisted_settings_from_vault(root);
+                    }
+                    let app = root.app.borrow();
+                    match result {
+                        Ok(()) => {
+                            app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
+                            app.passphrase_unlock_required.set(false);
+                            app.settings_encryption_status.borrow_mut().replace(
+                                SettingsBackupStatus::Success(SmolStr::new_static(
+                                    "Passphrase unlocked",
+                                )),
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "bentodesk::vault",
+                                error = %e,
+                                "UnlockEncryptionPassphrase failed"
+                            );
+                            app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
+                            app.passphrase_unlock_required.set(true);
+                            app.settings_encryption_status.borrow_mut().replace(
+                                SettingsBackupStatus::Error(SmolStr::new(format!(
+                                    "Passphrase unlock failed: {e}"
+                                ))),
+                            );
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                Command::CheckForUpdates => {
+                    {
+                        let app = root.app.borrow();
+                        *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Checking;
+                    }
+                    match root.updater.check() {
+                        Ok(Some(info)) => {
+                            let version = info.version.clone();
+                            let app = root.app.borrow();
+                            *app.settings_updater_status.borrow_mut() =
+                                SettingsUpdaterStatus::Available { version };
+                            log_static(
+                                format!(
+                                    "updater: CheckForUpdates available version={}\n",
+                                    info.version
+                                )
+                                .as_str(),
+                            );
+                        }
+                        Ok(None) => {
+                            let app = root.app.borrow();
+                            *app.settings_updater_status.borrow_mut() =
+                                SettingsUpdaterStatus::UpToDate {
+                                    current_version: bento_nano_backend::updater::pkg_version(),
+                                };
+                            log_static("updater: CheckForUpdates up-to-date\n");
+                        }
+                        Err(error) => {
+                            let app = root.app.borrow();
+                            set_update_error(&app, "Check failed", &error);
+                            log_static(
+                                format!("updater: CheckForUpdates failed error={error}\n").as_str(),
+                            );
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                Command::DownloadUpdate => {
+                    {
+                        let app = root.app.borrow();
+                        *app.settings_updater_status.borrow_mut() =
+                            SettingsUpdaterStatus::Downloading {
+                                chunk_len: 0,
+                                total_bytes: None,
+                            };
+                    }
+                    let result = root.updater.download();
+                    let _ = drain_updater_events(root);
+                    match result {
+                        Ok(()) => {
+                            let staged = root
+                                .updater
+                                .staged_artifact()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "<none>".to_owned());
+                            log_static(
+                                format!("updater: DownloadUpdate ready staged={staged}\n").as_str(),
+                            );
+                        }
+                        Err(error) => {
+                            let app = root.app.borrow();
+                            set_update_error(&app, "Download unavailable", &error);
+                            log_static(
+                                format!("updater: DownloadUpdate failed error={error}\n").as_str(),
+                            );
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                Command::InstallUpdateAndRestart => {
+                    let result = root.updater.install();
+                    let _ = drain_updater_events(root);
+                    match result {
+                        Ok(()) => {
+                            log_static("updater: InstallUpdateAndRestart launched installer\n");
+                            quit_after_drain = true;
+                        }
+                        Err(error) => {
+                            let app = root.app.borrow();
+                            set_update_error(&app, "Install unavailable", &error);
+                            log_static(
+                                format!("updater: InstallUpdateAndRestart failed error={error}\n")
+                                    .as_str(),
+                            );
+                        }
+                    }
+                    needs_redraw = true;
+                }
+                Command::SkipUpdateVersion(version) => {
+                    if version.as_str().is_empty() {
+                        let app = root.app.borrow();
+                        *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(
+                            SmolStr::new_static("No update version is available to skip"),
+                        );
+                    } else {
+                        root.updater.skip_version(version.clone());
+                        persist_skipped_update_to_vault(&version);
+                        let app = root.app.borrow();
+                        *app.settings_updater_status.borrow_mut() =
+                            SettingsUpdaterStatus::Skipped { version };
+                    }
+                    needs_redraw = true;
+                }
+                Command::AutoOrganize => {
+                    // Match the Tauri tray contract: explicit Auto Organize
+                    // opens the reviewable suggestor for a concrete target
+                    // Zone. It must not silently mint every suggestion at the
+                    // same origin.
+                    show_suggestor(root);
+                    needs_redraw = true;
+                }
+                Command::LoadIcon(path) => {
+                    if let Some(hash) = load_icon_hash_for_path(&path) {
+                        if apply_loaded_item_icon(root, &path, hash.as_str()) {
                             needs_redraw = true;
                         }
                     }
-                    if apply_setting_value_to_app(&app, key.as_str(), &value) || hotkey_changed {
+                }
+                Command::ApplyLoadedIcon { path, hash } => {
+                    if apply_loaded_item_icon(root, &path, hash.as_str()) {
                         needs_redraw = true;
                     }
                 }
-            }
-            Command::ResetKeybinding { action } => {
-                let Some(default_chord) = hotkey::default_chord_for_action(action.as_str()) else {
-                    let app = root.app.borrow();
-                    set_keybinding_feedback(
-                        &app,
-                        action.as_str(),
-                        SmolStr::new_static("Unsupported action"),
-                        true,
-                    );
-                    needs_redraw = true;
-                    continue;
-                };
-                if let Err(error) =
-                    validate_keybinding_candidate(root, action.as_str(), default_chord)
-                {
-                    let app = root.app.borrow();
-                    let message = match error {
-                        hotkey::BindingValidationError::UnsupportedActionOrChord => {
-                            SmolStr::new_static("Unsupported default")
-                        }
-                        hotkey::BindingValidationError::ChordAlreadyAssigned => {
-                            SmolStr::new_static("Default already in use")
-                        }
-                    };
-                    set_keybinding_feedback(&app, action.as_str(), message, true);
-                    needs_redraw = true;
-                    continue;
+                Command::OpenIconPicker { zone_id } => {
+                    // F2-07 — open the IconPicker aux HWND. Mirrors the F2-05
+                    // tooltip / F2-06 popover minimal-reachability shape:
+                    // construct the business descriptor (so `business::icon_picker`
+                    // is reachable from the production binary), lazy-spawn the
+                    // aux HWND via the F2-02 factory, then show with foreground
+                    // activation. The selection-result follow-up Command
+                    // (`SetZoneIcon`) belongs to the F3 wave.
+                    open_icon_picker(root, zone_id);
                 }
-                match bento_nano_backend::config_vault::Vault::global() {
-                    Some(mtx) => match mtx.lock() {
-                        Ok(mut vault) => {
-                            match persist_keybinding_reset_to_vault(&mut vault, action.as_str()) {
-                                Ok(true) => {
-                                    let _changed =
-                                        apply_hotkey_binding(root, action.as_str(), default_chord);
-                                    let app = root.app.borrow();
-                                    set_keybinding_feedback(
-                                        &app,
-                                        action.as_str(),
-                                        SmolStr::new(format!("Reset to {default_chord}")),
-                                        false,
-                                    );
-                                    needs_redraw = true;
-                                }
-                                Ok(false) => {
-                                    let app = root.app.borrow();
-                                    set_keybinding_feedback(
-                                        &app,
-                                        action.as_str(),
-                                        SmolStr::new_static("Unsupported action"),
-                                        true,
-                                    );
-                                    needs_redraw = true;
-                                }
-                                Err(error) => {
-                                    let app = root.app.borrow();
-                                    set_keybinding_feedback(
-                                        &app,
-                                        action.as_str(),
-                                        SmolStr::new(format!("Reset failed: {error}")),
-                                        true,
-                                    );
-                                    needs_redraw = true;
-                                }
+                Command::OpenPalettePicker { target } => {
+                    // F2-07 — open the palette picker aux HWND. f2-foundations
+                    // landed `WindowKind::PalettePicker` (Task #10) so the
+                    // dedicated 320× 240 chrome from `default_size` is honoured.
+                    // Follow-up Command (`SetZoneAccent` / `SetThemeBase`) is F3.
+                    open_palette_picker(root, target);
+                }
+                Command::OpenCapsulePicker => {
+                    // Open the Context Capsule browser aux HWND. The selected-stack
+                    // port now backs it with real zones.bin snapshots under the
+                    // appdata sibling `capsules/` directory.
+                    open_capsule_picker(root);
+                }
+                Command::CaptureCapsule(name) => {
+                    match capture_context_capsule(root, name.as_str()) {
+                        Ok(entry) => {
+                            clear_context_capsule_picker_error(root);
+                            log_static(
+                                format!(
+                                    "capsule: CaptureCapsule id={} name={}\n",
+                                    entry.id, entry.name
+                                )
+                                .as_str(),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::capsules",
+                                error = %error,
+                                "CaptureCapsule failed"
+                            );
+                            set_context_capsule_picker_error(
+                                root,
+                                SmolStr::new(format!("Capture failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::RestoreCapsule(capsule_id) => {
+                    match restore_context_capsule(root, capsule_id.as_str()) {
+                        Ok(restored_count) => {
+                            clear_context_capsule_picker_error(root);
+                            log_static(
+                                format!(
+                                    "capsule: RestoreCapsule id={} zones={}\n",
+                                    capsule_id, restored_count
+                                )
+                                .as_str(),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::capsules",
+                                error = %error,
+                                "RestoreCapsule failed"
+                            );
+                            set_context_capsule_picker_error(
+                                root,
+                                SmolStr::new(format!("Restore failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
+                        request_redraw(target);
+                    }
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::DeleteCapsule(capsule_id) => {
+                    match delete_context_capsule(root, capsule_id.as_str()) {
+                        Ok(()) => {
+                            clear_context_capsule_picker_error(root);
+                            log_static(
+                                format!("capsule: DeleteCapsule id={capsule_id}\n").as_str(),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::capsules",
+                                error = %error,
+                                "DeleteCapsule failed"
+                            );
+                            set_context_capsule_picker_error(
+                                root,
+                                SmolStr::new(format!("Delete failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::OpenTimeline => {
+                    open_timeline(root);
+                }
+                Command::OpenSnapshotPicker => {
+                    open_snapshot_picker(root);
+                }
+                Command::SaveSnapshot { name } => {
+                    match save_layout_snapshot(root, name) {
+                        Ok(snapshot) => tracing::info!(
+                            target: "bentodesk::snapshot",
+                            snapshot_id = %snapshot.id,
+                            "SaveSnapshot persisted selected-stack layout snapshot"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::snapshot",
+                                error = %error,
+                                "SaveSnapshot failed"
+                            );
+                            set_snapshot_picker_error(
+                                root,
+                                SmolStr::new(format!("Save failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::LoadSnapshot(snapshot_id) => {
+                    match load_layout_snapshot(root, snapshot_id.as_str()) {
+                        Ok(snapshot) => tracing::info!(
+                            target: "bentodesk::snapshot",
+                            snapshot_id = %snapshot.id,
+                            "LoadSnapshot applied selected-stack layout"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::snapshot",
+                                snapshot_id = %snapshot_id,
+                                error = %error,
+                                "LoadSnapshot failed"
+                            );
+                            set_snapshot_picker_error(
+                                root,
+                                SmolStr::new(format!("Load failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
+                        request_redraw(target);
+                    }
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::DeleteSnapshot(snapshot_id) => {
+                    match delete_layout_snapshot(root, snapshot_id.as_str()) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::snapshot",
+                                snapshot_id = %snapshot_id,
+                                error = %error,
+                                "DeleteSnapshot failed"
+                            );
+                            set_snapshot_picker_error(
+                                root,
+                                SmolStr::new(format!("Delete failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::SaveCheckpoint { id, label } => {
+                    match save_timeline_checkpoint(root, id, label) {
+                        Ok(checkpoint) => tracing::info!(
+                            target: "bentodesk::timeline",
+                            checkpoint_id = %checkpoint.id,
+                            pinned = checkpoint.pinned,
+                            "SaveCheckpoint persisted selected-stack checkpoint"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::timeline",
+                                error = %error,
+                                "SaveCheckpoint failed"
+                            );
+                            set_timeline_error(root, SmolStr::new(format!("Save failed: {error}")));
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::RestoreCheckpoint(checkpoint_id) => {
+                    match restore_timeline_checkpoint(root, checkpoint_id.as_str()) {
+                        Ok(restored_id) => tracing::info!(
+                            target: "bentodesk::timeline",
+                            checkpoint_id = %restored_id,
+                            "RestoreCheckpoint applied selected-stack layout"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::timeline",
+                                checkpoint_id = %checkpoint_id,
+                                error = %error,
+                                "RestoreCheckpoint failed"
+                            );
+                            set_timeline_error(
+                                root,
+                                SmolStr::new(format!("Restore failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
+                        request_redraw(target);
+                    }
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::UndoCheckpoint => {
+                    match undo_timeline_checkpoint(root) {
+                        Ok(Some(checkpoint_id)) => tracing::info!(
+                            target: "bentodesk::timeline",
+                            checkpoint_id = %checkpoint_id,
+                            "UndoCheckpoint applied selected-stack layout"
+                        ),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::timeline",
+                                error = %error,
+                                "UndoCheckpoint failed"
+                            );
+                            set_timeline_error(root, SmolStr::new(format!("Undo failed: {error}")));
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
+                        request_redraw(target);
+                    }
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::RedoCheckpoint => {
+                    match redo_timeline_checkpoint(root) {
+                        Ok(Some(checkpoint_id)) => tracing::info!(
+                            target: "bentodesk::timeline",
+                            checkpoint_id = %checkpoint_id,
+                            "RedoCheckpoint applied selected-stack layout"
+                        ),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::timeline",
+                                error = %error,
+                                "RedoCheckpoint failed"
+                            );
+                            set_timeline_error(root, SmolStr::new(format!("Redo failed: {error}")));
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
+                        request_redraw(target);
+                    }
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::DeleteCheckpoint(checkpoint_id) => {
+                    match delete_timeline_checkpoint(root, checkpoint_id.as_str()) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::timeline",
+                                checkpoint_id = %checkpoint_id,
+                                error = %error,
+                                "DeleteCheckpoint failed"
+                            );
+                            set_timeline_error(
+                                root,
+                                SmolStr::new(format!("Delete failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::OpenRulesWizard => {
+                    // F2-08 — open the multi-step rules wizard aux HWND
+                    // (`business::rules_wizard`). Save/finish emits a follow-up
+                    // F3 `AddRule` / `UpdateRule` Command (deferred to F3).
+                    open_rules_wizard(root);
+                }
+                Command::SaveRule(rule) => {
+                    match persist_rule_for_wizard(root, *rule) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::rules",
+                                error = %error,
+                                "SaveRule failed"
+                            );
+                            set_rules_wizard_error(
+                                root,
+                                SmolStr::new(format!("Save failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::DeleteRule(rule_id) => {
+                    match delete_rule_for_wizard(root, rule_id.as_str()) {
+                        Ok(()) => {
+                            clear_rules_wizard_delete_confirmation(root);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::rules",
+                                rule_id = %rule_id,
+                                error = %error,
+                                "DeleteRule failed"
+                            );
+                            set_rules_wizard_error(
+                                root,
+                                SmolStr::new(format!("Delete failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::PreviewRuleHits(rule) => {
+                    match preview_rule_for_wizard(root, &rule) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::rules",
+                                error = %error,
+                                "PreviewRuleHits failed"
+                            );
+                            set_rules_wizard_error(
+                                root,
+                                SmolStr::new(format!("Preview failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::RunRuleNow(rule_id) => {
+                    match run_rule_now_for_wizard(root, &rule_id) {
+                        Ok(report) => tracing::info!(
+                            target: "bentodesk::rules",
+                            rule_id = %rule_id,
+                            matched = report.matched,
+                            actions = report.actions_taken.len(),
+                            errors = report.errors.len(),
+                            "RunRuleNow applied selected-stack execution plan"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bentodesk::rules",
+                                rule_id = %rule_id,
+                                error = %error,
+                                "RunRuleNow failed"
+                            );
+                            set_rules_wizard_error(
+                                root,
+                                SmolStr::new(format!("Run failed: {error}")),
+                            );
+                        }
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::OpenBulkManager => {
+                    // F2-08 — open the bulk-action manager aux HWND
+                    // (`business::bulk_manager_panel`). The selected-stack
+                    // keyboard path now emits bulk hide/show/delete/move commands.
+                    open_bulk_manager(root);
+                }
+                Command::BulkDeleteZones(ids) => {
+                    let before_snapshot =
+                        capture_current_timeline_snapshot(root, "before bulk delete");
+                    let coalesce_scope = sorted_zone_ids_key(&ids);
+                    let mut removed = 0usize;
+                    {
+                        let mut app = root.app.borrow_mut();
+                        for id in &ids {
+                            if app.zones.remove(*id) {
+                                removed += 1;
                             }
                         }
-                        Err(_poisoned) => {
-                            let app = root.app.borrow();
-                            set_keybinding_feedback(
-                                &app,
-                                action.as_str(),
-                                SmolStr::new_static("Vault lock failed"),
-                                true,
-                            );
-                            needs_redraw = true;
+                        if removed > 0 {
+                            app.mark_dirty();
                         }
-                    },
-                    None => {
-                        let app = root.app.borrow();
-                        set_keybinding_feedback(
-                            &app,
-                            action.as_str(),
-                            SmolStr::new_static("Vault unavailable"),
-                            true,
-                        );
-                        needs_redraw = true;
-                    }
-                }
-            }
-            Command::CreateSettingsBackup => {
-                run_settings_backup(root);
-                needs_redraw = true;
-            }
-            Command::ListSettingsBackups => {
-                run_settings_backup_list(root);
-                needs_redraw = true;
-            }
-            Command::RestoreLatestSettingsBackup => {
-                run_settings_backup_restore_latest(root);
-                needs_redraw = true;
-            }
-            Command::RestoreSettingsBackup(backup_id) => {
-                run_settings_backup_restore_selected(root, backup_id.as_str());
-                needs_redraw = true;
-            }
-            Command::CreateRecoveryBundle => {
-                run_recovery_bundle_capture(root);
-                needs_redraw = true;
-            }
-            Command::ExportRecoveryDiagnostics => {
-                run_recovery_diagnostics_export(root);
-                needs_redraw = true;
-            }
-            Command::RestoreRecoveryBundle => {
-                run_recovery_bundle_restore(root);
-                needs_redraw = true;
-            }
-            Command::SetEncryptionPassphrase(passphrase) => {
-                let result = match bento_nano_backend::config_vault::Vault::global() {
-                    Some(mtx) => match mtx.lock() {
-                        Ok(mut vault) => {
-                            persist_passphrase_to_vault(&mut vault, passphrase.as_str())
-                        }
-                        Err(_poisoned) => {
-                            Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet)
-                        }
-                    },
-                    None => Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet),
-                };
-                let app = root.app.borrow();
-                match result {
-                    Ok(()) => {
-                        app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
-                        app.passphrase_unlock_required.set(false);
-                        app.settings_encryption_status.borrow_mut().replace(
-                            SettingsBackupStatus::Success(SmolStr::new_static(
-                                "Passphrase verified",
-                            )),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "bentodesk::vault",
-                            error = %e,
-                            "SetEncryptionPassphrase failed"
-                        );
-                        app.settings_encryption_status.borrow_mut().replace(
-                            SettingsBackupStatus::Error(SmolStr::new(format!(
-                                "Passphrase failed: {e}"
-                            ))),
-                        );
-                    }
-                }
-                needs_redraw = true;
-            }
-            Command::UnlockEncryptionPassphrase(passphrase) => {
-                let result = match bento_nano_backend::config_vault::Vault::global() {
-                    Some(mtx) => match mtx.lock() {
-                        Ok(mut vault) => unlock_passphrase_vault(&mut vault, passphrase.as_str()),
-                        Err(_poisoned) => {
-                            Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet)
-                        }
-                    },
-                    None => Err(bento_nano_backend::config_vault::VaultError::NoPassphraseSet),
-                };
-                if result.is_ok() {
-                    apply_persisted_settings_from_vault(root);
-                }
-                let app = root.app.borrow();
-                match result {
-                    Ok(()) => {
-                        app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
-                        app.passphrase_unlock_required.set(false);
-                        app.settings_encryption_status.borrow_mut().replace(
-                            SettingsBackupStatus::Success(SmolStr::new_static(
-                                "Passphrase unlocked",
-                            )),
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "bentodesk::vault",
-                            error = %e,
-                            "UnlockEncryptionPassphrase failed"
-                        );
-                        app.encryption_mode.set(SettingsEncryptionMode::Passphrase);
-                        app.passphrase_unlock_required.set(true);
-                        app.settings_encryption_status.borrow_mut().replace(
-                            SettingsBackupStatus::Error(SmolStr::new(format!(
-                                "Passphrase unlock failed: {e}"
-                            ))),
-                        );
-                    }
-                }
-                needs_redraw = true;
-            }
-            Command::CheckForUpdates => {
-                {
-                    let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Checking;
-                }
-                match root.updater.check() {
-                    Ok(Some(info)) => {
-                        let version = info.version.clone();
-                        let app = root.app.borrow();
-                        *app.settings_updater_status.borrow_mut() =
-                            SettingsUpdaterStatus::Available { version };
-                        log_static(
-                            format!(
-                                "updater: CheckForUpdates available version={}\n",
-                                info.version
-                            )
-                            .as_str(),
-                        );
-                    }
-                    Ok(None) => {
-                        let app = root.app.borrow();
-                        *app.settings_updater_status.borrow_mut() =
-                            SettingsUpdaterStatus::UpToDate {
-                                current_version: bento_nano_backend::updater::pkg_version(),
+                        let status =
+                            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                format!("已删除 {removed} 个区域")
+                            } else {
+                                format!("Deleted {removed} zones")
                             };
-                        log_static("updater: CheckForUpdates up-to-date\n");
+                        app.bulk_manager_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        let rows = bulk_manager_rows_from_app(&app);
+                        app.bulk_manager.borrow_mut().set_zones(rows);
                     }
-                    Err(error) => {
-                        let app = root.app.borrow();
-                        set_update_error(&app, "Check failed", &error);
-                        log_static(
-                            format!("updater: CheckForUpdates failed error={error}\n").as_str(),
-                        );
-                    }
-                }
-                needs_redraw = true;
-            }
-            Command::DownloadUpdate => {
-                {
-                    let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() =
-                        SettingsUpdaterStatus::Downloading {
-                            chunk_len: 0,
-                            total_bytes: None,
-                        };
-                }
-                let result = root.updater.download();
-                let _ = drain_updater_events(root);
-                match result {
-                    Ok(()) => {
-                        let staged = root
-                            .updater
-                            .staged_artifact()
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "<none>".to_owned());
-                        log_static(
-                            format!("updater: DownloadUpdate ready staged={staged}\n").as_str(),
-                        );
-                    }
-                    Err(error) => {
-                        let app = root.app.borrow();
-                        set_update_error(&app, "Download unavailable", &error);
-                        log_static(
-                            format!("updater: DownloadUpdate failed error={error}\n").as_str(),
-                        );
-                    }
-                }
-                needs_redraw = true;
-            }
-            Command::InstallUpdateAndRestart => {
-                let result = root.updater.install();
-                let _ = drain_updater_events(root);
-                match result {
-                    Ok(()) => {
-                        log_static("updater: InstallUpdateAndRestart launched installer\n");
-                        quit_after_drain = true;
-                    }
-                    Err(error) => {
-                        let app = root.app.borrow();
-                        set_update_error(&app, "Install unavailable", &error);
-                        log_static(
-                            format!("updater: InstallUpdateAndRestart failed error={error}\n")
-                                .as_str(),
-                        );
-                    }
-                }
-                needs_redraw = true;
-            }
-            Command::SkipUpdateVersion(version) => {
-                if version.as_str().is_empty() {
-                    let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Error(
-                        SmolStr::new_static("No update version is available to skip"),
-                    );
-                } else {
-                    root.updater.skip_version(version.clone());
-                    persist_skipped_update_to_vault(&version);
-                    let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() =
-                        SettingsUpdaterStatus::Skipped { version };
-                }
-                needs_redraw = true;
-            }
-            Command::AutoOrganize => {
-                if auto_organize_desktop(root) {
-                    needs_redraw = true;
-                }
-            }
-            Command::LoadIcon(path) => {
-                if let Some(hash) = load_icon_hash_for_path(&path) {
-                    let mut app = root.app.borrow_mut();
-                    let mut changed = false;
-                    let path_str = path.0.as_str();
-                    let zone_ids: Vec<_> = app.zones.iter().map(|zone| zone.id).collect();
-                    for zone_id in zone_ids {
-                        if app.zones.set_item_icon_hash(
-                            zone_id,
-                            path_str,
-                            std::borrow::Cow::Owned(hash.clone()),
-                        ) {
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        app.mark_dirty();
-                        needs_redraw = true;
-                    }
-                }
-            }
-            Command::OpenIconPicker { zone_id } => {
-                // F2-07 — open the IconPicker aux HWND. Mirrors the F2-05
-                // tooltip / F2-06 popover minimal-reachability shape:
-                // construct the business descriptor (so `business::icon_picker`
-                // is reachable from the production binary), lazy-spawn the
-                // aux HWND via the F2-02 factory, then show with foreground
-                // activation. The selection-result follow-up Command
-                // (`SetZoneIcon`) belongs to the F3 wave.
-                open_icon_picker(root, zone_id);
-            }
-            Command::OpenPalettePicker { target } => {
-                // F2-07 — open the palette picker aux HWND. f2-foundations
-                // landed `WindowKind::PalettePicker` (Task #10) so the
-                // dedicated 320×240 chrome from `default_size` is honoured.
-                // Follow-up Command (`SetZoneAccent` / `SetThemeBase`) is F3.
-                open_palette_picker(root, target);
-            }
-            Command::OpenCapsulePicker => {
-                // Open the Context Capsule browser aux HWND. The selected-stack
-                // port now backs it with real zones.bin snapshots under the
-                // appdata sibling `capsules/` directory.
-                open_capsule_picker(root);
-            }
-            Command::CaptureCapsule(name) => {
-                match capture_context_capsule(root, name.as_str()) {
-                    Ok(entry) => {
-                        clear_context_capsule_picker_error(root);
-                        log_static(
-                            format!(
-                                "capsule: CaptureCapsule id={} name={}\n",
-                                entry.id, entry.name
-                            )
-                            .as_str(),
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::capsules",
-                            error = %error,
-                            "CaptureCapsule failed"
-                        );
-                        set_context_capsule_picker_error(
-                            root,
-                            SmolStr::new(format!("Capture failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::RestoreCapsule(capsule_id) => {
-                match restore_context_capsule(root, capsule_id.as_str()) {
-                    Ok(restored_count) => {
-                        clear_context_capsule_picker_error(root);
-                        log_static(
-                            format!(
-                                "capsule: RestoreCapsule id={} zones={}\n",
-                                capsule_id, restored_count
-                            )
-                            .as_str(),
-                        );
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::capsules",
-                            error = %error,
-                            "RestoreCapsule failed"
-                        );
-                        set_context_capsule_picker_error(
-                            root,
-                            SmolStr::new(format!("Restore failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
-                    request_redraw(target);
-                }
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::DeleteCapsule(capsule_id) => {
-                match delete_context_capsule(root, capsule_id.as_str()) {
-                    Ok(()) => {
-                        clear_context_capsule_picker_error(root);
-                        log_static(format!("capsule: DeleteCapsule id={capsule_id}\n").as_str());
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::capsules",
-                            error = %error,
-                            "DeleteCapsule failed"
-                        );
-                        set_context_capsule_picker_error(
-                            root,
-                            SmolStr::new(format!("Delete failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::CapsulePicker) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::OpenTimeline => {
-                open_timeline(root);
-            }
-            Command::OpenSnapshotPicker => {
-                open_snapshot_picker(root);
-            }
-            Command::SaveSnapshot { name } => {
-                match save_layout_snapshot(root, name) {
-                    Ok(snapshot) => tracing::info!(
-                        target: "bentodesk::snapshot",
-                        snapshot_id = %snapshot.id,
-                        "SaveSnapshot persisted selected-stack layout snapshot"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::snapshot",
-                            error = %error,
-                            "SaveSnapshot failed"
-                        );
-                        set_snapshot_picker_error(
-                            root,
-                            SmolStr::new(format!("Save failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::LoadSnapshot(snapshot_id) => {
-                match load_layout_snapshot(root, snapshot_id.as_str()) {
-                    Ok(snapshot) => tracing::info!(
-                        target: "bentodesk::snapshot",
-                        snapshot_id = %snapshot.id,
-                        "LoadSnapshot applied selected-stack layout"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::snapshot",
-                            snapshot_id = %snapshot_id,
-                            error = %error,
-                            "LoadSnapshot failed"
-                        );
-                        set_snapshot_picker_error(
-                            root,
-                            SmolStr::new(format!("Load failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
-                    request_redraw(target);
-                }
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::DeleteSnapshot(snapshot_id) => {
-                match delete_layout_snapshot(root, snapshot_id.as_str()) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::snapshot",
-                            snapshot_id = %snapshot_id,
-                            error = %error,
-                            "DeleteSnapshot failed"
-                        );
-                        set_snapshot_picker_error(
-                            root,
-                            SmolStr::new(format!("Delete failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::SnapshotPicker) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::SaveCheckpoint { id, label } => {
-                match save_timeline_checkpoint(root, id, label) {
-                    Ok(checkpoint) => tracing::info!(
-                        target: "bentodesk::timeline",
-                        checkpoint_id = %checkpoint.id,
-                        pinned = checkpoint.pinned,
-                        "SaveCheckpoint persisted selected-stack checkpoint"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::timeline",
-                            error = %error,
-                            "SaveCheckpoint failed"
-                        );
-                        set_timeline_error(root, SmolStr::new(format!("Save failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::RestoreCheckpoint(checkpoint_id) => {
-                match restore_timeline_checkpoint(root, checkpoint_id.as_str()) {
-                    Ok(restored_id) => tracing::info!(
-                        target: "bentodesk::timeline",
-                        checkpoint_id = %restored_id,
-                        "RestoreCheckpoint applied selected-stack layout"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::timeline",
-                            checkpoint_id = %checkpoint_id,
-                            error = %error,
-                            "RestoreCheckpoint failed"
-                        );
-                        set_timeline_error(root, SmolStr::new(format!("Restore failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
-                    request_redraw(target);
-                }
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::UndoCheckpoint => {
-                match undo_timeline_checkpoint(root) {
-                    Ok(Some(checkpoint_id)) => tracing::info!(
-                        target: "bentodesk::timeline",
-                        checkpoint_id = %checkpoint_id,
-                        "UndoCheckpoint applied selected-stack layout"
-                    ),
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::timeline",
-                            error = %error,
-                            "UndoCheckpoint failed"
-                        );
-                        set_timeline_error(root, SmolStr::new(format!("Undo failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
-                    request_redraw(target);
-                }
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::RedoCheckpoint => {
-                match redo_timeline_checkpoint(root) {
-                    Ok(Some(checkpoint_id)) => tracing::info!(
-                        target: "bentodesk::timeline",
-                        checkpoint_id = %checkpoint_id,
-                        "RedoCheckpoint applied selected-stack layout"
-                    ),
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::timeline",
-                            error = %error,
-                            "RedoCheckpoint failed"
-                        );
-                        set_timeline_error(root, SmolStr::new(format!("Redo failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
-                    request_redraw(target);
-                }
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::DeleteCheckpoint(checkpoint_id) => {
-                match delete_timeline_checkpoint(root, checkpoint_id.as_str()) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::timeline",
-                            checkpoint_id = %checkpoint_id,
-                            error = %error,
-                            "DeleteCheckpoint failed"
-                        );
-                        set_timeline_error(root, SmolStr::new(format!("Delete failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::Timeline) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::OpenRulesWizard => {
-                // F2-08 — open the multi-step rules wizard aux HWND
-                // (`business::rules_wizard`). Save/finish emits a follow-up
-                // F3 `AddRule` / `UpdateRule` Command (deferred to F3).
-                open_rules_wizard(root);
-            }
-            Command::SaveRule(rule) => {
-                match persist_rule_for_wizard(root, *rule) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::rules",
-                            error = %error,
-                            "SaveRule failed"
-                        );
-                        set_rules_wizard_error(root, SmolStr::new(format!("Save failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::DeleteRule(rule_id) => {
-                match delete_rule_for_wizard(root, rule_id.as_str()) {
-                    Ok(()) => {
-                        clear_rules_wizard_delete_confirmation(root);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::rules",
-                            rule_id = %rule_id,
-                            error = %error,
-                            "DeleteRule failed"
-                        );
-                        set_rules_wizard_error(
-                            root,
-                            SmolStr::new(format!("Delete failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::PreviewRuleHits(rule) => {
-                match preview_rule_for_wizard(root, &rule) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::rules",
-                            error = %error,
-                            "PreviewRuleHits failed"
-                        );
-                        set_rules_wizard_error(
-                            root,
-                            SmolStr::new(format!("Preview failed: {error}")),
-                        );
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::RunRuleNow(rule_id) => {
-                match run_rule_now_for_wizard(root, &rule_id) {
-                    Ok(report) => tracing::info!(
-                        target: "bentodesk::rules",
-                        rule_id = %rule_id,
-                        matched = report.matched,
-                        actions = report.actions_taken.len(),
-                        errors = report.errors.len(),
-                        "RunRuleNow applied selected-stack execution plan"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "bentodesk::rules",
-                            rule_id = %rule_id,
-                            error = %error,
-                            "RunRuleNow failed"
-                        );
-                        set_rules_wizard_error(root, SmolStr::new(format!("Run failed: {error}")));
-                    }
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::RulesWizard) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::OpenBulkManager => {
-                // F2-08 — open the bulk-action manager aux HWND
-                // (`business::bulk_manager_panel`). The selected-stack
-                // keyboard path now emits bulk hide/show/delete/move commands.
-                open_bulk_manager(root);
-            }
-            Command::BulkDeleteZones(ids) => {
-                let before_snapshot = capture_current_timeline_snapshot(root, "before bulk delete");
-                let coalesce_scope = sorted_zone_ids_key(&ids);
-                let mut removed = 0usize;
-                {
-                    let mut app = root.app.borrow_mut();
-                    for id in &ids {
-                        if app.zones.remove(*id) {
-                            removed += 1;
-                        }
+                    if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
+                        request_redraw(target);
                     }
                     if removed > 0 {
-                        app.mark_dirty();
+                        record_coalesced_mutation_timeline_pair(
+                            root,
+                            before_snapshot,
+                            "bulk_pre_apply",
+                            "bulk_delete_zones",
+                            &coalesce_scope,
+                            "Bulk delete checkpointed",
+                        );
                     }
-                    app.bulk_manager_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!("Deleted {removed} zones")));
-                    let rows = bulk_manager_rows_from_app(&app);
-                    app.bulk_manager.borrow_mut().set_zones(rows);
+                    log_static(format!("bulk: BulkDeleteZones removed={removed}\n").as_str());
+                    needs_redraw = true;
                 }
-                if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
-                    request_redraw(target);
-                }
-                if removed > 0 {
-                    record_coalesced_mutation_timeline_pair(
-                        root,
-                        before_snapshot,
-                        "bulk_pre_apply",
-                        "bulk_delete_zones",
-                        &coalesce_scope,
-                        "Bulk delete checkpointed",
-                    );
-                }
-                needs_redraw = true;
-            }
-            Command::BulkSetZonesVisible { ids, visible } => {
-                let before_snapshot =
-                    capture_current_timeline_snapshot(root, "before bulk visibility");
-                let coalesce_scope = format!("visible={visible}:ids={}", sorted_zone_ids_key(&ids));
-                let changed;
-                let matched;
-                {
-                    let mut app = root.app.borrow_mut();
-                    (changed, matched) = apply_bulk_zone_visibility(&mut app, &ids, visible);
-                    if changed > 0 {
-                        app.mark_dirty();
-                    }
-                    let action = if visible { "Shown" } else { "Hidden" };
-                    app.bulk_manager_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "{action} {changed} zones ({matched} matched)"
-                        )));
-                    let rows = bulk_manager_rows_from_app(&app);
-                    app.bulk_manager.borrow_mut().set_zones(rows);
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
-                    request_redraw(target);
-                }
-                if changed > 0 {
-                    record_coalesced_mutation_timeline_pair(
-                        root,
-                        before_snapshot,
-                        "bulk_pre_apply",
-                        "bulk_set_zones_visible",
-                        &coalesce_scope,
-                        "Bulk visibility checkpointed",
-                    );
-                }
-                needs_redraw = true;
-            }
-            Command::BulkApplyLayout { ids, algorithm } => {
-                let before_snapshot = capture_current_timeline_snapshot(root, "before bulk layout");
-                let coalesce_scope = format!(
-                    "algorithm={}:ids={}",
-                    algorithm.wire(),
-                    sorted_zone_ids_key(&ids)
-                );
-                let changed;
-                let matched;
-                {
-                    let mut app = root.app.borrow_mut();
-                    (changed, matched) = apply_bulk_layout_algorithm(&mut app, &ids, algorithm);
-                    if changed > 0 {
-                        app.mark_dirty();
-                    }
-                    app.bulk_manager_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "Applied {} layout to {changed} zones ({matched} matched)",
-                            algorithm.wire()
-                        )));
-                    let rows = bulk_manager_rows_from_app(&app);
-                    app.bulk_manager.borrow_mut().set_zones(rows);
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
-                    request_redraw(target);
-                }
-                if changed > 0 {
-                    record_coalesced_mutation_timeline_pair(
-                        root,
-                        before_snapshot,
-                        "bulk_pre_apply",
-                        "apply_layout_algorithm",
-                        &coalesce_scope,
-                        "Bulk layout checkpointed",
-                    );
-                }
-                needs_redraw = true;
-            }
-            Command::BulkUpdateZones(updates) => {
-                let before_snapshot = capture_current_timeline_snapshot(root, "before bulk update");
-                let update_ids = updates.iter().map(|update| update.id).collect::<Vec<_>>();
-                let coalesce_scope = sorted_zone_ids_key(&update_ids);
-                let changed;
-                let matched;
-                {
-                    let mut app = root.app.borrow_mut();
-                    (changed, matched) = apply_bulk_zone_updates(&mut app, &updates);
-                    if changed > 0 {
-                        app.mark_dirty();
-                    }
-                    app.bulk_manager_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "Updated {changed} zones ({matched} matched)"
-                        )));
-                    let rows = bulk_manager_rows_from_app(&app);
-                    app.bulk_manager.borrow_mut().set_zones(rows);
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
-                    request_redraw(target);
-                }
-                if changed > 0 {
-                    record_coalesced_mutation_timeline_pair(
-                        root,
-                        before_snapshot,
-                        "bulk_pre_apply",
-                        "bulk_update_zones",
-                        &coalesce_scope,
-                        "Bulk update checkpointed",
-                    );
-                }
-                needs_redraw = true;
-            }
-            Command::BulkMoveZones { ids, delta } => {
-                let before_snapshot = capture_current_timeline_snapshot(root, "before bulk move");
-                let coalesce_scope = format!(
-                    "dx={}:dy={}:ids={}",
-                    delta.x,
-                    delta.y,
-                    sorted_zone_ids_key(&ids)
-                );
-                let mut moved = 0usize;
-                {
-                    let mut app = root.app.borrow_mut();
-                    for id in &ids {
-                        if let Some(zone) = app.zones.get_mut(*id) {
-                            if zone.locked {
-                                continue;
-                            }
-                            zone.x = zone.x.saturating_add(delta.x);
-                            zone.y = zone.y.saturating_add(delta.y);
-                            moved += 1;
+                Command::BulkSetZonesVisible { ids, visible } => {
+                    let before_snapshot =
+                        capture_current_timeline_snapshot(root, "before bulk visibility");
+                    let coalesce_scope =
+                        format!("visible={visible}:ids={}", sorted_zone_ids_key(&ids));
+                    let changed;
+                    let matched;
+                    {
+                        let mut app = root.app.borrow_mut();
+                        (changed, matched) = apply_bulk_zone_visibility(&mut app, &ids, visible);
+                        if changed > 0 {
+                            app.mark_dirty();
                         }
+                        let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
+                        let status = if zh {
+                            let action = if visible { "显示" } else { "隐藏" };
+                            format!("已{action} {changed} 个区域（匹配 {matched} 个）")
+                        } else {
+                            let action = if visible { "Shown" } else { "Hidden" };
+                            format!("{action} {changed} zones ({matched} matched)")
+                        };
+                        app.bulk_manager_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        let rows = bulk_manager_rows_from_app(&app);
+                        app.bulk_manager.borrow_mut().set_zones(rows);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
+                        request_redraw(target);
+                    }
+                    if changed > 0 {
+                        record_coalesced_mutation_timeline_pair(
+                            root,
+                            before_snapshot,
+                            "bulk_pre_apply",
+                            "bulk_set_zones_visible",
+                            &coalesce_scope,
+                            "Bulk visibility checkpointed",
+                        );
+                    }
+                    log_static(
+                        format!(
+                            "bulk: BulkSetZonesVisible visible={visible} changed={changed} matched={matched}\n"
+                        )
+                        .as_str(),
+                    );
+                    needs_redraw = true;
+                }
+                Command::BulkApplyLayout { ids, algorithm } => {
+                    let before_snapshot =
+                        capture_current_timeline_snapshot(root, "before bulk layout");
+                    let coalesce_scope = format!(
+                        "algorithm={}:ids={}",
+                        algorithm.wire(),
+                        sorted_zone_ids_key(&ids)
+                    );
+                    let changed;
+                    let matched;
+                    {
+                        let mut app = root.app.borrow_mut();
+                        (changed, matched) = apply_bulk_layout_algorithm(&mut app, &ids, algorithm);
+                        if changed > 0 {
+                            app.mark_dirty();
+                        }
+                        let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
+                        let layout = bulk_layout_algorithm_text(algorithm, zh);
+                        let status = if zh {
+                            format!("已对 {changed} 个区域应用{layout}布局（匹配 {matched} 个）")
+                        } else {
+                            format!(
+                                "Applied {layout} layout to {changed} zones ({matched} matched)"
+                            )
+                        };
+                        app.bulk_manager_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        let rows = bulk_manager_rows_from_app(&app);
+                        app.bulk_manager.borrow_mut().set_zones(rows);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
+                        request_redraw(target);
+                    }
+                    if changed > 0 {
+                        record_coalesced_mutation_timeline_pair(
+                            root,
+                            before_snapshot,
+                            "bulk_pre_apply",
+                            "apply_layout_algorithm",
+                            &coalesce_scope,
+                            "Bulk layout checkpointed",
+                        );
+                    }
+                    log_static(
+                        format!(
+                            "bulk: BulkApplyLayout algorithm={} changed={changed} matched={matched}\n",
+                            algorithm.wire()
+                        )
+                        .as_str(),
+                    );
+                    needs_redraw = true;
+                }
+                Command::BulkUpdateZones(updates) => {
+                    let before_snapshot =
+                        capture_current_timeline_snapshot(root, "before bulk update");
+                    let update_ids = updates.iter().map(|update| update.id).collect::<Vec<_>>();
+                    let coalesce_scope = sorted_zone_ids_key(&update_ids);
+                    let changed;
+                    let matched;
+                    {
+                        let mut app = root.app.borrow_mut();
+                        (changed, matched) = apply_bulk_zone_updates(&mut app, &updates);
+                        if changed > 0 {
+                            app.mark_dirty();
+                        }
+                        let status =
+                            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                format!("已更新 {changed} 个区域（匹配 {matched} 个）")
+                            } else {
+                                format!("Updated {changed} zones ({matched} matched)")
+                            };
+                        app.bulk_manager_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        let rows = bulk_manager_rows_from_app(&app);
+                        app.bulk_manager.borrow_mut().set_zones(rows);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
+                        request_redraw(target);
+                    }
+                    if changed > 0 {
+                        record_coalesced_mutation_timeline_pair(
+                            root,
+                            before_snapshot,
+                            "bulk_pre_apply",
+                            "bulk_update_zones",
+                            &coalesce_scope,
+                            "Bulk update checkpointed",
+                        );
+                    }
+                    log_static(
+                        format!("bulk: BulkUpdateZones changed={changed} matched={matched}\n")
+                            .as_str(),
+                    );
+                    needs_redraw = true;
+                }
+                Command::BulkMoveZones { ids, delta } => {
+                    let before_snapshot =
+                        capture_current_timeline_snapshot(root, "before bulk move");
+                    let coalesce_scope = format!(
+                        "dx={}:dy={}:ids={}",
+                        delta.x,
+                        delta.y,
+                        sorted_zone_ids_key(&ids)
+                    );
+                    let mut moved = 0usize;
+                    {
+                        let mut app = root.app.borrow_mut();
+                        for id in &ids {
+                            if let Some(zone) = app.zones.get_mut(*id) {
+                                if zone.locked {
+                                    continue;
+                                }
+                                zone.x = zone.x.saturating_add(delta.x);
+                                zone.y = zone.y.saturating_add(delta.y);
+                                moved += 1;
+                            }
+                        }
+                        if moved > 0 {
+                            app.mark_dirty();
+                        }
+                        let status =
+                            if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                format!("已将 {moved} 个区域移动 {},{}", delta.x, delta.y)
+                            } else {
+                                format!("Moved {moved} zones by {},{}", delta.x, delta.y)
+                            };
+                        app.bulk_manager_status
+                            .borrow_mut()
+                            .replace(SmolStr::new(status));
+                        let rows = bulk_manager_rows_from_app(&app);
+                        app.bulk_manager.borrow_mut().set_zones(rows);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
+                        request_redraw(target);
                     }
                     if moved > 0 {
-                        app.mark_dirty();
-                    }
-                    app.bulk_manager_status
-                        .borrow_mut()
-                        .replace(SmolStr::new(format!(
-                            "Moved {moved} zones by {},{}",
-                            delta.x, delta.y
-                        )));
-                    let rows = bulk_manager_rows_from_app(&app);
-                    app.bulk_manager.borrow_mut().set_zones(rows);
-                }
-                if let Some(target) = find_aux_window(root, WindowKind::BulkManager) {
-                    request_redraw(target);
-                }
-                if moved > 0 {
-                    record_coalesced_mutation_timeline_pair(
-                        root,
-                        before_snapshot,
-                        "bulk_pre_apply",
-                        "bulk_move_zones",
-                        &coalesce_scope,
-                        "Bulk move checkpointed",
-                    );
-                }
-                needs_redraw = true;
-            }
-            Command::OpenZoneEditor(zone_id) => {
-                open_zone_editor(root, zone_id);
-            }
-            Command::ShowSuggestor => {
-                // F2-08 — open the smart-group suggestor panel aux HWND
-                // (`business::smart_group_suggestor`). Pairs with the
-                // existing `SuggestorDismiss` (per-row) and
-                // `GroupingApply` (per-row) Commands.
-                show_suggestor(root);
-            }
-            Command::OpenSearch => {
-                show_search(root);
-                needs_redraw = true;
-            }
-            Command::QuerySearch(query) => {
-                let _result_count = run_search_query(root, query.as_str());
-                needs_redraw = true;
-            }
-            Command::ActivateSearchResult(hit_id) => {
-                let search_hwnd = find_aux_window(root, WindowKind::Search).unwrap_or(hwnd);
-                if activate_search_hit(root, hit_id.as_str(), search_hwnd) {
-                    needs_redraw = true;
-                }
-            }
-            Command::CloseSearch => {
-                if let Some(target) = find_aux_window(root, WindowKind::Search) {
-                    // SAFETY: ShowWindow with SW_HIDE on a HWND we own.
-                    unsafe { ShowWindow(target, SW_HIDE) };
-                }
-                let app = root.app.borrow();
-                app.highlight_overlay.borrow_mut().clear();
-                drop(app);
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
-                }
-                needs_redraw = true;
-            }
-            Command::PinZoneAsMinibar(zone_id) => {
-                if pin_zone_as_minibar(root, zone_id) {
-                    persist_minibar_pins_to_vault(root);
-                    needs_redraw = true;
-                }
-            }
-            Command::UnpinMinibar(zone_id) => {
-                if unpin_zone_minibar(root, zone_id) {
-                    persist_minibar_pins_to_vault(root);
-                    needs_redraw = true;
-                }
-            }
-            Command::ListPinnedMinibars => {
-                show_pinned_minibar_list_status(root);
-                needs_redraw = true;
-            }
-            Command::ShowTooltip { anchor, text } => {
-                // F2-05 — mount `business::tooltip` into the lazy
-                // `WindowKind::Tooltip` aux HWND. The Tooltip descriptor's
-                // padding/typography drive the host HWND footprint; the
-                // 200 px default size from `default_size(WindowKind::Tooltip)`
-                // is the upper clamp per snap.md.
-                show_tooltip(root, anchor, &text);
-            }
-            Command::HideTooltip => {
-                hide_tooltip(root);
-            }
-            Command::GroupingApply { suggestion } => {
-                let applied_paths = suggestion.matching_files.clone();
-                let mut app = root.app.borrow_mut();
-                match bento_nano_backend::grouping::apply_auto_group(&suggestion, &mut app.zones) {
-                    Ok(new_id) => {
-                        // Bump the AppState id allocator past the
-                        // backend-minted id so subsequent CreateZone calls
-                        // never collide.
-                        let bump = new_id.0.saturating_add(1).max(1);
-                        if app.next_zone_id.get() <= new_id.0 {
-                            app.next_zone_id.set(bump);
-                        }
-                        app.suggestor.borrow_mut().clear_applying();
-                        app.suggestor_status
-                            .borrow_mut()
-                            .replace(SmolStr::new(format!(
-                                "Applied '{}' into zone {}",
-                                suggestion.name, new_id.0
-                            )));
-                        app.mark_dirty();
-                        log_static(
-                            format!(
-                                "suggestor: GroupingApply name=\"{}\" new_zone={} paths={}\n",
-                                suggestion.name,
-                                new_id.0,
-                                suggestion.matching_files.len()
-                            )
-                            .as_str(),
-                        );
-                        drop(app);
-                        let _highlighted = set_highlight_for_paths_with_duration(
+                        record_coalesced_mutation_timeline_pair(
                             root,
-                            &applied_paths,
-                            Some(3_000),
+                            before_snapshot,
+                            "bulk_pre_apply",
+                            "bulk_move_zones",
+                            &coalesce_scope,
+                            "Bulk move checkpointed",
                         );
-                        if let Some(target) = find_main_hwnd(root) {
-                            request_redraw(target);
-                        }
+                    }
+                    log_static(
+                        format!(
+                            "bulk: BulkMoveZones moved={moved} dx={} dy={}\n",
+                            delta.x, delta.y
+                        )
+                        .as_str(),
+                    );
+                    needs_redraw = true;
+                }
+                Command::OpenZoneEditor(zone_id) => {
+                    open_zone_editor(root, zone_id);
+                }
+                Command::ShowSuggestor => {
+                    // F2-08 — open the smart-group suggestor panel aux HWND
+                    // (`business::smart_group_suggestor`). Pairs with the
+                    // existing `SuggestorDismiss` (per-row) and
+                    // `GroupingApply` (per-row) Commands.
+                    show_suggestor(root);
+                }
+                Command::OpenSearch => {
+                    show_search(root);
+                    needs_redraw = true;
+                }
+                Command::QuerySearch(query) => {
+                    let _result_count = run_search_query(root, query.as_str());
+                    needs_redraw = true;
+                }
+                Command::ActivateSearchResult(hit_id) => {
+                    let search_hwnd = find_aux_window(root, WindowKind::Search).unwrap_or(hwnd);
+                    if activate_search_hit(root, hit_id.as_str(), search_hwnd) {
                         needs_redraw = true;
                     }
-                    Err(e) => {
-                        app.suggestor.borrow_mut().clear_applying();
-                        app.suggestor_status
-                            .borrow_mut()
-                            .replace(SmolStr::new(format!("Apply failed: {e}")));
-                        tracing::warn!(
-                            target: "bentodesk::dispatcher",
-                            error = %e,
-                            "GroupingApply: apply_auto_group rejected"
-                        );
+                }
+                Command::CloseSearch => {
+                    if let Some(main) = find_main_hwnd(root) {
+                        close_inline_zone_search(root, main);
+                    }
+                    if let Some(target) = find_aux_window(root, WindowKind::Search) {
+                        // SAFETY: ShowWindow with SW_HIDE on a HWND we own.
+                        unsafe { ShowWindow(target, SW_HIDE) };
+                    }
+                    let app = root.app.borrow();
+                    app.highlight_overlay.borrow_mut().clear();
+                    drop(app);
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::PinZoneAsMinibar(zone_id) => {
+                    if pin_zone_as_minibar(root, zone_id) {
+                        persist_minibar_pins_to_vault(root);
+                        needs_redraw = true;
                     }
                 }
-            }
-            Command::SuggestorDismiss { suggestion_id } => {
-                // UI-only state flip — record the dismissal so the panel
-                // re-render skips this row. F4 (smart-group panel mount)
-                // will read `app.suggestor_dismissed` from its render path.
-                let app = root.app.borrow();
-                app.suggestor_dismissed
-                    .borrow_mut()
-                    .insert(suggestion_id.clone());
-                app.suggestor
-                    .borrow_mut()
-                    .remove_entry(suggestion_id.as_str());
-                app.suggestor_status
-                    .borrow_mut()
-                    .replace(SmolStr::new(format!("Dismissed {suggestion_id}")));
-                log_static(format!("suggestor: SuggestorDismiss id={suggestion_id}\n").as_str());
-                drop(app);
-                let _highlighted = set_highlight_for_suggestor_selection(root);
-                if let Some(target) = find_main_hwnd(root) {
-                    request_redraw(target);
+                Command::UnpinMinibar(zone_id) => {
+                    if unpin_zone_minibar(root, zone_id) {
+                        persist_minibar_pins_to_vault(root);
+                        needs_redraw = true;
+                    }
                 }
-                needs_redraw = true;
-            }
-            Command::ShowContextMenu { anchor, items } => {
-                // F2-06 — Win32 TrackPopupMenu spawn via `business::popover`.
-                // Items list maps command_id → Command; selection result is
-                // pushed back onto the dispatcher.
-                // SAFETY: TrackPopupMenu loop is canonical — see Ruling B.
-                unsafe { show_context_menu(root, anchor, &items) };
-            }
-            Command::HideContextMenu => {
-                // No persistent context menu HWND exists — TrackPopupMenu is
-                // a synchronous modal-loop API, so a separate hide path is a
-                // no-op once `show_context_menu` returns. The aux
-                // ContextMenu HWND (used as TrackPopupMenu owner) is safe to
-                // leave hidden.
-                hide_context_menu(root);
-            }
-            Command::QuitApp => {
-                quit_after_drain = true;
+                Command::ListPinnedMinibars => {
+                    show_pinned_minibar_list_status(root);
+                    needs_redraw = true;
+                }
+                Command::ShowTooltip { anchor, text } => {
+                    let main_anchor = find_main_hwnd(root)
+                        .map(|main| bento_nano_app::WindowHandle(main as isize));
+                    let context_menu_open =
+                        root.app.borrow().active_context_menu.borrow().is_some();
+                    if tooltip_uses_aux_surface(anchor, main_anchor, context_menu_open) {
+                        show_tooltip(root, anchor, &text);
+                    } else {
+                        // Auxiliary panels render their own labels/status. A
+                        // second DComp HWND here becomes a detached black strip
+                        // after the original hover target disappears.
+                        hide_tooltip(root);
+                    }
+                }
+                Command::HideTooltip => {
+                    hide_tooltip(root);
+                }
+                Command::GroupingApply { suggestion } => {
+                    let mut app = root.app.borrow_mut();
+                    let target_id = ensure_suggestor_target_zone(&mut app);
+                    match bento_nano_backend::grouping::apply_auto_group_to_zone(
+                        &suggestion,
+                        target_id,
+                        &mut app.zones,
+                    ) {
+                        Ok(added) => {
+                            let target_name = app
+                                .zones
+                                .get(target_id)
+                                .map(|zone| zone.display_title().to_owned())
+                                .unwrap_or_else(|| target_id.0.to_string());
+                            app.suggestor.borrow_mut().clear_applying();
+                            app.suggestor_status.borrow_mut().replace(SmolStr::new(
+                                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                    format!("已将 {added} 个文件整理到“{target_name}”")
+                                } else {
+                                    format!("Applied {added} files to '{target_name}'")
+                                },
+                            ));
+                            // The suggestor preview owns its temporary Desktop
+                            // highlight. A successful apply closes that surface,
+                            // so retaining a timed blue overlay afterwards makes
+                            // the operation look like a second floating layer.
+                            app.highlight_overlay.borrow_mut().clear();
+                            if added > 0 {
+                                app.mark_dirty();
+                            }
+                            log_static(
+                                format!(
+                                    "suggestor: GroupingApply name=\"{}\" target_zone={} added={} paths={} highlight_cleared=true\n",
+                                    suggestion.name,
+                                    target_id.0,
+                                    added,
+                                    suggestion.matching_files.len()
+                                )
+                                .as_str(),
+                            );
+                            drop(app);
+                            if let Some(target) = find_main_hwnd(root) {
+                                request_redraw(target);
+                            }
+                            if let Some(target) = find_aux_window(root, WindowKind::Suggestor) {
+                                // Keep the panel visible while the real backend
+                                // operation runs; only a successful apply closes
+                                // it so an error remains visible and actionable.
+                                unsafe { ShowWindow(target, SW_HIDE) };
+                            }
+                            needs_redraw = true;
+                        }
+                        Err(e) => {
+                            app.suggestor.borrow_mut().clear_applying();
+                            app.suggestor_status.borrow_mut().replace(SmolStr::new(
+                                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                                    format!("应用建议失败：{e}")
+                                } else {
+                                    format!("Apply failed: {e}")
+                                },
+                            ));
+                            tracing::warn!(
+                                target: "bentodesk::dispatcher",
+                                error = %e,
+                                "GroupingApply: apply_auto_group rejected"
+                            );
+                            drop(app);
+                            if let Some(target) = find_aux_window(root, WindowKind::Suggestor) {
+                                request_redraw(target);
+                            }
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                Command::SuggestorDismiss { suggestion_id } => {
+                    // UI-only state flip — record the dismissal so the panel
+                    // re-render skips this row. F4 (smart-group panel mount)
+                    // will read `app.suggestor_dismissed` from its render path.
+                    let app = root.app.borrow();
+                    app.suggestor_dismissed
+                        .borrow_mut()
+                        .insert(suggestion_id.clone());
+                    app.suggestor
+                        .borrow_mut()
+                        .remove_entry(suggestion_id.as_str());
+                    app.suggestor_status.borrow_mut().replace(SmolStr::new(
+                        if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                            "已忽略该分组建议".to_owned()
+                        } else {
+                            format!("Dismissed {suggestion_id}")
+                        },
+                    ));
+                    log_static(
+                        format!("suggestor: SuggestorDismiss id={suggestion_id}\n").as_str(),
+                    );
+                    drop(app);
+                    let _highlighted = set_highlight_for_suggestor_selection(root);
+                    if let Some(target) = find_main_hwnd(root) {
+                        request_redraw(target);
+                    }
+                    needs_redraw = true;
+                }
+                Command::ShowContextMenu { anchor, items } => {
+                    // F2-06 — Win32 TrackPopupMenu spawn via `business::popover`.
+                    // Items list maps command_id → Command; selection result is
+                    // pushed back onto the dispatcher.
+                    // SAFETY: TrackPopupMenu loop is canonical — see Ruling B.
+                    unsafe { show_context_menu(root, anchor, &items) };
+                }
+                Command::HideContextMenu => {
+                    // No persistent context menu HWND exists — TrackPopupMenu is
+                    // a synchronous modal-loop API, so a separate hide path is a
+                    // no-op once `show_context_menu` returns. The aux
+                    // ContextMenu HWND (used as TrackPopupMenu owner) is safe to
+                    // leave hidden.
+                    hide_context_menu(root);
+                }
+                Command::QuitApp => {
+                    quit_after_drain = true;
+                }
             }
         }
     }
@@ -20032,6 +24500,7 @@ fn drain_backend_events(root: &AppRoot) -> bool {
     drain_desktop_events(root)
         | drain_live_folder_events(root)
         | drain_ghost_events(root)
+        | drain_power_events(root)
         | drain_updater_events(root)
         | drain_rules_scheduler_events(root)
 }
@@ -20426,6 +24895,20 @@ fn normalized_rename_leaf(candidate: &str) -> Result<String, &'static str> {
     Ok(trimmed.to_owned())
 }
 
+fn localized_rename_validation_error(error: &str, zh: bool) -> &str {
+    if !zh {
+        return error;
+    }
+    match error {
+        "empty name" => "名称不能为空",
+        "reserved name" => "不能使用保留名称",
+        "trailing dot/space" => "名称不能以句点或空格结尾",
+        "name too long" => "名称过长",
+        "invalid filename character" => "名称包含 Windows 不允许的字符",
+        _ => "名称无效",
+    }
+}
+
 fn renamed_peer_path(current_path: &str, new_leaf: &str) -> Result<PathBuf, SmolStr> {
     let current = Path::new(current_path);
     let Some(parent) = current.parent() else {
@@ -20440,22 +24923,37 @@ fn rename_item_file(
     item_id: bento_nano_app::ItemId,
     new_leaf: &str,
 ) -> bool {
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     let zone_item_id = bento_nano_zone::ZoneItemId(item_id.0);
     let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
     let Some(item) = item else {
         set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "Rename rejected: item {} is no longer in zone {}",
-                item_id.0, zone_id.0
-            )),
+            SmolStr::new(if zh {
+                "无法重命名：该项目已不在区域中".to_owned()
+            } else {
+                format!(
+                    "Rename rejected: item {} is no longer in zone {}",
+                    item_id.0, zone_id.0
+                )
+            }),
         );
         return true;
     };
     let new_leaf = match normalized_rename_leaf(new_leaf) {
         Ok(name) => name,
         Err(error) => {
-            set_item_operation_status(root, SmolStr::new(format!("Rename rejected: {error}")));
+            set_item_operation_status(
+                root,
+                SmolStr::new(if zh {
+                    format!(
+                        "无法重命名：{}",
+                        localized_rename_validation_error(error, true)
+                    )
+                } else {
+                    format!("Rename rejected: {error}")
+                }),
+            );
             return true;
         }
     };
@@ -20468,27 +24966,46 @@ fn rename_item_file(
         }
         app.item_operation_status
             .borrow_mut()
-            .replace(SmolStr::new(format!(
-                "Rename failed: missing {}",
-                item.name
-            )));
+            .replace(SmolStr::new(if zh {
+                format!("无法重命名：找不到 {}", item.name)
+            } else {
+                format!("Rename failed: missing {}", item.name)
+            }));
         return true;
     }
     let target = match renamed_peer_path(&source_path, &new_leaf) {
         Ok(path) => path,
         Err(error) => {
-            set_item_operation_status(root, SmolStr::new(format!("Rename failed: {error}")));
+            set_item_operation_status(
+                root,
+                SmolStr::new(if zh {
+                    "无法重命名：无法读取所在文件夹".to_owned()
+                } else {
+                    format!("Rename failed: {error}")
+                }),
+            );
             return true;
         }
     };
     if target == source {
-        set_item_operation_status(root, SmolStr::new_static("Rename skipped: name unchanged"));
+        set_item_operation_status(
+            root,
+            SmolStr::new_static(if zh {
+                "名称没有变化"
+            } else {
+                "Rename skipped: name unchanged"
+            }),
+        );
         return true;
     }
     if target.exists() {
         set_item_operation_status(
             root,
-            SmolStr::new(format!("Rename failed: target exists: {new_leaf}")),
+            SmolStr::new(if zh {
+                format!("无法重命名：{new_leaf} 已存在")
+            } else {
+                format!("Rename failed: target exists: {new_leaf}")
+            }),
         );
         return true;
     }
@@ -20502,7 +25019,14 @@ fn rename_item_file(
             error = %error,
             "RenameItemFile failed"
         );
-        set_item_operation_status(root, SmolStr::new(format!("Rename failed: {error}")));
+        set_item_operation_status(
+            root,
+            SmolStr::new(if zh {
+                format!("重命名失败：{error}")
+            } else {
+                format!("Rename failed: {error}")
+            }),
+        );
         return true;
     }
 
@@ -20511,7 +25035,14 @@ fn rename_item_file(
         Some(original) => match renamed_peer_path(original, &new_leaf) {
             Ok(path) => Some(std::borrow::Cow::Owned(path.to_string_lossy().to_string())),
             Err(error) => {
-                set_item_operation_status(root, SmolStr::new(format!("Rename failed: {error}")));
+                set_item_operation_status(
+                    root,
+                    SmolStr::new(if zh {
+                        "重命名失败：无法同步原始路径".to_owned()
+                    } else {
+                        format!("Rename failed: {error}")
+                    }),
+                );
                 return true;
             }
         },
@@ -20545,7 +25076,11 @@ fn rename_item_file(
         app.mark_dirty();
         app.item_operation_status
             .borrow_mut()
-            .replace(SmolStr::new(format!("Renamed file: {new_leaf}")));
+            .replace(SmolStr::new(if zh {
+                format!("已重命名为：{new_leaf}")
+            } else {
+                format!("Renamed file: {new_leaf}")
+            }));
         log_static(
             format!(
                 "item-file: RenameItemFile renamed zone={} item={} from={} to={}\n",
@@ -20557,7 +25092,11 @@ fn rename_item_file(
     } else {
         app.item_operation_status
             .borrow_mut()
-            .replace(SmolStr::new_static("Rename failed: item disappeared"));
+            .replace(SmolStr::new_static(if zh {
+                "重命名失败：项目已不在区域中"
+            } else {
+                "Rename failed: item disappeared"
+            }));
         true
     }
 }
@@ -20823,9 +25362,10 @@ fn refresh_stealth_status(root: &AppRoot) {
 /// M1i 2026-05-29 — re-resolve the real Desktop sources and repopulate the
 /// cached read-only §2 list on `AppState`. Called on Settings-open and on the
 /// Refresh (`↻`) button (`RefreshDesktopSources`). Each resolved path is
-/// classified via `desktop_sources::classify_desktop_source` and tagged with a
-/// `watched` flag derived from the `watch_paths_draft` contents (case- and
-/// slash-insensitive line match). Runs ONCE per refresh — never per frame.
+/// classified via `desktop_sources::classify_desktop_source` and tagged as
+/// watched, matching Tauri `collect_desktop_sources` where every
+/// `all_desktop_dirs` source has the watcher attached. Runs ONCE per refresh —
+/// never per frame.
 fn refresh_desktop_sources(root: &AppRoot) {
     let app = root.app.borrow();
     // Resolve the live sources, threading the user's custom override so a
@@ -20837,38 +25377,43 @@ fn refresh_desktop_sources(root: &AppRoot) {
         Some(custom.as_str())
     };
     let dirs = bento_nano_backend::desktop_sources::all_desktop_dirs(custom_opt);
-    // Build the case/slash-insensitive watch-key set from the draft (one path
-    // per line). Empty lines are skipped.
-    let watch_draft = app.watch_paths_draft.borrow();
-    let watch_keys: std::collections::HashSet<String> = watch_draft
-        .lines()
-        .map(|line| {
-            line.trim()
-                .to_lowercase()
-                .replace('/', "\\")
-                .trim_end_matches('\\')
-                .to_string()
-        })
-        .filter(|key| !key.is_empty())
-        .collect();
-    drop(watch_draft);
+    let rows = desktop_source_rows_for_settings(&dirs);
+    let watched_count = rows.iter().filter(|(_, _, watched)| *watched).count();
+    log_static(
+        format!(
+            "settings: desktop_sources count={} watched={}\n",
+            rows.len(),
+            watched_count
+        )
+        .as_str(),
+    );
+    app.desktop_sources.replace(rows);
+}
+
+fn configured_desktop_sources_for_app(app: &AppState) -> Vec<PathBuf> {
+    let snapshot = app.snapshot_settings();
+    validate_settings_sources(&snapshot)
+        .unwrap_or_else(|_| bento_nano_backend::desktop_sources::all_desktop_dirs(None))
+}
+
+fn desktop_source_rows_for_settings(
+    dirs: &[PathBuf],
+) -> Vec<(
+    bento_nano_backend::desktop_sources::DesktopSourceKind,
+    SmolStr,
+    bool,
+)> {
     let mut rows: Vec<(
         bento_nano_backend::desktop_sources::DesktopSourceKind,
         SmolStr,
         bool,
     )> = Vec::with_capacity(dirs.len());
-    for dir in &dirs {
+    for dir in dirs {
         let kind = bento_nano_backend::desktop_sources::classify_desktop_source(dir);
         let display = dir.to_string_lossy();
-        let watch_key = display
-            .to_lowercase()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_string();
-        let watched = watch_keys.contains(&watch_key);
-        rows.push((kind, SmolStr::new(display.as_ref()), watched));
+        rows.push((kind, SmolStr::new(display.as_ref()), true));
     }
-    app.desktop_sources.replace(rows);
+    rows
 }
 
 fn stealth_file_type(path: &Path) -> &'static str {
@@ -20886,11 +25431,84 @@ fn stealth_file_type(path: &Path) -> &'static str {
     }
 }
 
-/// Tray AutoOrganize handler. This is a real selected-stack backend path:
-/// resolve actual Desktop folders, scan live files, ask the grouping backend
-/// for suggestions, and materialise suggested groups into the zone model.
+const SMART_GROUP_MIN_WIDTH_DIP: i32 = 320;
+const SMART_GROUP_MIN_HEIGHT_DIP: i32 = 220;
+
+fn smart_group_zone_dimensions(viewport_width: f32, viewport_height: f32) -> (i32, i32) {
+    let viewport_width = viewport_width.round().max(1.0) as i32;
+    let viewport_height = viewport_height.round().max(1.0) as i32;
+    let width = ((viewport_width as f32 * 0.25).round() as i32)
+        .max(SMART_GROUP_MIN_WIDTH_DIP)
+        .min(viewport_width);
+    let height = ((viewport_height as f32 * 0.45).round() as i32)
+        .max(SMART_GROUP_MIN_HEIGHT_DIP)
+        .min(viewport_height);
+    (width, height)
+}
+
+/// Resolve the concrete Zone that owns a suggestor session. Tauri always
+/// applies a reviewed suggestion to the Zone that opened the dialog; the tray
+/// path falls back to the first Zone and creates one only on an empty layout.
+fn ensure_suggestor_target_zone(app: &mut AppState) -> ZoneId {
+    if let Some(id) = selected_or_first_zone_id(app) {
+        app.selected_zone.set(Some(id));
+        return id;
+    }
+
+    let id = app.alloc_zone_id();
+    let (width, height) = smart_group_zone_dimensions(app.viewport.width, app.viewport.height);
+    let max_x = ((app.viewport.width.round() as i32) - width).max(0);
+    let max_y = ((app.viewport.height.round() as i32) - height).max(0);
+    let x = ((app.viewport.width * 0.30).round() as i32).clamp(0, max_x);
+    let y = ((app.viewport.height * 0.20).round() as i32).clamp(0, max_y);
+    let title = if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+        "自动整理"
+    } else {
+        "Auto Organize"
+    };
+    let mut zone = Zone::new(id, Cow::Borrowed(title), x, y, width, height);
+    zone.icon = Cow::Borrowed("lightning");
+    app.zones.add(zone);
+    app.selected_zone.set(Some(id));
+    app.mark_dirty();
+    id
+}
+
+/// Give background-created groups readable expanded geometry and distinct
+/// deterministic origins. Explicit Auto Organize never reaches this path; it
+/// opens the reviewable suggestor instead.
+fn layout_new_auto_group_zones(app: &mut AppState, ids: &[ZoneId]) -> usize {
+    let positions = compute_bulk_layout_positions(BulkLayoutAlgorithm::Grid, ids.len());
+    let viewport_width = app.viewport.width.max(1.0);
+    let viewport_height = app.viewport.height.max(1.0);
+    let (width, height) = smart_group_zone_dimensions(viewport_width, viewport_height);
+    let max_x = ((viewport_width.round() as i32) - width).max(0);
+    let max_y = ((viewport_height.round() as i32) - height).max(0);
+    let mut changed = 0usize;
+    for (index, id) in ids.iter().enumerate() {
+        let Some((x_percent, y_percent)) = positions.get(index).copied() else {
+            continue;
+        };
+        let Some(zone) = app.zones.get_mut(*id) else {
+            continue;
+        };
+        let x = percent_to_logical(x_percent, viewport_width).clamp(0, max_x);
+        let y = percent_to_logical(y_percent, viewport_height).clamp(0, max_y);
+        if (zone.x, zone.y, zone.w, zone.h) != (x, y, width, height) {
+            zone.x = x;
+            zone.y = y;
+            zone.w = width;
+            zone.h = height;
+            changed = changed.saturating_add(1);
+        }
+    }
+    changed
+}
+
+/// Background smart-layout path used by the desktop watcher. It resolves real
+/// Desktop folders, scans live files, and merges or materialises suggestions.
 fn auto_organize_desktop(root: &AppRoot) -> bool {
-    let desktop_dirs = bento_nano_backend::desktop_sources::all_desktop_dirs(None);
+    let desktop_dirs = configured_desktop_sources_for_app(&root.app.borrow());
     if desktop_dirs.is_empty() {
         tracing::warn!(
             target: "bentodesk::auto_organize",
@@ -20941,14 +25559,23 @@ fn auto_organize_desktop(root: &AppRoot) -> bool {
     }
 
     let mut applied = 0usize;
+    let mut merged_items = 0usize;
+    let mut created_ids = Vec::new();
     let mut app = root.app.borrow_mut();
     for suggestion in &suggestions {
+        if let Some((_zone_id, added)) =
+            bento_nano_backend::grouping::merge_auto_group(suggestion, &mut app.zones)
+        {
+            merged_items = merged_items.saturating_add(added);
+            continue;
+        }
         match bento_nano_backend::grouping::apply_auto_group(suggestion, &mut app.zones) {
             Ok(new_id) => {
                 let bump = new_id.0.saturating_add(1).max(1);
                 if app.next_zone_id.get() <= new_id.0 {
                     app.next_zone_id.set(bump);
                 }
+                created_ids.push(new_id);
                 applied += 1;
             }
             Err(e) => tracing::warn!(
@@ -20960,24 +25587,33 @@ fn auto_organize_desktop(root: &AppRoot) -> bool {
         }
     }
 
-    if applied > 0 {
+    let laid_out = layout_new_auto_group_zones(&mut app, &created_ids);
+
+    if applied > 0 || merged_items > 0 {
         app.mark_dirty();
         tracing::info!(
             target: "bentodesk::auto_organize",
             files = files.len(),
             suggestions = suggestions.len(),
             applied,
-            "AutoOrganize: backend suggestions applied into zones"
+            merged_items,
+            "AutoOrganize: backend suggestions applied or merged into zones"
         );
         log_static(
             format!(
-                "auto_organize: applied={} suggestions={} files={}\n",
+                "auto_organize: applied={} merged_items={} suggestions={} files={}\n",
                 applied,
+                merged_items,
                 suggestions.len(),
                 files.len()
             )
             .as_str(),
         );
+        if laid_out > 0 {
+            log_static(
+                format!("auto_organize: laid_out={laid_out} readable_geometry=true\n").as_str(),
+            );
+        }
         true
     } else {
         log_static(
@@ -21024,6 +25660,174 @@ fn load_icon_hash_for_path(path: &bento_nano_app::ItemPath) -> Option<String> {
             );
             None
         }
+    }
+}
+
+fn apply_loaded_item_icon(root: &AppRoot, path: &bento_nano_app::ItemPath, hash: &str) -> bool {
+    let mut app = root.app.borrow_mut();
+    let mut changed = false;
+    let zone_ids: Vec<_> = app.zones.iter().map(|zone| zone.id).collect();
+    for zone_id in zone_ids {
+        if app.zones.set_item_icon_hash(
+            zone_id,
+            path.0.as_str(),
+            std::borrow::Cow::Owned(hash.to_owned()),
+        ) {
+            changed = true;
+        }
+    }
+    if changed {
+        app.mark_dirty();
+    }
+    changed
+}
+
+fn item_icon_startup_rehydrate_force(
+    path: &str,
+    icon_hash: &str,
+    cache_has_icon: bool,
+) -> Option<bool> {
+    if icon_hash.starts_with("builtin:") {
+        return None;
+    }
+    let lower = path.to_ascii_lowercase();
+    let shortcut_identity_changed = (lower.ends_with(".lnk") || lower.ends_with(".url"))
+        && !icon_hash.is_empty()
+        && icon_hash != bento_nano_backend::icon::protocol::icon_cache_key(path);
+    if shortcut_identity_changed {
+        Some(true)
+    } else if icon_hash.is_empty() || !cache_has_icon {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn start_startup_icon_rehydrate(root: &AppRoot, hwnd: HWND) {
+    let Some(cache) = bento_nano_backend::icon::cache_handle() else {
+        return;
+    };
+    let mut paths = {
+        let app = root.app.borrow();
+        let mut paths = Vec::new();
+        for zone in app.zones.iter() {
+            for item in &zone.items {
+                let icon_hash = item.icon_hash.as_ref();
+                let cache_has_icon = !icon_hash.is_empty() && cache.contains_any_tier(icon_hash);
+                if !item.path.is_empty()
+                    && let Some(force) = item_icon_startup_rehydrate_force(
+                        item.path.as_ref(),
+                        icon_hash,
+                        cache_has_icon,
+                    )
+                {
+                    paths.push((item.path.to_string(), force));
+                }
+            }
+        }
+        paths
+    };
+    paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut unique_paths: Vec<(String, bool)> = Vec::with_capacity(paths.len());
+    for (path, force) in paths {
+        if let Some((previous_path, previous_force)) = unique_paths.last_mut()
+            && *previous_path == path
+        {
+            *previous_force |= force;
+            continue;
+        }
+        unique_paths.push((path, force));
+    }
+    let paths = unique_paths;
+    if paths.is_empty() {
+        log_static("icon: startup rehydrate cache-complete queued=0\n");
+        return;
+    }
+
+    let queued = paths.len();
+    let sender = root.dispatcher.sender();
+    let raw_hwnd = hwnd as isize;
+    log_static(format!("icon: startup rehydrate queued={queued}\n").as_str());
+    let spawn = std::thread::Builder::new()
+        .name("bento-icon-rehydrate".to_owned())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            // Shell shortcut resolution and WIC PNG encoding both require a
+            // COM apartment on the calling thread. The UI thread already owns
+            // one; this short-lived worker must initialise its own STA.
+            if let Err(error) = unsafe { OleInitialize(None) } {
+                log_static(
+                    format!("icon: startup rehydrate OLE init failed error={error}\n").as_str(),
+                );
+                return;
+            }
+            let mut results = Vec::with_capacity(queued);
+            let mut extracted = 0usize;
+            let mut failed = 0usize;
+            let mut first_error = None;
+            for (path, force) in paths {
+                let result = if force {
+                    bento_nano_backend::icon::protocol::extract_and_cache_fresh(&cache, &path)
+                } else {
+                    bento_nano_backend::icon::protocol::extract_and_cache(&cache, &path)
+                };
+                match result {
+                    Ok(hash) => {
+                        extracted = extracted.saturating_add(1);
+                        results.push((path, hash));
+                    }
+                    Err(error) => {
+                        failed = failed.saturating_add(1);
+                        if first_error.is_none() {
+                            first_error = Some(format!("{path}: {error}"));
+                        }
+                        tracing::warn!(
+                            target: "bentodesk::icon",
+                            %path,
+                            %error,
+                            "startup icon extraction failed; keeping retryable fallback"
+                        );
+                    }
+                }
+            }
+            // SAFETY: balances the successful OleInitialize call above on the
+            // same worker thread, after all Shell/WIC objects have been dropped.
+            unsafe { OleUninitialize() };
+            for (path, hash) in results {
+                if sender
+                    .send(Command::ApplyLoadedIcon {
+                        path: bento_nano_app::ItemPath::new(path),
+                        hash: SmolStr::new(hash),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // SAFETY: the raw value came from the live Main HWND. PostMessageW
+            // only queues a value; a destroyed HWND simply makes the call fail.
+            let _ = unsafe {
+                PostMessageW(
+                    raw_hwnd as HWND,
+                    WM_ICON_CACHE_READY,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            };
+            log_static(
+                format!(
+                    "icon: startup rehydrate completed={extracted} failed={failed} total={queued} first_error={}\n",
+                    first_error.as_deref().unwrap_or("-")
+                )
+                .as_str(),
+            );
+        });
+    if let Err(error) = spawn {
+        tracing::warn!(
+            target: "bentodesk::icon",
+            %error,
+            "failed to start startup icon rehydrate worker"
+        );
     }
 }
 
@@ -21352,12 +26156,11 @@ unsafe fn show_context_menu(
         }
     }
 
-    // Owner HWND — prefer the caller's anchor; fall back to the lazy aux
-    // ContextMenu HWND so TrackPopupMenu's keyboard-nav contract is met.
+    // Owner HWND — prefer the caller's anchor; Main is a sufficient non-null
+    // owner for this legacy native-menu command path. Creating a hidden D2D
+    // ContextMenu renderer solely to own an HMENU wastes several megabytes.
     let owner: HWND = if anchor.0 != 0 {
         anchor.0 as HWND
-    } else if let Some(h) = ensure_aux_window(root, WindowKind::ContextMenu) {
-        h
     } else if let Some(h) = find_main_hwnd(root) {
         h
     } else {
@@ -21486,6 +26289,16 @@ fn open_icon_picker(root: &AppRoot, zone_id: Option<ZoneId>) {
         return;
     };
 
+    // SAFETY: `target` is the registered IconPicker HWND and its GWLP_USERDATA
+    // points at the stable WindowSlot owned by the registry.
+    unsafe {
+        let slot = get_slot_ptr(target);
+        if !slot.is_null() {
+            (*slot)
+                .renderer
+                .start_auxiliary_open_animation(GetTickCount());
+        }
+    }
     // SAFETY: ShowWindow + SetForegroundWindow canonical on a HWND we own.
     //         IconPicker is NOT WS_EX_NOACTIVATE so SetForegroundWindow is
     //         the correct activation primitive (matches F2-02's main path).
@@ -21493,6 +26306,7 @@ fn open_icon_picker(root: &AppRoot, zone_id: Option<ZoneId>) {
         ShowWindow(target, SW_SHOW);
         SetForegroundWindow(target);
     }
+    arm_hover_frame_timer(target);
     request_redraw(target);
     log_static(
         format!(
@@ -21509,7 +26323,7 @@ fn open_icon_picker(root: &AppRoot, zone_id: Option<ZoneId>) {
 }
 
 /// F2-07/F3 bridge — `Command::OpenPalettePicker` handler. Spawns the dedicated
-/// `WindowKind::PalettePicker` aux HWND (320×240 per the platform crate's
+/// `WindowKind::PalettePicker` aux HWND (320× 240 per the platform crate's
 /// `default_size`) and constructs `business::palette_picker::build()` so
 /// the module reaches the production binary. `target` discriminates which
 /// downstream surface the picked swatch applies to. `ZoneAccent` emits
@@ -21631,7 +26445,7 @@ fn open_capsule_picker(root: &AppRoot) {
 }
 
 /// F2-08 — `Command::OpenRulesWizard` handler. Lazily spawns the
-/// `WindowKind::RulesWizard` aux HWND (640×480 per `default_size`),
+/// `WindowKind::RulesWizard` aux HWND (640× 480 per `default_size`),
 /// constructs the `business::rules_wizard::build()` widget descriptor so
 /// the production binary keeps the module reachable, then shows the HWND
 /// with foreground activation. Save/preview/delete/run-now dispatch selected
@@ -21674,7 +26488,7 @@ fn open_rules_wizard(root: &AppRoot) {
 }
 
 /// F2-08 — `Command::OpenBulkManager` handler. Spawns the
-/// `WindowKind::BulkManager` aux HWND (720×540 per `default_size`) and
+/// `WindowKind::BulkManager` aux HWND (720× 540 per `default_size`) and
 /// constructs `business::bulk_manager_panel::build()`. Apply emits F3/F5
 /// batch-update Commands.
 fn zone_percent(value: i32, total: f32) -> u32 {
@@ -21691,11 +26505,7 @@ fn bulk_manager_rows_from_app(app: &AppState) -> Vec<ZoneRow> {
         .iter()
         .map(|zone| ZoneRow {
             id: zone.id,
-            display_name: zone
-                .alias
-                .as_deref()
-                .map(SmolStr::new)
-                .unwrap_or_else(|| SmolStr::new(zone.title.as_ref())),
+            display_name: SmolStr::new(zone.display_title()),
             item_count: zone.items.len() as u32,
             accent_hex: zone
                 .accent_color
@@ -22080,11 +26890,6 @@ fn open_bulk_manager(root: &AppRoot) {
     );
 }
 
-/// `Command::OpenZoneEditor` handler. Spawns the `WindowKind::ZoneEditor`
-/// aux HWND and constructs `business::zone_editor::build()`. The zone
-/// context menu is now a real producer for this surface, and the keyboard
-/// save path dispatches rename + zone-appearance mutations. Pointer-first
-/// controls inside the editor remain follow-up parity work.
 fn open_zone_editor(root: &AppRoot, zone_id: ZoneId) {
     use bento_nano_app::business::zone_editor;
     let _editor = zone_editor::build();
@@ -22094,7 +26899,7 @@ fn open_zone_editor(root: &AppRoot, zone_id: ZoneId) {
         app.zone_editor.borrow_mut().replace(ZoneEditorSession {
             zone_id,
             draft_name: zone
-                .map(|entry| entry.title.to_string())
+                .map(|entry| entry.display_title().to_owned())
                 .unwrap_or_else(|| "Zone".to_owned()),
             draft_icon: zone
                 .map(|entry| normalize_icon_slug(entry.icon.as_ref()))
@@ -22122,11 +26927,11 @@ fn open_zone_editor(root: &AppRoot, zone_id: ZoneId) {
         return;
     };
 
-    // SAFETY: canonical show + activate.
-    unsafe {
-        ShowWindow(host, SW_SHOW);
-        SetForegroundWindow(host);
-    }
+    // `ensure_aux_window` re-centres reused dialogs on the invocation monitor,
+    // so the first visible frame already has its final borderless geometry.
+    // SAFETY: host is the live focusable ZoneEditor HWND.
+    unsafe { ShowWindow(host, SW_SHOW) };
+    focus_window_for_keyboard(host);
     request_redraw(host);
     log_static(
         format!(
@@ -22143,7 +26948,7 @@ fn open_zone_editor(root: &AppRoot, zone_id: ZoneId) {
 }
 
 /// F2-08 — `Command::ShowSuggestor` handler. Spawns the
-/// `WindowKind::Suggestor` aux HWND (640×560) and constructs
+/// `WindowKind::Suggestor` aux HWND (522×574) and constructs
 /// `business::smart_group_suggestor::build()`. Per-row Apply / Dismiss
 /// rides the existing `GroupingApply` / `SuggestorDismiss` Commands.
 fn open_item_file_rename(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_app::ItemId) {
@@ -22152,9 +26957,9 @@ fn open_item_file_rename(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
     let Some(item) = item else {
         set_item_operation_status(
             root,
-            SmolStr::new(format!(
-                "Rename rejected: item {} is no longer in zone {}",
-                item_id.0, zone_id.0
+            SmolStr::new_static(context_menu_text(
+                "无法重命名：该项目已不在区域中",
+                "Rename rejected: item is no longer in the zone",
             )),
         );
         return;
@@ -22181,7 +26986,10 @@ fn open_item_file_rename(root: &AppRoot, zone_id: ZoneId, item_id: bento_nano_ap
     let Some(host) = ensure_aux_window(root, WindowKind::ItemFileRename) else {
         set_item_operation_status(
             root,
-            SmolStr::new_static("Rename failed: window unavailable"),
+            SmolStr::new_static(context_menu_text(
+                "无法打开重命名窗口",
+                "Rename failed: window unavailable",
+            )),
         );
         return;
     };
@@ -22210,6 +27018,24 @@ fn add_search_item(
         id: SmolStr::new(id),
         title: SmolStr::new(title),
         path: SmolStr::new(path),
+        keywords: SmolStr::default(),
+        kind,
+    });
+}
+
+fn add_search_item_with_keywords(
+    index: &mut SearchIndex,
+    id: &str,
+    title: &str,
+    path: &str,
+    keywords: &str,
+    kind: SearchItemKind,
+) {
+    index.add(SearchItem {
+        id: SmolStr::new(id),
+        title: SmolStr::new(title),
+        path: SmolStr::new(path),
+        keywords: SmolStr::new(keywords),
         kind,
     });
 }
@@ -22229,9 +27055,11 @@ fn add_desktop_file_search_items(
     }
 }
 
-fn scan_search_desktop_files() -> Vec<bento_nano_backend::grouping::scanner::FileInfo> {
+fn scan_search_desktop_files(
+    app: &AppState,
+) -> Vec<bento_nano_backend::grouping::scanner::FileInfo> {
     let mut files = Vec::new();
-    for dir in bento_nano_backend::desktop_sources::all_desktop_dirs(None) {
+    for dir in configured_desktop_sources_for_app(app) {
         match bento_nano_backend::grouping::scan_desktop_files(&dir) {
             Ok(mut scanned) => files.append(&mut scanned),
             Err(error) => {
@@ -22248,13 +27076,15 @@ fn scan_search_desktop_files() -> Vec<bento_nano_backend::grouping::scanner::Fil
 }
 
 fn seed_search_index_from_app(app: &AppState) -> SearchIndex {
+    use bento_nano_style::i18n_zh_cn::ids;
+
     let mut index = SearchIndex::new();
 
     for zone in app.zones.iter() {
-        let title = zone.alias.as_deref().unwrap_or(zone.title.as_ref());
+        let title = zone.display_title();
         let zone_id = format!("zone:{}", zone.id.0);
         let zone_path = format!(
-            "Zone {} · {} item(s) · visible={}",
+            "Zone {} 路 {} item(s) 路 visible={}",
             zone.id.0,
             zone.items.len(),
             zone.visible
@@ -22290,65 +27120,133 @@ fn seed_search_index_from_app(app: &AppState) -> SearchIndex {
         }
     }
 
-    let desktop_files = scan_search_desktop_files();
+    let desktop_files = scan_search_desktop_files(app);
     add_desktop_file_search_items(&mut index, &desktop_files);
 
-    for (id, title, path) in [
+    let settings_group = bento_nano_style::t(ids::SEARCH_GROUP_SETTINGS);
+    for (id, title_id, keywords) in [
         (
             "setting:display.locale",
-            "Display locale",
-            "Settings / Language",
+            ids::SEARCH_SETTING_LOCALE,
+            "display locale language settings",
         ),
         (
             "setting:updates.check_frequency",
-            "Update check frequency",
-            "Settings / Updates",
+            ids::SEARCH_SETTING_UPDATE_FREQUENCY,
+            "update check frequency settings",
         ),
         (
             "setting:updates.auto_download",
-            "Auto-download updates",
-            "Settings / Updates",
+            ids::SEARCH_SETTING_AUTO_DOWNLOAD,
+            "auto download updates settings",
         ),
         (
             "setting:stealth.enabled",
-            "Stealth storage",
-            "Settings / Stealth",
+            ids::SEARCH_SETTING_STEALTH,
+            "stealth storage desktop settings",
         ),
         (
             "setting:encryption.mode",
-            "Encryption mode",
-            "Settings / Encryption",
+            ids::SEARCH_SETTING_ENCRYPTION,
+            "encryption mode settings",
         ),
         (
             "setting:zone_display_mode",
-            "Zone display mode",
-            "Settings / Display",
+            ids::SEARCH_SETTING_ZONE_DISPLAY,
+            "zone display mode settings",
         ),
         (
             "setting:keybindings",
-            "Keybindings",
-            "Settings / Keybindings",
+            ids::SEARCH_SETTING_KEYBINDINGS,
+            "keybindings keyboard shortcuts settings",
         ),
-        ("setting:active_theme", "Active theme", "Settings / Theme"),
+        (
+            "setting:active_theme",
+            ids::SEARCH_SETTING_THEME,
+            "active theme appearance settings",
+        ),
     ] {
-        add_search_item(&mut index, id, title, path, SearchItemKind::Setting);
+        add_search_item_with_keywords(
+            &mut index,
+            id,
+            bento_nano_style::t(title_id),
+            settings_group,
+            keywords,
+            SearchItemKind::Setting,
+        );
     }
 
-    for (id, title) in [
-        ("action:create_zone", "Create new zone"),
-        ("action:open_settings", "Open settings"),
-        ("action:open_about", "Open about"),
-        ("action:open_timeline", "Open timeline"),
-        ("action:open_snapshots", "Open snapshots"),
-        ("action:open_suggestor", "Open smart suggestions"),
-        ("action:open_bulk_manager", "Open bulk manager"),
-        ("action:open_capsule_picker", "Open context capsules"),
-        ("action:open_rules", "Open rules wizard"),
-        ("action:list_minibars", "List pinned minibars"),
-        ("action:toggle_debug_overlay", "Toggle debug overlay"),
-        ("action:quit", "Quit BentoDesk"),
+    let actions_group = bento_nano_style::t(ids::SEARCH_GROUP_ACTIONS);
+    for (id, title_id, keywords) in [
+        (
+            "action:create_zone",
+            ids::SEARCH_ACTION_CREATE_ZONE,
+            "create new zone",
+        ),
+        (
+            "action:open_settings",
+            ids::SEARCH_ACTION_OPEN_SETTINGS,
+            "open settings",
+        ),
+        (
+            "action:open_about",
+            ids::SEARCH_ACTION_OPEN_ABOUT,
+            "open about",
+        ),
+        (
+            "action:open_timeline",
+            ids::SEARCH_ACTION_OPEN_TIMELINE,
+            "open timeline",
+        ),
+        (
+            "action:open_snapshots",
+            ids::SEARCH_ACTION_OPEN_SNAPSHOTS,
+            "open snapshots layout",
+        ),
+        (
+            "action:open_suggestor",
+            ids::SEARCH_ACTION_OPEN_SUGGESTOR,
+            "open smart suggestions grouping",
+        ),
+        (
+            "action:open_bulk_manager",
+            ids::SEARCH_ACTION_OPEN_BULK_MANAGER,
+            "open bulk manager batch",
+        ),
+        (
+            "action:open_capsule_picker",
+            ids::SEARCH_ACTION_OPEN_CAPSULE_PICKER,
+            "open context capsules",
+        ),
+        (
+            "action:open_rules",
+            ids::SEARCH_ACTION_OPEN_RULES,
+            "open rules wizard",
+        ),
+        (
+            "action:list_minibars",
+            ids::SEARCH_ACTION_LIST_MINIBARS,
+            "list pinned minibars mini bars",
+        ),
+        (
+            "action:toggle_debug_overlay",
+            ids::SEARCH_ACTION_TOGGLE_DEBUG,
+            "toggle debug overlay information",
+        ),
+        (
+            "action:quit",
+            ids::SEARCH_ACTION_QUIT,
+            "quit exit BentoDesk",
+        ),
     ] {
-        add_search_item(&mut index, id, title, "Actions", SearchItemKind::Action);
+        add_search_item_with_keywords(
+            &mut index,
+            id,
+            bento_nano_style::t(title_id),
+            actions_group,
+            keywords,
+            SearchItemKind::Action,
+        );
     }
 
     index
@@ -22429,6 +27327,9 @@ fn run_search_query(root: &AppRoot, query: &str) -> usize {
 
 fn show_search(root: &AppRoot) {
     let _panel = search_bar::build();
+    if let Some(main) = find_main_hwnd(root) {
+        close_inline_zone_search(root, main);
+    }
     {
         let app = root.app.borrow();
         app.search_bar.borrow_mut().clear();
@@ -22639,9 +27540,13 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
             drop(app);
             root.dispatcher.push(Command::OpenSettings);
             let app = root.app.borrow();
-            app.search_status
-                .borrow_mut()
-                .replace(SmolStr::new(format!("Opening {}", hit.name)));
+            app.search_status.borrow_mut().replace(SmolStr::new(
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    format!("正在打开：{}", hit.name)
+                } else {
+                    format!("Opening {}", hit.name)
+                },
+            ));
         }
         SearchItemKind::Action => {
             let app = root.app.borrow();
@@ -22649,16 +27554,23 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
             drop(app);
             if !push_search_action(root, hit.id.as_str()) {
                 let app = root.app.borrow();
-                app.search_status.borrow_mut().replace(SmolStr::new(format!(
-                    "Unsupported Search action: {}",
-                    hit.id
-                )));
+                app.search_status.borrow_mut().replace(SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        "当前搜索操作不可用".to_owned()
+                    } else {
+                        format!("Unsupported Search action: {}", hit.id)
+                    },
+                ));
                 return false;
             }
             let app = root.app.borrow();
-            app.search_status
-                .borrow_mut()
-                .replace(SmolStr::new(format!("Running {}", hit.name)));
+            app.search_status.borrow_mut().replace(SmolStr::new(
+                if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                    format!("正在执行：{}", hit.name)
+                } else {
+                    format!("Running {}", hit.name)
+                },
+            ));
         }
     }
 
@@ -22673,12 +27585,14 @@ fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
     true
 }
 
-fn scan_suggestor_desktop_files() -> (
+fn scan_suggestor_desktop_files(
+    root: &AppRoot,
+) -> (
     Vec<bento_nano_backend::grouping::scanner::FileInfo>,
     usize,
     usize,
 ) {
-    let desktop_dirs = bento_nano_backend::desktop_sources::all_desktop_dirs(None);
+    let desktop_dirs = configured_desktop_sources_for_app(&root.app.borrow());
     let source_count = desktop_dirs.len();
     let mut files = Vec::new();
     let mut error_count = 0usize;
@@ -22718,25 +27632,52 @@ fn seed_suggestor_from_files(
     let visible_count = filtered.len();
     drop(dismissed);
     app.suggestor.borrow_mut().set_suggestions(filtered);
+    let zh = bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN);
     let status = if source_count == 0 {
-        SmolStr::new_static("No Desktop sources resolved for smart grouping")
+        SmolStr::new_static(if zh {
+            "尚未配置可用于智能分组的桌面源"
+        } else {
+            "No Desktop sources resolved for smart grouping"
+        })
     } else if files.is_empty() {
-        SmolStr::new(format!(
-            "Scanned {source_count} Desktop source(s); no groupable files found"
-        ))
+        SmolStr::new(if zh {
+            format!("已扫描 {source_count} 个桌面源，暂未找到可分组文件")
+        } else {
+            format!("Scanned {source_count} Desktop source(s); no groupable files found")
+        })
     } else if visible_count == 0 {
-        SmolStr::new(format!(
-            "Scanned {} files; backend returned no visible suggestions",
-            files.len()
-        ))
+        SmolStr::new(if zh {
+            format!("已扫描 {} 个文件，暂未生成分组建议", files.len())
+        } else {
+            format!(
+                "Scanned {} files; backend returned no visible suggestions",
+                files.len()
+            )
+        })
     } else {
-        SmolStr::new(format!(
-            "{} suggestion(s) from {} files across {} source(s); scan errors={}",
-            visible_count,
-            files.len(),
-            source_count,
-            error_count
-        ))
+        SmolStr::new(if zh {
+            if error_count == 0 {
+                format!(
+                    "已从 {} 个桌面源的 {} 个文件生成 {} 条建议",
+                    source_count,
+                    files.len(),
+                    visible_count
+                )
+            } else {
+                format!(
+                    "已生成 {} 条建议；另有 {} 个桌面源扫描失败",
+                    visible_count, error_count
+                )
+            }
+        } else {
+            format!(
+                "{} suggestion(s) from {} files across {} source(s); scan errors={}",
+                visible_count,
+                files.len(),
+                source_count,
+                error_count
+            )
+        })
     };
     app.suggestor_status.borrow_mut().replace(status);
     visible_count
@@ -22758,15 +27699,19 @@ fn drain_suggestor_action(root: &AppRoot, hwnd: HWND) {
             {
                 let app = root.app.borrow();
                 app.suggestor.borrow_mut().mark_applying(suggestion_id);
-                app.suggestor_status
-                    .borrow_mut()
-                    .replace(SmolStr::new(format!("Applying '{}'", suggestion.name)));
+                app.suggestor_status.borrow_mut().replace(SmolStr::new(
+                    if bento_nano_style::current_locale_is(&bento_nano_style::ZH_CN) {
+                        format!("正在应用建议“{}”", suggestion.name)
+                    } else {
+                        format!("Applying '{}'", suggestion.name)
+                    },
+                ));
+                app.highlight_overlay.borrow_mut().clear();
+            }
+            if let Some(main) = find_main_hwnd(root) {
+                request_redraw(main);
             }
             root.dispatcher.push(Command::GroupingApply { suggestion });
-            if !hwnd.is_null() {
-                // SAFETY: hwnd is the focused Suggestor HWND.
-                unsafe { ShowWindow(hwnd, SW_HIDE) };
-            }
         }
         smart_group_suggestor::SuggestorAction::Dismiss { suggestion_id } => {
             root.dispatcher
@@ -22791,9 +27736,17 @@ fn drain_suggestor_action(root: &AppRoot, hwnd: HWND) {
 
 fn show_suggestor(root: &AppRoot) {
     let _panel = smart_group_suggestor::build();
-    let (files, source_count, error_count) = scan_suggestor_desktop_files();
+    let target_id = {
+        let mut app = root.app.borrow_mut();
+        ensure_suggestor_target_zone(&mut app)
+    };
+    let (files, source_count, error_count) = scan_suggestor_desktop_files(root);
     let visible_count = seed_suggestor_from_files(root, &files, source_count, error_count);
-    let highlighted = set_highlight_for_suggestor_selection(root);
+    // Preview highlights are opt-in after the user selects a row. Opening the
+    // native dialog must not immediately paint a blue selection slab across
+    // the desktop behind it.
+    root.app.borrow().highlight_overlay.borrow_mut().clear();
+    let highlighted = 0;
 
     let Some(host) = ensure_aux_window(root, WindowKind::Suggestor) else {
         tracing::warn!(
@@ -22810,7 +27763,8 @@ fn show_suggestor(root: &AppRoot) {
     }
     log_static(
         format!(
-            "suggestor: ShowSuggestor files={} suggestions={} sources={} errors={} highlight_targets={}\n",
+            "suggestor: ShowSuggestor target_zone={} files={} suggestions={} sources={} errors={} highlight_targets={}\n",
+            target_id.0,
             files.len(),
             visible_count,
             source_count,
@@ -22855,6 +27809,93 @@ fn log_static(msg: &str) {
     let mut stderr = std::io::stderr();
     let _ = std::io::Write::write_all(&mut stderr, msg.as_bytes());
     let _ = std::io::Write::flush(&mut stderr);
+}
+
+fn compact_process_heaps() {
+    let mut heaps: [HANDLE; 32] = [ptr::null_mut(); 32];
+    // SAFETY: `heaps` is a valid writable stack buffer. `GetProcessHeaps`
+    // writes at most `heaps.len()` handles and returns the required count.
+    let count = unsafe { GetProcessHeaps(heaps.len() as u32, heaps.as_mut_ptr()) };
+    let count = (count as usize).min(heaps.len());
+    for heap in heaps
+        .iter()
+        .copied()
+        .take(count)
+        .filter(|heap| !heap.is_null())
+    {
+        // SAFETY: handles come directly from GetProcessHeaps for this process.
+        // Compact failure/unsupported LFH heaps are non-fatal.
+        unsafe {
+            let _ = HeapCompact(heap, 0);
+        }
+    }
+}
+
+fn trim_runtime_memory(reason: &str) {
+    // 1) Drop D2D effect / glyph cache that can be rebuilt on demand.
+    if let Ok(f) = bento_nano_platform::d2d::factory() {
+        // SAFETY: factory() returns a process-static reference; ClearResources
+        // is documented as re-entrant-safe and failure is not observable here.
+        unsafe { f.device.ClearResources(0) };
+    }
+    // 2) Let the DXGI device shed idle graphics allocations if the interface is available.
+    let _ = bento_nano_platform::d3d::trim();
+    // 3) Release retained mimalloc segments from startup-only work.
+    bento_nano_platform::allocator::collect_retained_segments();
+    // 4) Decommit compactable process-heap slack left by startup-only Win32/COM.
+    compact_process_heaps();
+    // 5) Push cold pages to standby.
+    // SAFETY: GetCurrentProcess returns a kernel pseudo-handle;
+    // EmptyWorkingSet failure (FALSE) is non-fatal.
+    unsafe {
+        let _ = EmptyWorkingSet(GetCurrentProcess());
+    }
+    log_static(format!("memory: trim reason={reason}\n").as_str());
+}
+
+fn arm_resident_memory_trim(hwnd: HWND) {
+    // SAFETY: `hwnd` is owned by the UI thread. The timer posts WM_TIMER back
+    // to the same window and is intentionally periodic until killed.
+    unsafe {
+        let timer = SetTimer(
+            hwnd,
+            RESIDENT_MEMORY_TRIM_TIMER_ID,
+            RESIDENT_MEMORY_TRIM_MS,
+            None,
+        );
+        if timer == 0 {
+            log_static(
+                format!(
+                    "memory: SetTimer(RESIDENT_MEMORY_TRIM) failed (GetLastError={})\n",
+                    GetLastError()
+                )
+                .as_str(),
+            );
+        }
+    }
+}
+
+fn arm_stack_tray_memory_trim(hwnd: HWND) {
+    // SAFETY: `hwnd` is owned by the UI thread. Resetting the same id before
+    // arming keeps repeated StackTray opens to a single pending trim.
+    unsafe {
+        KillTimer(hwnd, STACK_TRAY_MEMORY_TRIM_TIMER_ID);
+        let timer = SetTimer(
+            hwnd,
+            STACK_TRAY_MEMORY_TRIM_TIMER_ID,
+            STACK_TRAY_MEMORY_TRIM_MS,
+            None,
+        );
+        if timer == 0 {
+            log_static(
+                format!(
+                    "memory: SetTimer(STACK_TRAY_MEMORY_TRIM) failed (GetLastError={})\n",
+                    GetLastError()
+                )
+                .as_str(),
+            );
+        }
+    }
 }
 
 /// Mc-1b — show a modal, user-visible error box. Under
@@ -22914,6 +27955,163 @@ fn request_redraw(hwnd: HWND) {
     }
 }
 
+fn request_theme_surface_redraw(root: &AppRoot, animate_transition: bool) {
+    let registry = root.registry.borrow();
+    for slot in registry.iter() {
+        if !slot.is_visible.get() {
+            continue;
+        }
+        if animate_transition && slot.kind == WindowKind::Settings {
+            arm_hover_frame_timer(slot.hwnd);
+        }
+        request_redraw(slot.hwnd);
+    }
+}
+
+fn zone_pill_animation_active(app: &AppState) -> bool {
+    app.zone_pill_anim_zone
+        .get()
+        .and_then(|zone_id| app.zones.get(zone_id))
+        .map(|zone| !zone.is_stack_anchor() && app.zone_pill_anim_progress.get() < 1.0)
+        .unwrap_or(false)
+}
+
+fn hover_frame_pump_needed(app: &AppState) -> bool {
+    // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+    let now_ms = unsafe { GetTickCount() };
+    app.hover_scheduler.get().is_pending()
+        || stack_bloom_animation_active(app)
+        || zone_pill_animation_active(app)
+        || app.pill_animator.borrow().occupancy() > 0
+        || app.settings_open_animation_pending_at(now_ms)
+        || app.theme_transition_pending_at(now_ms)
+}
+
+fn stack_bloom_animation_active(app: &AppState) -> bool {
+    app.stack_bloom_anchor.get().is_some()
+        && (app.stack_bloom_leaving.get() || app.stack_bloom_progress.get() < 1.0)
+}
+
+fn stack_bloom_cursor_watch_active(app: &AppState) -> bool {
+    app.stack_bloom_anchor.get().is_some() && !app.stack_bloom_leaving.get()
+}
+
+fn hover_frame_timer_needed(app: &AppState) -> bool {
+    hover_frame_pump_needed(app) || stack_bloom_cursor_watch_active(app)
+}
+
+fn arm_hover_frame_timer(hwnd: HWND) {
+    // SAFETY: `hwnd` is an HWND owned by this UI thread. The timer has no
+    // callback; WM_TIMER is routed through `wnd_proc`.
+    unsafe {
+        let timer = SetTimer(hwnd, HOVER_FRAME_TIMER_ID, HOVER_FRAME_POLL_MS, None);
+        if timer == 0 {
+            log_static(
+                format!(
+                    "hover_frame: SetTimer failed (GetLastError={})\n",
+                    GetLastError()
+                )
+                .as_str(),
+            );
+        }
+    }
+}
+
+fn handle_hover_frame_timer(hwnd: HWND) {
+    if let Some(root) = app_root() {
+        let mut interaction_changed = false;
+        // SAFETY: `hwnd` owns a registry-stable WindowSlot for its lifetime;
+        // GetTickCount is total and thread-safe.
+        let (renderer_animating, renderer_settled) = unsafe {
+            let slot = get_slot_ptr(hwnd);
+            if slot.is_null() {
+                (false, false)
+            } else {
+                let now_ms = GetTickCount();
+                let animating = (*slot).renderer.auxiliary_open_animation_pending(now_ms);
+                let settled =
+                    !animating && (*slot).renderer.settle_auxiliary_open_animation(now_ms);
+                (animating, settled)
+            }
+        };
+        let watch_stack_cursor = {
+            let app = root.app.borrow();
+            stack_bloom_cursor_watch_active(&app)
+        };
+        if watch_stack_cursor {
+            // Once blank pixels switch the Main HWND to WS_EX_TRANSPARENT,
+            // Windows no longer routes the follow-up WM_MOUSEMOVE that would
+            // close a stable stack bloom. Reuse this already-armed frame timer
+            // as a cursor sentinel only while a bloom is visible; no idle
+            // timer and no stable-state redraw are introduced.
+            unsafe {
+                let p = get_slot_ptr(hwnd);
+                if !p.is_null() {
+                    let slot = &*p;
+                    if let Some((x, y, passthrough)) =
+                        refresh_ghost_cursor_passthrough(root, slot, hwnd)
+                    {
+                        if passthrough {
+                            clear_hover(root);
+                        } else {
+                            // The window may have been transparent while the
+                            // cursor crossed a family gap, so no WM_MOUSEMOVE is
+                            // guaranteed on petal re-entry. Sample the same
+                            // paint-priority hover path directly from this
+                            // already-running cursor sentinel.
+                            let app = root.app.borrow();
+                            // SAFETY: GetTickCount has no failure mode.
+                            let now_ms = GetTickCount();
+                            interaction_changed |=
+                                update_main_zone_hover_for_point(&app, x, y, now_ms);
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let app = root.app.borrow();
+            // SAFETY: GetTickCount has no failure mode.
+            let now_ms = unsafe { GetTickCount() };
+            interaction_changed |= poll_stack_bloom_interaction(&app, now_ms);
+        }
+        if interaction_changed || renderer_settled {
+            request_redraw(hwnd);
+        }
+        let app = root.app.borrow();
+        if hover_frame_pump_needed(&app) || renderer_animating {
+            drop(app);
+            request_redraw(hwnd);
+        } else if stack_bloom_cursor_watch_active(&app) {
+            // Stable bloom: keep only the cursor sentinel alive. Repainting at
+            // 60 fps here would waste CPU/GPU while nothing is animating.
+            drop(app);
+        } else {
+            drop(app);
+            // SAFETY: Killing an absent timer is a harmless no-op for this HWND/id.
+            unsafe {
+                KillTimer(hwnd, HOVER_FRAME_TIMER_ID);
+            }
+        }
+    } else {
+        // SAFETY: Killing an absent timer is a harmless no-op for this HWND/id.
+        unsafe {
+            KillTimer(hwnd, HOVER_FRAME_TIMER_ID);
+        }
+    }
+}
+
+fn sync_hover_frame_timer(hwnd: HWND, app: &AppState, renderer_animating: bool) {
+    if hover_frame_timer_needed(app) || renderer_animating {
+        arm_hover_frame_timer(hwnd);
+    } else {
+        // SAFETY: Killing an absent timer is a harmless no-op for this HWND/id.
+        unsafe {
+            KillTimer(hwnd, HOVER_FRAME_TIMER_ID);
+        }
+    }
+}
+
 fn log_paint_err(e: bento_nano_app::RenderError) {
     use core::fmt::Write as _;
     let mut buf: smallvec::SmallVec<[u8; 256]> = smallvec::SmallVec::new();
@@ -22962,8 +28160,7 @@ const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 /// process-wide device chain, and rebuilds THIS window's renderer.
 ///
 /// §11: never panics — a failed recreate is logged and counted, and the retry
-/// cap (or the next device-lost frame) decides whether to escalate. §10: cold —
-/// only reached on the rare device-lost event, never on a healthy frame.
+/// cap (or the next device-lost frame) decides whether to escalate. §10: cold —/// only reached on the rare device-lost event, never on a healthy frame.
 ///
 /// SAFETY: `hwnd` must be the live HWND whose paint/resize raised the loss; the
 /// slot pointer is fetched the same way `paint()` does (`get_slot_ptr`).
@@ -23172,6 +28369,9 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
         if tick_pill_animator(&app, now) {
             any_active = true;
         }
+        if settle_inline_zone_search_animation(&app, now) {
+            any_active = true;
+        }
         // M3-A2 — per-item hover/press ramp. Same frame cadence as the pill
         // animator; retires leaving/released cards and keeps the pump alive while
         // a 150ms hover / 80ms press transition is still in flight.
@@ -23196,6 +28396,12 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
     }
 
     // 2) Spec §C2 — exactly one `flush_dirty` per frame.
+    sync_hover_frame_timer(
+        hwnd,
+        &app,
+        slot.renderer.auxiliary_open_animation_pending(now),
+    );
+
     let frame = root.frame_id.get().wrapping_add(1);
     root.frame_id.set(frame);
     let _digest = app.tree.flush_dirty(frame);
@@ -23217,7 +28423,18 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
             return Err(e);
         }
     }
+    // Every auxiliary HWND owns an independent swap-chain size. Rendering it
+    // with the process-global Main viewport recentres/clips modal geometry
+    // inside the wrong coordinate space (the old About window showed only a
+    // cropped right-hand slice). Temporarily project the slot's device size to
+    // logical DIPs for this frame, then restore Main's viewport so an aux paint
+    // cannot poison desktop hit-testing. Main itself keeps its live viewport.
+    let previous_viewport = app.viewport;
+    app.viewport = window_slot_logical_viewport(slot);
     let r = slot.paint(&mut app);
+    if slot.kind != WindowKind::Main {
+        app.viewport = previous_viewport;
+    }
     drop(app);
 
     if rehydrate_live_folder_bindings(root) {
@@ -23246,20 +28463,7 @@ unsafe fn paint(hwnd: HWND) -> Result<(), bento_nano_app::RenderError> {
     if r.is_ok() {
         let win_ref = &slot.state;
         if !win_ref.first_paint_done.get() {
-            // 1) Tier 0 #28 — drop D2D effect / glyph cache.
-            //    SAFETY: factory() returns a process-static reference;
-            //            ClearResources is documented re-entrant-safe.
-            if let Ok(f) = bento_nano_platform::d2d::factory() {
-                unsafe { f.device.ClearResources(0) };
-            }
-            // 2) Release retained mimalloc segments from startup-only work.
-            bento_nano_platform::allocator::collect_retained_segments();
-            // 3) Tier 0 #29/#31 — push cold pages to standby.
-            //    SAFETY: GetCurrentProcess returns a kernel pseudo-handle;
-            //            EmptyWorkingSet failure (FALSE) is non-fatal.
-            unsafe {
-                let _ = EmptyWorkingSet(GetCurrentProcess());
-            }
+            trim_runtime_memory("first-paint");
             win_ref.first_paint_done.set(true);
         }
     }
@@ -23271,6 +28475,7 @@ fn drain_desktop_events(root: &AppRoot) -> bool {
     let _watcher_alive = root.desktop_watcher.borrow().is_some();
     let mut drained = 0u32;
     let mut changed = false;
+    let mut smart_group_requested = false;
     while let Ok(event) = root.desktop_events.try_recv() {
         drained = drained.saturating_add(1);
         tracing::debug!(
@@ -23305,6 +28510,7 @@ fn drain_desktop_events(root: &AppRoot) -> bool {
                     }
                 }
                 "create" => {
+                    smart_group_requested |= app.setting_smart_layout.get();
                     if let Some(old_path) = event.old_path.as_deref() {
                         if app.zones.replace_item_path(
                             old_path,
@@ -23347,6 +28553,9 @@ fn drain_desktop_events(root: &AppRoot) -> bool {
         if drained >= 32 {
             break;
         }
+    }
+    if smart_group_requested && auto_organize_desktop(root) {
+        changed = true;
     }
     changed || drained > 0
 }
@@ -23460,10 +28669,67 @@ fn drain_ghost_events(root: &AppRoot) -> bool {
         drained = drained.saturating_add(1);
         match event {
             bento_nano_backend::ghost_layer::GhostLayerEvent::PowerResume => {
-                bento_nano_backend::ghost_layer::reposition_to_work_area();
+                schedule_power_resume(root);
+            }
+        }
+        if drained >= 8 {
+            break;
+        }
+    }
+    drained > 0
+}
+
+fn schedule_power_resume(root: &AppRoot) {
+    let config = {
+        let app = root.app.borrow();
+        bento_nano_backend::power::ResumeConfig {
+            delay_ms: app.hibernate_resume_delay_ms.get().max(0) as u32,
+            safe_start_enabled: app.safe_start_after_hibernation.get(),
+        }
+    };
+    bento_nano_backend::power::handle_resume(config, root.power_event_tx.clone());
+}
+
+fn drain_power_events(root: &AppRoot) -> bool {
+    let mut drained = 0u32;
+    while let Ok(event) = root.power_events.try_recv() {
+        drained = drained.saturating_add(1);
+        match event {
+            bento_nano_backend::power::PowerEvent::Resumed => {
+                let snapshot = root.app.borrow().snapshot_settings();
+                if snapshot.ghost_layer_enabled {
+                    if let Some(hwnd) = find_main_hwnd(root) {
+                        if let Err(error) =
+                            bento_nano_backend::ghost_layer::attach_selected_stack(hwnd)
+                        {
+                            tracing::warn!(
+                                target: "bentodesk::ghost_layer",
+                                %error,
+                                "PowerResume ghost-layer reattach failed"
+                            );
+                        }
+                    }
+                    bento_nano_backend::ghost_layer::reposition_to_work_area();
+                }
+                match validate_settings_sources(&snapshot) {
+                    Ok(sources) => {
+                        if let Err(error) = rebuild_desktop_watcher(root, &sources) {
+                            tracing::warn!(
+                                target: "bentodesk::watcher",
+                                %error,
+                                "PowerResume watcher rebuild failed"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        target: "bentodesk::watcher",
+                        %error,
+                        "PowerResume watcher rebuild skipped for invalid Settings paths"
+                    ),
+                }
                 tracing::info!(
-                    target: "bentodesk::ghost_layer",
-                    "PowerResume routed — ghost layer work-area position reasserted"
+                    target: "bentodesk::power",
+                    "PowerResume recovery completed with saved delay and enablement"
                 );
             }
         }
@@ -23475,7 +28741,7 @@ fn drain_ghost_events(root: &AppRoot) -> bool {
 }
 
 /// T-099 hibernation pass — runs once per paint cycle. Iterates every
-/// registered slot looking for `pending_hibernate && (now - last_visible_change_ms ≥ HIBERNATE_GATE_MS)`,
+/// registered slot looking for `pending_hibernate && (now - last_visible_change_ms ≤ HIBERNATE_GATE_MS)`,
 /// and releases the swap chain backbuffer for each one. Main window slots
 /// short-circuit (`pending_hibernate` is never set on them per
 /// `WindowSlot::set_visible`).
@@ -23514,16 +28780,20 @@ mod tests {
         ALL_ICON_KINDS,
         AppRoot,
         AuxiliaryEscapeAction,
+        BACKEND_EVENT_POLL_TIMER_ID,
         BentoItem,
         BentoZone,
         BulkZoneUpdate,
+        CONTEXT_MENU_INPUT_TIMER_ID,
         Command,
         ContextCapsuleWindow,
         DispatchPoint,
         DispatchSize,
         DragSelectionRelease,
         EventDispatcher,
+        GHOST_PASSTHROUGH_TIMER_ID,
         GridPosition,
+        HOVER_FRAME_TIMER_ID,
         HWND,
         ITEM_CONTEXT_COPY_PATH_ID,
         ITEM_CONTEXT_DELETE_FILE_ID,
@@ -23540,12 +28810,14 @@ mod tests {
         LiveContextWindow,
         MiniBar,
         MiniBarRoster,
-        PendingItemContextMenu,
+        PendingItemDragOut,
+        RESIDENT_MEMORY_TRIM_TIMER_ID,
         RecoveryIconRestoreOutcome,
         RecycleDeleteOutcome,
         RelativePosition,
         RelativeSize,
         SETTING_ACTIVE_THEME,
+        SETTING_APPEARANCE_ACCENT_COLOR,
         SETTING_BACKUP_LAST_CREATED,
         SETTING_BACKUP_LAST_RESTORED,
         SETTING_DEBUG_OVERLAY,
@@ -23557,7 +28829,10 @@ mod tests {
         SETTING_UPDATES_AUTO_DOWNLOAD,
         SETTING_UPDATES_CHECK_FREQUENCY,
         SETTING_ZONE_DISPLAY_MODE,
+        STACK_TRAY_MEMORY_TRIM_TIMER_ID,
+        STARTUP_MEMORY_TRIM_TIMER_ID,
         StartupLayoutLoadSource,
+        TRAY_ICON_RETRY_TIMER_ID,
         VK_A_KEY,
         VK_BACKSPACE,
         VK_D_KEY,
@@ -23572,6 +28847,8 @@ mod tests {
         WindowState,
         ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
         ZoneContextAction,
+        accent_hex_to_colorref,
+        active_theme_id_is_builtin,
         add_item_to_zone_with,
         apply_active_theme_to_app,
         apply_bulk_layout_algorithm,
@@ -23586,6 +28863,7 @@ mod tests {
         apply_setting_value_to_app,
         apply_theme_base_accent_to_app,
         apply_update_event_to_app,
+        async_mouse_button_active,
         auxiliary_escape_action,
         bento_zones_from_app,
         bool_setting_command_for,
@@ -23599,10 +28877,16 @@ mod tests {
         capture_context_capsule_for_path,
         capture_current_timeline_snapshot,
         capture_recovery_bundle,
+        centered_fixed_aux_host_rect,
         clamp_zone_rect_to_viewport,
+        clear_stack_bloom_surface,
+        close_settings_surface,
+        collapse_zone_from_header,
+        colorref_to_accent_hex,
         compute_bulk_layout_positions,
         consume_dispatcher,
         context_capsule_payload_is_json,
+        context_menu_next_hit,
         copy_item_path_with,
         create_settings_backup_from_vault,
         current_minibar_pins_csv,
@@ -23612,13 +28896,16 @@ mod tests {
         delete_context_capsule_for_path,
         delete_item_file_to_recycle_bin_using,
         delete_path_to_recycle_bin_with,
+        desktop_source_rows_for_settings,
         drag_selection_release,
         drive_hover_scheduler,
         duplicate_selected_zone,
         encode_context_capsule_envelope,
         encryption_mode_from_wire,
         encryption_mode_setting_command_for,
+        ensure_suggestor_target_zone,
         export_recovery_diagnostics,
+        finalize_item_drag_out,
         // #7 fix wave (2026-06-01) — W1/W3/P15 seams under test.
         focus_passphrase_field,
         focus_visible_zone,
@@ -23631,7 +28918,6 @@ mod tests {
         handle_bulk_manager_text_edit_keydown,
         handle_icon_picker_keydown,
         handle_icon_picker_lbutton_up,
-        handle_item_context_wm_command,
         handle_rules_wizard_char,
         handle_rules_wizard_keydown,
         handle_rules_wizard_lbutton_up,
@@ -23640,6 +28926,8 @@ mod tests {
         handle_settings_text_keydown,
         handle_snapshot_picker_lbutton_up,
         handle_stack_bloom_lbutton_up,
+        handle_stack_bloom_preview_lbutton_down,
+        handle_stack_bloom_preview_lbutton_up,
         handle_stack_tray_lbutton_down,
         handle_stack_tray_lbutton_up,
         handle_suggestor_keydown,
@@ -23647,11 +28935,22 @@ mod tests {
         handle_timeline_lbutton_up,
         handle_zone_editor_lbutton_up,
         hide_tooltip_payload,
+        hides_when_workspace_aux_opens,
+        highlight_overlay,
+        hover_frame_pump_needed,
+        hover_frame_timer_needed,
         icon_picker_slug_for_hit,
         import_theme_for_root,
+        is_workspace_aux_surface,
         item_context_action_for_choice,
         item_context_dispatch_for_action,
+        item_context_menu_rows,
+        item_drag_target_zone_for_point,
         item_file_display_path,
+        item_grid_position_for_drag_point,
+        item_icon_startup_rehydrate_force,
+        item_open_command_for_double_click,
+        layout_new_auto_group_zones,
         list_context_capsules_for_path,
         list_pinned_minibar_labels,
         list_plugins_for_root,
@@ -23674,8 +28973,10 @@ mod tests {
         normal_pointer_drag_active,
         normalize_icon_slug,
         normalized_rename_leaf,
+        on_hover_target_changed,
         palette_picker,
         palette_picker_accent_for_hit,
+        panel_header_button_hover_for_hit,
         parse_minibar_pin_ids,
         passphrase_button_command,
         persist_active_theme_to_vault,
@@ -23683,10 +28984,12 @@ mod tests {
         persist_passphrase_to_vault,
         persist_rule_run_stats,
         persist_setting_to_vault,
+        persist_settings_accent_to_vault,
         persist_theme_base_accent_to_vault,
         persist_zone_display_mode_to_vault,
         pin_zone_minibar_state,
         poll_hover_scheduler,
+        poll_stack_bloom_interaction,
         queue_active_theme_cycle,
         queue_add_items,
         queue_update_action,
@@ -23697,6 +29000,7 @@ mod tests {
         refresh_settings_plugins_for_root,
         rehydrate_live_folder_bindings_with,
         reset_pointer_drag_hover_channels,
+        reset_settings_transient_state,
         resize_zone_live,
         restore_context_capsule_for_path,
         restore_latest_settings_backup_from_vault,
@@ -23706,12 +29010,14 @@ mod tests {
         restore_recovery_vault_payload_to_vault,
         restore_settings_backup_by_id_from_vault,
         restore_timeline_checkpoint,
+        reveal_stack_at_drop_pointer,
         rules_item_type_for_path,
         rules_preview_zones_from_app,
         rules_state_dir_for_zones_path,
         rules_zone_id_from_wire,
         run_interval_rule_for_scheduler_event_with_desktop,
         run_on_file_change_rules,
+        sampled_zone_pill_morph,
         save_icon_picker,
         save_layout_snapshot,
         save_palette_picker,
@@ -23720,14 +29026,26 @@ mod tests {
         save_timeline_checkpoint,
         search_icon_for_kind,
         seed_suggestor_from_files,
+        settings_appearance_hover_for_hit,
+        settings_aux_host_rect,
         settings_backup_file_name,
+        settings_close_hover_for_hit,
+        settings_encryption_mode_hover_for_hit,
         settings_wheel_scroll_delta_from_wparam,
+        settle_inline_zone_search_animation,
         shell_file_list_from_path,
         should_start_background_update_check,
         should_start_item_drag_out,
         show_tooltip_payload,
+        smart_group_zone_dimensions,
         snapshot_dir_for_zones_path,
+        stack_aware_hover_zone_for_point,
+        stack_bloom_cursor_watch_active,
+        stack_bloom_hit_for_point,
         stack_bloom_hover_anchor_for_point,
+        stack_bloom_hover_suppresses_main_tooltip,
+        stack_bloom_preview_hit_for_point,
+        stack_bloom_preview_item_hit_for_point,
         stack_bloom_reveal_progress_for_anchor,
         stamp_rule_id_if_empty,
         start_item_drag_out_with,
@@ -23739,11 +29057,13 @@ mod tests {
         tick_stack_bloom_animation,
         tick_zone_pill_animation,
         timeline_dir_for_zones_path,
+        toggle_stack_bloom_from_capsule_click,
         tooltip_command_for_bulk_manager_hover,
         tooltip_command_for_capsule_picker_hover,
         tooltip_command_for_hover,
         tooltip_command_for_icon_picker_hover,
         tooltip_command_for_item_file_rename_hover,
+        tooltip_command_for_main_hover,
         tooltip_command_for_minibar_hover,
         tooltip_command_for_palette_picker_hover,
         tooltip_command_for_rules_wizard_hover,
@@ -23752,6 +29072,7 @@ mod tests {
         tooltip_command_for_suggestor_hover,
         tooltip_command_for_timeline_hover,
         tooltip_command_for_zone_editor_hover,
+        tooltip_uses_aux_surface,
         tray_command_for_callback,
         tray_menu_command_for_choice,
         tray_menu_command_for_item,
@@ -23762,28 +29083,34 @@ mod tests {
         update_frequency_from_wire,
         update_frequency_setting_command_for,
         update_stack_bloom_hover,
+        update_stack_bloom_petal_hover,
         update_zone_pill_hover,
         updater_event_should_auto_download,
-        widen_dynamic,
         widen_static,
         window_kind_routes_settings_keydown,
         window_kind_routes_settings_pointer,
+        with_app_viewport,
         write_minibar_pins_to_vault,
+        zone_accepts_click_expand,
         zone_context_action_for_choice,
+        zone_context_menu_rows,
         zone_display_mode_from_wire,
+        zone_drag_pointer_offset,
+        zone_item_max_scroll,
         zone_list_from_bento_zones,
         zone_pill_geometry,
+        zone_scroll_target_for_point,
     };
     use bento_nano_app::business::bulk_manager_panel::{BulkTextEditField, SortKey};
     use bento_nano_app::business::capsule_picker::{
         CapsuleEntry, capsule_picker_empty_rect, capsule_picker_error_rect,
         capsule_picker_hint_rect, capsule_picker_row_rect,
     };
-    use bento_nano_app::business::icons::IconKind;
     use bento_nano_app::business::rules_wizard;
     use bento_nano_app::business::smart_group_suggestor;
     use bento_nano_app::business::stack_tray;
     use bento_nano_app::business::tray_menu::TrayMenuItem;
+    use bento_nano_app::business::{icons::IconKind, popover};
     use bento_nano_app::dispatcher::PaletteTarget;
     use bento_nano_app::item_file_rename_geometry::{
         item_file_rename_input_rect, item_file_rename_path_rect, item_file_rename_status_rect,
@@ -23792,19 +29119,24 @@ mod tests {
         IconPickerHit, PalettePickerHit, icon_picker_hit_test, icon_picker_slot_rect,
         palette_picker_clear_rect, palette_picker_hit_test, palette_picker_swatch_rect,
     };
+    use bento_nano_app::state::{
+        DEFAULT_COLLAPSE_DELAY_MS, DEFAULT_EXPAND_DELAY_MS, SettingsSnapshot,
+    };
     // R14 supplement (2026-05-25) — `settings_update_auto_download_rect` and
     // `settings_update_check_now_rect` removed from test-mod imports per
     // bundle directive (clippy `unused_imports`). The fns live in
     // `bento_nano_app::settings_panel` and remain accessible to production
     // call sites; the test mod simply does not reference them.
     use bento_nano_app::zone_editor_geometry::{
-        ZoneEditorHit, zone_editor_cancel_rect, zone_editor_grid_rect, zone_editor_hit_test,
-        zone_editor_icon_rect, zone_editor_save_rect,
+        ZoneEditorHit, zone_editor_accent_option_rect, zone_editor_cancel_rect,
+        zone_editor_close_rect, zone_editor_grid_option_rect, zone_editor_grid_rect,
+        zone_editor_hit_test, zone_editor_icon_rect, zone_editor_name_input_rect,
+        zone_editor_save_rect,
     };
     use bento_nano_app::{
         AppState, BulkLayoutAlgorithm, IconPickerSession, ItemDragCandidate, ItemFileRenameSession,
-        PalettePickerSession, SettingsBackupStatus, SettingsEncryptionMode, SettingsUpdaterStatus,
-        ZoneDisplayMode, ZoneEditorSession,
+        PalettePickerSession, PanelHeaderButtonHover, PanelHeaderButtonKind, SettingsBackupStatus,
+        SettingsEncryptionMode, SettingsUpdaterStatus, ZoneDisplayMode, ZoneEditorSession,
     };
     use bento_nano_backend::config_vault::wire::ModeTag;
     use bento_nano_backend::config_vault::{EncryptionMode as BackendEncryptionMode, Vault};
@@ -23830,6 +29162,193 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP};
     use zip::write::FileOptions;
 
+    #[test]
+    fn workspace_aux_surfaces_replace_superseded_tools_but_keep_shell_chrome() {
+        assert!(is_workspace_aux_surface(WindowKind::Suggestor));
+        assert!(is_workspace_aux_surface(WindowKind::ZoneEditor));
+        assert!(is_workspace_aux_surface(WindowKind::SnapshotPicker));
+        assert!(is_workspace_aux_surface(WindowKind::BulkManager));
+        assert!(!is_workspace_aux_surface(WindowKind::IconPicker));
+        assert!(!is_workspace_aux_surface(WindowKind::Settings));
+
+        assert!(hides_when_workspace_aux_opens(WindowKind::Suggestor));
+        assert!(hides_when_workspace_aux_opens(WindowKind::IconPicker));
+        assert!(!hides_when_workspace_aux_opens(WindowKind::Main));
+        assert!(!hides_when_workspace_aux_opens(WindowKind::MiniBar));
+        assert!(!hides_when_workspace_aux_opens(WindowKind::Settings));
+    }
+
+    #[test]
+    fn smart_group_target_and_background_layout_never_reuse_the_zero_origin_card() {
+        let mut empty = AppState::new();
+        empty.viewport = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        assert_eq!(smart_group_zone_dimensions(800.0, 600.0), (320, 270));
+        let target_id = ensure_suggestor_target_zone(&mut empty);
+        let target = empty
+            .zones
+            .get(target_id)
+            .expect("empty layout creates target");
+        assert_eq!((target.w, target.h), (320, 270));
+        assert_eq!(empty.selected_zone.get(), Some(target_id));
+
+        let mut app = AppState::new();
+        app.viewport = Size {
+            width: 1600.0,
+            height: 900.0,
+        };
+        let ids: Vec<_> = (1..=5).map(ZoneId).collect();
+        for id in &ids {
+            app.zones.add(Zone::new(*id, "Generated", 0, 0, 200, 120));
+        }
+
+        assert_eq!(layout_new_auto_group_zones(&mut app, &ids), 5);
+        let mut origins: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let zone = app.zones.get(*id).expect("created group");
+                assert_eq!((zone.w, zone.h), (400, 405));
+                (zone.x, zone.y)
+            })
+            .collect();
+        origins.sort_unstable();
+        origins.dedup();
+        assert_eq!(origins.len(), ids.len());
+    }
+
+    #[test]
+    fn r13_04_startup_icon_rehydrate_skips_builtin_and_repairs_missing_cache() {
+        let shortcut = "C:\\Desktop\\Game.lnk";
+        let internet_shortcut = "C:\\Desktop\\Game.url";
+        let current_shortcut_hash = bento_nano_backend::icon::protocol::icon_cache_key(shortcut);
+        let current_internet_shortcut_hash =
+            bento_nano_backend::icon::protocol::icon_cache_key(internet_shortcut);
+        assert_eq!(
+            item_icon_startup_rehydrate_force(shortcut, "builtin:folder", false),
+            None
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "0123456789abcdef", true),
+            None
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "0123456789abcdef", false),
+            Some(false)
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "", false),
+            Some(false)
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force(shortcut, "legacy-target-hash", true),
+            Some(true),
+            "cached target-keyed shortcut icons require one forced migration"
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force(shortcut, &current_shortcut_hash, true),
+            None
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force(
+                internet_shortcut,
+                &bento_nano_backend::icon::extractor::compute_icon_hash(internet_shortcut),
+                true,
+            ),
+            Some(true),
+            "cached generic .url icons require one forced resource migration"
+        );
+        assert_eq!(
+            item_icon_startup_rehydrate_force(
+                internet_shortcut,
+                &current_internet_shortcut_hash,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn panel_header_button_hover_maps_shell_hits() {
+        assert_eq!(
+            panel_header_button_hover_for_hit(Some((ZoneId(9), ui::HeaderButton::Search))),
+            Some(PanelHeaderButtonHover::new(
+                ZoneId(9),
+                PanelHeaderButtonKind::Search
+            ))
+        );
+        assert_eq!(
+            panel_header_button_hover_for_hit(Some((ZoneId(9), ui::HeaderButton::Close))),
+            Some(PanelHeaderButtonHover::new(
+                ZoneId(9),
+                PanelHeaderButtonKind::Close
+            ))
+        );
+        assert_eq!(panel_header_button_hover_for_hit(None), None);
+    }
+
+    #[test]
+    fn settings_encryption_mode_hover_maps_settings_hits() {
+        assert_eq!(
+            settings_encryption_mode_hover_for_hit(ui::SettingsHit::SelectEncryptionModeNone),
+            Some(SettingsEncryptionMode::None)
+        );
+        assert_eq!(
+            settings_encryption_mode_hover_for_hit(ui::SettingsHit::SelectEncryptionModeDpapi),
+            Some(SettingsEncryptionMode::Dpapi)
+        );
+        assert_eq!(
+            settings_encryption_mode_hover_for_hit(ui::SettingsHit::SelectEncryptionModePassphrase),
+            Some(SettingsEncryptionMode::Passphrase)
+        );
+        assert_eq!(
+            settings_encryption_mode_hover_for_hit(ui::SettingsHit::Body),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_appearance_hover_maps_settings_hits() {
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::SelectTheme(5)),
+            Some(bento_nano_app::theme_picker::AppearanceHit::Card(5))
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::SelectAccent(3)),
+            Some(bento_nano_app::theme_picker::AppearanceHit::Accent(3))
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::EditAccentColor),
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentEditor)
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::OpenAccentColorPicker),
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentPicker)
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::ClearAccentColor),
+            Some(bento_nano_app::theme_picker::AppearanceHit::AccentClear)
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::SelectEncryptionModeDpapi),
+            None
+        );
+        assert_eq!(
+            settings_appearance_hover_for_hit(ui::SettingsHit::Body),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_close_hover_maps_only_close_hit() {
+        assert!(settings_close_hover_for_hit(ui::SettingsHit::Close));
+        assert!(!settings_close_hover_for_hit(ui::SettingsHit::Body));
+        assert!(!settings_close_hover_for_hit(ui::SettingsHit::SelectTheme(
+            5
+        )));
+    }
+
     /// A3 (2026-05-29) — the former 80ms `LEAVE_GRACE_MS` dead stub is now
     /// LIVE: the hover-intent expand and grace-collapse are driven by the
     /// user-tunable `expand_delay_ms` / `collapse_delay_ms` settings through
@@ -23844,8 +29363,8 @@ mod tests {
             // Default ZoneDisplayMode::Hover so the leave auto-collapses.
             app.zones
                 .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
-            app.expand_delay_ms.set(150);
-            app.collapse_delay_ms.set(300);
+            app.expand_delay_ms.set(DEFAULT_EXPAND_DELAY_MS);
+            app.collapse_delay_ms.set(DEFAULT_COLLAPSE_DELAY_MS);
         }
         let app = root.app.borrow();
         let expand_delay = app.expand_delay_ms.get() as u32;
@@ -23865,8 +29384,8 @@ mod tests {
         assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
         assert!(app.zone_pill_anim_expanding.get());
 
-        // 3. Cursor leaves to empty space well after the 550ms expand-lock
-        //    (lock window was [t_expand, t_expand+550]); collapse is ARMED.
+        // 3. Cursor leaves to empty space after the shared morph-derived
+        //    expand-lock; collapse is ARMED.
         let leave = 1_000 + expand_delay + zone_pill_geometry::EXPAND_LOCK_MS + 10;
         drive_hover_scheduler(&app, None, leave);
         assert!(app.hover_scheduler.get().is_pending());
@@ -23880,29 +29399,117 @@ mod tests {
         assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
     }
 
-    /// A3 — ALWAYS display mode must NOT auto-collapse on leave (Tauri
-    /// `BentoZone.tsx:589`). The grace timer stays unarmed for the collapse.
+    /// A3/V21-A1: keep the on-demand hover frame timer alive while the
+    /// scheduler is pending or a capsule morph is still in flight.
     #[test]
-    fn hover_scheduler_always_mode_does_not_collapse_on_leave() {
+    fn hover_frame_pump_needed_tracks_pending_scheduler_and_morph() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+            app.expand_delay_ms.set(DEFAULT_EXPAND_DELAY_MS);
+            app.collapse_delay_ms.set(DEFAULT_COLLAPSE_DELAY_MS);
+        }
+        let app = root.app.borrow();
+        assert!(!hover_frame_pump_needed(&app));
+
+        drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
+        assert!(hover_frame_pump_needed(&app));
+
+        let expand_at = 1_000 + DEFAULT_EXPAND_DELAY_MS as u32;
+        assert!(poll_hover_scheduler(&app, expand_at));
+        assert!(hover_frame_pump_needed(&app));
+        assert!(tick_zone_pill_animation(
+            &app,
+            expand_at + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        ));
+        assert!(!hover_frame_pump_needed(&app));
+
+        drive_hover_scheduler(
+            &app,
+            None,
+            expand_at + zone_pill_geometry::EXPAND_LOCK_MS + 10,
+        );
+        assert!(hover_frame_pump_needed(&app));
+
+        assert!(poll_hover_scheduler(
+            &app,
+            expand_at + zone_pill_geometry::EXPAND_LOCK_MS + 10 + DEFAULT_COLLAPSE_DELAY_MS as u32
+        ));
+        assert!(hover_frame_pump_needed(&app));
+        assert!(tick_zone_pill_animation(
+            &app,
+            expand_at
+                + zone_pill_geometry::EXPAND_LOCK_MS
+                + 10
+                + DEFAULT_COLLAPSE_DELAY_MS as u32
+                + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        ));
+        assert!(!hover_frame_pump_needed(&app));
+    }
+
+    #[test]
+    fn hover_frame_pump_needed_tracks_theme_transition() {
+        let root = test_app_root();
+        let app = root.app.borrow();
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        app.settings_open.set(true);
+        let from_card = app.active_theme_card_id();
+
+        assert_eq!(app.apply_active_theme_by_id("light"), Some(true));
+        assert!(app.start_theme_transition_from(from_card, now_ms));
+        assert!(hover_frame_pump_needed(&app));
+
+        app.theme_transition_started_ms
+            .set(now_ms.wrapping_sub(bento_nano_app::state::THEME_TRANSITION_MS));
+        assert!(!hover_frame_pump_needed(&app));
+
+        app.settings_open.set(false);
+        assert!(!hover_frame_pump_needed(&app));
+    }
+
+    #[test]
+    fn hover_frame_pump_needed_tracks_settings_open_animation() {
+        let root = test_app_root();
+        let app = root.app.borrow();
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+
+        app.settings_open.set(true);
+        app.start_settings_open_animation(now_ms);
+        assert!(hover_frame_pump_needed(&app));
+
+        app.settings_open_started_ms
+            .set(now_ms.wrapping_sub(bento_nano_app::state::SETTINGS_OPEN_ANIMATION_MS));
+        assert!(!hover_frame_pump_needed(&app));
+    }
+
+    /// 07-22 hand-test: structural hover belongs exclusively to Hover mode.
+    /// Always is already open from its steady-state predicate and Click waits
+    /// for an explicit click; neither may arm a delayed hover morph.
+    #[test]
+    fn hover_scheduler_does_not_arm_for_always_or_click_modes() {
         let root = test_app_root();
         {
             let mut app = root.app.borrow_mut();
             app.zones
                 .add(Zone::new(ZoneId(1), "Pinned", 100, 100, 240, 180));
-            app.zone_display_mode
-                .set(bento_nano_app::ZoneDisplayMode::Always);
-            app.expand_delay_ms.set(150);
-            app.collapse_delay_ms.set(300);
+            app.expand_delay_ms.set(DEFAULT_EXPAND_DELAY_MS);
+            app.collapse_delay_ms.set(DEFAULT_COLLAPSE_DELAY_MS);
         }
         let app = root.app.borrow();
-        // Expand the zone via the scheduler.
-        drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
-        assert!(poll_hover_scheduler(&app, 1_000 + 150));
-        assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
-        // Leave far in the future — ALWAYS mode never auto-collapses.
-        drive_hover_scheduler(&app, None, 100_000);
-        assert!(!poll_hover_scheduler(&app, 200_000));
-        assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
+        for mode in [ZoneDisplayMode::Always, ZoneDisplayMode::Click] {
+            app.set_zone_display_mode(mode);
+            drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
+            assert!(!app.hover_scheduler.get().is_pending(), "mode={mode:?}");
+            assert!(!poll_hover_scheduler(
+                &app,
+                1_000 + DEFAULT_EXPAND_DELAY_MS as u32
+            ));
+            assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+        }
     }
 
     #[test]
@@ -23911,6 +29518,80 @@ mod tests {
         assert!(!startup_diag_skip_value(Some("icon,rules"), "ghost"));
         assert!(startup_diag_skip_value(Some(" icon, GHOST "), "ghost"));
         assert!(startup_diag_skip_value(Some("all"), "desktop_watcher"));
+    }
+
+    #[test]
+    fn win32_timer_ids_are_unique() {
+        let timer_ids = [
+            TRAY_ICON_RETRY_TIMER_ID,
+            GHOST_PASSTHROUGH_TIMER_ID,
+            BACKEND_EVENT_POLL_TIMER_ID,
+            HOVER_FRAME_TIMER_ID,
+            STARTUP_MEMORY_TRIM_TIMER_ID,
+            RESIDENT_MEMORY_TRIM_TIMER_ID,
+            STACK_TRAY_MEMORY_TRIM_TIMER_ID,
+            CONTEXT_MENU_INPUT_TIMER_ID,
+        ];
+        for (index, id) in timer_ids.iter().enumerate() {
+            assert!(
+                !timer_ids[index + 1..].contains(id),
+                "timer id must not be reused: {id:#X}",
+            );
+        }
+    }
+
+    #[test]
+    fn context_menu_mouse_poll_accepts_down_and_since_last_call_bits() {
+        assert!(async_mouse_button_active(i16::MIN));
+        assert!(async_mouse_button_active(0x0001));
+        assert!(async_mouse_button_active(i16::MIN | 0x0001));
+        assert!(!async_mouse_button_active(0));
+    }
+
+    #[test]
+    fn covered_main_window_clears_stale_hover_without_interrupting_drag() {
+        let main = 1usize as HWND;
+        let covering_window = 2usize as HWND;
+
+        assert!(super::should_clear_stale_main_hover(
+            true,
+            false,
+            covering_window,
+            main
+        ));
+        assert!(!super::should_clear_stale_main_hover(
+            false,
+            false,
+            covering_window,
+            main
+        ));
+        assert!(!super::should_clear_stale_main_hover(
+            true,
+            true,
+            covering_window,
+            main
+        ));
+        assert!(!super::should_clear_stale_main_hover(
+            true, false, main, main
+        ));
+    }
+
+    #[test]
+    fn desktop_source_rows_mark_every_resolved_source_watched() {
+        let dirs = [
+            std::path::PathBuf::from(r"C:\Users\Public\Desktop"),
+            std::path::PathBuf::from(r"D:\Desktop"),
+        ];
+
+        let rows = desktop_source_rows_for_settings(&dirs);
+
+        assert_eq!(rows.len(), dirs.len());
+        assert!(rows.iter().all(|(_, _, watched)| *watched));
+        assert_eq!(
+            rows[0].0,
+            bento_nano_backend::desktop_sources::DesktopSourceKind::Public
+        );
+        assert_eq!(rows[1].1.as_str(), r"D:\Desktop");
     }
 
     #[test]
@@ -23933,7 +29614,7 @@ mod tests {
 
     #[test]
     fn widen_static_handles_cjk_characters() {
-        let buf = widen_static::<8>("退出");
+        let buf = widen_static::<8>("\u{9000}\u{51fa}");
         assert_eq!(buf[0], 0x9000);
         assert_eq!(buf[1], 0x51FA);
         assert_eq!(buf[2], 0);
@@ -24121,17 +29802,17 @@ mod tests {
     }
 
     #[test]
-    fn item_context_action_mapping_covers_native_menu_ids() {
+    fn item_context_action_mapping_covers_d2d_menu_ids() {
         let move_targets = vec![
             (
                 ITEM_CONTEXT_MOVE_ZONE_BASE_ID,
                 ZoneId(12),
-                widen_dynamic("Move to Work"),
+                SmolStr::new_static("Work"),
             ),
             (
                 ITEM_CONTEXT_MOVE_ZONE_BASE_ID + 1,
                 ZoneId(13),
-                widen_dynamic("Move to Later"),
+                SmolStr::new_static("Later"),
             ),
         ];
 
@@ -24175,31 +29856,103 @@ mod tests {
     }
 
     #[test]
-    fn item_context_wm_command_routes_pending_native_menu_action() {
-        let root = test_app_root();
-        root.item_context_menu
-            .borrow_mut()
-            .replace(PendingItemContextMenu {
-                zone_id: ZoneId(7),
-                item_id: ZoneItemId(9),
-                path: SmolStr::new(r"C:\Users\Alice\Desktop\report.pdf"),
-                move_targets: vec![(ITEM_CONTEXT_MOVE_ZONE_BASE_ID, ZoneId(11))],
-            });
-
-        assert!(handle_item_context_wm_command(
-            &root,
-            std::ptr::null_mut(),
-            ITEM_CONTEXT_COPY_PATH_ID,
-        ));
-        assert!(root.item_context_menu_consumed.get());
-
-        let mut pending = smallvec::SmallVec::<[Command; 8]>::new();
-        root.dispatcher.drain_into(&mut pending);
+    fn d2d_zone_menu_keeps_dynamic_targets_in_one_submenu() {
+        let entries = zone_context_menu_rows(false, false, true);
+        let command_rows = entries
+            .iter()
+            .filter(|entry| entry.kind == popover::ContextMenuRowKind::Command)
+            .count();
+        assert!(command_rows <= 12, "main context menu must stay compact");
         assert_eq!(
-            pending.as_slice(),
-            &[Command::CopyItemPath(bento_nano_app::ItemPath::new(
-                r"C:\Users\Alice\Desktop\report.pdf"
-            ))]
+            entries
+                .iter()
+                .filter(|entry| entry.kind == popover::ContextMenuRowKind::Submenu)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries.last().map(|entry| entry.command_id),
+            Some(super::ZONE_CONTEXT_DELETE_ID)
+        );
+        assert!(entries.last().is_some_and(|entry| entry.danger));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.command_id == super::ZONE_CONTEXT_EDIT_ID)
+                .count(),
+            1,
+            "one editor owns the single user-facing Zone name"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.command_id == super::ZONE_CONTEXT_UNSTACK_ID)
+        );
+
+        let stacked = zone_context_menu_rows(true, true, true);
+        assert!(
+            stacked
+                .iter()
+                .any(|entry| entry.command_id == super::ZONE_CONTEXT_UNSTACK_ID)
+        );
+        assert!(
+            stacked
+                .iter()
+                .any(|entry| entry.command_id == super::ZONE_CONTEXT_OPEN_STACK_TRAY_ID)
+        );
+    }
+
+    #[test]
+    fn d2d_context_menu_keyboard_navigation_skips_separators() {
+        let rows = zone_context_menu_rows(false, false, false);
+        let separator = rows
+            .iter()
+            .position(|row| row.kind == popover::ContextMenuRowKind::Separator)
+            .expect("zone menu contains a separator");
+        let session = popover::ContextMenuSession::new(rows, popover::ContextMenuRows::new());
+        assert_eq!(
+            context_menu_next_hit(
+                &session,
+                popover::ContextMenuColumn::Main,
+                Some(separator - 1),
+                true,
+            ),
+            Some(popover::ContextMenuHit {
+                column: popover::ContextMenuColumn::Main,
+                row: separator + 1,
+            })
+        );
+        assert_eq!(
+            context_menu_next_hit(
+                &session,
+                popover::ContextMenuColumn::Main,
+                Some(separator + 1),
+                false,
+            ),
+            Some(popover::ContextMenuHit {
+                column: popover::ContextMenuColumn::Main,
+                row: separator - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn d2d_item_menu_separates_file_delete_and_collapses_move_targets() {
+        let entries = item_context_menu_rows(true);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == popover::ContextMenuRowKind::Submenu)
+                .count(),
+            1
+        );
+        let last = entries.last().expect("destructive row");
+        assert_eq!(last.command_id, ITEM_CONTEXT_DELETE_FILE_ID);
+        assert!(last.danger);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.command_id == ITEM_CONTEXT_REMOVE_ID)
         );
     }
 
@@ -24474,8 +30227,7 @@ mod tests {
     /// before reaching the BentoDesk window). This test bypasses the input
     /// path entirely and exercises the receive side: WM_DROPFILES's terminal
     /// helper `queue_add_items` enqueues `Command::AddItem` per file, which
-    /// the dispatcher then resolves through `add_item_to_zone_with` →
-    /// `hide_item_file` → `bento_nano_backend::stealth::hide_file`. If any
+    /// the dispatcher then resolves through `add_item_to_zone_with` →    /// `hide_item_file` → `bento_nano_backend::stealth::hide_file`. If any
     /// link in that chain breaks (mis-routed Command, dropped enqueue,
     /// stealth path swallowed), this test fails — proving that what the
     /// programmatic R3 hand-test can't see is in fact functional.
@@ -24987,6 +30739,154 @@ mod tests {
     }
 
     #[test]
+    fn successful_drag_out_moves_by_default_and_ctrl_drag_copies() {
+        let root = test_app_root();
+        let zone_id = ZoneId(83);
+        let (move_item_id, copy_item_id) = {
+            let mut app = root.app.borrow_mut();
+            let mut zone = Zone::new(zone_id, "Drag Out", 0, 0, 280, 180);
+            let move_item_id = zone
+                .add_item(
+                    Cow::Borrowed("C:/Users/HP/Desktop/move-out.txt"),
+                    Cow::Borrowed("move-hash"),
+                )
+                .expect("move item");
+            let copy_item_id = zone
+                .add_item(
+                    Cow::Borrowed("C:/Users/HP/Desktop/copy-out.txt"),
+                    Cow::Borrowed("copy-hash"),
+                )
+                .expect("copy item");
+            app.zones.add(zone);
+            (move_item_id, copy_item_id)
+        };
+
+        let move_request = PendingItemDragOut {
+            zone_id,
+            item_id: move_item_id,
+            path: SmolStr::new("C:/Users/HP/Desktop/move-out.txt"),
+            copy_only: false,
+        };
+        finalize_item_drag_out(
+            &root,
+            &move_request,
+            "move-out.txt",
+            bento_nano_backend::drag_drop::DragOutcome::Dropped,
+        );
+        {
+            let app = root.app.borrow();
+            assert!(
+                app.zones.item(zone_id, move_item_id).is_none(),
+                "ordinary successful drag-out must remove the source Zone item"
+            );
+            assert_eq!(
+                app.item_operation_status
+                    .borrow()
+                    .as_ref()
+                    .map(SmolStr::as_str),
+                Some("Moved out: move-out.txt")
+            );
+        }
+
+        let copy_request = PendingItemDragOut {
+            zone_id,
+            item_id: copy_item_id,
+            path: SmolStr::new("C:/Users/HP/Desktop/copy-out.txt"),
+            copy_only: true,
+        };
+        finalize_item_drag_out(
+            &root,
+            &copy_request,
+            "copy-out.txt",
+            bento_nano_backend::drag_drop::DragOutcome::Dropped,
+        );
+        let app = root.app.borrow();
+        assert!(
+            app.zones.item(zone_id, copy_item_id).is_some(),
+            "Ctrl-drag follows Explorer copy semantics and keeps the source item"
+        );
+        assert_eq!(
+            app.item_operation_status
+                .borrow()
+                .as_ref()
+                .map(SmolStr::as_str),
+            Some("Copied out: copy-out.txt")
+        );
+    }
+
+    #[test]
+    fn successful_drag_out_removes_stealth_item_after_shell_moved_hidden_file() {
+        let root = test_app_root();
+        let zones_path = scratch_zones_path("item-drag-out-stealth-move");
+        let state_dir = zones_path.parent().expect("scratch parent");
+        std::fs::create_dir_all(state_dir).expect("state dir");
+        let original = state_dir.join("Desktop").join("moved-out.url");
+        let hidden = state_dir
+            .join(".bentodesk")
+            .join("91")
+            .join("moved-out.url");
+        let original_path = original.to_string_lossy().to_string();
+        let hidden_path = hidden.to_string_lossy().to_string();
+        let zone_id = ZoneId(91);
+        let item_id = {
+            let mut app = root.app.borrow_mut();
+            app.zones_path = zones_path.clone();
+            let mut zone = Zone::new(zone_id, "Stealth Drag Out", 0, 0, 280, 180);
+            let item_id = zone
+                .add_item_with_metadata(
+                    Cow::Owned(hidden_path.clone()),
+                    Some(original_path.as_str()),
+                    Cow::Borrowed("url-hash"),
+                    Some(Cow::Owned(original_path.clone())),
+                    Some(Cow::Owned(hidden_path.clone())),
+                )
+                .expect("stealth item");
+            app.zones.add(zone);
+            item_id
+        };
+
+        // Mirrors the state after Explorer accepted DROPEFFECT_MOVE: the
+        // hidden source has already left BentoDesk's storage, so neither peer
+        // path exists at the old location.
+        assert!(!hidden.exists());
+        assert!(!original.exists());
+        finalize_item_drag_out(
+            &root,
+            &PendingItemDragOut {
+                zone_id,
+                item_id,
+                path: SmolStr::new(hidden_path),
+                copy_only: false,
+            },
+            "moved-out.url",
+            bento_nano_backend::drag_drop::DragOutcome::Dropped,
+        );
+
+        {
+            let app = root.app.borrow();
+            assert!(
+                app.zones.item(zone_id, item_id).is_none(),
+                "Shell move completion must remove the stale Zone card"
+            );
+            assert!(
+                !app.dirty.get(),
+                "drag-out completion must persist immediately"
+            );
+            assert_eq!(
+                app.item_operation_status
+                    .borrow()
+                    .as_ref()
+                    .map(SmolStr::as_str),
+                Some("Moved out: moved-out.url")
+            );
+        }
+        let reloaded = storage::read_zones(&zones_path).expect("persisted zones");
+        assert!(reloaded.item(zone_id, item_id).is_none());
+
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
     fn item_drag_out_suspends_own_ole_drop_target() {
         let root = test_app_root();
         let path = r"C:\Users\HP\Desktop\drag-me.txt".to_owned();
@@ -25452,9 +31352,10 @@ mod tests {
     }
 
     fn test_app_root() -> AppRoot {
-        let (_, desktop_events) = crossbeam_channel::unbounded();
+        let (desktop_event_tx, desktop_events) = crossbeam_channel::unbounded();
         let (_, live_folder_events) = crossbeam_channel::unbounded();
         let (_, ghost_events) = crossbeam_channel::unbounded();
+        let (power_event_tx, power_events) = crossbeam_channel::unbounded();
         let (updater_events_tx, updater_events) = crossbeam_channel::unbounded();
         let (_, rules_scheduler_events) = crossbeam_channel::unbounded();
         AppRoot {
@@ -25469,11 +31370,9 @@ mod tests {
             minibar_roster: std::cell::RefCell::new(MiniBarRoster::new()),
             minibars: std::cell::RefCell::new(smallvec::SmallVec::new()),
             zone_context_menu: std::cell::RefCell::new(None),
-            zone_context_menu_consumed: std::cell::Cell::new(false),
-            zone_context_menu_deferred: std::cell::RefCell::new(None),
             item_context_menu: std::cell::RefCell::new(None),
-            item_context_menu_consumed: std::cell::Cell::new(false),
             pending_item_drag_out: std::cell::RefCell::new(None),
+            pending_stack_drop_bloom: std::cell::Cell::new(None),
             item_drag_out_active: std::cell::Cell::new(false),
             tray_context_menu: std::cell::RefCell::new(None),
             tray_context_menu_consumed: std::cell::Cell::new(false),
@@ -25484,10 +31383,13 @@ mod tests {
             tray_retry_attempts: std::cell::Cell::new(0),
             tray_uid_only: std::cell::Cell::new(false),
             desktop_watcher: std::cell::RefCell::new(None),
+            desktop_event_tx,
             desktop_events,
             live_folder_events,
             live_folder_rehydrated: std::cell::Cell::new(true),
             ghost_events,
+            power_event_tx,
+            power_events,
             updater: bento_nano_backend::updater::Updater::new(updater_events_tx),
             updater_events,
             rules_scheduler_events,
@@ -25544,6 +31446,95 @@ mod tests {
     }
 
     #[test]
+    fn settings_close_surface_hides_active_tooltip() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            app.set_settings_close_hover(true);
+        }
+
+        assert!(show_tooltip_payload(
+            &root,
+            &smol_str::SmolStr::new_static("Save settings")
+        ));
+
+        let _hidden = close_settings_surface(&root);
+
+        let app = root.app.borrow();
+        assert!(!app.settings_open.get());
+        assert!(!app.settings_close_hover.get());
+        assert!(app.active_tooltip.borrow().is_none());
+    }
+
+    #[test]
+    fn settings_outside_click_uses_visible_panel_not_full_workarea_host() {
+        let panel = super::settings_panel_client_device_rect(
+            super::RECT {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1368,
+            },
+            144,
+        );
+        assert_eq!(
+            (panel.left, panel.top, panel.right, panel.bottom),
+            (920, 137, 1640, 1231)
+        );
+
+        assert!(!super::settings_outside_click_should_close(
+            true, false, true, true
+        ));
+        assert!(super::settings_outside_click_should_close(
+            true, false, true, false
+        ));
+        assert!(super::settings_outside_click_should_close(
+            false, false, false, true
+        ));
+        assert!(!super::settings_outside_click_should_close(
+            false, false, true, false
+        ));
+        assert!(super::settings_outside_click_should_close(
+            false, true, true, false
+        ));
+
+        // An owned common-dialog click is suppressed while held and for the
+        // first released poll; only the following independent click may close
+        // Settings.
+        assert_eq!(
+            super::settings_owned_dialog_guard_transition(true, true),
+            (true, true)
+        );
+        assert_eq!(
+            super::settings_owned_dialog_guard_transition(true, false),
+            (true, false)
+        );
+        assert_eq!(
+            super::settings_owned_dialog_guard_transition(false, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn settings_controls_do_not_spawn_native_tooltip_windows() {
+        let root = test_app_root();
+        let app = root.app.borrow();
+
+        assert_eq!(
+            super::settings_tooltip_text_for_hit(
+                &app,
+                super::ui::SettingsHit::ToggleStartupHighPriority,
+            ),
+            None,
+        );
+        assert_eq!(
+            super::settings_tooltip_text_for_hit(&app, super::ui::SettingsHit::SaveSettings),
+            None,
+        );
+    }
+
+    #[test]
     fn tooltip_hover_item_producer_queues_show_and_hide() {
         let root = test_app_root();
         {
@@ -25569,7 +31560,7 @@ mod tests {
 
         let show = {
             let app = root.app.borrow();
-            // M2③: grid row 0 starts below the 48-DIP header (zone_top 0 + 48);
+            // M2① grid row 0 starts below the 48-DIP header (zone_top 0 + 48);
             // hover at y=70 lands on the first card, clear of the header band.
             tooltip_command_for_hover(&app, bento_nano_app::WindowHandle::NULL, 24.0, 70.0)
         };
@@ -25593,6 +31584,57 @@ mod tests {
             tooltip_command_for_hover(&app, bento_nano_app::WindowHandle::NULL, 900.0, 900.0)
         };
         assert!(matches!(hide, Some(Command::HideTooltip)));
+    }
+
+    #[test]
+    fn main_tooltip_suppresses_stack_bloom_hover_anchor() {
+        let root = test_app_root();
+        let win = WindowState::new();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            let mut anchor = Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130);
+            anchor.add_item(r"C:\Users\HP\Desktop\contract.pdf", "document");
+            app.zones.add(anchor);
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        }
+
+        let app = root.app.borrow();
+        let hover_x = 124.0;
+        let hover_y = 118.0;
+        assert!(stack_bloom_hover_suppresses_main_tooltip(
+            &app, hover_x, hover_y
+        ));
+        assert!(
+            tooltip_command_for_main_hover(
+                &app,
+                &win,
+                bento_nano_app::WindowHandle::NULL,
+                hover_x,
+                hover_y
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn tooltip_never_spawns_a_second_auxiliary_surface() {
+        let main = bento_nano_app::WindowHandle(41);
+        let auxiliary = bento_nano_app::WindowHandle(42);
+
+        assert!(!tooltip_uses_aux_surface(main, Some(main), false));
+        assert!(!tooltip_uses_aux_surface(auxiliary, Some(main), true));
+        assert!(!tooltip_uses_aux_surface(auxiliary, Some(main), false));
+        assert!(!tooltip_uses_aux_surface(
+            bento_nano_app::WindowHandle::NULL,
+            None,
+            false
+        ));
     }
 
     // V-6 Round-2 (2026-05-21) — `toolbar_hover_point_for_event` retired
@@ -25642,9 +31684,8 @@ mod tests {
         assert!(!root.app.borrow().debug_overlay.borrow().visible);
     }
 
-    /// M7 — WM_CHAR routes a typed char into the focused 桌面路径 draft and
-    /// marks the panel dirty. Pure CPU (null HWND, no window/D3D). Not focused →
-    /// rejected.
+    /// M7 — WM_CHAR routes a typed char into the focused 妗岄潰璺緞 draft and
+    /// marks the panel dirty. Pure CPU (null HWND, no window/D3D). Not focused →    /// rejected.
     #[test]
     fn m7_handle_settings_text_char_appends_to_desktop_path() {
         let root = test_app_root();
@@ -25672,7 +31713,8 @@ mod tests {
     }
 
     /// M7 — WM_KEYDOWN: Backspace pops the last char from the focused draft;
-    /// Esc blurs the field (clears focus). Pure CPU (null HWND).
+    /// Esc blurs the field and falls through so Settings closes on that same
+    /// keydown. Pure CPU (null HWND).
     #[test]
     fn m7_handle_settings_text_keydown_backspace_and_blur() {
         let root = test_app_root();
@@ -25697,10 +31739,11 @@ mod tests {
         );
         assert_eq!(root.app.borrow().watch_paths_draft.borrow().as_str(), "a\n");
 
-        // Esc blurs the field (clears focus); the keydown is consumed.
+        // Esc blurs the field but is not consumed: `handle_keydown` must let
+        // the same key reach the Settings auxiliary-escape close branch.
         assert_eq!(
             handle_settings_text_keydown(&root, VK_ESCAPE_KEY, std::ptr::null_mut()),
-            Some(0)
+            None
         );
         assert_eq!(
             root.app.borrow().settings_focused_field.get(),
@@ -25740,6 +31783,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v21_n15_handle_settings_text_char_appends_to_accent_color() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            *app.settings_draft_accent_color.borrow_mut() = None;
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::AccentColor);
+            app.settings_dirty.set(false);
+        }
+
+        assert!(handle_settings_text_char(&root, u32::from('A')));
+        assert!(handle_settings_text_char(&root, u32::from('b')));
+        {
+            let app = root.app.borrow();
+            assert_eq!(
+                app.settings_draft_accent_color.borrow().as_deref(),
+                Some("#ab")
+            );
+            assert!(app.settings_dirty.get());
+            app.settings_dirty.set(false);
+        }
+
+        assert!(handle_settings_text_char(&root, u32::from('g')));
+        let app = root.app.borrow();
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#ab")
+        );
+        assert!(
+            !app.settings_dirty.get(),
+            "rejected chars must not mark dirty"
+        );
+    }
+
+    #[test]
+    fn v21_n15_handle_settings_text_keydown_enter_blurs_accent_color() {
+        let root = test_app_root();
+        {
+            let app = root.app.borrow();
+            app.settings_open.set(true);
+            *app.settings_draft_accent_color.borrow_mut() = Some(smol_str::SmolStr::new("#abcdef"));
+            app.settings_focused_field
+                .set(bento_nano_app::SettingsTextField::AccentColor);
+        }
+        assert_eq!(
+            handle_settings_text_keydown(&root, VK_ENTER, std::ptr::null_mut()),
+            Some(0)
+        );
+        let app = root.app.borrow();
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#abcdef")
+        );
+        assert_eq!(
+            app.settings_focused_field.get(),
+            bento_nano_app::SettingsTextField::None
+        );
+    }
+
+    #[test]
+    fn v21_n16_native_colorref_round_trips_accent_hex() {
+        assert_eq!(accent_hex_to_colorref("#3b82f6"), Some(0x00F6_823B));
+        assert_eq!(accent_hex_to_colorref("#14B8a6"), Some(0x00A6_B814));
+        assert_eq!(accent_hex_to_colorref("3b82f6"), None);
+        assert_eq!(accent_hex_to_colorref("#3b82fg"), None);
+        assert_eq!(colorref_to_accent_hex(0x00A6_B814).as_str(), "#14b8a6");
+    }
+
     /// W3 (#7 fix wave 2026-06-01) — the settings keydowns must route for BOTH
     /// Main and the focusable Settings aux HWND; every other aux kind and the
     /// stack tray must NOT. Pins the routing predicate so a future refactor
@@ -25753,6 +31866,19 @@ mod tests {
         assert!(!window_kind_routes_settings_keydown(WindowKind::IconPicker));
         assert!(!window_kind_routes_settings_keydown(WindowKind::Search));
         assert!(!window_kind_routes_settings_keydown(WindowKind::About));
+    }
+
+    #[test]
+    fn w13_settings_dismiss_resets_scroll_for_next_open() {
+        let root = test_app_root();
+        let app = root.app.borrow();
+        app.scroll_offset_y.set(720.0);
+        app.settings_plugin_uninstall_confirm.set(Some(0));
+
+        reset_settings_transient_state(&app);
+
+        assert_eq!(app.scroll_offset_y.get(), 0.0);
+        assert_eq!(app.settings_plugin_uninstall_confirm.get(), None);
     }
 
     #[test]
@@ -25792,6 +31918,38 @@ mod tests {
     }
 
     #[test]
+    fn expanded_zone_wheel_target_is_content_only_and_query_aware() {
+        let mut app = AppState::new();
+        let mut zone = Zone::new(ZoneId(4), "Benchmark Zone 4", 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        for index in 1..=10 {
+            zone.add_item(
+                format!("C:/Desktop/item-{index:02}.txt"),
+                format!("hash-{index:02}"),
+            )
+            .expect("benchmark item");
+        }
+        app.zones.add(zone);
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
+
+        let zone = app.zones.get(ZoneId(4)).expect("zone");
+        assert!(zone_item_max_scroll(&app, zone) > 0.0);
+        assert_eq!(zone_scroll_target_for_point(&app, 100.0, 350.0), None);
+        let target = zone_scroll_target_for_point(&app, 100.0, 400.0).expect("content target");
+        assert_eq!(target.0, ZoneId(4));
+        assert!(target.1 > 0.0);
+
+        app.zone_search_target.set(Some(ZoneId(4)));
+        app.search_bar.borrow_mut().query = "item-01".into();
+        assert_eq!(zone_item_max_scroll(&app, zone), 0.0);
+        assert_eq!(zone_scroll_target_for_point(&app, 100.0, 410.0), None);
+        assert_eq!(
+            zone_scroll_target_for_point(&app, 100.0, 450.0),
+            Some((ZoneId(4), 0.0))
+        );
+    }
+
+    #[test]
     fn w3_settings_input_viewport_uses_current_window_slot_size() {
         let logical = logical_viewport_from_device_size(800, 600, 96);
         assert_eq!(logical.width, 800.0);
@@ -25800,6 +31958,84 @@ mod tests {
         let hidpi = logical_viewport_from_device_size(1_200, 900, 144);
         assert!((hidpi.width - 800.0).abs() < f32::EPSILON);
         assert!((hidpi.height - 600.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn auxiliary_input_viewport_projection_restores_main_and_nests() {
+        let root = test_app_root();
+        let main = Size {
+            width: 1_706.0,
+            height: 900.0,
+        };
+        let editor = Size {
+            width: 480.0,
+            height: 460.0,
+        };
+        let picker = Size {
+            width: 320.0,
+            height: 240.0,
+        };
+        root.app.borrow_mut().viewport = main;
+
+        with_app_viewport(&root, editor, || {
+            assert_eq!(root.app.borrow().viewport, editor);
+            with_app_viewport(&root, picker, || {
+                assert_eq!(root.app.borrow().viewport, picker);
+            });
+            assert_eq!(root.app.borrow().viewport, editor);
+        });
+
+        assert_eq!(root.app.borrow().viewport, main);
+    }
+
+    #[test]
+    fn settings_aux_host_is_panel_sized_and_centered_at_150_percent_dpi() {
+        let work = bento_nano_platform::RectI32 {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1368,
+        };
+        assert_eq!(settings_aux_host_rect(work, 144), (920, 137, 720, 1094));
+    }
+
+    #[test]
+    fn settings_aux_host_clamps_to_eighty_percent_of_small_workarea() {
+        let work = bento_nano_platform::RectI32 {
+            left: 10,
+            top: 20,
+            right: 1010,
+            bottom: 720,
+        };
+        assert_eq!(settings_aux_host_rect(work, 96), (270, 90, 480, 560));
+    }
+
+    #[test]
+    fn settings_aux_host_stays_within_offset_workarea_at_200_percent_dpi() {
+        let work = bento_nano_platform::RectI32 {
+            left: -1920,
+            top: 40,
+            right: 0,
+            bottom: 1120,
+        };
+        let (x, y, width, height) = settings_aux_host_rect(work, 192);
+        assert_eq!((x, y, width, height), (-1440, 148, 960, 864));
+        assert!(x >= work.left && y >= work.top);
+        assert!(x + width <= work.right && y + height <= work.bottom);
+    }
+
+    #[test]
+    fn zone_editor_host_is_dpi_scaled_and_centered_in_workarea() {
+        let work = bento_nano_platform::RectI32 {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1368,
+        };
+        assert_eq!(
+            centered_fixed_aux_host_rect(work, 144, 480.0, 460.0),
+            (920, 339, 720, 690)
+        );
     }
 
     /// W3 — once routing reaches the Settings HWND, typing must actually land in
@@ -25923,11 +32159,10 @@ mod tests {
 
     /// W1 (#7 fix wave 2026-06-01) — `save_settings_general` captures the two §2
     /// Paths drafts under the same borrow it batches the toggles with. The
-    /// process-global vault isn't installed in a headless test, so Save takes the
-    /// "vault global not installed" early-out — but that path STILL captures the
-    /// drafts (proving they're read under the same borrow) and clears the dirty
-    /// flag. Pin that the drafts are read (no panic / no borrow conflict) and the
-    /// post-save state is clean. Pure CPU (no vault, no window).
+    /// process-global vault isn't installed in a headless test, so Save must
+    /// reject the transaction without lying that it succeeded. Pin that the
+    /// drafts are read (no panic / no borrow conflict), remain editable, and
+    /// retain a visible error while dirty stays true.
     #[test]
     fn w1_save_settings_general_captures_path_drafts_without_panicking() {
         let root = test_app_root();
@@ -25935,18 +32170,208 @@ mod tests {
             let app = root.app.borrow();
             app.settings_open.set(true);
             app.settings_dirty.set(true);
-            *app.desktop_path_draft.borrow_mut() = smol_str::SmolStr::new("F:\\Desk");
-            *app.watch_paths_draft.borrow_mut() = smol_str::SmolStr::new("F:\\W1\nF:\\W2");
+            *app.desktop_path_draft.borrow_mut() =
+                smol_str::SmolStr::new(std::env::temp_dir().to_string_lossy().as_ref());
+            *app.watch_paths_draft.borrow_mut() = SmolStr::new_static("");
         }
-        // Reads desktop_path_draft + watch_paths_draft under the same borrow as
-        // the toggles; the no-vault early-out clears dirty. The drafts must
-        // survive the call (Save persists them; it never mutates the in-memory
-        // drafts).
-        save_settings_general(&root);
+        let saved = save_settings_general(&root, std::ptr::null_mut());
         let app = root.app.borrow();
-        assert!(!app.settings_dirty.get(), "Save clears the dirty flag");
-        assert_eq!(app.desktop_path_draft.borrow().as_str(), "F:\\Desk");
-        assert_eq!(app.watch_paths_draft.borrow().as_str(), "F:\\W1\nF:\\W2");
+        assert!(!saved);
+        assert!(
+            app.settings_dirty.get(),
+            "failed Save must retain unsaved changes"
+        );
+        assert_eq!(
+            app.desktop_path_draft.borrow().as_str(),
+            std::env::temp_dir().to_string_lossy().as_ref()
+        );
+        assert!(app.watch_paths_draft.borrow().is_empty());
+        assert!(
+            app.settings_save_error.borrow().is_some(),
+            "failed Save must remain visible in the Settings footer"
+        );
+    }
+
+    #[test]
+    fn settings_source_validation_accepts_real_dirs_dedupes_and_rejects_files() {
+        let scratch = std::env::temp_dir().join(format!(
+            "bento-nano-settings-sources-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let desktop = scratch.join("Desktop");
+        let watch = scratch.join("Watch");
+        std::fs::create_dir_all(&desktop).expect("create desktop source");
+        std::fs::create_dir_all(&watch).expect("create watch source");
+        let file = scratch.join("not-a-directory.txt");
+        std::fs::write(&file, b"file").expect("create plain file");
+
+        let mut snapshot = AppState::new().snapshot_settings();
+        snapshot.desktop_path_draft = SmolStr::new(desktop.to_string_lossy().as_ref());
+        snapshot.watch_paths_draft = SmolStr::new(format!(
+            "{}\n{}\n{}",
+            desktop.display(),
+            watch.display(),
+            watch.display()
+        ));
+        let sources = super::validate_settings_sources(&snapshot).expect("valid source list");
+        let canonical_desktop = std::fs::canonicalize(&desktop).expect("canonical desktop");
+        let canonical_watch = std::fs::canonicalize(&watch).expect("canonical watch");
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| **source == canonical_desktop)
+                .count(),
+            1,
+            "desktop source must be de-duplicated"
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|source| **source == canonical_watch)
+                .count(),
+            1,
+            "watch source must be de-duplicated"
+        );
+
+        snapshot.watch_paths_draft = SmolStr::new(file.to_string_lossy().as_ref());
+        assert!(
+            super::validate_settings_sources(&snapshot)
+                .expect_err("file path must be rejected")
+                .contains("不是文件夹")
+        );
+        snapshot.watch_paths_draft =
+            SmolStr::new(scratch.join("missing").to_string_lossy().as_ref());
+        assert!(
+            super::validate_settings_sources(&snapshot)
+                .expect_err("missing path must be rejected")
+                .contains("不存在")
+        );
+        assert!(super::settings_path_is_within_prefix(
+            r"c:\windows\system32",
+            r"c:\windows"
+        ));
+        assert!(!super::settings_path_is_within_prefix(
+            r"c:\windowsold",
+            r"c:\windows"
+        ));
+
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn settings_restart_registration_is_bounded_and_resets_after_window() {
+        assert_eq!(
+            super::restart_registration_command(false, 3, 60, 120, &[]),
+            None
+        );
+        assert_eq!(
+            super::restart_registration_command(true, 0, 60, 120, &[]),
+            None
+        );
+        let args = vec![
+            "bento-nano-shell.exe".to_owned(),
+            format!("{}1", super::RESTART_ATTEMPT_ARG),
+            format!("{}100", super::RESTART_WINDOW_START_ARG),
+        ];
+        assert_eq!(
+            super::restart_registration_command(true, 3, 60, 150, &args).as_deref(),
+            Some("--bentodesk-restart-attempt=2 --bentodesk-restart-window-start=100")
+        );
+        let exhausted = vec![
+            format!("{}3", super::RESTART_ATTEMPT_ARG),
+            format!("{}100", super::RESTART_WINDOW_START_ARG),
+        ];
+        assert_eq!(
+            super::restart_registration_command(true, 3, 60, 150, &exhausted),
+            None
+        );
+        assert_eq!(
+            super::restart_registration_command(true, 3, 60, 161, &args).as_deref(),
+            Some("--bentodesk-restart-attempt=1 --bentodesk-restart-window-start=161")
+        );
+    }
+
+    #[test]
+    fn settings_transaction_persists_every_save_gated_field() {
+        use bento_nano_backend::config_vault::SettingValue;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "bento-nano-settings-vault-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).expect("create vault scratch");
+        let vault_path = scratch.join("vault.bin");
+        let snapshot = SettingsSnapshot {
+            ghost_layer_enabled: false,
+            launch_at_startup: true,
+            show_in_taskbar: true,
+            auto_group_enabled: false,
+            portable_mode: true,
+            expand_delay_ms: 175,
+            collapse_delay_ms: 425,
+            icon_cache_size: 777,
+            startup_high_priority: true,
+            crash_restart_enabled: true,
+            crash_max_retries: 4,
+            crash_window_secs: 88,
+            safe_start_after_hibernation: false,
+            hibernate_resume_delay_ms: 1_250,
+            active_theme_id: SmolStr::new_static("light"),
+            zone_display_mode: ZoneDisplayMode::Click,
+            desktop_path_draft: SmolStr::new_static(r"C:\Users\Test\Desktop"),
+            watch_paths_draft: SmolStr::new_static("D:\\Docs\nD:\\Work"),
+        };
+        let accent = SmolStr::new_static("#22c55e");
+        let mut vault = Vault::open(&vault_path).expect("open settings vault");
+        super::persist_settings_snapshot_to_vault(&mut vault, &snapshot, Some(&accent), false);
+
+        for key in super::SETTINGS_TRANSACTION_KEYS {
+            assert!(
+                vault.get_setting(key).is_some(),
+                "transaction omitted persisted key {key}"
+            );
+        }
+        assert_eq!(
+            vault.get_setting(super::SETTING_GENERAL_LAUNCH_AT_STARTUP),
+            Some(SettingValue::Bool(true))
+        );
+        assert_eq!(
+            vault.get_setting(super::SETTING_PERF_ICON_CACHE_SIZE),
+            Some(SettingValue::Int(777))
+        );
+        assert_eq!(
+            vault.get_setting(super::SETTING_STARTUP_CRASH_MAX_RETRIES),
+            Some(SettingValue::Int(4))
+        );
+        assert_eq!(
+            vault.get_setting(super::SETTING_PATHS_WATCH_PATHS),
+            Some(SettingValue::Str(SmolStr::new_static("D:\\Docs\nD:\\Work")))
+        );
+        assert_eq!(
+            vault.get_setting(super::SETTING_ACTIVE_THEME),
+            Some(SettingValue::Str(SmolStr::new_static("light")))
+        );
+        assert_eq!(
+            vault.get_setting(super::SETTING_ZONE_DISPLAY_MODE),
+            Some(SettingValue::Str(SmolStr::new_static("click")))
+        );
+        vault.flush().expect("flush settings vault");
+        drop(vault);
+        let reopened = Vault::open(&vault_path).expect("reopen settings vault");
+        assert_eq!(
+            reopened.get_setting(super::SETTING_APPEARANCE_ACCENT_COLOR),
+            Some(SettingValue::Str(accent))
+        );
+
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     #[test]
@@ -26019,7 +32444,7 @@ mod tests {
     // Round-2 M1 — K1 Settings row-tooltip tests retired. The K1 row
     // geometry (`settings_update_check_now_rect`, `settings_update_auto_download_rect`)
     // is orphan-alive per Ruling B but the centre points now fall on M1's
-    // top-toggle band, so the tooltip text is M1's "Toggle …" wording, not
+    // top-toggle band, so the tooltip text is M1's "Toggle — wording, not
     // the K1 "Check for updates" / "Disable automatic update downloads"
     // strings. M4 will fully delete the K1 helpers and these stubs.
     #[test]
@@ -26828,7 +33253,7 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_hover_suggestor_row_and_apply_producer_queues_show_and_hide() {
+    fn tooltip_hover_suggestor_omits_row_bubble_but_keeps_action_help() {
         let root = test_app_root();
         let files = smart_group_sample_files();
         {
@@ -26856,12 +33281,10 @@ mod tests {
                 row_y,
             )
         };
-        match row_show {
-            Some(Command::ShowTooltip { text, .. }) => {
-                assert_eq!(text.as_str(), "Selected suggestion Documents (4/4 files)");
-            }
-            other => panic!("expected Suggestor row tooltip, got {other:?}"),
-        }
+        assert!(
+            row_show.is_none(),
+            "the fully labelled suggestion card must not spawn a redundant mini tooltip"
+        );
 
         let apply_show = {
             let app = root.app.borrow();
@@ -27129,7 +33552,7 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_hover_zone_editor_text_tracks_live_drafts() {
+    fn tooltip_hover_zone_editor_never_opens_a_detached_explanation_strip() {
         let root = test_app_root();
         {
             let mut app = root.app.borrow_mut();
@@ -27152,25 +33575,8 @@ mod tests {
             width: 420.0,
             height: 380.0,
         };
-        let grid = zone_editor_grid_rect(viewport);
-        let grid_tooltip = {
-            let app = root.app.borrow();
-            tooltip_command_for_zone_editor_hover(
-                &app,
-                bento_nano_app::WindowHandle::NULL,
-                grid.x + 8.0,
-                grid.y + 8.0,
-            )
-        };
-        match grid_tooltip {
-            Some(Command::ShowTooltip { text, .. }) => {
-                assert_eq!(text.as_str(), "Cycle grid columns (current 5)");
-            }
-            other => panic!("expected ZoneEditor grid tooltip, got {other:?}"),
-        }
-
         let save = zone_editor_save_rect(viewport);
-        let save_tooltip = {
+        let no_tooltip = {
             let app = root.app.borrow();
             tooltip_command_for_zone_editor_hover(
                 &app,
@@ -27179,29 +33585,23 @@ mod tests {
                 save.y + 8.0,
             )
         };
-        match save_tooltip {
-            Some(Command::ShowTooltip { text, .. }) => {
-                assert_eq!(text.as_str(), "Save zone editor changes");
-            }
-            other => panic!("expected ZoneEditor save tooltip, got {other:?}"),
-        }
+        assert!(no_tooltip.is_none());
 
-        let cancel = zone_editor_cancel_rect(viewport);
-        let cancel_tooltip = {
+        assert!(
+            root.app
+                .borrow()
+                .show_tooltip_text(SmolStr::new_static("stale tooltip"))
+        );
+        let hide_stale = {
             let app = root.app.borrow();
             tooltip_command_for_zone_editor_hover(
                 &app,
                 bento_nano_app::WindowHandle::NULL,
-                cancel.x + 8.0,
-                cancel.y + 8.0,
+                save.x + 8.0,
+                save.y + 8.0,
             )
         };
-        match cancel_tooltip {
-            Some(Command::ShowTooltip { text, .. }) => {
-                assert_eq!(text.as_str(), "Cancel zone editing");
-            }
-            other => panic!("expected ZoneEditor cancel tooltip, got {other:?}"),
-        }
+        assert!(matches!(hide_stale, Some(Command::HideTooltip)));
     }
 
     #[test]
@@ -27827,6 +34227,21 @@ mod tests {
     }
 
     #[test]
+    fn search_about_action_completes_in_one_dispatch_turn() {
+        let root = test_app_root();
+        let _count = super::run_search_query(&root, "open about");
+        root.dispatcher.push(Command::ActivateSearchResult(
+            smol_str::SmolStr::new_static("action:open_about"),
+        ));
+
+        super::consume_dispatcher(&root, std::ptr::null_mut());
+
+        assert!(root.app.borrow().about_open.get());
+        let mut commands: smallvec::SmallVec<[Command; 8]> = smallvec::SmallVec::new();
+        assert_eq!(root.dispatcher.drain_into(&mut commands), 0);
+    }
+
+    #[test]
     fn search_query_indexes_list_minibars_action() {
         let root = test_app_root();
 
@@ -27921,6 +34336,75 @@ mod tests {
     }
 
     #[test]
+    fn inline_zone_search_char_and_escape_animate_closed_on_main_surface() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(7), "Search", 20, 30, 240, 180));
+            app.set_zone_display_mode(ZoneDisplayMode::Hover);
+            app.zone_search_target.set(Some(ZoneId(7)));
+        }
+
+        assert!(super::handle_inline_zone_search_char(
+            &root,
+            'A' as u32,
+            std::ptr::null_mut()
+        ));
+        assert_eq!(root.app.borrow().search_bar.borrow().query.as_str(), "A");
+
+        assert_eq!(
+            super::handle_inline_zone_search_keydown(&root, VK_ESCAPE_KEY, std::ptr::null_mut()),
+            Some(0)
+        );
+        {
+            let app = root.app.borrow();
+            assert_eq!(app.zone_search_target.get(), Some(ZoneId(7)));
+            assert!(app.zone_search_closing.get());
+            assert_eq!(app.search_bar.borrow().query.as_str(), "A");
+            let settled_at = unsafe {
+                windows_sys::Win32::System::SystemInformation::GetTickCount().wrapping_add(1_000)
+            };
+            let _ = app.pill_animator.borrow_mut().tick(settled_at);
+            assert!(settle_inline_zone_search_animation(&app, settled_at));
+        }
+        assert!(root.app.borrow().zone_search_target.get().is_none());
+        assert!(root.app.borrow().search_bar.borrow().query.is_empty());
+        assert_eq!(root.app.borrow().zone_pill_anim_zone.get(), Some(ZoneId(7)));
+        assert!(!root.app.borrow().zone_pill_anim_expanding.get());
+        assert_eq!(root.app.borrow().zone_pill_anim_from_morph.get(), 1.0);
+    }
+
+    #[test]
+    fn inline_zone_search_enter_opens_first_matching_item() {
+        let root = test_app_root();
+        let item_id = {
+            let mut app = root.app.borrow_mut();
+            let mut zone = Zone::new(ZoneId(77), "Inbox", 10, 20, 240, 180);
+            let item_id = zone
+                .add_item("C:/Desktop/Quarterly Report.pdf", "hash")
+                .expect("item");
+            app.zones.add(zone);
+            app.zone_search_target.set(Some(ZoneId(77)));
+            app.search_bar
+                .borrow_mut()
+                .set_query(SmolStr::new_static("report"));
+            item_id
+        };
+
+        assert_eq!(
+            super::handle_inline_zone_search_keydown(&root, VK_ENTER, std::ptr::null_mut()),
+            Some(0)
+        );
+        let mut commands: smallvec::SmallVec<[Command; 8]> = smallvec::SmallVec::new();
+        assert_eq!(root.dispatcher.drain_into(&mut commands), 1);
+        assert!(matches!(
+            commands.first(),
+            Some(Command::OpenItemFile(ZoneId(77), id)) if id.0 == item_id.0
+        ));
+    }
+
+    #[test]
     fn search_pointer_row_queues_activation_command() {
         let root = test_app_root();
         {
@@ -27987,6 +34471,58 @@ mod tests {
             drained.first(),
             Some(Command::GroupingApply { suggestion }) if suggestion.name == "Documents"
         ));
+    }
+
+    #[test]
+    fn suggestor_grouping_apply_updates_selected_zone_without_minting_overlap_card() {
+        let root = test_app_root();
+        let zones_path = scratch_zones_path("suggestor-existing-target");
+        let files = smart_group_sample_files();
+        let suggestion = bento_nano_backend::grouping::suggest_groups(&files)
+            .into_iter()
+            .find(|entry| entry.name == "Documents")
+            .expect("documents suggestion");
+
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones_path = zones_path.clone();
+            let mut target = Zone::new(ZoneId(42), "Inbox", 88, 66, 420, 300);
+            let _ = target.add_item(
+                Cow::Owned(suggestion.matching_files[0].clone()),
+                Cow::Borrowed(""),
+            );
+            app.zones.add(target);
+            app.selected_zone.set(Some(ZoneId(42)));
+        }
+
+        root.dispatcher.push(Command::GroupingApply {
+            suggestion: Box::new(suggestion),
+        });
+        consume_dispatcher(&root, std::ptr::null_mut());
+
+        {
+            let app = root.app.borrow();
+            assert_eq!(app.zones.len(), 1, "Apply must not mint a second Zone");
+            let target = app.zones.get(ZoneId(42)).expect("selected target survives");
+            assert_eq!(target.title.as_ref(), "Inbox");
+            assert_eq!((target.x, target.y, target.w, target.h), (88, 66, 420, 300));
+            assert_eq!(
+                target.items.len(),
+                4,
+                "duplicate path is not appended twice"
+            );
+            assert!(
+                !app.dirty.get(),
+                "dispatcher must persist the applied items"
+            );
+        }
+        let persisted = storage::read_zones(&zones_path).expect("persisted zones");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted.get(ZoneId(42)).map(|zone| zone.items.len()),
+            Some(4)
+        );
+        let _ = std::fs::remove_dir_all(zones_path.parent().expect("scratch parent"));
     }
 
     #[test]
@@ -28944,6 +35480,81 @@ mod tests {
     }
 
     #[test]
+    fn zone_editor_uses_one_name_and_direct_appearance_controls() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 480.0,
+                height: 460.0,
+            };
+            app.zone_editor.borrow_mut().replace(ZoneEditorSession {
+                zone_id: ZoneId(6),
+                draft_name: "Canonical".to_owned(),
+                draft_icon: SmolStr::new_static("folder"),
+                draft_accent_color: None,
+                draft_grid_columns: 4,
+                draft_capsule_size: SmolStr::new_static("large"),
+                draft_capsule_shape: SmolStr::new_static("square"),
+            });
+        }
+        let viewport = root.app.borrow().viewport;
+        let name = zone_editor_name_input_rect(viewport);
+        assert!(handle_zone_editor_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            name.x + 8.0,
+            name.y + 8.0
+        ));
+        super::handle_zone_editor_char(&root, u32::from('!'));
+        let accent = zone_editor_accent_option_rect(viewport, 3).expect("accent swatch");
+        assert!(handle_zone_editor_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            accent.x + accent.width * 0.5,
+            accent.y + accent.height * 0.5
+        ));
+        let columns = zone_editor_grid_option_rect(viewport, 6).expect("six-column segment");
+        assert!(handle_zone_editor_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            columns.x + columns.width * 0.5,
+            columns.y + columns.height * 0.5
+        ));
+
+        {
+            let app = root.app.borrow();
+            let editor = app.zone_editor.borrow();
+            let editor = editor.as_ref().expect("editor remains open");
+            assert_eq!(editor.draft_name, "Canonical!");
+            assert_eq!(editor.draft_accent_color.as_deref(), Some("#22c55e"));
+            assert_eq!(editor.draft_grid_columns, 6);
+        }
+
+        super::save_zone_editor(&root);
+        let mut commands = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut commands), 6);
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::SetZoneAlias(ZoneId(6), alias) if alias.is_empty()
+        )));
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::SetZoneAccent(ZoneId(6), Some(accent)) if accent.as_str() == "#22c55e"
+        )));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::SetZoneGridColumns(ZoneId(6), 6)))
+        );
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            Command::SetZoneCapsule(ZoneId(6), size, shape)
+                if size.as_str() == "large" && shape.as_str() == "square"
+        )));
+    }
+
+    #[test]
     fn zone_editor_icon_row_queues_icon_picker_for_same_zone() {
         let root = test_app_root();
         {
@@ -28982,6 +35593,38 @@ mod tests {
             })
         ));
         assert!(root.app.borrow().zone_editor.borrow().is_some());
+    }
+
+    #[test]
+    fn zone_editor_self_painted_close_discards_draft() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 480.0,
+                height: 460.0,
+            };
+            app.zone_editor.borrow_mut().replace(ZoneEditorSession {
+                zone_id: ZoneId(8),
+                draft_name: "Unsaved".to_owned(),
+                draft_icon: SmolStr::new_static("folder"),
+                draft_accent_color: None,
+                draft_grid_columns: 4,
+                draft_capsule_size: SmolStr::new_static("medium"),
+                draft_capsule_shape: SmolStr::new_static("rounded"),
+            });
+        }
+        let close = zone_editor_close_rect(root.app.borrow().viewport);
+
+        assert!(handle_zone_editor_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            close.x + close.width * 0.5,
+            close.y + close.height * 0.5
+        ));
+        assert!(root.app.borrow().zone_editor.borrow().is_none());
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 0);
     }
 
     #[test]
@@ -29273,7 +35916,7 @@ mod tests {
     #[test]
     fn clamp_zone_rect_pulls_high_percent_zone_fully_on_screen() {
         // ROOT-CAUSE-corrupt-zone-geometry.md Part 3: a zone at ~90% x with a
-        // big body, migrated against a SMALL viewport (the 1707×960 logical
+        // big body, migrated against a SMALL viewport (the 1707× 960 logical
         // screen), must end up fully on-screen (x + w <= vp_w, y + h <= vp_h).
         let vp = Size {
             width: 1707.0,
@@ -29291,7 +35934,7 @@ mod tests {
 
     #[test]
     fn clamp_zone_rect_caps_oversized_body_to_viewport() {
-        // A body far larger than the viewport (the 170667×91200 corruption,
+        // A body far larger than the viewport (the 170667× 91200 corruption,
         // already neutralised by storage clamp but defended again here) is
         // capped to the viewport extents.
         let vp = Size {
@@ -31420,18 +38063,9 @@ mod tests {
     }
 
     #[test]
-    fn zone_context_bind_live_folder_choice_defers_native_picker() {
-        let root = test_app_root();
+    fn zone_context_bind_live_folder_choice_maps_to_real_picker_action() {
         assert!(matches!(
-            unsafe {
-                zone_context_action_for_choice(
-                    &root,
-                    std::ptr::null_mut(),
-                    ZoneId(31),
-                    ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
-                    &[],
-                )
-            },
+            zone_context_action_for_choice(ZONE_CONTEXT_BIND_LIVE_FOLDER_ID, &[]),
             Some(ZoneContextAction::OpenLiveFolderPicker)
         ));
     }
@@ -32424,12 +39058,26 @@ mod tests {
     fn zone_editor_hit_test_maps_visible_pointer_controls() {
         let viewport = Size {
             width: 480.0,
-            height: 360.0,
+            height: 460.0,
         };
+        let close = zone_editor_close_rect(viewport);
+        assert_eq!(
+            zone_editor_hit_test(viewport, close.x + 6.0, close.y + 6.0),
+            Some(ZoneEditorHit::Close)
+        );
         let grid = zone_editor_grid_rect(viewport);
         assert_eq!(
             zone_editor_hit_test(viewport, grid.x + 6.0, grid.y + 6.0),
-            Some(ZoneEditorHit::GridColumns)
+            Some(ZoneEditorHit::GridColumns(2))
+        );
+        let accent = zone_editor_accent_option_rect(viewport, 2).expect("accent option");
+        assert_eq!(
+            zone_editor_hit_test(
+                viewport,
+                accent.x + accent.width * 0.5,
+                accent.y + accent.height * 0.5
+            ),
+            Some(ZoneEditorHit::AccentSwatch(1))
         );
 
         let save = zone_editor_save_rect(viewport);
@@ -32458,7 +39106,7 @@ mod tests {
     }
 
     #[test]
-    fn drag_selection_release_restores_only_real_collapsed_pill_drags() {
+    fn drag_selection_release_never_reexpands_the_dragged_zone() {
         let app = AppState::new();
         app.zone_drag_body_visible_at_start
             .set(Some((ZoneId(2), false)));
@@ -32475,10 +39123,27 @@ mod tests {
 
         app.zone_drag_body_visible_at_start
             .set(Some((ZoneId(2), true)));
+        app.zone_drag_selected_before_start.set(Some(ZoneId(2)));
         assert_eq!(
             drag_selection_release(&app, true),
-            DragSelectionRelease::KeepCurrent
+            DragSelectionRelease::Restore(None)
         );
+    }
+
+    #[test]
+    fn ordinary_zone_click_expands_only_in_click_mode() {
+        let mut app = AppState::new();
+        let zone_id = ZoneId(21);
+        app.zones
+            .add(Zone::new(zone_id, "Mode gate", 0, 0, 160, 120));
+
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        assert!(!zone_accepts_click_expand(&app, zone_id, false));
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
+        assert!(!zone_accepts_click_expand(&app, zone_id, false));
+        app.set_zone_display_mode(ZoneDisplayMode::Click);
+        assert!(zone_accepts_click_expand(&app, zone_id, false));
+        assert!(!zone_accepts_click_expand(&app, zone_id, true));
     }
 
     #[test]
@@ -32533,7 +39198,8 @@ mod tests {
             app.zones
                 .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
             assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
-            app.hovered_zone.set(Some(ZoneId(1)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            app.stack_bloom_progress.set(1.0);
         }
         let petal = {
             let app = root.app.borrow();
@@ -32562,22 +39228,227 @@ mod tests {
             assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
             assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
             assert!(app.stack_bloom_progress.get().abs() < f32::EPSILON);
+            let reveal_duration_ms = stack_tray::stack_bloom_reveal_duration_ms(2);
             assert!(tick_stack_bloom_animation(
                 &app,
-                1_000 + stack_tray::BLOOM_REVEAL_DURATION_MS / 2
+                1_000 + reveal_duration_ms / 2
             ));
             let halfway = stack_bloom_reveal_progress_for_anchor(&app, ZoneId(1));
             assert!(halfway > 0.0 && halfway < 1.0);
-            assert!(tick_stack_bloom_animation(
-                &app,
-                1_000 + stack_tray::BLOOM_REVEAL_DURATION_MS
-            ));
+            assert!(tick_stack_bloom_animation(&app, 1_000 + reveal_duration_ms));
             assert!((app.stack_bloom_progress.get() - 1.0).abs() < f32::EPSILON);
             assert!(!tick_stack_bloom_animation(
                 &app,
-                1_000 + stack_tray::BLOOM_REVEAL_DURATION_MS + 1
+                1_000 + reveal_duration_ms + 1
             ));
         }
+    }
+
+    #[test]
+    fn stack_bloom_visible_keeps_hover_frame_timer_alive_for_cursor_leave() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            assert!(hover_frame_pump_needed(&app));
+            assert!(stack_bloom_cursor_watch_active(&app));
+            assert!(hover_frame_timer_needed(&app));
+            app.stack_bloom_progress.set(1.0);
+            assert!(!hover_frame_pump_needed(&app));
+            assert!(stack_bloom_cursor_watch_active(&app));
+            assert!(hover_frame_timer_needed(&app));
+
+            assert!(update_stack_bloom_hover(&app, None, 2_000));
+            assert!(stack_bloom_cursor_watch_active(&app));
+            assert!(!hover_frame_pump_needed(&app));
+            assert!(hover_frame_timer_needed(&app));
+            assert!(!poll_stack_bloom_interaction(
+                &app,
+                2_000 + stack_tray::BLOOM_LEAVE_GRACE_MS - 1
+            ));
+            assert!(poll_stack_bloom_interaction(
+                &app,
+                2_000 + stack_tray::BLOOM_LEAVE_GRACE_MS
+            ));
+            assert!(!stack_bloom_cursor_watch_active(&app));
+            assert!(hover_frame_pump_needed(&app));
+
+            let exit_duration_ms = stack_tray::stack_bloom_exit_duration_ms(2);
+            assert!(tick_stack_bloom_animation(
+                &app,
+                2_000 + stack_tray::BLOOM_LEAVE_GRACE_MS + exit_duration_ms
+            ));
+            assert!(!hover_frame_pump_needed(&app));
+            assert!(!stack_bloom_cursor_watch_active(&app));
+            assert!(!hover_frame_timer_needed(&app));
+        }
+    }
+
+    #[test]
+    fn stack_bloom_leave_runs_tauri_exit_window_before_clearing_anchor() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            assert!(tick_stack_bloom_animation(
+                &app,
+                1_000 + stack_tray::stack_bloom_reveal_duration_ms(2)
+            ));
+            assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+            assert!(!app.stack_bloom_leaving.get());
+            assert!((app.stack_bloom_progress.get() - 1.0).abs() < f32::EPSILON);
+
+            assert!(update_stack_bloom_hover(&app, None, 2_000));
+            assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+            assert!(!app.stack_bloom_leaving.get());
+            assert!((app.stack_bloom_progress.get() - 1.0).abs() < f32::EPSILON);
+            assert!(!poll_stack_bloom_interaction(&app, 2_079));
+            assert!(poll_stack_bloom_interaction(&app, 2_080));
+            assert!(app.stack_bloom_leaving.get());
+            assert!(app.stack_bloom_progress.get().abs() < f32::EPSILON);
+
+            assert!(tick_stack_bloom_animation(&app, 2_200));
+            assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+            assert!(app.stack_bloom_leaving.get());
+            assert!(app.stack_bloom_progress.get() > 0.0);
+            assert!(app.stack_bloom_progress.get() < 1.0);
+
+            assert!(tick_stack_bloom_animation(
+                &app,
+                2_080 + stack_tray::stack_bloom_exit_duration_ms(2)
+            ));
+            assert_eq!(app.stack_bloom_anchor.get(), None);
+            assert!(!app.stack_bloom_leaving.get());
+            assert!((app.stack_bloom_progress.get() - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn stack_bloom_blank_gap_reentry_cancels_leave_grace_without_blinking() {
+        let root = test_app_root();
+        let mut app = root.app.borrow_mut();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+        app.stack_bloom_progress.set(1.0);
+
+        assert!(update_stack_bloom_hover(&app, None, 2_000));
+        assert!(!poll_stack_bloom_interaction(
+            &app,
+            2_000 + stack_tray::BLOOM_LEAVE_GRACE_MS - 1
+        ));
+        assert!(update_stack_bloom_hover(
+            &app,
+            Some(ZoneId(1)),
+            2_000 + stack_tray::BLOOM_LEAVE_GRACE_MS - 1
+        ));
+        assert_eq!(app.stack_bloom_interaction.get().leave_started_ms, None);
+        assert!(!poll_stack_bloom_interaction(&app, 2_500));
+        assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+        assert!(!app.stack_bloom_leaving.get());
+        assert!((app.stack_bloom_progress.get() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stack_bloom_visual_layer_wins_hover_over_zone_beneath_petal() {
+        let root = test_app_root();
+        let (x, y) = {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            app.stack_bloom_progress.set(1.0);
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            let petal = stack_tray::stack_bloom_petal_rects(app.viewport, anchor, 2)[1];
+            let x = petal.x + petal.width * 0.5;
+            let y = petal.y + petal.height * 0.5;
+            app.zones.add(Zone::new(
+                ZoneId(3),
+                "Under petal",
+                (x - 80.0) as i32,
+                (y - 26.0) as i32,
+                180,
+                130,
+            ));
+            (x, y)
+        };
+        let app = root.app.borrow();
+        assert_eq!(ui::hit_test_zone(&app, x, y), Some(ZoneId(3)));
+        assert_eq!(
+            stack_aware_hover_zone_for_point(&app, x, y),
+            Some(ZoneId(1))
+        );
+    }
+
+    #[test]
+    fn stack_bloom_petal_hover_intent_then_click_commits_before_second_click_closes() {
+        let (root, x, y) = stack_bloom_click_fixture();
+        {
+            let app = root.app.borrow();
+            assert!(update_stack_bloom_petal_hover(&app, x, y, 2_000));
+            assert_eq!(
+                app.stack_bloom_interaction.get().active_member,
+                Some(ZoneId(2))
+            );
+            assert!(!poll_stack_bloom_interaction(
+                &app,
+                2_000 + stack_tray::BLOOM_PREVIEW_HOVER_INTENT_MS - 1
+            ));
+            assert!(app.stack_tray.borrow().is_none());
+            assert!(poll_stack_bloom_interaction(
+                &app,
+                2_000 + stack_tray::BLOOM_PREVIEW_HOVER_INTENT_MS
+            ));
+            let tray = app.stack_tray.borrow();
+            let preview = tray.as_ref().expect("hover preview");
+            assert!(preview.is_bloom_preview());
+            assert_eq!(preview.selected_member_id, ZoneId(2));
+            assert!(!app.stack_bloom_interaction.get().preview_sticky);
+        }
+
+        assert!(handle_stack_bloom_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            x,
+            y
+        ));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        {
+            let app = root.app.borrow();
+            assert!(app.stack_tray.borrow().is_some());
+            assert!(app.stack_bloom_interaction.get().preview_sticky);
+        }
+
+        assert!(handle_stack_bloom_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            x,
+            y
+        ));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        let app = root.app.borrow();
+        assert!(app.stack_tray.borrow().is_none());
+        assert!(!app.stack_bloom_interaction.get().preview_sticky);
     }
 
     #[test]
@@ -32601,6 +39472,8 @@ mod tests {
             assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
             assert!(app.zone_pill_anim_expanding.get());
             assert!(app.zone_pill_anim_progress.get().abs() < f32::EPSILON);
+            assert!(app.zone_pill_anim_from_morph.get().abs() < f32::EPSILON);
+            assert_eq!(app.zone_pill_anim_duration_ms.get(), duration);
 
             // 2. Tick halfway through the morph.
             assert!(tick_zone_pill_animation(&app, 1_000 + duration / 2));
@@ -32618,6 +39491,7 @@ mod tests {
             assert!(update_zone_pill_hover(&app, None, 2_000));
             assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
             assert!(!app.zone_pill_anim_expanding.get());
+            assert!((app.zone_pill_anim_from_morph.get() - 1.0).abs() < f32::EPSILON);
 
             // 5. Tick the collapse halfway.
             assert!(tick_zone_pill_animation(&app, 2_000 + duration / 2));
@@ -32633,11 +39507,65 @@ mod tests {
     }
 
     #[test]
-    fn pill_hover_animation_matches_tauri_spring_expand_duration() {
-        // M3 (2026-05-29) — the live morph now mirrors Tauri `.spring-expand`
-        // (width/height/--rad over 0.5s, `animations.css:41-43`). The pre-M3
-        // ≤200ms Wave G2 cap is superseded by 1:1 Tauri parity.
-        assert_eq!(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS, 500);
+    fn pill_hover_content_envelope_matches_fast_release_duration() {
+        assert_eq!(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS, 300);
+        assert_eq!(zone_pill_geometry::ZONE_PILL_GEOMETRY_DURATION_MS, 300);
+    }
+
+    #[test]
+    fn pill_hover_reverse_keeps_the_current_visual_morph() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+        }
+
+        let app = root.app.borrow();
+        assert!(update_zone_pill_hover(&app, Some(ZoneId(1)), 1_000));
+        assert!(tick_zone_pill_animation(&app, 1_100));
+
+        let before_leave = sampled_zone_pill_morph(&app);
+        assert!(before_leave > 0.0 && before_leave < 1.0);
+        assert!(update_zone_pill_hover(&app, None, 1_100));
+        let after_leave = sampled_zone_pill_morph(&app);
+        assert!((before_leave - after_leave).abs() < 0.0001);
+        assert!(
+            app.zone_pill_anim_duration_ms.get() < zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        );
+        assert!(
+            app.zone_pill_anim_duration_ms.get()
+                >= zone_pill_geometry::ZONE_PILL_MIN_SEGMENT_DURATION_MS
+        );
+
+        let collapse_duration = app.zone_pill_anim_duration_ms.get();
+        let reverse_at = 1_100 + collapse_duration / 4;
+        assert!(tick_zone_pill_animation(&app, reverse_at));
+        let before_reenter = sampled_zone_pill_morph(&app);
+        assert!(before_reenter > 0.0 && before_reenter < before_leave);
+        assert!(update_zone_pill_hover(&app, Some(ZoneId(1)), reverse_at));
+        let after_reenter = sampled_zone_pill_morph(&app);
+        assert!((before_reenter - after_reenter).abs() < 0.0001);
+    }
+
+    #[test]
+    fn header_close_animates_a_click_selected_panel_from_its_visible_shape() {
+        let mut app = AppState::new();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180));
+        app.set_zone_display_mode(ZoneDisplayMode::Click);
+        app.selected_zone.set(Some(ZoneId(1)));
+
+        assert!(app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
+        assert_eq!(app.zone_pill_anim_zone.get(), None);
+        assert!(collapse_zone_from_header(&app, ZoneId(1), 1_500));
+        assert_eq!(app.selected_zone.get(), None);
+        assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
+        assert!(!app.zone_pill_anim_expanding.get());
+        assert!((app.zone_pill_anim_from_morph.get() - 1.0).abs() < f32::EPSILON);
+        assert!(app.zone_pill_anim_progress.get().abs() < f32::EPSILON);
+        assert!(app.zone_pill_morph_in_flight(app.zones.get(ZoneId(1)).unwrap()));
+        assert!((sampled_zone_pill_morph(&app) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -32670,12 +39598,84 @@ mod tests {
     }
 
     #[test]
+    fn live_drag_moves_an_existing_stack_as_one_rigid_cluster() {
+        let mut app = AppState::new();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Anchor", 100, 120, 240, 180));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Child A", 140, 190, 240, 180));
+        app.zones
+            .add(Zone::new(ZoneId(3), "Child B", 60, 250, 240, 180));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(3)));
+
+        assert!(move_zone_live(
+            &mut app,
+            ZoneId(1),
+            DispatchPoint::new(300, 320)
+        ));
+        assert_eq!(
+            app.zones.get(ZoneId(1)).map(|zone| (zone.x, zone.y)),
+            Some((300, 320))
+        );
+        assert_eq!(
+            app.zones.get(ZoneId(2)).map(|zone| (zone.x, zone.y)),
+            Some((340, 390))
+        );
+        assert_eq!(
+            app.zones.get(ZoneId(3)).map(|zone| (zone.x, zone.y)),
+            Some((260, 450))
+        );
+        assert!(app.dirty.get());
+    }
+
+    #[test]
+    fn zone_drag_pointer_offset_centers_the_painted_capsule_not_the_panel() {
+        let mut app = AppState::new();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Expanded", 100, 120, 800, 600));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Stack child", 400, 120, 800, 600));
+
+        assert_eq!(zone_drag_pointer_offset(&app, ZoneId(1)), Some((80, 24)));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        assert_eq!(zone_drag_pointer_offset(&app, ZoneId(1)), Some((110, 26)));
+    }
+
+    #[test]
+    fn header_close_clears_mouse_down_selection_and_scheduler_expansion() {
+        let mut app = AppState::new();
+        let zone = Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180);
+        app.zones.add(zone);
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        app.selected_zone.set(Some(ZoneId(1)));
+        app.hovered_zone.set(Some(ZoneId(1)));
+        app.hover_scheduler.set({
+            let mut scheduler = zone_pill_geometry::HoverScheduler::new();
+            scheduler.mark_expanded(ZoneId(1), 1_000);
+            scheduler
+        });
+        app.zone_pill_anim_zone.set(Some(ZoneId(1)));
+        app.zone_pill_anim_expanding.set(true);
+        app.zone_pill_anim_progress.set(1.0);
+
+        assert!(app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
+        assert!(collapse_zone_from_header(&app, ZoneId(1), 1_500));
+        assert_eq!(app.selected_zone.get(), None);
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+        assert_eq!(app.hovered_zone.get(), Some(ZoneId(1)));
+        assert!(!app.zone_pill_anim_expanding.get());
+        assert!(!app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
+    }
+
+    #[test]
     fn pointer_drag_reset_clears_hover_morph_channels_without_tray_drag_guard() {
         let mut app = AppState::new();
         app.zones
             .add(Zone::new(ZoneId(1), "Compiler", 100, 120, 240, 180));
         app.hovered_zone.set(Some(ZoneId(1)));
         app.stack_bloom_anchor.set(Some(ZoneId(1)));
+        app.stack_bloom_leaving.set(true);
         app.stack_bloom_progress.set(0.25);
         app.zone_pill_anim_zone.set(Some(ZoneId(1)));
         app.zone_pill_anim_expanding.set(true);
@@ -32726,9 +39726,15 @@ mod tests {
 
         assert_eq!(app.hovered_zone.get(), None);
         assert_eq!(app.stack_bloom_anchor.get(), None);
+        assert!(!app.stack_bloom_leaving.get());
         assert_eq!(app.stack_bloom_progress.get(), 1.0);
         assert_eq!(app.zone_pill_anim_zone.get(), None);
         assert_eq!(app.zone_pill_anim_progress.get(), 1.0);
+        assert_eq!(app.zone_pill_anim_from_morph.get(), 0.0);
+        assert_eq!(
+            app.zone_pill_anim_duration_ms.get(),
+            zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        );
         assert!(!app.hover_scheduler.get().is_pending());
         assert!(!app.item_hover.get().is_active(1_020));
         assert!(
@@ -32830,19 +39836,52 @@ mod tests {
         {
             let app = root.app.borrow();
             assert_eq!(app.zones.stack_anchor_for(ZoneId(2)), Some(ZoneId(1)));
+            assert_eq!(
+                app.pill_animator.borrow().occupancy(),
+                1,
+                "StackZone must start exactly one bounded emerge animation"
+            );
             assert!(
                 app.stack_tray.borrow().is_none(),
                 "StackZone must NOT auto-open the management tray"
+            );
+            app.hovered_zone.set(Some(ZoneId(1)));
+            app.stack_bloom_anchor.set(Some(ZoneId(1)));
+            app.stack_bloom_leaving.set(true);
+            app.stack_bloom_progress.set(0.5);
+            drive_hover_scheduler(&app, Some(ZoneId(2)), 1_000);
+            assert!(
+                app.hover_scheduler.get().is_pending(),
+                "fixture should start with pending hover state so OpenStackTray proves cleanup"
             );
         }
 
         // Explicit open — tray becomes Some, anchored on the stack.
         root.dispatcher.push(Command::OpenStackTray(ZoneId(1)));
         consume_dispatcher(&root, std::ptr::null_mut());
-        assert!(
-            root.app.borrow().stack_tray.borrow().is_some(),
-            "OpenStackTray is the sole opener and must set stack_tray"
-        );
+        {
+            let app = root.app.borrow();
+            assert!(
+                app.stack_tray.borrow().is_some(),
+                "OpenStackTray is the sole opener and must set stack_tray"
+            );
+            assert_eq!(
+                app.hovered_zone.get(),
+                None,
+                "OpenStackTray must clear stale hover target"
+            );
+            assert_eq!(
+                app.stack_bloom_anchor.get(),
+                None,
+                "OpenStackTray must clear the mutually-exclusive hover bloom"
+            );
+            assert!(!app.stack_bloom_leaving.get());
+            assert_eq!(app.stack_bloom_progress.get(), 1.0);
+            assert!(
+                !app.hover_scheduler.get().is_pending(),
+                "OpenStackTray must cancel pending hover scheduler work"
+            );
+        }
 
         // Explicit close — back to None.
         root.dispatcher.push(Command::CloseStackTray);
@@ -32852,7 +39891,7 @@ mod tests {
 
     #[test]
     fn pill_hover_skips_stack_anchors() {
-        // #4 (2026-06-02) — stack anchors don't run the pill↔panel morph
+        // #4 (2026-06-02) — stack anchors don't run the pill→panel morph
         // (stack_bloom owns the hover affordance); pill morph must not steal
         // that animation slot. A collapsed anchor still renders as the compact
         // pill, but via the non-morph pill paint path.
@@ -32873,7 +39912,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_bloom_petal_click_opens_tray_and_previews_member() {
+    fn stack_bloom_petal_click_opens_floating_preview_without_management_tray() {
         let root = test_app_root();
         {
             let mut app = root.app.borrow_mut();
@@ -32886,7 +39925,8 @@ mod tests {
             app.zones
                 .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
             assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
-            app.hovered_zone.set(Some(ZoneId(1)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            app.stack_bloom_progress.set(1.0);
         }
         let petal = {
             let app = root.app.borrow();
@@ -32901,15 +39941,47 @@ mod tests {
             petal.y + 4.0
         ));
         let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
-        assert_eq!(root.dispatcher.drain_into(&mut drained), 2);
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 1);
         assert!(matches!(
             drained.first(),
-            Some(Command::OpenStackTray(ZoneId(1)))
+            Some(Command::ToggleStackBloomPreview(ZoneId(1), ZoneId(2)))
         ));
-        assert!(matches!(
-            drained.get(1),
-            Some(Command::PreviewStackMember(ZoneId(1), ZoneId(2)))
-        ));
+    }
+
+    #[test]
+    fn stack_capsule_outranks_petals_during_bloom_entry_overlap() {
+        let root = test_app_root();
+        let (x, y) = {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            app.stack_bloom_progress.set(0.0);
+
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            let capsule = zone_pill_geometry::stack_capsule_layout_for_zone(anchor, 2).rect;
+            let x = capsule.x + capsule.width * 0.5;
+            let y = capsule.y + capsule.height * 0.5;
+            assert_eq!(
+                stack_tray::stack_bloom_hit_test_at(app.viewport, anchor, 2, 0.0, x, y),
+                Some(0),
+                "fixture must cover the transient animated-petal/capsule overlap"
+            );
+            (x, y)
+        };
+
+        assert_eq!(
+            stack_bloom_hit_for_point(&root.app.borrow(), x, y),
+            None,
+            "capsule hover/click must not arm or commit an animated petal preview"
+        );
     }
 
     fn stack_bloom_click_fixture() -> (AppRoot, f32, f32) {
@@ -32925,7 +39997,8 @@ mod tests {
             app.zones
                 .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
             assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
-            app.hovered_zone.set(Some(ZoneId(1)));
+            assert!(update_stack_bloom_hover(&app, Some(ZoneId(1)), 1_000));
+            app.stack_bloom_progress.set(1.0);
         }
         let petal = {
             let app = root.app.borrow();
@@ -32933,6 +40006,360 @@ mod tests {
             stack_tray::stack_bloom_petal_rects(app.viewport, anchor, 2)[1]
         };
         (root, petal.x + 4.0, petal.y + 4.0)
+    }
+
+    fn open_stack_bloom_preview() -> AppRoot {
+        let (root, x, y) = stack_bloom_click_fixture();
+        assert!(handle_stack_bloom_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            x,
+            y
+        ));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        root
+    }
+
+    fn stack_bloom_preview_rect_for_test(root: &AppRoot) -> bento_nano_style::Rect {
+        let app = root.app.borrow();
+        let state = app.stack_tray.borrow().clone().expect("preview state");
+        let anchor = app.zones.get(state.anchor_zone_id).expect("anchor");
+        let members = app.zones.stack_member_ids(anchor.id).expect("members");
+        let index = members
+            .iter()
+            .position(|member| *member == state.selected_member_id)
+            .expect("selected member");
+        let member = app
+            .zones
+            .get(state.selected_member_id)
+            .expect("selected zone");
+        let petals = stack_tray::stack_bloom_petal_rects(app.viewport, anchor, members.len());
+        let petal = petals[index];
+        stack_tray::focused_bloom_preview_rect(app.viewport, petal, &petals, member)
+    }
+
+    #[test]
+    fn stack_bloom_pointer_dispatch_uses_explicit_visible_bloom_state() {
+        let (root, x, y) = stack_bloom_click_fixture();
+
+        assert!(handle_stack_bloom_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            x,
+            y
+        ));
+        super::consume_dispatcher(&root, std::ptr::null_mut());
+
+        let app = root.app.borrow();
+        let tray = app.stack_tray.borrow();
+        let tray = tray
+            .as_ref()
+            .expect("pointer dispatch must open the floating preview");
+        assert!(tray.is_bloom_preview());
+        assert_eq!(tray.anchor_zone_id, ZoneId(1));
+        assert_eq!(tray.selected_member_id, ZoneId(2));
+        assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+        assert!(!app.stack_bloom_leaving.get());
+    }
+
+    #[test]
+    fn stack_bloom_preview_click_toggles_and_switches_members_without_management_mode() {
+        let (root, x, y) = stack_bloom_click_fixture();
+        assert!(handle_stack_bloom_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            x,
+            y
+        ));
+        consume_dispatcher(&root, std::ptr::null_mut());
+
+        root.dispatcher
+            .push(Command::PreviewStackMember(ZoneId(1), ZoneId(1)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        {
+            let app = root.app.borrow();
+            let state = app.stack_tray.borrow();
+            let state = state.as_ref().expect("switch keeps the preview open");
+            assert!(state.is_bloom_preview());
+            assert_eq!(state.selected_member_id, ZoneId(1));
+        }
+
+        root.dispatcher
+            .push(Command::PreviewStackMember(ZoneId(1), ZoneId(1)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+        assert!(root.app.borrow().stack_tray.borrow().is_none());
+    }
+
+    #[test]
+    fn stack_bloom_preview_body_keeps_bloom_open_and_consumes_pointer() {
+        let root = open_stack_bloom_preview();
+        let preview = stack_bloom_preview_rect_for_test(&root);
+        let body_x = preview.x + 16.0;
+        let body_y = preview.y + preview.height - 16.0;
+        {
+            let app = root.app.borrow();
+            assert_eq!(
+                stack_bloom_preview_hit_for_point(&app, body_x, body_y)
+                    .map(|(anchor, member, _)| (anchor, member)),
+                Some((ZoneId(1), ZoneId(2)))
+            );
+            assert_eq!(
+                stack_bloom_hover_anchor_for_point(&app, body_x, body_y),
+                Some(ZoneId(1))
+            );
+            assert!(!update_stack_bloom_hover(&app, Some(ZoneId(1)), 2_000));
+            assert!(!app.stack_bloom_leaving.get());
+            assert!(handle_stack_bloom_preview_lbutton_down(
+                &app,
+                std::ptr::null_mut(),
+                body_x,
+                body_y
+            ));
+        }
+        assert!(handle_stack_bloom_preview_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            body_x,
+            body_y
+        ));
+        assert!(root.app.borrow().stack_tray.borrow().is_some());
+    }
+
+    #[test]
+    fn stack_bloom_preview_header_actions_close_or_open_search() {
+        let root = open_stack_bloom_preview();
+        let close =
+            stack_tray::focused_bloom_preview_close_rect(stack_bloom_preview_rect_for_test(&root));
+        assert!(handle_stack_bloom_preview_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            close.x + close.width * 0.5,
+            close.y + close.height * 0.5
+        ));
+        assert!(root.app.borrow().stack_tray.borrow().is_none());
+        assert_eq!(root.app.borrow().stack_bloom_anchor.get(), Some(ZoneId(1)));
+
+        let root = open_stack_bloom_preview();
+        let search =
+            stack_tray::focused_bloom_preview_search_rect(stack_bloom_preview_rect_for_test(&root));
+        assert!(handle_stack_bloom_preview_lbutton_up(
+            &root,
+            std::ptr::null_mut(),
+            search.x + search.width * 0.5,
+            search.y + search.height * 0.5
+        ));
+        {
+            let app = root.app.borrow();
+            let preview = app.stack_tray.borrow();
+            assert!(
+                preview
+                    .as_ref()
+                    .is_some_and(|state| state.is_bloom_preview())
+            );
+            assert_eq!(app.zone_search_target.get(), Some(ZoneId(2)));
+        }
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 0);
+    }
+
+    #[test]
+    fn stack_bloom_preview_item_single_click_arms_drag_and_double_click_opens() {
+        let root = open_stack_bloom_preview();
+        {
+            let mut app = root.app.borrow_mut();
+            let member = app.zones.get_mut(ZoneId(2)).expect("member");
+            member.w = 320;
+            member.h = 360;
+            member.items.push(ZoneItem::new(
+                ZoneItemId(41),
+                r"C:\Users\Alice\Desktop\report.txt",
+                "text-icon",
+                0,
+                0,
+            ));
+        }
+        let preview = stack_bloom_preview_rect_for_test(&root);
+        let card = {
+            let app = root.app.borrow();
+            let member = app.zones.get(ZoneId(2)).expect("member");
+            highlight_overlay::item_card_rect_for_flow_slot_in_panel(member, preview, 0, false, 0.0)
+                .0
+        };
+        let x = card.x + card.width * 0.5;
+        let y = card.y + card.height * 0.5;
+
+        {
+            let app = root.app.borrow();
+            assert_eq!(
+                stack_bloom_preview_item_hit_for_point(&app, x, y),
+                Some((ZoneId(1), ZoneId(2), ZoneItemId(41)))
+            );
+            assert_eq!(item_drag_target_zone_for_point(&app, x, y), Some(ZoneId(2)));
+            assert_eq!(
+                item_grid_position_for_drag_point(&app, ZoneId(2), x, y),
+                Some((0, 0))
+            );
+            assert!(handle_stack_bloom_preview_lbutton_down(
+                &app,
+                std::ptr::null_mut(),
+                x,
+                y,
+            ));
+            assert!(app.item_drag.borrow().is_some());
+        }
+        assert!(
+            !handle_stack_bloom_preview_lbutton_up(&root, std::ptr::null_mut(), x, y),
+            "preview must let the shared item-drag release path consume mouse-up"
+        );
+
+        let mut drained = smallvec::SmallVec::<[Command; 8]>::new();
+        assert_eq!(root.dispatcher.drain_into(&mut drained), 0);
+        let command = {
+            let app = root.app.borrow();
+            item_open_command_for_double_click(&app, x, y)
+        };
+        assert!(matches!(
+            command,
+            Some(Command::OpenItemFile(ZoneId(2), bento_nano_app::ItemId(41)))
+        ));
+        assert!(root.app.borrow().stack_tray.borrow().is_some());
+    }
+
+    #[test]
+    fn stack_drop_arms_bloom_without_invisible_settled_petal_hits() {
+        let root = test_app_root();
+        let petal = {
+            let mut app = root.app.borrow_mut();
+            app.viewport = Size {
+                width: 1280.0,
+                height: 720.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            reveal_stack_at_drop_pointer(&app, ZoneId(1), 1_000);
+            let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+            stack_tray::stack_bloom_petal_rects(app.viewport, anchor, 2)[1]
+        };
+
+        let app = root.app.borrow();
+        assert_eq!(app.hovered_zone.get(), Some(ZoneId(1)));
+        assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+        assert_eq!(app.stack_bloom_progress.get(), 0.0);
+        assert!(app.stack_tray.borrow().is_none());
+        assert_eq!(
+            stack_bloom_hit_for_point(&app, petal.x + 4.0, petal.y + 4.0),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_stack_drop_blooms_on_the_same_dispatch_turn() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            app.selected_zone.set(Some(ZoneId(1)));
+        }
+
+        root.pending_stack_drop_bloom.set(Some(ZoneId(1)));
+        root.dispatcher
+            .push(Command::StackZone(ZoneId(1), ZoneId(2)));
+        consume_dispatcher(&root, std::ptr::null_mut());
+
+        let app = root.app.borrow();
+        assert_eq!(root.pending_stack_drop_bloom.get(), None);
+        assert_eq!(app.zones.stack_anchor_for(ZoneId(2)), Some(ZoneId(1)));
+        assert_eq!(app.selected_zone.get(), None);
+        assert_eq!(app.hovered_zone.get(), Some(ZoneId(1)));
+        assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+        assert!(!app.stack_bloom_leaving.get());
+        assert_eq!(app.stack_bloom_progress.get(), 0.0);
+        assert!(app.stack_tray.borrow().is_none());
+    }
+
+    #[test]
+    fn stack_capsule_click_toggles_bloom_without_expanding_panel() {
+        let root = test_app_root();
+        {
+            let mut app = root.app.borrow_mut();
+            app.zones
+                .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+            app.zones
+                .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+            assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+            app.selected_zone.set(None);
+            app.hovered_zone.set(Some(ZoneId(1)));
+            clear_stack_bloom_surface(&app);
+
+            assert!(toggle_stack_bloom_from_capsule_click(
+                &app,
+                ZoneId(1),
+                2_000
+            ));
+            assert_eq!(app.selected_zone.get(), None);
+            assert_eq!(app.stack_bloom_anchor.get(), Some(ZoneId(1)));
+            assert!(!app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
+
+            assert!(toggle_stack_bloom_from_capsule_click(
+                &app,
+                ZoneId(1),
+                2_500
+            ));
+            assert!(app.stack_bloom_leaving.get());
+            assert_eq!(app.selected_zone.get(), None);
+        }
+    }
+
+    #[test]
+    fn stack_capsule_click_and_always_modes_ignore_pointer_enter() {
+        let root = test_app_root();
+        let mut app = root.app.borrow_mut();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Anchor", 100, 100, 180, 130));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Child", 420, 100, 180, 130));
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+
+        app.set_zone_display_mode(ZoneDisplayMode::Click);
+        app.hovered_zone.set(None);
+        on_hover_target_changed(&app, Some(ZoneId(1)), 900);
+        assert_eq!(app.stack_bloom_anchor.get(), None);
+        assert!(app.stack_tray.borrow().is_none());
+        assert!(toggle_stack_bloom_from_capsule_click(
+            &app,
+            ZoneId(1),
+            1_000
+        ));
+        assert!(
+            app.stack_tray
+                .borrow()
+                .as_ref()
+                .is_some_and(stack_tray::StackTrayState::is_management)
+        );
+        assert_eq!(app.stack_bloom_anchor.get(), None);
+        assert!(toggle_stack_bloom_from_capsule_click(
+            &app,
+            ZoneId(1),
+            1_100
+        ));
+        assert!(app.stack_tray.borrow().is_none());
+
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
+        app.hovered_zone.set(None);
+        on_hover_target_changed(&app, Some(ZoneId(1)), 2_000);
+        assert!(app.stack_tray.borrow().is_none());
+        assert_eq!(app.stack_bloom_anchor.get(), None);
+        assert!(!toggle_stack_bloom_from_capsule_click(
+            &app,
+            ZoneId(1),
+            2_100
+        ));
     }
 
     fn stack_tray_row_fixture() -> (AppRoot, f32, f32) {
@@ -33597,6 +41024,37 @@ mod tests {
     }
 
     #[test]
+    fn settings_accent_vault_persist_writes_and_clears_modern_and_legacy_keys() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "bento-nano-settings-accent-clear-{}.vault",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut vault = Vault::open(&path).expect("open test vault");
+        let accent = smol_str::SmolStr::new_static("#abcdef");
+
+        persist_settings_accent_to_vault(&mut vault, Some(&accent), false);
+        assert_eq!(
+            vault.get_setting(SETTING_APPEARANCE_ACCENT_COLOR),
+            Some(bento_nano_backend::config_vault::SettingValue::Str(
+                accent.clone()
+            ))
+        );
+        assert_eq!(
+            vault.get_setting(SETTING_THEME_BASE_ACCENT),
+            Some(bento_nano_backend::config_vault::SettingValue::Str(
+                accent.clone()
+            ))
+        );
+
+        persist_settings_accent_to_vault(&mut vault, Some(&accent), true);
+        assert_eq!(vault.get_setting(SETTING_APPEARANCE_ACCENT_COLOR), None);
+        assert_eq!(vault.get_setting(SETTING_THEME_BASE_ACCENT), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn active_theme_loads_applies_persists_and_rejects_unknown() {
         let root = test_app_root();
         let scratch = scratch_zones_path("active-theme");
@@ -33613,7 +41071,6 @@ mod tests {
                 .any(|theme| theme.id.as_str() == "ocean-blue")
         );
 
-        let default_accent = root.app.borrow().active_theme_palette().accent;
         assert!(
             apply_active_theme_to_app(&root, SmolStr::new_static("ocean-blue"))
                 .expect("apply built-in theme")
@@ -33621,7 +41078,19 @@ mod tests {
         {
             let app = root.app.borrow();
             assert_eq!(app.active_theme_id.borrow().as_str(), "ocean-blue");
-            assert_ne!(app.active_theme_palette().accent, default_accent);
+            assert_eq!(
+                app.active_theme_tauri(),
+                bento_nano_style::tokens::PALETTE_OCEAN_BLUE
+            );
+        }
+        assert!(active_theme_id_is_builtin("light"));
+        assert!(
+            apply_active_theme_to_app(&root, SmolStr::new_static("light"))
+                .expect("apply app built-in light")
+        );
+        {
+            let app = root.app.borrow();
+            assert_eq!(app.active_theme_id.borrow().as_str(), "light");
         }
 
         let mut vault_path = std::env::temp_dir();
@@ -33631,7 +41100,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&vault_path);
         let mut vault = Vault::open(&vault_path).expect("open test vault");
-        let active_id = SmolStr::new_static("ocean-blue");
+        let active_id = SmolStr::new_static("light");
         assert!(persist_active_theme_to_vault(&mut vault, &active_id).expect("persist theme"));
         assert_eq!(
             vault.get_setting(SETTING_ACTIVE_THEME),
@@ -33641,10 +41110,7 @@ mod tests {
         );
 
         assert!(apply_active_theme_to_app(&root, SmolStr::new_static("missing-theme")).is_err());
-        assert_eq!(
-            root.app.borrow().active_theme_id.borrow().as_str(),
-            "ocean-blue"
-        );
+        assert_eq!(root.app.borrow().active_theme_id.borrow().as_str(), "light");
 
         let _ = std::fs::remove_file(&vault_path);
         let _ = std::fs::remove_dir_all(scratch.parent().expect("scratch parent"));
@@ -33790,10 +41256,10 @@ mod tests {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].id.as_str(), "com.test.lifecycle-theme");
             assert!(entries[0].enabled);
-            assert!(matches!(
-                app.settings_plugin_status.borrow().as_ref(),
-                Some(SettingsBackupStatus::Success(_))
-            ));
+            assert!(
+                app.settings_plugin_status.borrow().is_none(),
+                "a normal list refresh must stay visually quiet"
+            );
         }
 
         root.dispatcher.push(Command::TogglePlugin(

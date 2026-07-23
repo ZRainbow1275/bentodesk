@@ -55,21 +55,24 @@ const APPLY_DEFAULT_H: i32 = 120;
 
 /// Errors surfaced by `apply_auto_group`.
 ///
-/// Hand-rolled per spec §8.1 (no `thiserror`). Reserved variant `IdOverflow`
-/// fires only if the existing zone list has saturated `u64::MAX` ids — kept
-/// as an explicit error rather than `panic!` to honour spec §11 no-panic.
+/// Hand-rolled per spec §8.1 (no `thiserror`). `IdOverflow` fires only if the
+/// existing zone list has saturated `u64::MAX` ids; `ZoneNotFound` keeps a
+/// disappearing explicit target recoverable rather than panicking.
 #[derive(Debug)]
 pub enum GroupingError {
     /// Monotonic id allocator wrapped past `u64::MAX`. Practically
     /// unreachable (would require ~1.8e19 zones across product lifetime),
     /// but required so the API never panics.
     IdOverflow,
+    /// The explicit target disappeared before the suggestion was applied.
+    ZoneNotFound(ZoneId),
 }
 
 impl core::fmt::Display for GroupingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::IdOverflow => write!(f, "zone id allocator exhausted (u64 saturated)"),
+            Self::ZoneNotFound(id) => write!(f, "zone not found: {}", id.0),
         }
     }
 }
@@ -110,11 +113,69 @@ pub fn apply_auto_group(
         APPLY_DEFAULT_W,
         APPLY_DEFAULT_H,
     );
-    for path in &suggestion.matching_files {
-        let _ = zone.add_item(Cow::Owned(path.clone()), Cow::Borrowed(""));
-    }
+    append_unique_paths(&mut zone, &suggestion.matching_files);
     zones.add(zone);
     Ok(id)
+}
+
+/// Apply a suggestion to an existing zone without changing its geometry or
+/// appearance. This is the native counterpart of Tauri `apply_auto_group`,
+/// whose Apply action targets the Zone that opened the suggestor.
+pub fn apply_auto_group_to_zone(
+    suggestion: &SuggestedGroup,
+    zone_id: ZoneId,
+    zones: &mut ZoneList,
+) -> Result<usize, GroupingError> {
+    let zone = zones
+        .get_mut(zone_id)
+        .ok_or(GroupingError::ZoneNotFound(zone_id))?;
+    Ok(append_unique_paths(zone, &suggestion.matching_files))
+}
+
+/// Merge a repeated automatic suggestion into an existing same-name zone.
+///
+/// Smart-layout can run more than once (including once per desktop watcher
+/// create event). Re-minting the same suggestion on every run produces
+/// duplicate zones and duplicate item cards. This helper keeps background
+/// smart-layout creation idempotent; the reviewed suggestor path targets an
+/// existing Zone through [`apply_auto_group_to_zone`].
+///
+/// Returns `None` when no same-name zone exists. Otherwise returns that
+/// zone's id and the number of newly appended unique paths.
+pub fn merge_auto_group(
+    suggestion: &SuggestedGroup,
+    zones: &mut ZoneList,
+) -> Option<(ZoneId, usize)> {
+    let zone = zones
+        .iter_mut()
+        .find(|zone| zone.title.as_ref().eq_ignore_ascii_case(&suggestion.name))?;
+    let added = append_unique_paths(zone, &suggestion.matching_files);
+    Some((zone.id, added))
+}
+
+fn append_unique_paths(zone: &mut Zone, paths: &[String]) -> usize {
+    let mut added = 0usize;
+    for path in paths {
+        let already_present = zone.items.iter().any(|item| {
+            item.path.as_ref().eq_ignore_ascii_case(path)
+                || item
+                    .original_path
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(path))
+                || item
+                    .hidden_path
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(path))
+        });
+        if !already_present
+            && zone
+                .add_item(Cow::Owned(path.clone()), Cow::Borrowed(""))
+                .is_some()
+        {
+            added = added.saturating_add(1);
+        }
+    }
+    added
 }
 
 #[cfg(test)]
@@ -189,5 +250,62 @@ mod tests {
             ZoneId(1),
             "first allocation must skip ZoneId::INVALID (0)"
         );
+    }
+
+    #[test]
+    fn merge_auto_group_is_idempotent_and_appends_only_new_paths() {
+        let suggestion = sample_suggestion("Documents");
+        let mut zones = ZoneList::new();
+        let id = apply_auto_group(&suggestion, &mut zones).expect("initial apply");
+
+        let (merged_id, first_added) =
+            merge_auto_group(&suggestion, &mut zones).expect("same-name zone");
+        assert_eq!(merged_id, id);
+        assert_eq!(first_added, 0, "same suggestion must be a no-op");
+        assert_eq!(zones.len(), 1);
+
+        let mut updated = suggestion.clone();
+        updated
+            .matching_files
+            .push("C:\\Desktop\\d.pdf".to_string());
+        let (_, second_added) = merge_auto_group(&updated, &mut zones).expect("same-name zone");
+        assert_eq!(second_added, 1);
+        let zone = zones.get(id).expect("merged zone");
+        assert_eq!(zone.items.len(), 4);
+        assert_eq!(
+            zone.items
+                .iter()
+                .filter(|item| item
+                    .path
+                    .as_ref()
+                    .eq_ignore_ascii_case("C:\\Desktop\\d.pdf"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn apply_auto_group_to_zone_preserves_geometry_and_skips_duplicates() {
+        let suggestion = sample_suggestion("Documents");
+        let mut zones = ZoneList::new();
+        let mut target = Zone::new(ZoneId(9), Cow::Borrowed("Inbox"), 44, 55, 360, 280);
+        let _ = target.add_item(
+            Cow::Owned(suggestion.matching_files[0].clone()),
+            Cow::Borrowed(""),
+        );
+        zones.add(target);
+
+        let added = apply_auto_group_to_zone(&suggestion, ZoneId(9), &mut zones)
+            .expect("existing target should accept selected paths");
+
+        assert_eq!(added, 2);
+        let target = zones.get(ZoneId(9)).expect("target remains present");
+        assert_eq!(target.title.as_ref(), "Inbox");
+        assert_eq!((target.x, target.y, target.w, target.h), (44, 55, 360, 280));
+        assert_eq!(target.items.len(), 3);
+        assert!(matches!(
+            apply_auto_group_to_zone(&suggestion, ZoneId(99), &mut zones),
+            Err(GroupingError::ZoneNotFound(ZoneId(99)))
+        ));
     }
 }

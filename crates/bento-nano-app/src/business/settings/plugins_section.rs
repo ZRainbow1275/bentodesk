@@ -112,7 +112,15 @@ mod tests {
 
     fn mk(n: usize) -> Vec<SettingsPluginEntry> {
         (0..n)
-            .map(|i| entry(&format!("id-{i}"), &format!("Plugin {i}"), "1.0.0", "theme", i % 2 == 0))
+            .map(|i| {
+                entry(
+                    &format!("id-{i}"),
+                    &format!("Plugin {i}"),
+                    "1.0.0",
+                    "theme",
+                    i % 2 == 0,
+                )
+            })
             .collect()
     }
 

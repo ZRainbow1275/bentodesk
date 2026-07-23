@@ -169,6 +169,18 @@ pub fn fallback_icon_kind_for(path: &str) -> IconKind {
     fallback_icon_family_for(path).icon_kind()
 }
 
+/// Resolve the icon used when a cached bitmap is unavailable.
+///
+/// Benchmark/imported layouts may carry a `builtin:<name>` hash instead of
+/// extracted PNG bytes. Prefer that explicit category; real hashes and
+/// unknown built-ins continue through the extension fallback.
+pub fn fallback_icon_kind_for_item(icon_hash: &str, path: &str) -> IconKind {
+    icon_hash
+        .strip_prefix("builtin:")
+        .and_then(IconKind::from_str_opt)
+        .unwrap_or_else(|| fallback_icon_kind_for(path))
+}
+
 /// Map a file path's extension to the legacy 1.x fallback emoji.
 ///
 /// The selected-stack runtime should use [`fallback_icon_kind_for`] instead.
@@ -252,6 +264,30 @@ mod tests {
         assert_eq!(
             fallback_icon_kind_for("shortcut.lnk"),
             IconKind::ExternalLink
+        );
+    }
+
+    #[test]
+    fn fallback_icon_kind_prefers_explicit_builtin_category() {
+        assert_eq!(
+            fallback_icon_kind_for_item("builtin:folder", "shortcut.lnk"),
+            IconKind::Folder
+        );
+        assert_eq!(
+            fallback_icon_kind_for_item("builtin:file", "shortcut.lnk"),
+            IconKind::Document
+        );
+        assert_eq!(
+            fallback_icon_kind_for_item("builtin:terminal", "shortcut.lnk"),
+            IconKind::Code
+        );
+        assert_eq!(
+            fallback_icon_kind_for_item("builtin:unknown", "shortcut.lnk"),
+            IconKind::ExternalLink
+        );
+        assert_eq!(
+            fallback_icon_kind_for_item("sha256:real", "notes.md"),
+            IconKind::Document
         );
     }
 

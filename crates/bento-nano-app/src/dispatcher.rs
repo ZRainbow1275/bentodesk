@@ -378,6 +378,11 @@ pub enum Command {
     CloseStackTray,
     /// Select a real stack member for the FocusedZonePreview overlay.
     PreviewStackMember(ZoneId, ZoneId),
+    /// Click a Bloom petal: commit its preview as sticky, or close it when the
+    /// same sticky petal is clicked again. Kept separate from keyboard/tray
+    /// selection because a hover-open preview must become sticky rather than
+    /// being toggled closed by the first explicit click.
+    ToggleStackBloomPreview(ZoneId, ZoneId),
     /// Detach one member from a real stack and keep any remaining stack valid.
     DetachStackMember(ZoneId, ZoneId),
     /// Dissolve every member from the stack containing the given zone.
@@ -425,6 +430,8 @@ pub enum Command {
     RefreshLiveFolder(ZoneId),
     /// Move a zone to a new sort_order slot (1.x `reorder_zones`).
     ReorderZone(ZoneId, u32),
+    /// Sort only this zone's items by display name and rebuild its grid.
+    AutoArrangeZone(ZoneId),
     /// Duplicate the current selected zone or first visible zone.
     DuplicateZone,
     /// Toggle the current selected zone's locked flag.
@@ -542,6 +549,9 @@ pub enum Command {
     /// desktop path. The selected-stack shell calls
     /// `bento_nano_backend::icon::protocol::extract_and_cache` directly.
     LoadIcon(ItemPath),
+    /// Apply an icon hash produced off the UI thread. Startup cache repair uses
+    /// this result path so slow Shell/COM icon handlers never block painting.
+    ApplyLoadedIcon { path: ItemPath, hash: SmolStr },
 
     // -------- Picker openers (Phase 2 dialog spawn — F2-07) --------
     /// Open the icon picker as a `WindowKind::IconPicker` aux HWND.
@@ -718,6 +728,7 @@ impl Command {
             Self::OpenStackTray(_) => "OpenStackTray",
             Self::CloseStackTray => "CloseStackTray",
             Self::PreviewStackMember(_, _) => "PreviewStackMember",
+            Self::ToggleStackBloomPreview(_, _) => "ToggleStackBloomPreview",
             Self::DetachStackMember(_, _) => "DetachStackMember",
             Self::DissolveStack(_) => "DissolveStack",
             Self::ReorderStackMember(_, _, _) => "ReorderStackMember",
@@ -738,6 +749,7 @@ impl Command {
             Self::UnbindZoneFolder(_) => "UnbindZoneFolder",
             Self::RefreshLiveFolder(_) => "RefreshLiveFolder",
             Self::ReorderZone(_, _) => "ReorderZone",
+            Self::AutoArrangeZone(_) => "AutoArrangeZone",
             Self::DuplicateZone => "DuplicateZone",
             Self::ToggleSelectedZoneLock => "ToggleSelectedZoneLock",
             Self::ToggleAllZonesVisible => "ToggleAllZonesVisible",
@@ -779,6 +791,7 @@ impl Command {
             Self::ActivateSearchResult(_) => "ActivateSearchResult",
             Self::CloseSearch => "CloseSearch",
             Self::LoadIcon(_) => "LoadIcon",
+            Self::ApplyLoadedIcon { .. } => "ApplyLoadedIcon",
             Self::OpenIconPicker { .. } => "OpenIconPicker",
             Self::OpenPalettePicker { .. } => "OpenPalettePicker",
             Self::OpenCapsulePicker => "OpenCapsulePicker",
@@ -1386,6 +1399,7 @@ mod tests {
             Command::OpenStackTray(ZoneId(7)),
             Command::CloseStackTray,
             Command::PreviewStackMember(ZoneId(7), ZoneId(8)),
+            Command::ToggleStackBloomPreview(ZoneId(7), ZoneId(8)),
             Command::DetachStackMember(ZoneId(7), ZoneId(8)),
             Command::DissolveStack(ZoneId(7)),
             Command::ReorderStackMember(ZoneId(7), ZoneId(8), 1),
@@ -1412,6 +1426,7 @@ mod tests {
             Command::UnbindZoneFolder(ZoneId(7)),
             Command::RefreshLiveFolder(ZoneId(7)),
             Command::ReorderZone(ZoneId(7), 3),
+            Command::AutoArrangeZone(ZoneId(7)),
             Command::DuplicateZone,
             Command::ToggleSelectedZoneLock,
             Command::ToggleAllZonesVisible,
@@ -1458,6 +1473,10 @@ mod tests {
             Command::ActivateSearchResult(SmolStr::new_static("zone:7")),
             Command::CloseSearch,
             Command::LoadIcon(ItemPath::new("/path/file.txt")),
+            Command::ApplyLoadedIcon {
+                path: ItemPath::new("/path/file.txt"),
+                hash: SmolStr::new_static("0123456789abcdef"),
+            },
             Command::OpenIconPicker {
                 zone_id: Some(ZoneId(7)),
             },

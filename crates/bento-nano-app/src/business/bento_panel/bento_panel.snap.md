@@ -22,7 +22,7 @@ PanelHeader (icon · title · search · close) → optional SearchBar → ItemGr
 | header-title-font | 14 px / weight 500 / color text-primary / nowrap / flex:1; Tauri `letter-spacing: 0.3px` APPROXIMATED (omitted — see deviations) |
 | header-badge      | bg `var(--zone-accent, --badge-bg)` · radius `--radius-badge` · padding 2px 9px · 11 px / weight 600 · text-primary · line-height 1.4 · INTRINSIC width · placed BEFORE the actions group |
 | header-btn        | 28×28 · radius 6 px · color text-muted · 14×14 glyph (search=magnifier `IconKind::Search`, close=X `IconKind::X`) |
-| header-btn-hover  | search: bg `--surface-hover`+text-primary; close: bg rgba(239,68,68,0.2)+accent-red — DEFERRED in nano (see deviations) |
+| header-btn-hover  | search: bg `--surface-hover`+text-primary; close: bg rgba(239,68,68,0.2)+accent-red |
 | header-gap-below | 8 px                                   |
 | search-row-h     | 32 px (when expanded)                  |
 | search-collapsed | 0 px (animated 200 ms ease-out)        |
@@ -48,12 +48,12 @@ Locked behaviour:
   collapses the expanded panel back to its pill (Tauri `onClose()`). Geometry
   for the icon / badge / both buttons is the paint==hit SSoT in
   `expanded_zone_grid::ExpandedZoneLayout`.
+- **PanelHeader button hover** (V21-H1 2026-06-26): shell hit-testing writes
+  `panel_header_button_hover`, and D2D paint applies the Tauri search hover
+  fill/text-primary and close hover red fill/accent glyph without allocating a
+  per-button map.
 
 nano deviations from Tauri (intentional, documented):
 - **Title `letter-spacing: 0.3px`** is NOT applied — nano's DWrite text path
   has no per-run character-spacing seam wired at this call site, and at 14 px
   the 0.3 px tracking is sub-pixel. Approximated without it.
-- **Header-button hover** (`--surface-hover` / close-red) is DEFERRED — there
-  is no per-button hover signal for the panel header yet, so only the base
-  (transparent) button state is painted; the glyphs render at `text_muted`.
-  When a header-button hover channel lands, lerp the fill + glyph colour.

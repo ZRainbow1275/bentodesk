@@ -48,11 +48,11 @@ pub const BODY_PADDING_Y: f32 = 16.0;
 /// every other modal in the suite.
 pub const PANEL_OPEN_DURATION_MS: u32 = 200;
 
-/// Selected-stack aux renderer panel margin.
-pub const RUNTIME_PANEL_MARGIN_PX: f32 = 16.0;
-
 /// Left/right inset used by the D2D runtime renderer.
 pub const RUNTIME_PANEL_INSET_PX: f32 = 18.0;
+
+/// Square close target in the self-painted native title bar.
+pub const RUNTIME_CLOSE_BUTTON_SIZE_PX: f32 = 32.0;
 
 /// Runtime action button height in the D2D aux panel.
 pub const RUNTIME_ACTION_BUTTON_HEIGHT_PX: f32 = 28.0;
@@ -257,20 +257,27 @@ pub const SNAPSHOT_PICKER_ACTION_BUTTONS: &[SnapshotPickerButtonSpec] = &[
         x_offset: 204.0,
         width: 82.0,
     },
-    SnapshotPickerButtonSpec {
-        hit: SnapshotPickerPointerHit::Close,
-        label: "Close",
-        x_offset: 294.0,
-        width: 58.0,
-    },
 ];
 
 pub fn snapshot_picker_panel_rect(viewport: Size) -> Rect {
     Rect {
-        x: RUNTIME_PANEL_MARGIN_PX,
-        y: RUNTIME_PANEL_MARGIN_PX,
-        width: (viewport.width - (RUNTIME_PANEL_MARGIN_PX * 2.0)).max(PANEL_WIDTH),
-        height: (viewport.height - (RUNTIME_PANEL_MARGIN_PX * 2.0)).max(360.0),
+        x: 0.0,
+        y: 0.0,
+        width: viewport.width.max(1.0),
+        height: viewport.height.max(1.0),
+    }
+}
+
+/// Header close button.  Close is deliberately not another toolbar pill: a
+/// title-bar affordance gives the modal one obvious dismissal point and keeps
+/// the data actions visually separate from window chrome.
+pub fn snapshot_picker_close_rect(viewport: Size) -> Rect {
+    let panel = snapshot_picker_panel_rect(viewport);
+    Rect {
+        x: panel.right() - RUNTIME_PANEL_INSET_PX - RUNTIME_CLOSE_BUTTON_SIZE_PX,
+        y: panel.y + 10.0,
+        width: RUNTIME_CLOSE_BUTTON_SIZE_PX,
+        height: RUNTIME_CLOSE_BUTTON_SIZE_PX,
     }
 }
 
@@ -310,6 +317,9 @@ pub fn snapshot_picker_hit_test(
     x: f32,
     y: f32,
 ) -> Option<SnapshotPickerPointerHit> {
+    if rect_contains(snapshot_picker_close_rect(viewport), x, y) {
+        return Some(SnapshotPickerPointerHit::Close);
+    }
     for spec in SNAPSHOT_PICKER_ACTION_BUTTONS {
         if rect_contains(snapshot_picker_button_rect(viewport, *spec), x, y) {
             return Some(spec.hit);
@@ -680,8 +690,8 @@ mod tests {
         assert_eq!(BODY_PADDING_X, 20.0);
         assert_eq!(BODY_PADDING_Y, 16.0);
         assert_eq!(PANEL_OPEN_DURATION_MS, 200);
-        assert_eq!(RUNTIME_PANEL_MARGIN_PX, 16.0);
         assert_eq!(RUNTIME_PANEL_INSET_PX, 18.0);
+        assert_eq!(RUNTIME_CLOSE_BUTTON_SIZE_PX, 32.0);
         assert_eq!(RUNTIME_ACTION_BUTTON_HEIGHT_PX, 28.0);
         assert_eq!(RUNTIME_ACTION_BUTTON_TOP_PX, 108.0);
         assert_eq!(RUNTIME_ROW_TOP_PX, 148.0);
@@ -703,6 +713,12 @@ mod tests {
                 Some(spec.hit)
             );
         }
+
+        let close = snapshot_picker_close_rect(viewport);
+        assert_eq!(
+            snapshot_picker_hit_test(viewport, 3, close.x + 1.0, close.y + 1.0),
+            Some(SnapshotPickerPointerHit::Close)
+        );
 
         let second_row = snapshot_picker_row_rect(viewport, 1);
         assert_eq!(
@@ -753,20 +769,47 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_subtle);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
-        assert_eq!(chrome.action_background, style_tokens::PALETTE_DARK.accent_blue);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
+        assert_eq!(
+            chrome.action_background,
+            style_tokens::PALETTE_DARK.accent_blue
+        );
         assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
         assert_eq!(chrome.error_color, style_tokens::PALETTE_DARK.accent_red);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.button_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
         // Thumbnail chrome is composed from the same Tauri palette.
-        assert_eq!(chrome.thumbnail_chrome.fallback_zone_color, style_tokens::PALETTE_DARK.accent_blue);
-        assert_eq!(chrome.thumbnail_chrome.border_color, style_tokens::PALETTE_DARK.border_expanded);
+        assert_eq!(
+            chrome.thumbnail_chrome.fallback_zone_color,
+            style_tokens::PALETTE_DARK.accent_blue
+        );
+        assert_eq!(
+            chrome.thumbnail_chrome.border_color,
+            style_tokens::PALETTE_DARK.border_expanded
+        );
     }
 }

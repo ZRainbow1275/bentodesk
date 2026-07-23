@@ -54,8 +54,14 @@ pub mod theme_shadow;
 pub mod theme_typography;
 // M6c — the per-theme `effect` token family (scanlines/neon/chromatic) lives
 // in its own submodule for the same §15 reason (`tokens.rs` is 782 lines).
+pub mod control_palette;
 pub mod theme_effect;
 
+pub use control_palette::ControlPaletteTauri;
+pub use theme_effect::{
+    ChromaticEffect, EFFECT_CHROMATIC_EDITORIAL, EFFECT_NEON_CYBERPUNK, EFFECT_SCANLINES_TERMINAL,
+    EffectTauri, NeonEffect, ScanlineEffect, effect_tauri_for_theme,
+};
 pub use theme_palettes::{
     PALETTE_BRUTALISM, PALETTE_CYBERPUNK, PALETTE_EDITORIAL, PALETTE_FLAT, PALETTE_FOREST,
     PALETTE_FOREST_GREEN, PALETTE_FROSTED, PALETTE_MIDNIGHT, PALETTE_NEO, PALETTE_OCEAN_BLUE,
@@ -69,13 +75,7 @@ pub use theme_shadow::{
     SHADOW_CYBERPUNK, SHADOW_DARK, SHADOW_NEO, SHADOW_NONE, SHADOW_ORDER, SHADOW_TERMINAL,
     shadow_tauri_for_theme,
 };
-pub use theme_typography::{
-    TYPOGRAPHY_EDITORIAL, TYPOGRAPHY_TERMINAL, typography_tauri_for_theme,
-};
-pub use theme_effect::{
-    ChromaticEffect, EFFECT_CHROMATIC_EDITORIAL, EFFECT_NEON_CYBERPUNK, EFFECT_SCANLINES_TERMINAL,
-    EffectTauri, NeonEffect, ScanlineEffect, effect_tauri_for_theme,
-};
+pub use theme_typography::{TYPOGRAPHY_EDITORIAL, TYPOGRAPHY_TERMINAL, typography_tauri_for_theme};
 
 // =============================================================================
 // Palette — surface / border / text / accent / badge / scrim.
@@ -401,10 +401,11 @@ pub struct TypographyTauri {
 }
 
 pub const TYPOGRAPHY: TypographyTauri = TypographyTauri {
-    // TL Ruling 3 2026-05-21: switch to Microsoft YaHei UI — Win11 default
-    // CJK render font; Tauri 1.2.4 baseline; Segoe UI's CJK glyph fallback
-    // is inconsistent and caused mis-shaped glyphs in M3 captures.
-    font_family: "Microsoft YaHei UI",
+    // V21-T4 (2026-06-23): Tauri's CSS stack starts at `"Segoe UI"`.
+    // DirectWrite keeps using system fallback for CJK glyphs, while Latin zone
+    // titles and right-rail labels now share the same primary metrics as the
+    // WebView baseline. System fonts only; no bundled font assets.
+    font_family: "Segoe UI",
 
     xs: TypographyRole {
         size_px: 11.0,
@@ -591,7 +592,10 @@ mod tests {
     #[test]
     fn radius_capsule_largest_in_core() {
         assert_eq!(
-            *RADIUS_STOPS.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+            *RADIUS_STOPS
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap(),
             RADIUS.capsule,
         );
     }
@@ -647,7 +651,10 @@ mod tests {
         // pre-M6b `0 8px 32px #000@.25` and the inner the `0 2px 8px #000@.15`.
         assert_eq!(SHADOW.zen.outer().offset_y, 8.0);
         assert_eq!(SHADOW.zen.outer().blur, 32.0);
-        assert_eq!(SHADOW.zen.outer().color, Color::from_u8(0x00, 0x00, 0x00, 0x40));
+        assert_eq!(
+            SHADOW.zen.outer().color,
+            Color::from_u8(0x00, 0x00, 0x00, 0x40)
+        );
         assert_eq!(SHADOW.zen.inner().offset_y, 2.0);
         assert_eq!(SHADOW.zen.inner().blur, 8.0);
         assert_eq!(SHADOW.zen.outer().spread, 0.0);
@@ -711,9 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn typography_font_family_yahei_ui() {
-        // TL Ruling 3 2026-05-21: YaHei UI is Win11 CJK baseline.
-        assert_eq!(TYPOGRAPHY.font_family, "Microsoft YaHei UI");
+    fn typography_font_family_matches_tauri_css_primary() {
+        // variables.css: --font-family-primary starts with "Segoe UI".
+        assert_eq!(TYPOGRAPHY.font_family, "Segoe UI");
     }
 
     // --- Motion ---
@@ -748,19 +755,14 @@ mod tests {
     #[test]
     fn minibar_gradient_top_denser_than_bottom() {
         // Wave A minibar.md: 0.82 → 0.72 gradient direction.
-        assert!(
-            PALETTE_DARK.minibar_gradient_top.a > PALETTE_DARK.minibar_gradient_bottom.a,
-        );
+        assert!(PALETTE_DARK.minibar_gradient_top.a > PALETTE_DARK.minibar_gradient_bottom.a,);
     }
 
     #[test]
     fn minibar_gradient_distinct_from_surface_zen() {
         // Wave A flagged: minibar gradient must NOT collapse to surface_zen
         // (different blue tint, denser alpha).
-        assert_ne!(
-            PALETTE_DARK.minibar_gradient_top,
-            PALETTE_DARK.surface_zen,
-        );
+        assert_ne!(PALETTE_DARK.minibar_gradient_top, PALETTE_DARK.surface_zen,);
     }
 
     // --- M6a: byte-parity anchors for the lookup fn. The full 17-id lookup +

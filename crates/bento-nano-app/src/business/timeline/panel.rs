@@ -680,16 +680,37 @@ mod tests {
             style_tokens::RADIUS,
             style_tokens::SHADOW,
         );
-        assert_eq!(chrome.panel_background, style_tokens::PALETTE_DARK.surface_expanded);
-        assert_eq!(chrome.row_background, style_tokens::PALETTE_DARK.surface_subtle);
-        assert_eq!(chrome.selected_background, style_tokens::PALETTE_DARK.surface_active);
-        assert_eq!(chrome.action_background, style_tokens::PALETTE_DARK.accent_blue);
+        assert_eq!(
+            chrome.panel_background,
+            style_tokens::PALETTE_DARK.surface_expanded
+        );
+        assert_eq!(
+            chrome.row_background,
+            style_tokens::PALETTE_DARK.surface_subtle
+        );
+        assert_eq!(
+            chrome.selected_background,
+            style_tokens::PALETTE_DARK.surface_active
+        );
+        assert_eq!(
+            chrome.action_background,
+            style_tokens::PALETTE_DARK.accent_blue
+        );
         assert_eq!(chrome.title_color, style_tokens::PALETTE_DARK.text_primary);
         assert_eq!(chrome.muted_color, style_tokens::PALETTE_DARK.text_muted);
         assert_eq!(chrome.error_color, style_tokens::PALETTE_DARK.accent_red);
-        assert_eq!(chrome.panel_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
-        assert_eq!(chrome.button_radius, BorderRadius::all(style_tokens::RADIUS.card));
-        assert_eq!(chrome.row_radius, BorderRadius::all(style_tokens::RADIUS.card));
+        assert_eq!(
+            chrome.panel_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
+        assert_eq!(
+            chrome.button_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
+        assert_eq!(
+            chrome.row_radius,
+            BorderRadius::all(style_tokens::RADIUS.card)
+        );
         // M6b — `SHADOW.expanded` is a `ShadowStack`; chrome consumes `.outer()`.
         assert_eq!(chrome.panel_shadow, style_tokens::SHADOW.expanded.outer());
     }

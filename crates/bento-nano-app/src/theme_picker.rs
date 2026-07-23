@@ -7,7 +7,7 @@
 //! families** (Rounded Glass 9 · Solid 1 · Angular Modern 4 · Personality 3),
 //! each card a 2×2 preview swatch + a centred name label, the active card
 //! drawn with a 2-DIP accent-blue border + 10 %-blue fill tint. Below the
-//! grid sits an editable **accent-colour** swatch row (12 VIBRANT swatches).
+//! grid sits Tauri's compact **accent-colour** control.
 //!
 //! ## Layering & contracts
 //!
@@ -52,24 +52,44 @@ pub const SWATCH_BLOCK_SIZE: f32 = 40.0;
 pub const SWATCH_BLOCK_RADIUS: f32 = 8.0;
 /// `.theme-card__swatches { gap: 3px }` (inner quadrant gutter).
 pub const SWATCH_INNER_GAP: f32 = 3.0;
-/// `.theme-group__title { font-size: 10px }` line box + slack.
-pub const GROUP_HEADING_HEIGHT: f32 = 14.0;
+/// `.theme-group__title { font-size: 10px }` CSS-derived line box.
+pub const GROUP_HEADING_HEIGHT: f32 = 12.0;
 /// `.theme-group { gap: 6px }` (heading → grid).
 pub const GROUP_HEADING_TO_GRID_GAP: f32 = 6.0;
-/// `.theme-card__label { font-size: 10px }` line box.
-pub const CARD_LABEL_HEIGHT: f32 = 14.0;
-/// Vertical gap between two family groups in the stacked column.
-pub const GROUP_TO_GROUP_GAP: f32 = 10.0;
+/// `.theme-card__label { font-size: 10px; line-height: 1.2 }`.
+pub const CARD_LABEL_HEIGHT: f32 = 12.0;
+/// `.theme-groups { gap: var(--spacing-md, 12px) }`.
+pub const GROUP_TO_GROUP_GAP: f32 = 12.0;
 
-/// One card's total height (column: pad-top + swatch + gap + label + pad-bot).
+/// One card's border-box height.
+///
+/// Tauri `.theme-card` uses CSS' default `box-sizing: content-box`: the
+/// 2px border sits outside `padding + swatch + gap + label`. N137 runtime
+/// PrintWindow measured the active card at 152×120 px on the 1.5× display
+/// (80 CSS px high), so include both vertical borders in the layout height.
 pub const THEME_CARD_HEIGHT: f32 = THEME_CARD_PAD_TOP
     + SWATCH_BLOCK_SIZE
     + THEME_CARD_SWATCH_LABEL_GAP
     + CARD_LABEL_HEIGHT
-    + THEME_CARD_PAD_BOTTOM;
+    + THEME_CARD_PAD_BOTTOM
+    + THEME_CARD_BORDER * 2.0;
 
-/// Accent row (Control B) — `.settings-row` label + 12-swatch strip (§7).
-pub const ACCENT_ROW_HEIGHT: f32 = 28.0;
+/// Accent row — Tauri `.settings-row { min-height: 42px }`.
+pub const ACCENT_ROW_HEIGHT: f32 = 42.0;
+/// Inline hex editor width for `#rrggbb`.
+pub const ACCENT_INPUT_W: f32 = 84.0;
+/// Inline hex editor height.
+pub const ACCENT_INPUT_H: f32 = 28.0;
+/// Gap between the row label and the inline hex editor.
+pub const ACCENT_INPUT_GAP: f32 = 8.0;
+/// Tauri `.settings-row__color { width: 36px }`.
+pub const ACCENT_PICKER_W: f32 = 36.0;
+/// Native Windows colour-dialog button height.
+pub const ACCENT_PICKER_H: f32 = ACCENT_INPUT_H;
+/// Inline accent reset button width.
+pub const ACCENT_CLEAR_W: f32 = 52.0;
+/// Inline accent reset button height.
+pub const ACCENT_CLEAR_H: f32 = ACCENT_INPUT_H;
 /// Accent swatch dot diameter (≈16 DIP, gap 8).
 pub const ACCENT_DOT_SIZE: f32 = 16.0;
 /// Gap between adjacent accent swatch dots.
@@ -190,61 +210,129 @@ const fn color(rgba: u32) -> Color {
 /// is `[TL, TR, BL, BR]`; each value is `0xRRGGBBAA`.
 pub const BUILTIN_THEMES: [ThemePreset; PRESET_COUNT] = [
     // ── Rounded Glass (9) ────────────────────────────────────────────────
-    ThemePreset { id: 0, theme_id: "dark", group: ThemeGroup::Rounded,
+    ThemePreset {
+        id: 0,
+        theme_id: "dark",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_DARK,
-        swatch_colors: sw(0x12121AFF, 0x3B82F6FF, 0xF0F0F5FF, 0x1A1A24FF) },
-    ThemePreset { id: 1, theme_id: "light", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0x12121AFF, 0x3B82F6FF, 0xF0F0F5FF, 0x1A1A24FF),
+    },
+    ThemePreset {
+        id: 1,
+        theme_id: "light",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_LIGHT,
-        swatch_colors: sw(0xFAFAFCFF, 0x3B82F6FF, 0x111118FF, 0xFFFFFFFF) },
-    ThemePreset { id: 2, theme_id: "midnight", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0xFAFAFCFF, 0x3B82F6FF, 0x111118FF, 0xFFFFFFFF),
+    },
+    ThemePreset {
+        id: 2,
+        theme_id: "midnight",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_MIDNIGHT,
-        swatch_colors: sw(0x0F172AFF, 0x6366F1FF, 0xE2E8F0FF, 0x1E293BFF) },
-    ThemePreset { id: 3, theme_id: "forest", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0x0F172AFF, 0x6366F1FF, 0xE2E8F0FF, 0x1E293BFF),
+    },
+    ThemePreset {
+        id: 3,
+        theme_id: "forest",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_FOREST,
-        swatch_colors: sw(0x1A2E1AFF, 0x22C55EFF, 0xE8F5E9FF, 0x2D4A2DFF) },
-    ThemePreset { id: 4, theme_id: "sunset", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0x1A2E1AFF, 0x22C55EFF, 0xE8F5E9FF, 0x2D4A2DFF),
+    },
+    ThemePreset {
+        id: 4,
+        theme_id: "sunset",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_SUNSET,
-        swatch_colors: sw(0x2A1A0AFF, 0xF59E0BFF, 0xFEF3C7FF, 0x3D2B16FF) },
+        swatch_colors: sw(0x2A1A0AFF, 0xF59E0BFF, 0xFEF3C7FF, 0x3D2B16FF),
+    },
     // `frosted` TL/BR are translucent (0x26 ≈ rgba .15 / 0x40 ≈ rgba .25).
-    ThemePreset { id: 5, theme_id: "frosted", group: ThemeGroup::Rounded,
+    ThemePreset {
+        id: 5,
+        theme_id: "frosted",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_FROSTED,
-        swatch_colors: sw(0xFFFFFF26, 0x60A5FAFF, 0xF0F0F5FF, 0xFFFFFF40) },
-    ThemePreset { id: 6, theme_id: "ocean-blue", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0xFFFFFF26, 0x60A5FAFF, 0xF0F0F5FF, 0xFFFFFF40),
+    },
+    ThemePreset {
+        id: 6,
+        theme_id: "ocean-blue",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_OCEAN_BLUE,
-        swatch_colors: sw(0x082F49FF, 0x0EA5E9FF, 0xE0F2FEFF, 0x0C4A6EFF) },
-    ThemePreset { id: 7, theme_id: "rose-gold", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0x082F49FF, 0x0EA5E9FF, 0xE0F2FEFF, 0x0C4A6EFF),
+    },
+    ThemePreset {
+        id: 7,
+        theme_id: "rose-gold",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_ROSE_GOLD,
-        swatch_colors: sw(0x4C1D27FF, 0xF43F5EFF, 0xFFF1F2FF, 0x881337FF) },
-    ThemePreset { id: 8, theme_id: "forest-green", group: ThemeGroup::Rounded,
+        swatch_colors: sw(0x4C1D27FF, 0xF43F5EFF, 0xFFF1F2FF, 0x881337FF),
+    },
+    ThemePreset {
+        id: 8,
+        theme_id: "forest-green",
+        group: ThemeGroup::Rounded,
         name_id: ids::THEME_NAME_FOREST_GREEN,
-        swatch_colors: sw(0x142E1AFF, 0x22C55EFF, 0xDCFCE7FF, 0x166534FF) },
+        swatch_colors: sw(0x142E1AFF, 0x22C55EFF, 0xDCFCE7FF, 0x166534FF),
+    },
     // ── Solid (1) ────────────────────────────────────────────────────────
-    ThemePreset { id: 9, theme_id: "solid", group: ThemeGroup::Solid,
+    ThemePreset {
+        id: 9,
+        theme_id: "solid",
+        group: ThemeGroup::Solid,
         name_id: ids::THEME_NAME_SOLID,
-        swatch_colors: sw(0x1E1E2EFF, 0x89B4FAFF, 0xCDD6F4FF, 0x313244FF) },
+        swatch_colors: sw(0x1E1E2EFF, 0x89B4FAFF, 0xCDD6F4FF, 0x313244FF),
+    },
     // ── Angular Modern (4) ─────────────────────────────────────────────────
-    ThemePreset { id: 10, theme_id: "order", group: ThemeGroup::Angular,
+    ThemePreset {
+        id: 10,
+        theme_id: "order",
+        group: ThemeGroup::Angular,
         name_id: ids::THEME_NAME_ORDER,
-        swatch_colors: sw(0xFF512FFF, 0xFAFAFAFF, 0x1F2937FF, 0xCBD5E1FF) },
-    ThemePreset { id: 11, theme_id: "flat", group: ThemeGroup::Angular,
+        swatch_colors: sw(0xFF512FFF, 0xFAFAFAFF, 0x1F2937FF, 0xCBD5E1FF),
+    },
+    ThemePreset {
+        id: 11,
+        theme_id: "flat",
+        group: ThemeGroup::Angular,
         name_id: ids::THEME_NAME_FLAT,
-        swatch_colors: sw(0xE74C3CFF, 0x2C3E50FF, 0xECF0F1FF, 0x3498DBFF) },
-    ThemePreset { id: 12, theme_id: "brutalism", group: ThemeGroup::Angular,
+        swatch_colors: sw(0xE74C3CFF, 0x2C3E50FF, 0xECF0F1FF, 0x3498DBFF),
+    },
+    ThemePreset {
+        id: 12,
+        theme_id: "brutalism",
+        group: ThemeGroup::Angular,
         name_id: ids::THEME_NAME_BRUTALISM,
-        swatch_colors: sw(0xFFD400FF, 0x000000FF, 0xFFFFFFFF, 0xE63946FF) },
-    ThemePreset { id: 13, theme_id: "editorial", group: ThemeGroup::Angular,
+        swatch_colors: sw(0xFFD400FF, 0x000000FF, 0xFFFFFFFF, 0xE63946FF),
+    },
+    ThemePreset {
+        id: 13,
+        theme_id: "editorial",
+        group: ThemeGroup::Angular,
         name_id: ids::THEME_NAME_EDITORIAL,
-        swatch_colors: sw(0xFAFAFAFF, 0x0A0A0AFF, 0xD7263DFF, 0xE5E5E5FF) },
+        swatch_colors: sw(0xFAFAFAFF, 0x0A0A0AFF, 0xD7263DFF, 0xE5E5E5FF),
+    },
     // ── Personality (3) ────────────────────────────────────────────────────
-    ThemePreset { id: 14, theme_id: "neo", group: ThemeGroup::Personality,
+    ThemePreset {
+        id: 14,
+        theme_id: "neo",
+        group: ThemeGroup::Personality,
         name_id: ids::THEME_NAME_NEO,
-        swatch_colors: sw(0x667EEAFF, 0xE6E8EEFF, 0x2D3748FF, 0xFFFFFFFF) },
-    ThemePreset { id: 15, theme_id: "terminal", group: ThemeGroup::Personality,
+        swatch_colors: sw(0x667EEAFF, 0xE6E8EEFF, 0x2D3748FF, 0xFFFFFFFF),
+    },
+    ThemePreset {
+        id: 15,
+        theme_id: "terminal",
+        group: ThemeGroup::Personality,
         name_id: ids::THEME_NAME_TERMINAL,
-        swatch_colors: sw(0x0A0E0CFF, 0x00FF9CFF, 0x050705FF, 0x003D24FF) },
-    ThemePreset { id: 16, theme_id: "cyberpunk", group: ThemeGroup::Personality,
+        swatch_colors: sw(0x0A0E0CFF, 0x00FF9CFF, 0x050705FF, 0x003D24FF),
+    },
+    ThemePreset {
+        id: 16,
+        theme_id: "cyberpunk",
+        group: ThemeGroup::Personality,
         name_id: ids::THEME_NAME_CYBERPUNK,
-        swatch_colors: sw(0x0C0420FF, 0x00F0FFFF, 0xFF2E93FF, 0x1A0B3BFF) },
+        swatch_colors: sw(0x0C0420FF, 0x00F0FFFF, 0xFF2E93FF, 0x1A0B3BFF),
+    },
 ];
 
 /// VIBRANT accent-swatch palette (Control B MVP, §7). The 12 hex values are
@@ -299,9 +387,15 @@ pub struct AppearanceLayout {
     pub cards: [Rect; PRESET_COUNT],
     /// 40×40 swatch block rects (centred inside each card), by preset id.
     pub swatch_blocks: [Rect; PRESET_COUNT],
-    /// Accent row container rect (label + swatch strip).
+    /// Accent row container rect (label + compact colour control).
     pub accent_row: Rect,
-    /// Per-swatch accent dot rects (right-aligned strip in the accent row).
+    /// Retired inline `#rrggbb` editor rect (zero-sized for compatibility).
+    pub accent_input: Rect,
+    /// Native colour-dialog launcher rect, matching Tauri's 36×28 input.
+    pub accent_picker: Rect,
+    /// Retired inline accent reset rect (zero-sized for compatibility).
+    pub accent_clear: Rect,
+    /// Retired quick-swatch rects (zero-sized for compatibility).
     pub accent_swatches: [Rect; ACCENT_SWATCH_COUNT],
     /// Total laid-out height (grid + accent row) for the body content height.
     pub total_height: f32,
@@ -318,8 +412,7 @@ pub struct AppearanceLayout {
 /// accent row below the grid. Allocation-free; safe to call every frame.
 pub fn appearance_layout(origin: Point, inner_w: f32) -> AppearanceLayout {
     let cols = THEME_GRID_COLS as f32;
-    let card_w =
-        ((inner_w - (cols - 1.0) * THEME_GRID_GAP) / cols).max(SWATCH_BLOCK_SIZE);
+    let card_w = ((inner_w - (cols - 1.0) * THEME_GRID_GAP) / cols).max(SWATCH_BLOCK_SIZE);
 
     let mut cards = [Rect::ZERO; PRESET_COUNT];
     let mut swatch_blocks = [Rect::ZERO; PRESET_COUNT];
@@ -386,22 +479,18 @@ pub fn appearance_layout(origin: Point, inner_w: f32) -> AppearanceLayout {
         width: inner_w,
         height: ACCENT_ROW_HEIGHT,
     };
-    // 12 dots right-aligned in the accent row, vertically centred.
-    let strip_w = ACCENT_DOT_SIZE * ACCENT_SWATCH_COUNT as f32
-        + ACCENT_DOT_GAP * (ACCENT_SWATCH_COUNT as f32 - 1.0);
-    let strip_x = accent_row.right() - strip_w;
-    let dot_y = accent_row.y + (accent_row.height - ACCENT_DOT_SIZE) * 0.5;
-    let mut accent_swatches = [Rect::ZERO; ACCENT_SWATCH_COUNT];
-    let mut s = 0usize;
-    while s < ACCENT_SWATCH_COUNT {
-        accent_swatches[s] = Rect {
-            x: strip_x + (ACCENT_DOT_SIZE + ACCENT_DOT_GAP) * s as f32,
-            y: dot_y,
-            width: ACCENT_DOT_SIZE,
-            height: ACCENT_DOT_SIZE,
-        };
-        s += 1;
-    }
+    // Match Tauri's single 36×28 colour input. Nano reuses the existing
+    // ChooseColorW producer; the old inline hex / clear / quick-swatch state
+    // remains compatible but no longer competes with the primary control.
+    let accent_picker = Rect {
+        x: accent_row.right() - ACCENT_PICKER_W,
+        y: accent_row.y + (accent_row.height - ACCENT_PICKER_H) * 0.5,
+        width: ACCENT_PICKER_W,
+        height: ACCENT_PICKER_H,
+    };
+    let accent_input = Rect::ZERO;
+    let accent_clear = Rect::ZERO;
+    let accent_swatches = [Rect::ZERO; ACCENT_SWATCH_COUNT];
 
     let total_height = accent_row.bottom() - origin.y;
 
@@ -410,6 +499,9 @@ pub fn appearance_layout(origin: Point, inner_w: f32) -> AppearanceLayout {
         cards,
         swatch_blocks,
         accent_row,
+        accent_input,
+        accent_picker,
+        accent_clear,
         accent_swatches,
         total_height,
     }
@@ -434,10 +526,30 @@ pub fn thumbnail_swatch_quadrants(block: Rect, gutter: f32) -> [Rect; 4] {
     let right_x = block.x + half_w + gutter;
     let bottom_y = block.y + half_h + gutter;
     [
-        Rect { x: block.x, y: block.y, width: half_w, height: half_h },
-        Rect { x: right_x, y: block.y, width: half_w, height: half_h },
-        Rect { x: block.x, y: bottom_y, width: half_w, height: half_h },
-        Rect { x: right_x, y: bottom_y, width: half_w, height: half_h },
+        Rect {
+            x: block.x,
+            y: block.y,
+            width: half_w,
+            height: half_h,
+        },
+        Rect {
+            x: right_x,
+            y: block.y,
+            width: half_w,
+            height: half_h,
+        },
+        Rect {
+            x: block.x,
+            y: bottom_y,
+            width: half_w,
+            height: half_h,
+        },
+        Rect {
+            x: right_x,
+            y: bottom_y,
+            width: half_w,
+            height: half_h,
+        },
     ]
 }
 
@@ -453,6 +565,12 @@ pub enum AppearanceHit {
     /// Cursor fell on the accent swatch with this strip index
     /// (`0..ACCENT_SWATCH_COUNT`).
     Accent(u8),
+    /// Cursor fell on the inline `#rrggbb` accent editor.
+    AccentEditor,
+    /// Cursor fell on the native OS colour dialog launcher.
+    AccentPicker,
+    /// Cursor fell on the inline accent reset button.
+    AccentClear,
 }
 
 /// Hit-test `(x, y)` against `layout`. Cards take priority over accent
@@ -465,6 +583,15 @@ pub fn appearance_hit_test(layout: &AppearanceLayout, x: f32, y: f32) -> Option<
             return Some(AppearanceHit::Card(i as u8));
         }
         i += 1;
+    }
+    if rect_contains(layout.accent_input, x, y) {
+        return Some(AppearanceHit::AccentEditor);
+    }
+    if rect_contains(layout.accent_picker, x, y) {
+        return Some(AppearanceHit::AccentPicker);
+    }
+    if rect_contains(layout.accent_clear, x, y) {
+        return Some(AppearanceHit::AccentClear);
     }
     let mut s = 0;
     while s < ACCENT_SWATCH_COUNT {
@@ -495,7 +622,10 @@ mod tests {
     fn seventeen_presets_with_4_swatch_colors_each() {
         assert_eq!(BUILTIN_THEMES.len(), PRESET_COUNT);
         for (i, preset) in BUILTIN_THEMES.iter().enumerate() {
-            assert_eq!(preset.id as usize, i, "preset id must equal its array index");
+            assert_eq!(
+                preset.id as usize, i,
+                "preset id must equal its array index"
+            );
             assert_eq!(preset.swatch_colors.len(), 4);
             for (q, c) in preset.swatch_colors.iter().enumerate() {
                 assert!(c.a > 0.0, "preset {i} quadrant {q} alpha must be > 0");
@@ -551,8 +681,37 @@ mod tests {
     }
 
     #[test]
+    fn vertical_density_matches_tauri_theme_group_css() {
+        assert!((GROUP_HEADING_HEIGHT - 12.0).abs() < f32::EPSILON);
+        assert!((CARD_LABEL_HEIGHT - 12.0).abs() < f32::EPSILON);
+        assert!((GROUP_TO_GROUP_GAP - 12.0).abs() < f32::EPSILON);
+        assert!((THEME_CARD_HEIGHT - 80.0).abs() < f32::EPSILON);
+
+        let layout = appearance_layout(Point::ZERO, INNER_W);
+        let rounded_grid_h = 3.0 * THEME_CARD_HEIGHT + 2.0 * THEME_GRID_GAP;
+        let single_row_grid_h = THEME_CARD_HEIGHT;
+        let rounded_group_h = GROUP_HEADING_HEIGHT + GROUP_HEADING_TO_GRID_GAP + rounded_grid_h;
+        let single_row_group_h =
+            GROUP_HEADING_HEIGHT + GROUP_HEADING_TO_GRID_GAP + single_row_grid_h;
+        let theme_groups_bottom = rounded_group_h
+            + GROUP_TO_GROUP_GAP
+            + single_row_group_h
+            + GROUP_TO_GROUP_GAP
+            + single_row_group_h
+            + GROUP_TO_GROUP_GAP
+            + single_row_group_h;
+
+        assert!((theme_groups_bottom - 608.0).abs() < 0.01);
+        assert!((layout.accent_row.y - (theme_groups_bottom + ACCENT_ROW_TOP_GAP)).abs() < 0.01);
+        assert!((layout.total_height - (layout.accent_row.bottom())).abs() < 0.01);
+    }
+
+    #[test]
     fn frosted_has_two_translucent_quadrants() {
-        let frosted = BUILTIN_THEMES.iter().find(|p| p.theme_id == "frosted").unwrap();
+        let frosted = BUILTIN_THEMES
+            .iter()
+            .find(|p| p.theme_id == "frosted")
+            .unwrap();
         // TL ≈ 0.15, BR ≈ 0.25 — translucent; TR/BL opaque.
         assert!(frosted.swatch_colors[0].a < 0.99 && frosted.swatch_colors[0].a > 0.0);
         assert!(frosted.swatch_colors[3].a < 0.99 && frosted.swatch_colors[3].a > 0.0);
@@ -607,18 +766,33 @@ mod tests {
     }
 
     #[test]
-    fn layout_accent_row_below_grid_with_12_swatches() {
+    fn layout_accent_row_matches_tauri_compact_color_control() {
         let layout = appearance_layout(Point::ZERO, INNER_W);
         // Accent row sits below every theme card.
         for i in 0..PRESET_COUNT {
             assert!(layout.accent_row.y >= layout.cards[i].bottom() - 0.01);
         }
-        // 12 swatches, right-aligned, strictly increasing x, inside the row.
-        for s in 1..ACCENT_SWATCH_COUNT {
-            assert!(layout.accent_swatches[s].x > layout.accent_swatches[s - 1].x);
-        }
-        assert!(layout.accent_swatches[ACCENT_SWATCH_COUNT - 1].right() <= layout.accent_row.right() + 0.01);
-        assert!(layout.accent_swatches[0].x >= layout.accent_row.x);
+        assert_eq!(layout.accent_row.height, 42.0);
+        assert_eq!(layout.accent_picker.width, 36.0);
+        assert_eq!(layout.accent_picker.height, 28.0);
+        assert!((layout.accent_picker.right() - layout.accent_row.right()).abs() < 0.01);
+        assert!(
+            (layout.accent_picker.y
+                - layout.accent_row.y
+                - (layout.accent_row.height - layout.accent_picker.height) * 0.5)
+                .abs()
+                < 0.01
+        );
+        assert!(layout.accent_picker.y >= layout.accent_row.y);
+        assert!(layout.accent_picker.bottom() <= layout.accent_row.bottom() + 0.01);
+        assert_eq!(layout.accent_input, Rect::ZERO);
+        assert_eq!(layout.accent_clear, Rect::ZERO);
+        assert!(
+            layout
+                .accent_swatches
+                .iter()
+                .all(|rect| *rect == Rect::ZERO)
+        );
     }
 
     #[test]
@@ -632,7 +806,12 @@ mod tests {
 
     #[test]
     fn quadrants_tile_without_overlap_inside_block() {
-        let block = Rect { x: 100.0, y: 200.0, width: SWATCH_BLOCK_SIZE, height: SWATCH_BLOCK_SIZE };
+        let block = Rect {
+            x: 100.0,
+            y: 200.0,
+            width: SWATCH_BLOCK_SIZE,
+            height: SWATCH_BLOCK_SIZE,
+        };
         let quads = thumbnail_swatch_quadrants(block, SWATCH_INNER_GAP);
         for q in &quads {
             assert!(q.width > 0.0 && q.height > 0.0);
@@ -666,17 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_each_accent_swatch() {
+    fn hit_test_accent_picker() {
         let layout = appearance_layout(Point::new(20.0, 60.0), INNER_W);
-        for s in 0..ACCENT_SWATCH_COUNT {
-            let d = layout.accent_swatches[s];
-            let cx = d.x + d.width * 0.5;
-            let cy = d.y + d.height * 0.5;
-            assert_eq!(
-                appearance_hit_test(&layout, cx, cy),
-                Some(AppearanceHit::Accent(s as u8)),
-            );
-        }
+        let picker = layout.accent_picker;
+        assert_eq!(
+            appearance_hit_test(
+                &layout,
+                picker.x + picker.width * 0.5,
+                picker.y + picker.height * 0.5,
+            ),
+            Some(AppearanceHit::AccentPicker)
+        );
     }
 
     #[test]

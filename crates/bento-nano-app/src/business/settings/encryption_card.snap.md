@@ -3,6 +3,7 @@
 Source: `bentodesk/src/components/Settings/EncryptionCard.tsx` (164 LOC) + `EncryptionCard.css`.
 
 > **nano status:** the §10 card is NOW implemented in nano (previously deferred to task #7). Paint lives in `crates/bento-nano-app/src/render.rs` (§10 block) and geometry in `crates/bento-nano-app/src/settings_panel.rs` (`settings_encryption_*_rect` + `SETTINGS_ENCRYPTION_*` consts). The 5 §10 text draws (mode-title 13/600, mode-sub 11/400, current-mode label 13/400, passphrase label 13/400, input mask + placeholder 12/400) were brought to the Tauri sizes via a new no-wrap styled draw (`draw_text_no_wrap_with_style`) on 2026-06-01.
+> **2026-06-26 hover status:** nano now threads real Settings `WM_MOUSEMOVE` through `SettingsHit::{SelectEncryptionModeNone,Dpapi,Passphrase}` into `AppState::settings_encryption_mode_hover`; inactive mode buttons paint the Tauri hover fill `rgba(96,165,250,0.12)`, while active mode fill `rgba(96,165,250,0.18)` remains stronger.
 
 - **Card:** plain flex column with `gap: 10px` (no chrome — composes within `.settings-group`).
 - **Title:** inherits `.settings-card-title` from host.

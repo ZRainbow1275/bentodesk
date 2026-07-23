@@ -426,7 +426,10 @@ mod tests {
         );
         assert_eq!(t.background, style_tokens::PALETTE_DARK.tooltip_bg);
         assert_eq!(t.text_color, style_tokens::PALETTE_DARK.text_primary);
-        assert_eq!(t.border_radius, BorderRadius::all(style_tokens::RADIUS.tooltip));
+        assert_eq!(
+            t.border_radius,
+            BorderRadius::all(style_tokens::RADIUS.tooltip)
+        );
         // Wave A: 6 px vertical, 12 px horizontal.
         assert_eq!(t.padding.top, style_tokens::SPACING.s6);
         assert_eq!(t.padding.bottom, style_tokens::SPACING.s6);

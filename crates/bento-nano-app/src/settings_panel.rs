@@ -80,13 +80,14 @@ pub const SETTINGS_ROW_STEP_Y: f32 = 44.0;
 pub const SETTINGS_ROW_H: f32 = 40.0;
 
 /// Header band height (title + close + bottom hairline).
-pub const SETTINGS_HEADER_H: f32 = 48.0;
+pub const SETTINGS_HEADER_H: f32 = 52.0;
 
-/// Wave K1 — iOS-style rocker switch track size (38×22 DIPs).
-pub const SETTINGS_TOGGLE_TRACK_W: f32 = 38.0;
-pub const SETTINGS_TOGGLE_TRACK_H: f32 = 22.0;
-/// Knob diameter — 16 DIPs at off, slides 16 DIPs on the on edge.
-pub const SETTINGS_TOGGLE_KNOB_D: f32 = 16.0;
+/// Wave K1 / V21-N132 — iOS-style rocker switch track size.
+/// Tauri source `.toggle-switch` is 44×24 px.
+pub const SETTINGS_TOGGLE_TRACK_W: f32 = 44.0;
+pub const SETTINGS_TOGGLE_TRACK_H: f32 = 24.0;
+/// Knob diameter — Tauri source `.toggle-switch__thumb` is 20×20 px.
+pub const SETTINGS_TOGGLE_KNOB_D: f32 = 20.0;
 
 /// Wave K1 — Hit-box for a toggle row "control" position. Larger than the
 /// painted track so the click target is comfortable.
@@ -557,11 +558,20 @@ pub fn settings_keybindings_close_rect(viewport: Size) -> Rect {
 /// the visual perception of "tiny" came from leak debris, not real geometry,
 /// but a 20-DIP bump still leaves room for M3 slider track + value chip pairs).
 pub const SETTINGS_PANEL_WIDTH_M1: f32 = 480.0;
-/// Round-2 M1 — maximum panel height. TL A-path 2026-05-21: 700→580 so the
-/// modal fits inside the 800×600 Settings aux HWND client area with breathing
-/// room around the 8-DIP drop shadow. Smaller viewports still clamp via the
-/// `min(available_h)` in `settings_panel_rect_m1`.
-pub const SETTINGS_PANEL_HEIGHT_MAX: f32 = 580.0;
+/// V21-N90 maximum panel height. The Settings HWND host stays tall for scroll
+/// reachability, but N89 proved the visible surface was over-occupying that
+/// host. Large viewports therefore use a compact centred cap while small
+/// legacy viewports still clamp to the available height.
+pub const SETTINGS_PANEL_HEIGHT_MAX: f32 = 768.0;
+/// Tauri SettingsPanel uses `max-height: 80vh`. The shell applies this fraction
+/// to the target monitor work area before allocating the narrow auxiliary HWND.
+pub const SETTINGS_PANEL_MAX_WORKAREA_FRAC: f32 = 0.80;
+/// Large Settings hosts centre the visible modal vertically. The previous
+/// lower-biased anchor placed the card against the bottom edge of the desktop.
+pub const SETTINGS_PANEL_LARGE_VIEWPORT_Y_FRAC: f32 = 0.5;
+/// V21-G18 - keep the legacy 800x600 fallback path on the old available-height
+/// behavior. Runtime Settings exceeds this height through its capped aux host.
+pub const SETTINGS_PANEL_OVERLAY_MIN_VIEWPORT_H: f32 = 600.0;
 /// Round-2 M1 — panel corner radius. Tauri `--radius-expanded: 16px`
 /// (`SettingsPanel.css`); M1b parity bump 14→16 (was 14 per frame_060).
 pub const SETTINGS_PANEL_RADIUS: f32 = 16.0;
@@ -579,16 +589,42 @@ pub const SETTINGS_PANEL_RADIUS: f32 = 16.0;
 /// 0.15 (still produced a faint visible ring per V-5 re-audit).
 pub const SETTINGS_PANEL_SHADOW_ALPHA: f32 = 0.0;
 /// Round-2 M1 — sticky header band height (title + close ×).
-pub const SETTINGS_HEADER_H_M1: f32 = 48.0;
+pub const SETTINGS_HEADER_H_M1: f32 = 52.0;
 /// Round-2 M1 — sticky footer band height ([取消] [保存]).
 pub const SETTINGS_FOOTER_H: f32 = 56.0;
 /// Round-2 M1 — single row height in the scrollable body.
 pub const SETTINGS_ROW_H_M1: f32 = 44.0;
 /// Round-2 M1 — horizontal padding inside body rows.
 pub const SETTINGS_ROW_PAD_X: f32 = 20.0;
+/// Tauri `.settings-panel__body` top padding plus the compact General title
+/// band (`20px + 24px`). Keeping this in geometry means paint and hit-testing
+/// move together instead of the title being a decorative overlay on row 0.
+pub const SETTINGS_BODY_TOP_INSET: f32 = 44.0;
+/// Tauri `.settings-panel__body` bottom padding. This prevents the final plugin
+/// card from touching the sticky footer when the body reaches max scroll.
+pub const SETTINGS_BODY_BOTTOM_INSET: f32 = 20.0;
 /// Round-2 M1 — vertical gap between logical sections inside the body.
 pub const SETTINGS_SECTION_GAP: f32 = 24.0;
-/// Round-2 M1 — top-toggle track width (matches the Wave K1 toggle, 38 DIP).
+/// V21-T1 (2026-06-21) - compact Settings-only label text role. The global
+/// typography table stays unchanged for capsules / expanded panels; Settings
+/// uses explicit small roles because the modal is a high-density control panel.
+pub const SETTINGS_TEXT_LABEL_SIZE: f32 = 13.0;
+/// V21-T1 - label weight mirrors Tauri's regular settings copy, not the global
+/// `md` medium weight used by larger shell labels.
+pub const SETTINGS_TEXT_LABEL_WEIGHT: u16 = 400;
+/// V21-T1 - compact no-wrap value / button text role for Settings chrome.
+pub const SETTINGS_TEXT_VALUE_SIZE: f32 = 12.0;
+/// V21-T1 - value/button text keeps medium weight so controls remain scannable
+/// after the size reduction.
+pub const SETTINGS_TEXT_VALUE_WEIGHT: u16 = 500;
+/// V21-T1 - short Settings labels use a tight line box; long-form copy still
+/// has explicit per-card styles where needed.
+pub const SETTINGS_TEXT_LINE_HEIGHT: f32 = 1.0;
+/// Tauri `.settings-group__title`: compact uppercase section marker.
+pub const SETTINGS_GROUP_TITLE_SIZE: f32 = 10.0;
+pub const SETTINGS_GROUP_TITLE_WEIGHT: u16 = 600;
+pub const SETTINGS_GROUP_TITLE_TRACKING: f32 = 1.2;
+/// Round-2 M1 — top-toggle hit box remains wider than the 44 DIP track.
 pub const SETTINGS_TOP_TOGGLE_HIT_W: f32 = 60.0;
 /// Round-2 M1 — top-toggle row right-anchored hit-box height.
 pub const SETTINGS_TOP_TOGGLE_HIT_H: f32 = 28.0;
@@ -599,9 +635,22 @@ pub const SETTINGS_LANGUAGE_CHIP_H: f32 = 28.0;
 /// Round-2 M1 — chevron column width inside the language chip.
 pub const SETTINGS_LANGUAGE_CHEVRON_W: f32 = 14.0;
 /// Round-2 M1 — header close-× hit-box size (square).
-pub const SETTINGS_CLOSE_X_SIZE: f32 = 28.0;
+///
+/// V21-G20 — Tauri `.settings-panel__close` is 32×32 px with 8 px radius.
+pub const SETTINGS_CLOSE_X_SIZE: f32 = 32.0;
+/// Tauri's WebKit scrollbar is a narrow 4-DIP affordance inside the body.
+pub const SETTINGS_SCROLLBAR_W: f32 = 4.0;
+/// Keep the thumb clear of the sticky header/footer hairlines.
+pub const SETTINGS_SCROLLBAR_INSET_Y: f32 = 4.0;
+/// A long settings document must still expose a comfortably visible thumb.
+pub const SETTINGS_SCROLLBAR_MIN_THUMB_H: f32 = 36.0;
 /// Round-2 M1 — footer button width (Cancel + Save share a width).
 pub const SETTINGS_FOOTER_BTN_W: f32 = 84.0;
+/// Tauri footer actions size to their two-character label plus 20-DIP side
+/// padding (`.settings-btn { padding: 8px 20px }`), which resolves to 68 DIPs
+/// with the Settings 13-DIP text role. Wider inline actions keep the generic
+/// [`SETTINGS_FOOTER_BTN_W`] above so longer labels never clip.
+pub const SETTINGS_FOOTER_ACTION_BTN_W: f32 = 68.0;
 /// Round-2 M1 — footer button height.
 pub const SETTINGS_FOOTER_BTN_H: f32 = 32.0;
 /// Round-2 M1 — gap between Cancel and Save in the footer.
@@ -611,30 +660,35 @@ pub const SETTINGS_FOOTER_BTN_GAP: f32 = 8.0;
 /// row living inside the same logical section). Pinned by a test below.
 pub const SETTINGS_TOP_TOGGLE_COUNT: u8 = 5;
 
-/// α4 (Wave I-α, 2026-05-25) — zone-display-mode picker row geometry.
-/// Tauri 1.2.4 baseline (`SettingsPanel.tsx:555-595`) renders a 3-radio
-/// horizontal group (Hover / Always / Click) immediately below the language
-/// row. Each radio is a 12-DIP outer circle plus a 6-DIP inner dot when
-/// selected, alongside an inline label. Three radios, two inter-radio gaps,
-/// and leading/trailing padding pack into the right-anchored ~260-DIP
-/// cluster, matching the language-chip horizontal anchor for vertical
-/// alignment.
-///
-/// Picker row sits between the language row (M1) and the M2 sources
-/// section; `settings_m2_origin_y_offset` is bumped by one row to clear it.
+/// α4 (Wave I-α, 2026-05-25) / Tauri parity (2026-07-15) —
+/// zone-display-mode picker geometry. Tauri's `.settings-display-mode` is a
+/// right-aligned vertical stack of three full-width option cards, not three
+/// compressed inline radios. Shared geometry keeps paint, hit-testing and
+/// scroll height in lockstep.
 /// Number of choices in the zone-display-mode picker.
 pub const SETTINGS_ZONE_DISPLAY_MODE_COUNT: u8 = 3;
 /// Outer circle diameter (DIP) of one radio.
 pub const SETTINGS_RADIO_OUTER_D: f32 = 14.0;
 /// Inner dot diameter (DIP) when a radio is selected.
 pub const SETTINGS_RADIO_INNER_D: f32 = 6.0;
-/// Per-radio hit-box width (outer circle + 4-DIP gap + label).
-pub const SETTINGS_RADIO_W: f32 = 78.0;
-/// Per-radio hit-box height (matches the language-chip height so the row
-/// reads as a single horizontal control band).
-pub const SETTINGS_RADIO_H: f32 = 28.0;
-/// Horizontal gap between adjacent radios.
-pub const SETTINGS_RADIO_GAP: f32 = 4.0;
+/// Tauri `.settings-display-mode { min-width: 220px }`.
+pub const SETTINGS_RADIO_W: f32 = 220.0;
+/// 13-DIP label line plus Tauri's `8px` vertical option padding.
+pub const SETTINGS_RADIO_H: f32 = 36.0;
+/// Vertical gap between adjacent option cards.
+pub const SETTINGS_RADIO_GAP: f32 = 8.0;
+/// Horizontal inset inside each option card.
+pub const SETTINGS_DISPLAY_MODE_OPTION_PAD_X: f32 = 12.0;
+/// Gap between the radio circle and its full option label.
+pub const SETTINGS_DISPLAY_MODE_OPTION_LABEL_GAP: f32 = 10.0;
+/// Breathing room between the left explanatory copy and the option stack.
+pub const SETTINGS_DISPLAY_MODE_COPY_GAP: f32 = 16.0;
+/// Left-side primary copy line height.
+pub const SETTINGS_DISPLAY_MODE_COPY_LABEL_H: f32 = 18.0;
+/// Left-side two-line hint band.
+pub const SETTINGS_DISPLAY_MODE_HINT_H: f32 = 34.0;
+/// Gap between the primary copy and hint.
+pub const SETTINGS_DISPLAY_MODE_HINT_GAP: f32 = 4.0;
 
 /// Round-2 M2 — height of a section label band (the dim header text above
 /// 桌面源 / 桌面路径 / 监控值).
@@ -693,16 +747,44 @@ pub enum SettingsSectionId {
     Language,
 }
 
+/// Whether the Settings card occupies the complete native HWND client area.
+///
+/// Production uses a 480-DIP panel-sized popup. Wider viewports remain useful
+/// for deterministic overlay/layout tests and legacy embedded callers.
+#[inline]
+pub fn settings_panel_fills_host(viewport: Size) -> bool {
+    viewport.width <= SETTINGS_PANEL_WIDTH_M1 + 0.5
+}
+
 /// Round-2 M1 — compute the dark Settings panel rect for the supplied
-/// viewport. Centred horizontally, top-anchored with
-/// [`SETTINGS_PANEL_TOP_MARGIN`] headroom, clamps to the available height.
+/// viewport. The production panel-sized HWND is filled exactly; legacy wider
+/// viewports keep the centred overlay geometry.
 pub fn settings_panel_rect_m1(viewport: Size) -> Rect {
+    if settings_panel_fills_host(viewport) {
+        return Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.width.max(0.0),
+            height: viewport.height.max(0.0),
+        };
+    }
     let panel_w = SETTINGS_PANEL_WIDTH_M1.min(viewport.width);
     let available_h = (viewport.height - SETTINGS_PANEL_TOP_MARGIN * 2.0).max(0.0);
-    let panel_h = SETTINGS_PANEL_HEIGHT_MAX.min(available_h);
+    let css_max_h = if viewport.height > SETTINGS_PANEL_OVERLAY_MIN_VIEWPORT_H {
+        viewport.height * SETTINGS_PANEL_MAX_WORKAREA_FRAC
+    } else {
+        available_h
+    };
+    let panel_h = SETTINGS_PANEL_HEIGHT_MAX.min(available_h).min(css_max_h);
+    let panel_y = if viewport.height > SETTINGS_PANEL_OVERLAY_MIN_VIEWPORT_H {
+        ((viewport.height - panel_h) * SETTINGS_PANEL_LARGE_VIEWPORT_Y_FRAC)
+            .max(SETTINGS_PANEL_TOP_MARGIN)
+    } else {
+        SETTINGS_PANEL_TOP_MARGIN
+    };
     Rect {
         x: ((viewport.width - panel_w) * 0.5).max(0.0),
-        y: SETTINGS_PANEL_TOP_MARGIN,
+        y: panel_y,
         width: panel_w,
         height: panel_h,
     }
@@ -758,9 +840,9 @@ pub fn settings_close_button_rect_m1(viewport: Size) -> Rect {
 pub fn settings_save_button_rect(viewport: Size) -> Rect {
     let footer = settings_footer_rect(viewport);
     Rect {
-        x: footer.right() - SETTINGS_ROW_PAD_X - SETTINGS_FOOTER_BTN_W,
+        x: footer.right() - SETTINGS_ROW_PAD_X - SETTINGS_FOOTER_ACTION_BTN_W,
         y: footer.y + (footer.height - SETTINGS_FOOTER_BTN_H) * 0.5,
-        width: SETTINGS_FOOTER_BTN_W,
+        width: SETTINGS_FOOTER_ACTION_BTN_W,
         height: SETTINGS_FOOTER_BTN_H,
     }
 }
@@ -769,9 +851,9 @@ pub fn settings_save_button_rect(viewport: Size) -> Rect {
 pub fn settings_cancel_button_rect(viewport: Size) -> Rect {
     let save = settings_save_button_rect(viewport);
     Rect {
-        x: save.x - SETTINGS_FOOTER_BTN_GAP - SETTINGS_FOOTER_BTN_W,
+        x: save.x - SETTINGS_FOOTER_BTN_GAP - SETTINGS_FOOTER_ACTION_BTN_W,
         y: save.y,
-        width: SETTINGS_FOOTER_BTN_W,
+        width: SETTINGS_FOOTER_ACTION_BTN_W,
         height: SETTINGS_FOOTER_BTN_H,
     }
 }
@@ -779,7 +861,20 @@ pub fn settings_cancel_button_rect(viewport: Size) -> Rect {
 /// Round-2 M1 — content-space origin for body content. Subtract this from
 /// the absolute paint Y of a body row to get its position in scroll space.
 fn settings_body_content_origin(viewport: Size, scroll_offset_y: f32) -> f32 {
-    settings_body_rect(viewport).y - scroll_offset_y
+    settings_body_rect(viewport).y + SETTINGS_BODY_TOP_INSET - scroll_offset_y
+}
+
+/// Tauri General-group title inside the scrollable body. The title starts at
+/// the body's 20-DIP inset; the first toggle row begins after the complete
+/// 44-DIP top/title band through [`settings_body_content_origin`].
+pub fn settings_general_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let body = settings_body_rect(viewport);
+    Rect {
+        x: body.x + SETTINGS_ROW_PAD_X,
+        y: body.y + 20.0 - scroll_offset_y,
+        width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
 }
 
 /// Round-2 M1 — full row rect for the top-section toggle at `index`
@@ -899,26 +994,23 @@ pub fn settings_zone_display_mode_picker_row_rect(viewport: Size, scroll_offset_
         x: label.x,
         y: label.bottom(),
         width: label.width,
-        height: SETTINGS_ROW_H_M1,
+        height: SETTINGS_RADIO_H * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
+            + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32,
     }
 }
 
 /// α4 — sub-rect for radio `index` (0 = Hover, 1 = Always, 2 = Click).
-/// Three radios right-anchor as a single 78×3 + 4×2 = 242-DIP cluster
-/// aligned with the language-chip column above. The hit-box height matches
-/// the row breathing room (28 DIP) so a tall click still lands cleanly.
+/// The three 220-DIP cards right-anchor and stack vertically with an 8-DIP
+/// gap, matching Tauri's `.settings-display-mode` control.
 pub fn settings_zone_display_mode_radio_rect(
     viewport: Size,
     scroll_offset_y: f32,
     index: u8,
 ) -> Rect {
     let row = settings_zone_display_mode_picker_row_rect(viewport, scroll_offset_y);
-    let cluster_w = SETTINGS_RADIO_W * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
-        + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32;
-    let cluster_x = row.right() - cluster_w;
     Rect {
-        x: cluster_x + (SETTINGS_RADIO_W + SETTINGS_RADIO_GAP) * index as f32,
-        y: row.y + (row.height - SETTINGS_RADIO_H) * 0.5,
+        x: row.right() - SETTINGS_RADIO_W,
+        y: row.y + (SETTINGS_RADIO_H + SETTINGS_RADIO_GAP) * index as f32,
         width: SETTINGS_RADIO_W,
         height: SETTINGS_RADIO_H,
     }
@@ -933,7 +1025,7 @@ pub fn settings_zone_display_mode_radio_outer_rect(
 ) -> Rect {
     let hit = settings_zone_display_mode_radio_rect(viewport, scroll_offset_y, index);
     Rect {
-        x: hit.x,
+        x: hit.x + SETTINGS_DISPLAY_MODE_OPTION_PAD_X,
         y: hit.y + (hit.height - SETTINGS_RADIO_OUTER_D) * 0.5,
         width: SETTINGS_RADIO_OUTER_D,
         height: SETTINGS_RADIO_OUTER_D,
@@ -957,7 +1049,7 @@ pub fn settings_zone_display_mode_radio_inner_rect(
 }
 
 /// α4 — label rect for radio `index`. Sits to the right of the outer
-/// circle with a 4-DIP gap; vertically centred inside the hit-box.
+/// circle with Tauri's 10-DIP gap and keeps the trailing 12-DIP card padding.
 pub fn settings_zone_display_mode_radio_label_rect(
     viewport: Size,
     scroll_offset_y: f32,
@@ -965,12 +1057,37 @@ pub fn settings_zone_display_mode_radio_label_rect(
 ) -> Rect {
     let hit = settings_zone_display_mode_radio_rect(viewport, scroll_offset_y, index);
     let outer = settings_zone_display_mode_radio_outer_rect(viewport, scroll_offset_y, index);
-    let label_x = outer.right() + 4.0;
+    let label_x = outer.right() + SETTINGS_DISPLAY_MODE_OPTION_LABEL_GAP;
     Rect {
         x: label_x,
         y: hit.y + (hit.height - 16.0) * 0.5,
-        width: (hit.right() - label_x).max(0.0),
+        width: (hit.right() - SETTINGS_DISPLAY_MODE_OPTION_PAD_X - label_x).max(0.0),
         height: 16.0,
+    }
+}
+
+/// Left-side primary copy (`Zone 唤醒方式` / `How zones reveal`).
+pub fn settings_display_mode_copy_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let row = settings_zone_display_mode_picker_row_rect(viewport, scroll_offset_y);
+    let copy_h = SETTINGS_DISPLAY_MODE_COPY_LABEL_H
+        + SETTINGS_DISPLAY_MODE_HINT_GAP
+        + SETTINGS_DISPLAY_MODE_HINT_H;
+    Rect {
+        x: row.x,
+        y: row.y + (row.height - copy_h) * 0.5,
+        width: (row.width - SETTINGS_RADIO_W - SETTINGS_DISPLAY_MODE_COPY_GAP).max(0.0),
+        height: SETTINGS_DISPLAY_MODE_COPY_LABEL_H,
+    }
+}
+
+/// Left-side explanatory hint, directly below the primary copy.
+pub fn settings_display_mode_hint_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let label = settings_display_mode_copy_label_rect(viewport, scroll_offset_y);
+    Rect {
+        x: label.x,
+        y: label.bottom() + SETTINGS_DISPLAY_MODE_HINT_GAP,
+        width: label.width,
+        height: SETTINGS_DISPLAY_MODE_HINT_H,
     }
 }
 
@@ -979,7 +1096,10 @@ pub fn settings_zone_display_mode_radio_label_rect(
 /// a trailing section gap. PURE — no global state. Mirrors the term rhythm of
 /// the other section content-height helpers so the scroll clamp stays exact.
 pub fn settings_display_mode_content_height() -> f32 {
-    SETTINGS_SECTION_LABEL_H + SETTINGS_ROW_H_M1 + SETTINGS_SECTION_GAP
+    SETTINGS_SECTION_LABEL_H
+        + SETTINGS_RADIO_H * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
+        + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32
+        + SETTINGS_SECTION_GAP
 }
 
 /// M1f — which Updater §8 status family is live, for height purposes only.
@@ -1026,6 +1146,13 @@ pub struct SettingsBodyFlags {
     /// so its height grows one [`SETTINGS_BACKUP_ROW_H`] per visible row; an
     /// empty list shows the single `backupEmpty` placeholder row instead.
     pub backup_row_count: usize,
+    /// Backup §9 — whether the action status line is currently visible. Tauri
+    /// does not reserve an empty status row, so this flag keeps list geometry,
+    /// hit-testing and the scroll clamp aligned with the painted card.
+    pub backup_status_present: bool,
+    /// Encryption §10 — whether its success/error status line is visible.
+    /// Plugins anchor directly after the hint when no status is present.
+    pub encryption_status_present: bool,
     /// Plugins §11 — number of plugin cards the list paints (already capped at
     /// [`SETTINGS_PLUGINS_ROW_VISIBLE_MAX`] by the caller via
     /// `plugins_section::plugin_visible_row_count`). Like the backup list this
@@ -1033,6 +1160,9 @@ pub struct SettingsBodyFlags {
     /// [`SETTINGS_PLUGIN_CARD_H`] (+ inter-card gap); an empty list shows the
     /// single `pluginEmpty` placeholder row instead.
     pub plugin_row_count: usize,
+    /// Plugins §11 — whether a real lifecycle status line is visible below the
+    /// install button.
+    pub plugin_status_present: bool,
     /// Paths §2 — number of dynamic desktop-source cards the §2 list paints
     /// (already capped at [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`] by the caller).
     /// M1i fidelity (2026-05-29) — this section sits MID-body and now REFLOWS:
@@ -1063,7 +1193,10 @@ impl SettingsBodyFlags {
             stealth_has_error,
             updater_kind,
             backup_row_count: 0,
+            backup_status_present: false,
+            encryption_status_present: false,
             plugin_row_count: 0,
+            plugin_status_present: false,
             source_row_count: 0,
         }
     }
@@ -1077,12 +1210,30 @@ impl SettingsBodyFlags {
         self
     }
 
+    /// Return a copy with the Backup §9 status-row visibility set.
+    pub const fn with_backup_status(mut self, present: bool) -> Self {
+        self.backup_status_present = present;
+        self
+    }
+
+    /// Return a copy with the Encryption §10 status-row visibility set.
+    pub const fn with_encryption_status(mut self, present: bool) -> Self {
+        self.encryption_status_present = present;
+        self
+    }
+
     /// M1h — return a copy with the Plugins §11 visible-row count set. Same
     /// builder rationale as [`Self::with_backup_rows`]: keeps `new()`'s arity
     /// fixed while feeding the live capped plugin-card count into the dynamic
     /// body height + scroll clamp so paint / hit / scroll all agree.
     pub const fn with_plugin_rows(mut self, plugin_row_count: usize) -> Self {
         self.plugin_row_count = plugin_row_count;
+        self
+    }
+
+    /// Return a copy with the Plugins §11 lifecycle status-row visibility set.
+    pub const fn with_plugin_status(mut self, present: bool) -> Self {
+        self.plugin_status_present = present;
         self
     }
 
@@ -1107,7 +1258,8 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
     // Startup §6 → Stealth §7 → Updater §8 → Backup §9 → Encryption §10 →
     // Plugins §11. The total is order-independent (it is a sum), but the
     // ordering is kept readable to mirror the laid-out chain.
-    settings_m2_content_height(viewport, flags.source_row_count)
+    SETTINGS_BODY_TOP_INSET
+        + settings_m2_content_height(viewport, flags.source_row_count)
         // §3 Appearance grid — body-width-driven (4-col card grid), now between
         // §2 Paths and §4 DisplayMode (was painted LAST pre-G3).
         + settings_appearance_content_height(viewport)
@@ -1120,12 +1272,19 @@ pub fn settings_body_content_height(viewport: Size, flags: &SettingsBodyFlags) -
         )
         + settings_stealth_content_height(flags.stealth_has_retry, flags.stealth_has_error)
         + settings_updater_content_height(flags.updater_kind)
-        + settings_backup_content_height(flags.backup_row_count)
+        + settings_backup_content_height_for_status(
+            flags.backup_row_count,
+            flags.backup_status_present,
+        )
         // M7 — §10 Encryption card slots between Backup §9 and Plugins §11
         // (Tauri `<BackupCard/><EncryptionCard/>` adjacency). Fixed-height, so a
         // single constant additive term (no `SettingsBodyFlags` field needed).
-        + settings_encryption_content_height()
-        + settings_plugins_content_height(flags.plugin_row_count)
+        + settings_encryption_content_height_for_status(flags.encryption_status_present)
+        + settings_plugins_content_height_for_status(
+            flags.plugin_row_count,
+            flags.plugin_status_present,
+        )
+        + SETTINGS_BODY_BOTTOM_INSET
 }
 
 /// Round-2 M1 — clamp `requested_offset` to `[0, max_scroll]` where
@@ -1165,15 +1324,27 @@ fn settings_m2_origin_y_offset() -> f32 {
     SETTINGS_ROW_H_M1 * (SETTINGS_TOP_TOGGLE_COUNT as f32 + 1.0) + SETTINGS_SECTION_GAP
 }
 
-/// Round-2 M2 — `桌面源` section label rect (the dim caption above the two
-/// source cards).
-pub fn settings_sources_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+/// Tauri §2 `Paths` group title. It owns the section gap after General; the
+/// nested `桌面源` row label begins exactly at this title band's bottom.
+pub fn settings_paths_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
     let body = settings_body_rect(viewport);
     let origin_y = settings_body_content_origin(viewport, scroll_offset_y);
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
         y: origin_y + settings_m2_origin_y_offset(),
         width: body.width - SETTINGS_ROW_PAD_X * 2.0,
+        height: SETTINGS_SECTION_LABEL_H,
+    }
+}
+
+/// Round-2 M2 — `桌面源` section label rect (the dim caption above the two
+/// source cards).
+pub fn settings_sources_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
+    let paths = settings_paths_label_rect(viewport, scroll_offset_y);
+    Rect {
+        x: paths.x,
+        y: paths.bottom(),
+        width: paths.width,
         height: SETTINGS_SECTION_LABEL_H,
     }
 }
@@ -1349,6 +1520,7 @@ pub fn settings_sources_reserve_delta(source_row_count: usize) -> f32 {
 /// the rendered list.
 pub fn settings_m2_content_height(_viewport: Size, source_row_count: usize) -> f32 {
     settings_m2_origin_y_offset()
+        + SETTINGS_SECTION_LABEL_H
         + settings_sources_content_height(source_row_count)
         + SETTINGS_SECTION_LABEL_H
         + SETTINGS_INPUT_ROW_H
@@ -1356,6 +1528,35 @@ pub fn settings_m2_content_height(_viewport: Size, source_row_count: usize) -> f
         + SETTINGS_SECTION_LABEL_H
         + SETTINGS_TEXTAREA_H
         + SETTINGS_SECTION_GAP
+}
+
+/// Visible body-scroll thumb. Returns `None` when the document fits, matching
+/// CSS scrollbar behaviour without adding a separate interactive control.
+pub fn settings_scrollbar_thumb_rect(
+    viewport: Size,
+    content_total_h: f32,
+    scroll_offset_y: f32,
+) -> Option<Rect> {
+    let body = settings_body_rect(viewport);
+    let max_scroll = settings_body_max_scroll(content_total_h, viewport);
+    if max_scroll <= f32::EPSILON || body.height <= SETTINGS_SCROLLBAR_INSET_Y * 2.0 {
+        return None;
+    }
+
+    let track_y = body.y + SETTINGS_SCROLLBAR_INSET_Y;
+    let track_h = body.height - SETTINGS_SCROLLBAR_INSET_Y * 2.0;
+    let visible_ratio = (body.height / content_total_h.max(body.height)).clamp(0.0, 1.0);
+    let thumb_h = (track_h * visible_ratio)
+        .max(SETTINGS_SCROLLBAR_MIN_THUMB_H)
+        .min(track_h);
+    let progress = (scroll_offset_y / max_scroll).clamp(0.0, 1.0);
+
+    Some(Rect {
+        x: body.right() - SETTINGS_SCROLLBAR_W - 2.0,
+        y: track_y + (track_h - thumb_h) * progress,
+        width: SETTINGS_SCROLLBAR_W,
+        height: thumb_h,
+    })
 }
 
 // ── M1d 2026-05-29 — Performance §5 + Startup management §6 ────────────
@@ -1374,9 +1575,10 @@ pub fn settings_m2_content_height(_viewport: Size, source_row_count: usize) -> f
 /// M1d — number of SliderRows in the Performance section (展开/收起/缓存).
 pub const SETTINGS_PERF_ROW_COUNT: u8 = 3;
 
-/// M1d — number-stepper mini button (− / +) size.
-pub const SETTINGS_NUM_BTN_W: f32 = 24.0;
-pub const SETTINGS_NUM_BTN_H: f32 = 24.0;
+/// M1d / Tauri parity — native-number spinner side target. Two 16-DIP side
+/// targets plus the 40-DIP value band form Tauri's 72-DIP number input.
+pub const SETTINGS_NUM_BTN_W: f32 = 16.0;
+pub const SETTINGS_NUM_BTN_H: f32 = 30.0;
 
 /// M1d — number-stepper value label width (between − and +).
 pub const SETTINGS_NUM_VALUE_W: f32 = 40.0;
@@ -1642,6 +1844,19 @@ pub fn settings_stepper_minus_rect(row: Rect) -> Rect {
         x: value.x - SETTINGS_NUM_BTN_W,
         y: value.y,
         width: SETTINGS_NUM_BTN_W,
+        height: SETTINGS_NUM_BTN_H,
+    }
+}
+
+/// Visible Tauri `.settings-row__number-input` shell enclosing the existing
+/// decrement / value / increment targets.
+pub fn settings_stepper_input_rect(row: Rect) -> Rect {
+    let minus = settings_stepper_minus_rect(row);
+    let plus = settings_stepper_plus_rect(row);
+    Rect {
+        x: minus.x,
+        y: minus.y,
+        width: plus.right() - minus.x,
         height: SETTINGS_NUM_BTN_H,
     }
 }
@@ -2319,19 +2534,22 @@ pub const SETTINGS_BACKUP_ROW_VISIBLE_MAX: usize = 3;
 /// Stealth/Updater 28-DIP status-line rhythm).
 pub const SETTINGS_BACKUP_ROW_H: f32 = 28.0;
 
-/// M1g — backup-list entry row height (file·size on the left, 恢复 button on
-/// the right).
-pub const SETTINGS_BACKUP_ENTRY_ROW_H: f32 = 30.0;
+/// Backup-list entry row height. Tauri paints timestamp and size on separate
+/// lines; 40 DIP also keeps the 32-DIP restore button inside the row.
+pub const SETTINGS_BACKUP_ENTRY_ROW_H: f32 = 40.0;
 
 /// M1g — gap between adjacent backup-list entry rows.
 pub const SETTINGS_BACKUP_ENTRY_ROW_GAP: f32 = 6.0;
 
 /// M1g — `立即备份 / Create now` button width (wider than a stepper so the
 /// bilingual label fits) and the smaller per-row 恢复 / Refresh button width.
-pub const SETTINGS_BACKUP_CREATE_BTN_W: f32 = 104.0;
+pub const SETTINGS_BACKUP_CREATE_BTN_W: f32 = 88.0;
 pub const SETTINGS_BACKUP_REFRESH_BTN_W: f32 = 84.0;
 pub const SETTINGS_BACKUP_RESTORE_BTN_W: f32 = 64.0;
 pub const SETTINGS_BACKUP_BTN_GAP_M1: f32 = 8.0;
+
+/// Tauri `.backup-card { gap: 10px }` between the actions/status/list blocks.
+pub const SETTINGS_BACKUP_CONTENT_GAP: f32 = 10.0;
 
 /// M1g — `设置备份 / Settings Backup` group title rect. Sits below the Updater
 /// section + a section gap. Takes the full flag set so its Y follows whatever
@@ -2426,7 +2644,7 @@ pub fn settings_backup_status_rect(
     let actions = settings_backup_actions_row_rect(viewport, scroll_offset_y, flags);
     Rect {
         x: actions.x,
-        y: actions.bottom() + 4.0,
+        y: actions.bottom() + SETTINGS_BACKUP_CONTENT_GAP,
         width: actions.width,
         height: SETTINGS_BACKUP_ROW_H,
     }
@@ -2441,12 +2659,18 @@ pub fn settings_backup_entry_row_rect(
     flags: &SettingsBodyFlags,
     entry_index: usize,
 ) -> Rect {
-    let status = settings_backup_status_rect(viewport, scroll_offset_y, flags);
+    let actions = settings_backup_actions_row_rect(viewport, scroll_offset_y, flags);
+    let list_y = if flags.backup_status_present {
+        settings_backup_status_rect(viewport, scroll_offset_y, flags).bottom()
+            + SETTINGS_BACKUP_CONTENT_GAP
+    } else {
+        actions.bottom() + SETTINGS_BACKUP_CONTENT_GAP
+    };
     Rect {
-        x: status.x,
-        y: status.bottom()
+        x: actions.x,
+        y: list_y
             + (SETTINGS_BACKUP_ENTRY_ROW_H + SETTINGS_BACKUP_ENTRY_ROW_GAP) * entry_index as f32,
-        width: status.width,
+        width: actions.width,
         height: SETTINGS_BACKUP_ENTRY_ROW_H,
     }
 }
@@ -2454,7 +2678,7 @@ pub fn settings_backup_entry_row_rect(
 /// M1g — right-anchored `恢复 / Restore` button rect inside an entry row.
 pub fn settings_backup_restore_button_rect(row: Rect) -> Rect {
     Rect {
-        x: row.right() - SETTINGS_BACKUP_RESTORE_BTN_W,
+        x: row.right() - 12.0 - SETTINGS_BACKUP_RESTORE_BTN_W,
         y: row.y + (row.height - SETTINGS_FOOTER_BTN_H) * 0.5,
         width: SETTINGS_BACKUP_RESTORE_BTN_W,
         height: SETTINGS_FOOTER_BTN_H,
@@ -2469,11 +2693,19 @@ pub fn settings_backup_restore_button_rect(row: Rect) -> Rect {
 /// gaps) or a single empty-placeholder row. A trailing section gap pads the
 /// body bottom (and reserves room for the §10/§11 chunk to come).
 pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
+    settings_backup_content_height_for_status(backup_row_count, false)
+}
+
+fn settings_backup_content_height_for_status(backup_row_count: usize, status_present: bool) -> f32 {
     let base = SETTINGS_SECTION_LABEL_H
         + SETTINGS_BACKUP_ROW_H            // description
         + SETTINGS_BACKUP_BTN_ROW_H        // actions
-        + 4.0
-        + SETTINGS_BACKUP_ROW_H; // reserved status line
+        + SETTINGS_BACKUP_CONTENT_GAP
+        + if status_present {
+            SETTINGS_BACKUP_ROW_H + SETTINGS_BACKUP_CONTENT_GAP
+        } else {
+            0.0
+        };
     let rows = backup_row_count.min(SETTINGS_BACKUP_ROW_VISIBLE_MAX);
     let list = if rows == 0 {
         // Empty placeholder occupies one entry-row slot.
@@ -2508,21 +2740,21 @@ pub fn settings_backup_content_height(backup_row_count: usize) -> f32 {
 // Geometry stays PURE — every helper is a function of (viewport, scroll, flags),
 // returning `Copy` `Rect`s; no `AppState` reads (§10).
 
-/// M7 — encryption mode-button row height (each button is a title + sub-label
-/// stacked block; matches the footer-button rhythm with room for two lines).
-/// #7 §10 item 7 (2026-06-01) — bumped 44→52 to fit Tauri's `padding: 10px 12px`
-/// + `gap: 4px` (`EncryptionCard.css:29,36`): 10 (top pad) + 16 (13px title slot)
-/// + 4 (gap) + 16 (11px sub slot) + 10 (bottom pad) ≈ 52. The prior 44 packed the
-///   two-line content against the chip edges.
-pub const SETTINGS_ENCRYPTION_BTN_ROW_H: f32 = 52.0;
+/// M7 — gap between mode cards in the responsive grid.
+pub const SETTINGS_ENCRYPTION_BTN_GAP: f32 = 8.0;
+/// Height of one encryption mode card (title + sub-label).
+pub const SETTINGS_ENCRYPTION_BTN_H: f32 = 52.0;
+/// At the 440-DIP Settings content width Tauri's
+/// `repeat(auto-fit, minmax(160px, 1fr))` resolves to two columns, so the third
+/// card wraps to a second row instead of being clipped into a three-column row.
+pub const SETTINGS_ENCRYPTION_BTN_ROW_H: f32 =
+    SETTINGS_ENCRYPTION_BTN_H * 2.0 + SETTINGS_ENCRYPTION_BTN_GAP;
 /// M7 — encryption passphrase input row height (single-line masked box; shares
 /// the §2 path-input rhythm).
 pub const SETTINGS_ENCRYPTION_INPUT_ROW_H: f32 = 40.0;
 /// M7 — encryption current-mode / hint / status compact row heights (match the
 /// other card status-line rhythm).
 pub const SETTINGS_ENCRYPTION_ROW_H: f32 = 28.0;
-/// M7 — gap between the three mode buttons in the grid.
-pub const SETTINGS_ENCRYPTION_BTN_GAP: f32 = 8.0;
 /// P13 (#7 fix wave 2026-06-01) — vertical gap between EVERY sibling row of the
 /// §10 card (description / current / grid / passphrase-row / hint / status).
 /// Tauri `.encryption-card { gap: 10px }` (`EncryptionCard.css:4`). The
@@ -2600,7 +2832,7 @@ pub fn settings_encryption_current_mode_rect(
 
 /// M7 — the 3-button mode-grid row rect (the band holding all three buttons).
 /// Below the current-mode row. Use [`settings_encryption_mode_button_rect`] for
-/// individual buttons inside this band.
+/// individual buttons inside this two-row band.
 pub fn settings_encryption_mode_row_rect(
     viewport: Size,
     scroll_offset_y: f32,
@@ -2617,8 +2849,9 @@ pub fn settings_encryption_mode_row_rect(
 }
 
 /// M7 — individual mode-button rect inside the grid for `index`
-/// (0 = None, 1 = DPAPI, 2 = Passphrase). The three buttons split the row width
-/// evenly with two inter-button gaps. PURE — no global state.
+/// (0 = None, 1 = DPAPI, 2 = Passphrase). At the native panel's fixed content
+/// width this mirrors Tauri's auto-fit grid as two cards on the first row and
+/// the passphrase card on the second. PURE — no global state.
 pub fn settings_encryption_mode_button_rect(
     viewport: Size,
     scroll_offset_y: f32,
@@ -2626,15 +2859,15 @@ pub fn settings_encryption_mode_button_rect(
     index: u8,
 ) -> Rect {
     let row = settings_encryption_mode_row_rect(viewport, scroll_offset_y, flags);
-    let count = SETTINGS_ENCRYPTION_MODE_COUNT as f32;
-    let total_gap = SETTINGS_ENCRYPTION_BTN_GAP * (count - 1.0);
-    let btn_w = ((row.width - total_gap) / count).max(0.0);
-    let i = (index.min(SETTINGS_ENCRYPTION_MODE_COUNT - 1)) as f32;
+    let i = index.min(SETTINGS_ENCRYPTION_MODE_COUNT - 1);
+    let column = (i % 2) as f32;
+    let grid_row = (i / 2) as f32;
+    let btn_w = ((row.width - SETTINGS_ENCRYPTION_BTN_GAP) / 2.0).max(0.0);
     Rect {
-        x: row.x + (btn_w + SETTINGS_ENCRYPTION_BTN_GAP) * i,
-        y: row.y,
+        x: row.x + (btn_w + SETTINGS_ENCRYPTION_BTN_GAP) * column,
+        y: row.y + (SETTINGS_ENCRYPTION_BTN_H + SETTINGS_ENCRYPTION_BTN_GAP) * grid_row,
         width: btn_w,
-        height: row.height,
+        height: SETTINGS_ENCRYPTION_BTN_H,
     }
 }
 
@@ -2736,16 +2969,23 @@ pub fn settings_encryption_status_rect(
 /// this is a constant: label + desc + current-mode + button-row + passphrase
 /// input + hint + reserved status + a trailing section gap.
 pub fn settings_encryption_content_height() -> f32 {
+    settings_encryption_content_height_for_status(false)
+}
+
+fn settings_encryption_content_height_for_status(status_present: bool) -> f32 {
     SETTINGS_SECTION_LABEL_H
         + SETTINGS_ENCRYPTION_ROW_H            // description
         + SETTINGS_ENCRYPTION_ROW_H            // current-mode row
         + SETTINGS_ENCRYPTION_BTN_ROW_H        // mode-button grid
         + SETTINGS_ENCRYPTION_INPUT_ROW_H      // passphrase row (label + input)
         + SETTINGS_ENCRYPTION_ROW_H            // hint line
-        + SETTINGS_ENCRYPTION_ROW_H            // reserved status banner
-        // P13 — 6 × 10px inter-row gaps (label→desc→current→grid→passphrase→
-        // hint→status). Replaces the single 8px pre-passphrase button gap.
-        + SETTINGS_ENCRYPTION_ROW_GAP * 6.0
+        // Five always-present gaps; a visible status adds its own row + gap.
+        + SETTINGS_ENCRYPTION_ROW_GAP * 5.0
+        + if status_present {
+            SETTINGS_ENCRYPTION_ROW_H + SETTINGS_ENCRYPTION_ROW_GAP
+        } else {
+            0.0
+        }
         + SETTINGS_SECTION_GAP
 }
 
@@ -2799,6 +3039,8 @@ pub const SETTINGS_PLUGIN_EMPTY_ROW_H: f32 = SETTINGS_BACKUP_ENTRY_ROW_H;
 
 /// M1h — gap between adjacent plugin cards.
 pub const SETTINGS_PLUGIN_CARD_GAP: f32 = 8.0;
+/// Lifecycle feedback row shown after install/toggle/uninstall attempts.
+pub const SETTINGS_PLUGIN_STATUS_H: f32 = 20.0;
 
 /// M1h — type-badge chip width + the enable-toggle hit-box (right-anchored in
 /// the card header) + the 卸载 button width.
@@ -2822,11 +3064,11 @@ pub fn settings_plugins_label_rect(
     flags: &SettingsBodyFlags,
 ) -> Rect {
     let body = settings_body_rect(viewport);
-    // The §10 Encryption card's last laid-out row is its reserved status slot.
-    // Anchoring off its bottom keeps the offset chain linear regardless of
-    // whether a status banner is actually painted.
-    let encryption_bottom =
-        settings_encryption_status_rect(viewport, scroll_offset_y, flags).bottom();
+    let encryption_bottom = if flags.encryption_status_present {
+        settings_encryption_status_rect(viewport, scroll_offset_y, flags).bottom()
+    } else {
+        settings_encryption_hint_rect(viewport, scroll_offset_y, flags).bottom()
+    };
     Rect {
         x: body.x + SETTINGS_ROW_PAD_X,
         y: encryption_bottom + SETTINGS_SECTION_GAP,
@@ -2850,6 +3092,31 @@ pub fn settings_plugins_install_button_rect(
     }
 }
 
+/// Optional plugin lifecycle status row below the install button.
+pub fn settings_plugin_status_rect(
+    viewport: Size,
+    scroll_offset_y: f32,
+    flags: &SettingsBodyFlags,
+) -> Rect {
+    let install = settings_plugins_install_button_rect(viewport, scroll_offset_y, flags);
+    Rect {
+        x: install.x,
+        y: install.bottom() + SETTINGS_PLUGIN_CARD_GAP,
+        width: install.width,
+        height: SETTINGS_PLUGIN_STATUS_H,
+    }
+}
+
+fn settings_plugin_list_top(install: Rect, flags: &SettingsBodyFlags) -> f32 {
+    install.bottom()
+        + SETTINGS_PLUGIN_CARD_GAP
+        + if flags.plugin_status_present {
+            SETTINGS_PLUGIN_STATUS_H + SETTINGS_PLUGIN_CARD_GAP
+        } else {
+            0.0
+        }
+}
+
 /// M1h — plugin-card row rect for visible `card_index` (0-based). Sits below
 /// the install button. When the list is empty the renderer paints a single
 /// `pluginEmpty` placeholder at `card_index = 0` (its height differs, but the
@@ -2863,8 +3130,7 @@ pub fn settings_plugin_card_rect(
     let install = settings_plugins_install_button_rect(viewport, scroll_offset_y, flags);
     Rect {
         x: install.x,
-        y: install.bottom()
-            + SETTINGS_PLUGIN_CARD_GAP
+        y: settings_plugin_list_top(install, flags)
             + (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP) * card_index as f32,
         width: install.width,
         height: SETTINGS_PLUGIN_CARD_H,
@@ -2881,7 +3147,7 @@ pub fn settings_plugin_empty_row_rect(
     let install = settings_plugins_install_button_rect(viewport, scroll_offset_y, flags);
     Rect {
         x: install.x,
-        y: install.bottom() + SETTINGS_PLUGIN_CARD_GAP,
+        y: settings_plugin_list_top(install, flags),
         width: install.width,
         height: SETTINGS_PLUGIN_EMPTY_ROW_H,
     }
@@ -2957,6 +3223,17 @@ pub fn settings_plugin_uninstall_button_rect(card: Rect) -> Rect {
     }
 }
 
+/// Neutral cancel button shown left of the destructive confirm button.
+pub fn settings_plugin_uninstall_cancel_button_rect(card: Rect) -> Rect {
+    let confirm = settings_plugin_uninstall_button_rect(card);
+    Rect {
+        x: confirm.x - SETTINGS_PLUGIN_CARD_GAP - SETTINGS_PLUGIN_UNINSTALL_BTN_W,
+        y: confirm.y,
+        width: SETTINGS_PLUGIN_UNINSTALL_BTN_W,
+        height: confirm.height,
+    }
+}
+
 /// M1h — height the Plugins §11 section contributes to
 /// `settings_body_content_height`. Always-present: title + install button. The
 /// list adds either `n` plugin cards (+ inter-card gaps, plus the leading gap)
@@ -2964,6 +3241,14 @@ pub fn settings_plugin_uninstall_button_rect(card: Rect) -> Rect {
 /// bottom. The (already-capped) `plugin_row_count` is the parameter — geometry
 /// never reads global state.
 pub fn settings_plugins_content_height(plugin_row_count: usize) -> f32 {
+    settings_plugins_content_height_for_status(plugin_row_count, false)
+}
+
+/// Plugin section height including an optional real lifecycle status row.
+pub fn settings_plugins_content_height_for_status(
+    plugin_row_count: usize,
+    status_present: bool,
+) -> f32 {
     let base = SETTINGS_SECTION_LABEL_H + SETTINGS_PLUGIN_INSTALL_BTN_H;
     let rows = plugin_row_count.min(SETTINGS_PLUGINS_ROW_VISIBLE_MAX);
     let list = if rows == 0 {
@@ -2973,7 +3258,12 @@ pub fn settings_plugins_content_height(plugin_row_count: usize) -> f32 {
             + SETTINGS_PLUGIN_CARD_H * rows as f32
             + SETTINGS_PLUGIN_CARD_GAP * (rows as f32 - 1.0)
     };
-    base + list + SETTINGS_SECTION_GAP
+    base + if status_present {
+        SETTINGS_PLUGIN_STATUS_H + SETTINGS_PLUGIN_CARD_GAP
+    } else {
+        0.0
+    } + list
+        + SETTINGS_SECTION_GAP
 }
 
 // ── M6-UI 2026-05-29 / G3 parity 2026-06-01 — §3 Appearance inline theme grid (`SettingsPanel.tsx:396-536`) ──
@@ -3099,8 +3389,57 @@ mod m1_tests {
         assert!((p.x - expected_x).abs() < 0.01);
         assert!((p.y - SETTINGS_PANEL_TOP_MARGIN).abs() < 0.01);
         assert_eq!(p.width, SETTINGS_PANEL_WIDTH_M1);
-        // 600 - 16 * 2 = 568 < 700 → clamp to 568.
-        assert!(p.height <= SETTINGS_PANEL_HEIGHT_MAX);
+        // 600 - 16 * 2 = 568 < max height, so the legacy viewport still clamps.
+        assert!((p.height - 568.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn panel_sized_native_host_is_filled_without_overlay_margin() {
+        let viewport = Size {
+            width: SETTINGS_PANEL_WIDTH_M1,
+            height: 729.3333,
+        };
+        assert!(settings_panel_fills_host(viewport));
+        assert_eq!(
+            settings_panel_rect_m1(viewport),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: viewport.width,
+                height: viewport.height,
+            }
+        );
+        assert_eq!(settings_header_rect(viewport).y, 0.0);
+        assert_eq!(settings_footer_rect(viewport).bottom(), viewport.height);
+    }
+
+    #[test]
+    fn m1_panel_large_overlay_is_tall_and_centered() {
+        let viewport = Size {
+            width: 1707.0,
+            height: 912.0,
+        };
+        let p = settings_panel_rect_m1(viewport);
+        let expected_h = viewport.height * SETTINGS_PANEL_MAX_WORKAREA_FRAC;
+        let expected_y = (viewport.height - expected_h) * SETTINGS_PANEL_LARGE_VIEWPORT_Y_FRAC;
+        assert!((p.height - expected_h).abs() < 0.01);
+        assert!((p.y - expected_y).abs() < 0.01);
+        assert_eq!(p.width, SETTINGS_PANEL_WIDTH_M1);
+    }
+
+    #[test]
+    fn m1_panel_host_margin_controls_height_and_keeps_body_scrollable() {
+        let viewport = Size {
+            width: 811.0,
+            height: 760.0,
+        };
+        let p = settings_panel_rect_m1(viewport);
+        let expected_h = viewport.height * SETTINGS_PANEL_MAX_WORKAREA_FRAC;
+        let expected_y = (viewport.height - expected_h) * SETTINGS_PANEL_LARGE_VIEWPORT_Y_FRAC;
+        assert!((p.height - expected_h).abs() < 0.01);
+        assert!(settings_body_rect(viewport).height > SETTINGS_ROW_H_M1 * 2.0);
+        assert!((p.y - expected_y).abs() < 0.01);
+        assert_eq!(p.width, SETTINGS_PANEL_WIDTH_M1);
     }
 
     #[test]
@@ -3111,6 +3450,12 @@ mod m1_tests {
         assert_eq!(h.y, p.y);
         assert_eq!(h.width, p.width);
         assert_eq!(h.height, SETTINGS_HEADER_H_M1);
+    }
+
+    #[test]
+    fn m1_header_matches_tauri_settings_panel_css_height() {
+        assert_eq!(SETTINGS_HEADER_H_M1, 52.0);
+        assert_eq!(SETTINGS_HEADER_H, SETTINGS_HEADER_H_M1);
     }
 
     #[test]
@@ -3139,6 +3484,12 @@ mod m1_tests {
         assert!(c.bottom() <= h.bottom());
         assert!(c.right() <= h.right());
         assert_eq!(c.width, SETTINGS_CLOSE_X_SIZE);
+        assert_eq!(c.height, SETTINGS_CLOSE_X_SIZE);
+    }
+
+    #[test]
+    fn m1_close_button_matches_tauri_settings_panel_css_size() {
+        assert_eq!(SETTINGS_CLOSE_X_SIZE, 32.0);
     }
 
     #[test]
@@ -3147,6 +3498,7 @@ mod m1_tests {
         let save = settings_save_button_rect(vp());
         assert_eq!(cancel.y, save.y);
         assert_eq!(cancel.width, save.width);
+        assert_eq!(save.width, SETTINGS_FOOTER_ACTION_BTN_W);
         assert!(cancel.right() < save.x);
         let f = settings_footer_rect(vp());
         assert!(save.right() <= f.right());
@@ -3161,6 +3513,17 @@ mod m1_tests {
         assert!(r0.y < r1.y);
         assert!(r1.y < r4.y);
         assert!((r1.y - r0.y - SETTINGS_ROW_H_M1).abs() < 0.01);
+    }
+
+    #[test]
+    fn m1_general_title_and_body_padding_precede_first_toggle() {
+        let v = vp();
+        let body = settings_body_rect(v);
+        let title = settings_general_label_rect(v, 0.0);
+        let first = settings_top_toggle_row_rect(v, 0.0, 0);
+        assert!((title.y - body.y - 20.0).abs() < 0.01);
+        assert!((first.y - body.y - SETTINGS_BODY_TOP_INSET).abs() < 0.01);
+        assert!(title.bottom() <= first.y);
     }
 
     #[test]
@@ -3217,7 +3580,11 @@ mod m1_tests {
             title.bottom(),
             picker.y,
         );
-        assert_eq!(picker.height, SETTINGS_ROW_H_M1);
+        assert_eq!(
+            picker.height,
+            SETTINGS_RADIO_H * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
+                + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32
+        );
         // §4 DisplayMode sits below §3 Appearance (the appearance accent row),
         // a full section gap clear — the General band no longer contains it.
         let appearance = settings_appearance_label_rect(v, 0.0, &plugin_flags(0));
@@ -3240,25 +3607,43 @@ mod m1_tests {
     }
 
     #[test]
-    fn alpha4_three_radios_pack_left_to_right_inside_picker_row() {
+    fn alpha4_three_radios_stack_top_to_bottom_inside_picker_row() {
         let v = vp();
         let row = settings_zone_display_mode_picker_row_rect(v, 0.0);
         let r0 = settings_zone_display_mode_radio_rect(v, 0.0, 0);
         let r1 = settings_zone_display_mode_radio_rect(v, 0.0, 1);
         let r2 = settings_zone_display_mode_radio_rect(v, 0.0, 2);
-        assert_eq!(r0.y, r1.y);
-        assert_eq!(r1.y, r2.y);
-        assert!(r0.right() <= r1.x);
-        assert!(r1.right() <= r2.x);
-        // The whole cluster right-anchors at row.right() and never pokes
-        // outside the row. Cluster width (78×3 + 4×2 = 242 DIP) leaves the
-        // first radio at ~row.width × 0.36; allow a 0.3 floor so the
-        // assertion stays meaningful across SETTINGS_PANEL_WIDTH_M1 tweaks.
-        assert!(r0.x >= row.x + row.width * 0.3);
-        assert!(r2.right() <= row.right());
-        // Per-radio dimensions pinned.
+        assert_eq!(r0.x, r1.x);
+        assert_eq!(r1.x, r2.x);
+        assert!((r1.y - r0.bottom() - SETTINGS_RADIO_GAP).abs() < 0.01);
+        assert!((r2.y - r1.bottom() - SETTINGS_RADIO_GAP).abs() < 0.01);
+        assert_eq!(r0.right(), row.right());
+        assert_eq!(r2.bottom(), row.bottom());
         assert_eq!(r0.width, SETTINGS_RADIO_W);
         assert_eq!(r0.height, SETTINGS_RADIO_H);
+    }
+
+    #[test]
+    fn alpha4_display_mode_copy_stays_left_of_option_stack() {
+        let v = vp();
+        let label = settings_display_mode_copy_label_rect(v, 0.0);
+        let hint = settings_display_mode_hint_rect(v, 0.0);
+        let option = settings_zone_display_mode_radio_rect(v, 0.0, 0);
+        assert_eq!(label.x, hint.x);
+        assert_eq!(label.width, hint.width);
+        assert!((hint.y - label.bottom() - SETTINGS_DISPLAY_MODE_HINT_GAP).abs() < 0.01);
+        assert!(label.right() + SETTINGS_DISPLAY_MODE_COPY_GAP <= option.x + 0.01);
+        assert!(hint.bottom() <= settings_zone_display_mode_picker_row_rect(v, 0.0).bottom());
+    }
+
+    #[test]
+    fn alpha4_display_mode_content_height_includes_full_vertical_stack() {
+        let stack_h = SETTINGS_RADIO_H * SETTINGS_ZONE_DISPLAY_MODE_COUNT as f32
+            + SETTINGS_RADIO_GAP * (SETTINGS_ZONE_DISPLAY_MODE_COUNT - 1) as f32;
+        assert_eq!(
+            settings_display_mode_content_height(),
+            SETTINGS_SECTION_LABEL_H + stack_h + SETTINGS_SECTION_GAP
+        );
     }
 
     #[test]
@@ -3378,28 +3763,20 @@ mod m1_tests {
 
     #[test]
     fn m1h_plugins_section_sits_below_encryption_card() {
-        // M7 (2026-06-01) — Plugins §11 now anchors off the Encryption §10
-        // card's reserved status row (the card slots between Backup §9 and
-        // Plugins §11), not directly off the Backup card. The Backup card still
-        // sits ABOVE the encryption card, and the encryption status row sits
-        // ABOVE the Plugins group title, separated by a section gap.
+        // With no status, Plugins follows the hint directly; a visible status
+        // inserts exactly one row + gap. Both paths must stay below Backup.
         let v = vp();
         let f = plugin_flags(2);
         let backup_empty = settings_backup_entry_row_rect(v, 0.0, &f, 0);
-        let encryption_status = settings_encryption_status_rect(v, 0.0, &f);
+        let encryption_hint = settings_encryption_hint_rect(v, 0.0, &f);
         let plugin_label = settings_plugins_label_rect(v, 0.0, &f);
-        // Encryption card sits below the backup card's last row.
-        assert!(encryption_status.y >= backup_empty.bottom());
-        // Plugins title sits below the encryption card's status row.
-        assert!(
-            plugin_label.y >= encryption_status.bottom(),
-            "plugins title (y={}) must sit below the encryption card's status \
-             row (bottom={})",
-            plugin_label.y,
-            encryption_status.bottom(),
-        );
-        // A section gap separates them.
-        assert!((plugin_label.y - encryption_status.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
+        assert!(encryption_hint.y >= backup_empty.bottom());
+        assert!((plugin_label.y - encryption_hint.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
+
+        let with_status = f.with_encryption_status(true);
+        let status = settings_encryption_status_rect(v, 0.0, &with_status);
+        let plugin_after_status = settings_plugins_label_rect(v, 0.0, &with_status);
+        assert!((plugin_after_status.y - status.bottom() - SETTINGS_SECTION_GAP).abs() < 0.01);
     }
 
     #[test]
@@ -3433,6 +3810,24 @@ mod m1_tests {
             (card1.y - card0.y - (SETTINGS_PLUGIN_CARD_H + SETTINGS_PLUGIN_CARD_GAP)).abs() < 0.01
         );
         assert_eq!(card0.height, SETTINGS_PLUGIN_CARD_H);
+    }
+
+    #[test]
+    fn m1h_plugin_status_reflows_cards_and_scroll_height_in_lockstep() {
+        let v = vp();
+        let without_status = plugin_flags(1);
+        let with_status = without_status.with_plugin_status(true);
+        let card_without = settings_plugin_card_rect(v, 0.0, &without_status, 0);
+        let card_with = settings_plugin_card_rect(v, 0.0, &with_status, 0);
+        let expected_shift = SETTINGS_PLUGIN_STATUS_H + SETTINGS_PLUGIN_CARD_GAP;
+        assert!((card_with.y - card_without.y - expected_shift).abs() < 0.01);
+
+        let body_without = settings_body_content_height(v, &without_status);
+        let body_with = settings_body_content_height(v, &with_status);
+        assert!((body_with - body_without - expected_shift).abs() < 0.01);
+
+        let status = settings_plugin_status_rect(v, 0.0, &with_status);
+        assert!(status.bottom() + SETTINGS_PLUGIN_CARD_GAP <= card_with.y + 0.01);
     }
 
     #[test]
@@ -3527,18 +3922,21 @@ mod m1_tests {
         // must equal the sum of its laid-out rows.
         let h = settings_encryption_content_height();
         assert!(h > 0.0);
-        // P13 (#7 fix wave) — 7 rows separated by 6 × 10px inter-row gaps
-        // (replacing the old single 8px pre-passphrase button gap).
+        // Default/no-status card: 6 rows separated by 5 × 10px gaps.
         let expected = SETTINGS_SECTION_LABEL_H
             + SETTINGS_ENCRYPTION_ROW_H
             + SETTINGS_ENCRYPTION_ROW_H
             + SETTINGS_ENCRYPTION_BTN_ROW_H
             + SETTINGS_ENCRYPTION_INPUT_ROW_H
             + SETTINGS_ENCRYPTION_ROW_H
-            + SETTINGS_ENCRYPTION_ROW_H
-            + SETTINGS_ENCRYPTION_ROW_GAP * 6.0
+            + SETTINGS_ENCRYPTION_ROW_GAP * 5.0
             + SETTINGS_SECTION_GAP;
         assert!((h - expected).abs() < f32::EPSILON);
+        let with_status = settings_encryption_content_height_for_status(true);
+        assert!(
+            (with_status - h - SETTINGS_ENCRYPTION_ROW_H - SETTINGS_ENCRYPTION_ROW_GAP).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -3554,7 +3952,8 @@ mod m1_tests {
         // DisplayMode group height (promoted out of the General band into its
         // own section). Without it the body total no longer matches the sum of
         // every non-encryption section.
-        let others = settings_m2_content_height(v, f.source_row_count)
+        let others = SETTINGS_BODY_TOP_INSET
+            + settings_m2_content_height(v, f.source_row_count)
             + settings_appearance_content_height(v)
             + settings_display_mode_content_height()
             + settings_perf_startup_content_height(
@@ -3565,27 +3964,28 @@ mod m1_tests {
             + settings_stealth_content_height(f.stealth_has_retry, f.stealth_has_error)
             + settings_updater_content_height(f.updater_kind)
             + settings_backup_content_height(f.backup_row_count)
-            + settings_plugins_content_height(f.plugin_row_count);
+            + settings_plugins_content_height(f.plugin_row_count)
+            + SETTINGS_BODY_BOTTOM_INSET;
         assert!((total - others - settings_encryption_content_height()).abs() < 0.01);
     }
 
     #[test]
-    fn m7_encryption_mode_buttons_are_three_non_overlapping_rects() {
+    fn m7_encryption_mode_buttons_wrap_two_plus_one_without_overlap() {
         let v = vp();
         let f = plugin_flags(0);
         let b0 = settings_encryption_mode_button_rect(v, 0.0, &f, 0);
         let b1 = settings_encryption_mode_button_rect(v, 0.0, &f, 1);
         let b2 = settings_encryption_mode_button_rect(v, 0.0, &f, 2);
-        // Same row (same y/height), increasing x, no overlap.
+        // None + DPAPI share row 1; Passphrase wraps to row 2, left aligned.
         assert_eq!(b0.y, b1.y);
-        assert_eq!(b1.y, b2.y);
+        assert!(b2.y >= b0.bottom() + SETTINGS_ENCRYPTION_BTN_GAP - 0.01);
+        assert!((b2.x - b0.x).abs() < 0.01);
         assert!(b0.width > 0.0);
         assert!(b1.x >= b0.right() - 0.01);
-        assert!(b2.x >= b1.right() - 0.01);
-        // All three fit inside the mode-grid row band.
         let row = settings_encryption_mode_row_rect(v, 0.0, &f);
         assert!(b0.x >= row.x - 0.01);
-        assert!(b2.right() <= row.right() + 0.01);
+        assert!(b1.right() <= row.right() + 0.01);
+        assert!(b2.bottom() <= row.bottom() + 0.01);
     }
 
     #[test]
@@ -3678,8 +4078,34 @@ mod m2_tests {
     fn m2_sources_label_sits_below_language_row() {
         let v = vp();
         let lang = settings_language_row_rect(v, 0.0);
-        let label = settings_sources_label_rect(v, 0.0);
-        assert!(label.y >= lang.bottom() + SETTINGS_SECTION_GAP - 0.01);
+        let paths = settings_paths_label_rect(v, 0.0);
+        let sources = settings_sources_label_rect(v, 0.0);
+        assert!(paths.y >= lang.bottom() + SETTINGS_SECTION_GAP - 0.01);
+        assert!((sources.y - paths.bottom()).abs() < 0.01);
+    }
+
+    #[test]
+    fn m2_scrollbar_thumb_is_hidden_when_content_fits() {
+        let v = vp();
+        let body = settings_body_rect(v);
+        assert_eq!(settings_scrollbar_thumb_rect(v, body.height, 0.0), None);
+    }
+
+    #[test]
+    fn m2_scrollbar_thumb_tracks_document_endpoints_inside_body() {
+        let v = vp();
+        let body = settings_body_rect(v);
+        let content_h = body.height * 3.0;
+        let max_scroll = settings_body_max_scroll(content_h, v);
+        let top = settings_scrollbar_thumb_rect(v, content_h, 0.0).expect("top thumb");
+        let bottom = settings_scrollbar_thumb_rect(v, content_h, max_scroll).expect("bottom thumb");
+
+        assert!((top.y - body.y - SETTINGS_SCROLLBAR_INSET_Y).abs() < 0.01);
+        assert!((bottom.bottom() - body.bottom() + SETTINGS_SCROLLBAR_INSET_Y).abs() < 0.01);
+        assert_eq!(top.width, SETTINGS_SCROLLBAR_W);
+        assert_eq!(top.height, bottom.height);
+        assert!(top.height >= SETTINGS_SCROLLBAR_MIN_THUMB_H);
+        assert!(bottom.y > top.y);
     }
 
     #[test]
@@ -3932,11 +4358,17 @@ mod m1d_tests {
         let plus = settings_stepper_plus_rect(retries);
         let value = settings_stepper_value_rect(retries);
         let minus = settings_stepper_minus_rect(retries);
+        let input = settings_stepper_input_rect(retries);
         assert!(minus.right() <= value.x + 0.01);
         assert!(value.right() <= plus.x + 0.01);
         assert!(plus.right() <= retries.right() + 0.01);
         assert_eq!(plus.width, SETTINGS_NUM_BTN_W);
         assert_eq!(value.width, SETTINGS_NUM_VALUE_W);
+        assert_eq!(input.width, 72.0);
+        assert_eq!(input.height, 30.0);
+        assert_eq!(input.x, minus.x);
+        assert_eq!(input.right(), plus.right());
+        assert_eq!(input.right(), retries.right());
     }
 
     #[test]
@@ -4312,7 +4744,7 @@ mod m1d_tests {
     #[test]
     fn m1g_rows_stack_in_order_title_desc_actions_status_list() {
         let v = vp();
-        let f = backup_flags(2);
+        let f = backup_flags(2).with_backup_status(true);
         let title = settings_backup_label_rect(v, 0.0, &f);
         let desc = settings_backup_description_rect(v, 0.0, &f);
         let actions = settings_backup_actions_row_rect(v, 0.0, &f);
@@ -4322,6 +4754,14 @@ mod m1d_tests {
         assert!((actions.y - desc.bottom()).abs() < 0.01);
         assert!(status.y >= actions.bottom());
         assert!(entry0.y >= status.bottom());
+
+        let no_status = backup_flags(2);
+        let no_status_actions = settings_backup_actions_row_rect(v, 0.0, &no_status);
+        let no_status_entry = settings_backup_entry_row_rect(v, 0.0, &no_status, 0);
+        assert!(
+            (no_status_entry.y - no_status_actions.bottom() - SETTINGS_BACKUP_CONTENT_GAP).abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -4596,6 +5036,22 @@ mod tests {
         // vault, modal openers. Backup entry strip lives between vault and
         // modals (not counted as a section row).
         assert_eq!(SETTINGS_SECTION_ROW_COUNT, 9);
+    }
+
+    #[test]
+    fn settings_typography_roles_are_compact_and_system_fonted() {
+        let global = bento_nano_style::tokens::TYPOGRAPHY;
+        assert_eq!(global.font_family, "Segoe UI");
+        assert!(SETTINGS_TEXT_LABEL_SIZE < global.md.size_px);
+        assert!(SETTINGS_TEXT_VALUE_SIZE < global.md.size_px);
+        assert_eq!(SETTINGS_TEXT_LABEL_SIZE, 13.0);
+        assert_eq!(SETTINGS_TEXT_LABEL_WEIGHT, global.weight_normal);
+        assert_eq!(SETTINGS_TEXT_VALUE_SIZE, 12.0);
+        assert_eq!(SETTINGS_TEXT_VALUE_WEIGHT, global.weight_medium);
+        assert_eq!(SETTINGS_TEXT_LINE_HEIGHT, 1.0);
+        assert_eq!(SETTINGS_GROUP_TITLE_SIZE, 10.0);
+        assert_eq!(SETTINGS_GROUP_TITLE_WEIGHT, global.weight_semibold);
+        assert_eq!(SETTINGS_GROUP_TITLE_TRACKING, 1.2);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Typography tokens — font family + size scale + weight + line-height.
 //!
-//! `font_family` is `SmolStr` so the literal "Microsoft YaHei UI" stays inline
-//! (≤22 bytes, no allocation). Sizes are `pt` to match the existing `TextNode::
-//! font_size_pt` field. TL Ruling 3 2026-05-21: Win11 CJK render baseline.
+//! `font_family` is `SmolStr` so the literal "Segoe UI" stays inline (≤22
+//! bytes, no allocation). Sizes are `pt` to match the existing `TextNode::
+//! font_size_pt` field. V21-T4 2026-06-23: match Tauri CSS primary font while
+//! relying on DWrite system fallback for CJK glyphs.
 
 use smol_str::SmolStr;
 

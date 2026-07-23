@@ -107,10 +107,10 @@ pub const ACCENT_PALETTE: &[&str] = &[
 // canonical form in one place.
 // -----------------------------------------------------------------------------
 
-/// Capsule outline shape — 1.x supports four variants (the
-/// `bento_nano_app::business::zen_capsule::CapsuleShape` enum lives in the
-/// rendering layer and tracks only the three rendering-relevant variants;
-/// the editor UI lets the user pick from the full 1.x set).
+/// Capsule outline shape. The four Tauri variants remain first, followed by
+/// the legacy near-square variant that the native renderer already supports.
+/// Exposing `Square` here makes corner shape a truthful, independently editable
+/// property instead of labelling the transparent `Minimal` style as square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CapsuleShapeChoice {
@@ -119,6 +119,7 @@ pub enum CapsuleShapeChoice {
     Rounded,
     Circle,
     Minimal,
+    Square,
 }
 
 impl CapsuleShapeChoice {
@@ -129,6 +130,7 @@ impl CapsuleShapeChoice {
             Self::Rounded => "rounded",
             Self::Circle => "circle",
             Self::Minimal => "minimal",
+            Self::Square => "square",
         }
     }
 
@@ -141,13 +143,20 @@ impl CapsuleShapeChoice {
             "rounded" => Self::Rounded,
             "circle" => Self::Circle,
             "minimal" => Self::Minimal,
+            "square" => Self::Square,
             _ => Self::default(),
         }
     }
 
-    /// Iteration order matches the 1.x `CAPSULE_SHAPES` array — drives the
-    /// editor's left-to-right button row.
-    pub const ALL: &'static [Self] = &[Self::Pill, Self::Rounded, Self::Circle, Self::Minimal];
+    /// The Tauri choices retain their original order; `Square` is appended for
+    /// backward-compatible near-sharp geometry.
+    pub const ALL: &'static [Self] = &[
+        Self::Pill,
+        Self::Rounded,
+        Self::Circle,
+        Self::Minimal,
+        Self::Square,
+    ];
 }
 
 /// Capsule size choice — three variants matching 1.x `CAPSULE_SIZES`.
@@ -657,6 +666,7 @@ mod tests {
             CapsuleShapeChoice::Rounded,
             CapsuleShapeChoice::Circle,
             CapsuleShapeChoice::Minimal,
+            CapsuleShapeChoice::Square,
         ] {
             let s = serde_json::to_string(&v).unwrap_or_default();
             let back: CapsuleShapeChoice = serde_json::from_str(&s).unwrap_or_default();

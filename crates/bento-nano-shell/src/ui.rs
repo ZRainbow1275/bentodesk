@@ -47,7 +47,7 @@
 
 use bento_nano_app::{
     AppState, WindowState,
-    business::{highlight_overlay, item_grid, stack_tray},
+    business::{bulk_manager_panel, highlight_overlay, popover, search_bar, stack_tray},
     expanded_zone_grid, zone_pill_geometry,
 };
 use bento_nano_layout::Direction;
@@ -86,14 +86,8 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
     // (`Renderer::draw_zones`) and the z-layering (`zone_on_top`) key off — so
     // paint == hit geometry can never drift across the app/shell boundary.
     let body_visible = app.zone_pill_body_visible(zone);
-    // #4 (2026-06-02) — a collapsed stack anchor renders as the compact pill
-    // with the stack-MEMBER count as the badge value; mirror the paint side
-    // (Renderer::draw_zones) so paint == hit geometry for the anchor pill.
-    let count = app
-        .zones
-        .stack_member_ids(zone.id)
-        .map(|m| m.len())
-        .unwrap_or_else(|| zone.items.len());
+    let stack_member_count = app.zones.stack_member_ids(zone.id).map(|m| m.len());
+    let count = stack_member_count.unwrap_or_else(|| zone.items.len());
     let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
     let expanded_rect = Rect {
         x: zone.x as f32,
@@ -106,26 +100,25 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
     // pill_anim_active also excludes them).
     // V-13 paint–hit parity: during the ~10% easeOutBack overshoot the painted
     // rect bulges past the expanded target; the hit-rect must bulge with it or
-    // clicks fall outside the visible shape. #2 step 8 (2026-06-02) — the
-    // raw→easeOutBack→(flip)→rect math is the shared `current_morph_rect` SSoT,
-    // the SAME helper render.rs paints with, so paint == hit is enforced (no
-    // chance of the two formulas drifting).
-    if app.zone_pill_anim_zone.get() == Some(zone.id) && !zone.is_stack_anchor() {
+    // clicks fall outside the visible shape. The segment-start→easeOutBack→rect
+    // math is the shared `current_morph_rect` SSoT, the SAME helper render.rs paints with, so
+    // paint == hit is enforced (no chance of the two formulas drifting).
+    if app.zone_pill_morph_in_flight(zone) {
         let raw = app.zone_pill_anim_progress.get();
-        if raw > 0.0 && raw < 1.0 {
-            let (_morph, rect) = zone_pill_geometry::current_morph_rect(
-                pill_layout.rect,
-                expanded_rect,
-                raw,
-                app.zone_pill_anim_expanding.get(),
-            );
-            return rect;
-        }
+        let (_morph, rect) = zone_pill_geometry::current_morph_rect(
+            pill_layout.rect,
+            expanded_rect,
+            app.zone_pill_anim_from_morph.get(),
+            raw,
+            app.zone_pill_anim_expanding.get(),
+        );
+        return rect;
     }
 
-    // V-13 case 2 — collapsed pill (no morph, body hidden). #4: a collapsed
-    // stack anchor now ALSO renders as the compact pill, so it reaches here.
     if !body_visible {
+        if let Some(member_count) = stack_member_count {
+            return zone_pill_geometry::stack_capsule_layout_for_zone(zone, member_count).rect;
+        }
         return pill_layout.rect;
     }
 
@@ -286,6 +279,118 @@ pub fn nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) -> HitK
     }
 }
 
+/// Shared hit-test for focusable D2D/DComp auxiliary panels. Their left header
+/// area moves the single native HWND; the right edge stays client space for a
+/// painted close control. Keeping this rule independent of widget-tree state
+/// prevents a newly-opened panel from reverting to an immovable debug window
+/// before its first interactive tree update.
+pub fn auxiliary_panel_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    if x < 0.0 || y < 0.0 || x >= viewport.width || y >= viewport.height {
+        return HitKind::Transparent;
+    }
+    const HEADER_HEIGHT: f32 = 52.0;
+    const CLOSE_CONTROL_RESERVE: f32 = 96.0;
+    if y < HEADER_HEIGHT && x < (viewport.width - CLOSE_CONTROL_RESERVE).max(0.0) {
+        HitKind::Caption
+    } else {
+        HitKind::Client
+    }
+}
+
+/// Borderless Bulk Manager hit-test. Its search input intentionally shares the
+/// title row, so the generic auxiliary caption rule must exempt both the input
+/// and close button. Otherwise Windows consumes a real click as HTCAPTION and
+/// the client never receives the event that arms keyboard search.
+pub fn bulk_manager_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    if x < 0.0 || y < 0.0 || x >= viewport.width || y >= viewport.height {
+        return HitKind::Transparent;
+    }
+    if rect_contains(bulk_manager_panel::bulk_manager_search_rect(viewport), x, y)
+        || rect_contains(bulk_manager_panel::bulk_manager_close_rect(viewport), x, y)
+    {
+        return HitKind::Client;
+    }
+    auxiliary_panel_nchittest_kind(viewport, x, y)
+}
+
+/// Borderless Settings hit-test: its painted header is the drag handle while
+/// the close button remains a normal client control. The generic auxiliary
+/// rule only treats the HWND's top 48 DIPs as a caption, which misses a centred
+/// modal whose header starts below the window origin.
+pub fn settings_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    if rect_contains(
+        bento_nano_app::settings_panel::settings_close_button_rect_m1(viewport),
+        x,
+        y,
+    ) {
+        return HitKind::Client;
+    }
+    if rect_contains(
+        bento_nano_app::settings_panel::settings_header_rect(viewport),
+        x,
+        y,
+    ) {
+        return HitKind::Caption;
+    }
+    HitKind::Client
+}
+
+/// Borderless global Search hit-test. Transparent host margin never blocks the
+/// desktop; the painted header drags the real native popup, while the close
+/// button and body remain client controls.
+pub fn search_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    let panel = bento_nano_app::business::search_bar::search_panel_rect(viewport);
+    if !rect_contains(panel, x, y) {
+        return HitKind::Transparent;
+    }
+    if rect_contains(
+        bento_nano_app::business::search_bar::search_close_rect(viewport),
+        x,
+        y,
+    ) {
+        return HitKind::Client;
+    }
+    if y < panel.y + bento_nano_app::business::search_bar::RUNTIME_HEADER_HEIGHT_PX {
+        return HitKind::Caption;
+    }
+    HitKind::Client
+}
+
+/// Borderless About hit-test. The identity/header area is a native caption
+/// drag handle, except for the painted close button which must keep receiving
+/// normal client clicks.
+pub fn about_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    let close = bento_nano_app::business::about::close_button_rect(viewport);
+    if rect_contains(close, x, y) {
+        return HitKind::Client;
+    }
+    let panel = bento_nano_app::business::about::panel_rect(viewport);
+    if rect_contains(panel, x, y) && y <= panel.y + 144.0 {
+        return HitKind::Caption;
+    }
+    HitKind::Client
+}
+
+/// Borderless ZoneEditor hit-test. The self-painted header is the native drag
+/// handle, while its close button and every form control remain client input.
+pub fn zone_editor_nchittest_kind(viewport: bento_nano_style::Size, x: f32, y: f32) -> HitKind {
+    if rect_contains(
+        bento_nano_app::zone_editor_geometry::zone_editor_close_rect(viewport),
+        x,
+        y,
+    ) {
+        return HitKind::Client;
+    }
+    if rect_contains(
+        bento_nano_app::zone_editor_geometry::zone_editor_header_rect(viewport),
+        x,
+        y,
+    ) {
+        return HitKind::Caption;
+    }
+    HitKind::Client
+}
+
 /// Main desktop-overlay hit-test.
 ///
 /// Unlike auxiliary dialogs, the main Ghost Layer covers the desktop work
@@ -296,9 +401,6 @@ pub fn main_nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) ->
     if x < 0.0 || y < 0.0 || x >= app.viewport.width || y >= app.viewport.height {
         return HitKind::Transparent;
     }
-    if app.settings_open.get() || app.about_open.get() {
-        return HitKind::Client;
-    }
     if app.zone_drag.get().is_some()
         || app.zone_resize.get().is_some()
         || app.item_drag.borrow().is_some()
@@ -307,6 +409,14 @@ pub fn main_nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) ->
         return HitKind::Client;
     }
     if stack_overlay_contains(app, x, y) {
+        return HitKind::Client;
+    }
+    if app
+        .active_context_menu
+        .borrow()
+        .as_ref()
+        .is_some_and(|session| popover::context_menu_contains(session, x, y))
+    {
         return HitKind::Client;
     }
     if hit_test_zone_resize_corner(app, x, y).is_some()
@@ -322,35 +432,62 @@ pub fn main_nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) ->
 }
 
 fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
-    if let Some(state) = app.stack_tray.borrow().clone() {
+    let stack_surface = app.stack_tray.borrow().clone();
+    if let Some(state) = stack_surface.as_ref() {
         if let Some(anchor) = app.zones.get(state.anchor_zone_id) {
             if let Some(members) = app.zones.stack_member_ids(anchor.id) {
                 let member_count = members.len();
-                if stack_tray::stack_tray_hit_test(app.viewport, anchor, member_count, x, y)
-                    .is_some()
+                if state.is_management() {
+                    if stack_tray::stack_tray_hit_test(app.viewport, anchor, member_count, x, y)
+                        .is_some()
+                    {
+                        return true;
+                    }
+                    let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
+                    let selected_id = if members.contains(&state.selected_member_id) {
+                        state.selected_member_id
+                    } else {
+                        members[0]
+                    };
+                    if stack_tray::focused_preview_visible(anchor.id, selected_id)
+                        && rect_contains(stack_tray::focused_preview_rect(app.viewport, tray), x, y)
+                    {
+                        return true;
+                    }
+                } else if let Some(member_index) = members
+                    .iter()
+                    .position(|member_id| *member_id == state.selected_member_id)
+                    && let Some(member) = app.zones.get(state.selected_member_id)
                 {
-                    return true;
-                }
-                let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
-                if rect_contains(stack_tray::focused_preview_rect(app.viewport, tray), x, y) {
-                    return true;
+                    let petals =
+                        stack_tray::stack_bloom_petal_rects(app.viewport, anchor, member_count);
+                    if let Some(petal) = petals.get(member_index).copied()
+                        && stack_tray::focused_bloom_preview_contains(
+                            app.viewport,
+                            petal,
+                            &petals,
+                            member,
+                            x,
+                            y,
+                        )
+                    {
+                        return true;
+                    }
                 }
             }
         }
     }
 
-    // #4 / R1 (2026-06-02) — the hover-bloom is a gated, mutually-exclusive
-    // surface: it only paints when the tray is closed and no member is
-    // focused/selected. Mirror that here so the overlay region (click-through)
-    // never claims petal points on a frame where no bloom is shown.
-    if app.stack_tray.borrow().is_some() || app.selected_zone.get().is_some() {
+    // Management mode owns the stack surface and suppresses Bloom. A floating
+    // petal preview does not: Tauri keeps the petals live while it is open.
+    if app.selected_zone.get().is_some()
+        || stack_surface
+            .as_ref()
+            .is_some_and(|state| state.is_management())
+    {
         return false;
     }
-    let Some(anchor_id) = app
-        .hovered_zone
-        .get()
-        .and_then(|zone_id| app.zones.stack_anchor_for(zone_id))
-    else {
+    let Some(anchor_id) = app.stack_bloom_anchor.get() else {
         return false;
     };
     let Some(anchor) = app.zones.get(anchor_id) else {
@@ -424,13 +561,51 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         if x < zx || x >= zr || y < zy || y >= zb {
             continue;
         }
-        for item in z.items.iter().rev() {
+        let search_active = app.zone_search_target.get() == Some(z.id);
+        let search_reveal = if search_active {
+            // SAFETY: GetTickCount is total and thread-safe.
+            app.zone_search_animation_progress_at(unsafe {
+                windows_sys::Win32::System::SystemInformation::GetTickCount()
+            })
+        } else {
+            0.0
+        };
+        let item_top_offset = if search_active {
+            search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * search_reveal
+        } else {
+            0.0
+        };
+        let content_clip = highlight_overlay::item_content_clip_rect(z, item_top_offset);
+        if !rect_contains(content_clip, x, y) {
+            continue;
+        }
+        let scroll_offset = app.zone_content_scroll_offset(z.id);
+        let search_query = search_active.then(|| app.search_bar.borrow().query.clone());
+        let mut search_slot = 0;
+        for item in &z.items {
+            if let Some(query) = search_query.as_ref() {
+                if !search_bar::zone_item_matches_query(item.name.as_ref(), query.as_str()) {
+                    continue;
+                }
+            }
             // P3.8 paint-hit parity: reuse the same item-card rectangle SSoT as
             // the renderer and highlight overlay. This keeps the 16-DIP horizontal
             // inset, 56-DIP grid top, row height, wide-card span, and bottom clamp
             // in lockstep; the old local 8/16/48 math made hit/drag targets drift
             // from the cards the user actually saw.
-            let card = highlight_overlay::item_card_rect_for_item(z, item);
+            let card = if search_active {
+                let (card, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_scrolled(
+                    z,
+                    search_slot,
+                    item.is_wide,
+                    item_top_offset,
+                    scroll_offset,
+                );
+                search_slot = next_slot;
+                card
+            } else {
+                highlight_overlay::item_card_rect_for_item_scrolled(z, item, scroll_offset)
+            };
             if card.width > 0.0
                 && card.height > 0.0
                 && x >= card.x
@@ -445,6 +620,46 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineZoneSearchHit {
+    Body,
+    Clear,
+}
+
+/// Hit-test the active Tauri-parity inline Zone search input.
+pub fn hit_test_inline_zone_search(app: &AppState, x: f32, y: f32) -> Option<InlineZoneSearchHit> {
+    if app.zone_search_closing.get() {
+        return None;
+    }
+    let zone_id = app.zone_search_target.get()?;
+    let zone = app.zones.get(zone_id)?;
+    let zone_rect = Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+    let final_input = search_bar::zone_inline_rect(zone_rect);
+    // SAFETY: GetTickCount is total and thread-safe.
+    let reveal = app.zone_search_animation_progress_at(unsafe {
+        windows_sys::Win32::System::SystemInformation::GetTickCount()
+    });
+    let input = Rect {
+        x: final_input.right() - final_input.width * reveal,
+        width: final_input.width * reveal,
+        ..final_input
+    };
+    if !rect_contains(input, x, y) {
+        return None;
+    }
+    let clear = search_bar::zone_inline_clear_rect(zone_rect);
+    if !app.search_bar.borrow().query.is_empty() && rect_contains(clear, x, y) {
+        Some(InlineZoneSearchHit::Clear)
+    } else {
+        Some(InlineZoneSearchHit::Body)
+    }
+}
+
 /// Grid coordinate under `(x, y)` inside `zone_id`, using the same geometry
 /// constants as [`hit_test_zone_item`] and `Renderer::draw_zones`. The shell
 /// uses this on item mouse-up so a dragged card can produce a real
@@ -456,22 +671,28 @@ pub fn item_grid_position_for_point(
     y: f32,
 ) -> Option<(i32, i32)> {
     let z = app.zones.get(zone_id)?;
-    let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
-    // P3.8: mirror `highlight_overlay::item_card_rect_for_grid` / renderer
-    // geometry. The grid starts 16 DIPs in from the panel edge; row 0 starts at
-    // the 56-DIP header+content-pad SSoT.
-    let inset_x = expanded_zone_grid::HEADER_INSET_X;
-    let columns =
-        item_grid::effective_column_count(z.w as f32, z.grid_columns.max(1), inset_x).max(1) as i32;
-    let columns_f = columns as f32;
-    let cell_w = ((z.w as f32 - inset_x * 2.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
-    let col_stride = cell_w + gap;
-    let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
-    let raw_col = ((x - z.x as f32 - inset_x) / col_stride).floor() as i32;
-    // Same shared grid-top SSoT as the renderer + `hit_test_zone_item`.
-    let raw_row =
-        ((y - z.y as f32 - item_grid::ITEM_GRID_TOP_OFFSET_PX) / row_stride).floor() as i32;
-    Some((raw_col.clamp(0, columns - 1), raw_row.max(0)))
+    let item_top_offset = if app.zone_search_target.get() == Some(zone_id) {
+        // SAFETY: GetTickCount is total and thread-safe.
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            * app.zone_search_animation_progress_at(unsafe {
+                windows_sys::Win32::System::SystemInformation::GetTickCount()
+            })
+    } else {
+        0.0
+    };
+    let scroll_offset = app.zone_content_scroll_offset(zone_id);
+    highlight_overlay::item_grid_position_for_panel(
+        Rect {
+            x: z.x as f32,
+            y: z.y as f32,
+            width: z.w as f32,
+            height: z.h as f32,
+        },
+        z.grid_columns,
+        x,
+        y + scroll_offset,
+        item_top_offset,
+    )
 }
 
 /// Topmost zone whose bottom-right `ZONE_RESIZE_CORNER` square contains
@@ -587,6 +808,10 @@ pub enum SettingsHit {
     TogglePlugin(usize),
     /// Uninstall the visible plugin row at this row index.
     UninstallPlugin(usize),
+    /// Confirm the destructive uninstall action for the visible plugin row.
+    ConfirmUninstallPlugin(usize),
+    /// Cancel the currently pending plugin uninstall confirmation.
+    CancelUninstallPlugin,
     /// Start recording the visible keybinding row at this row index.
     RecordKeybinding(usize),
     /// Reset the visible keybinding row at this row index.
@@ -619,6 +844,12 @@ pub enum SettingsHit {
     /// `index` is the VIBRANT strip index (`0..ACCENT_SWATCH_COUNT`). The
     /// dispatch arm writes `settings_draft_accent_color` + sets `settings_dirty`.
     SelectAccent(u8),
+    /// V21-N15 — §3 Appearance inline hex accent editor (`#rrggbb`).
+    EditAccentColor,
+    /// V21-N16 — §3 Appearance native Windows colour picker launcher.
+    OpenAccentColorPicker,
+    /// V21-N16 - §3 Appearance inline accent reset button.
+    ClearAccentColor,
     /// Process default zone display-mode cycle button.
     CycleZoneDisplayMode,
     /// α4 (Wave I-α, 2026-05-25) — pick a specific zone-display mode
@@ -1104,14 +1335,17 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
     // Startup+Stealth+Updater flags as the renderer PLUS the variable backup
     // row count (capped), so build the same `SettingsBodyFlags` the renderer
     // paints from via `with_backup_rows` (so paint geometry and hit geometry
-    // agree). Interactive: 立即备份 (always) + 刷新 (always) + per-row 恢复
+    // agree). Interactive: 立即备份 (always) + per-row 恢复
     // (one per visible entry). The title/description/status/empty rows are
     // non-interactive. The per-row 恢复 carries the newest-first list index;
     // the dispatch arm maps index → entry → backup_id.
     let backup_entries = app.settings_backup_entries.borrow();
     let backup_visible =
         bento_nano_app::business::settings::backup_card::backup_visible_row_count(&backup_entries);
-    let backup_flags = updater_flags.with_backup_rows(backup_visible);
+    let backup_flags = updater_flags
+        .with_backup_rows(backup_visible)
+        .with_backup_status(app.settings_backup_status.borrow().is_some())
+        .with_encryption_status(app.settings_encryption_status.borrow().is_some());
     let backup_actions = bento_nano_app::settings_panel::settings_backup_actions_row_rect(
         vp,
         scroll_y,
@@ -1121,15 +1355,6 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         bento_nano_app::settings_panel::settings_backup_create_button_rect(backup_actions);
     if x >= create_btn.x && x < create_btn.right() && y >= create_btn.y && y < create_btn.bottom() {
         return SettingsHit::CreateSettingsBackup;
-    }
-    let refresh_btn =
-        bento_nano_app::settings_panel::settings_backup_refresh_button_rect(backup_actions);
-    if x >= refresh_btn.x
-        && x < refresh_btn.right()
-        && y >= refresh_btn.y
-        && y < refresh_btn.bottom()
-    {
-        return SettingsHit::ListSettingsBackups;
     }
     // Per-row 恢复 buttons — only the visible (non-empty, capped) entries.
     if !bento_nano_app::business::settings::backup_card::backup_list_is_empty(&backup_entries) {
@@ -1196,7 +1421,9 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         bento_nano_app::business::settings::plugins_section::plugin_visible_row_count(
             &plugin_entries,
         );
-    let plugin_flags = backup_flags.with_plugin_rows(plugin_visible);
+    let plugin_flags = backup_flags
+        .with_plugin_rows(plugin_visible)
+        .with_plugin_status(app.settings_plugin_status.borrow().is_some());
     let plugin_install = bento_nano_app::settings_panel::settings_plugins_install_button_rect(
         vp,
         scroll_y,
@@ -1224,7 +1451,22 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
             }
             let uninstall =
                 bento_nano_app::settings_panel::settings_plugin_uninstall_button_rect(card);
-            if x >= uninstall.x
+            if app.settings_plugin_uninstall_confirm.get() == Some(card_index) {
+                let cancel =
+                    bento_nano_app::settings_panel::settings_plugin_uninstall_cancel_button_rect(
+                        card,
+                    );
+                if x >= cancel.x && x < cancel.right() && y >= cancel.y && y < cancel.bottom() {
+                    return SettingsHit::CancelUninstallPlugin;
+                }
+                if x >= uninstall.x
+                    && x < uninstall.right()
+                    && y >= uninstall.y
+                    && y < uninstall.bottom()
+                {
+                    return SettingsHit::ConfirmUninstallPlugin(card_index);
+                }
+            } else if x >= uninstall.x
                 && x < uninstall.right()
                 && y >= uninstall.y
                 && y < uninstall.bottom()
@@ -1253,6 +1495,15 @@ pub fn settings_hit(app: &AppState, x: f32, y: f32) -> SettingsHit {
         }
         Some(bento_nano_app::theme_picker::AppearanceHit::Accent(idx)) => {
             return SettingsHit::SelectAccent(idx);
+        }
+        Some(bento_nano_app::theme_picker::AppearanceHit::AccentEditor) => {
+            return SettingsHit::EditAccentColor;
+        }
+        Some(bento_nano_app::theme_picker::AppearanceHit::AccentPicker) => {
+            return SettingsHit::OpenAccentColorPicker;
+        }
+        Some(bento_nano_app::theme_picker::AppearanceHit::AccentClear) => {
+            return SettingsHit::ClearAccentColor;
         }
         None => {}
     }
@@ -1369,11 +1620,246 @@ mod phase21_tests {
     }
 
     #[test]
-    fn main_nchittest_keeps_modal_overlay_dismissal_clickable() {
+    fn main_nchittest_keeps_app_rendered_context_menu_clickable() {
+        let (app, win) = app_and_window_with_minibar(Vec::new());
+        let mut rows = popover::ContextMenuRows::new();
+        rows.push(popover::ContextMenuRow::command(
+            1,
+            "Edit zone",
+            bento_nano_app::business::icons::IconKind::Edit,
+        ));
+        let mut session = popover::ContextMenuSession::new(rows, popover::ContextMenuRows::new());
+        session.set_origin(320.0, 240.0);
+        app.active_context_menu.borrow_mut().replace(session);
+
+        assert_eq!(
+            main_nchittest_kind(&app, &win, 340.0, 260.0),
+            HitKind::Client
+        );
+        assert_eq!(
+            main_nchittest_kind(&app, &win, 40.0, 40.0),
+            HitKind::Transparent
+        );
+    }
+
+    #[test]
+    fn main_nchittest_keeps_bloom_petals_and_floating_preview_clickable() {
+        let anchor = Zone::new(ZoneId(1), Cow::Borrowed("Anchor"), 100, 100, 180, 130);
+        let member = Zone::new(ZoneId(2), Cow::Borrowed("Member"), 420, 100, 320, 220);
+        let (mut app, win) = app_and_window_with_minibar(vec![anchor, member]);
+        assert!(app.zones.stack(ZoneId(1), ZoneId(2)));
+        app.stack_bloom_anchor.set(Some(ZoneId(1)));
+        app.stack_bloom_progress.set(1.0);
+        app.stack_tray
+            .borrow_mut()
+            .replace(stack_tray::StackTrayState::bloom_preview(
+                ZoneId(1),
+                ZoneId(2),
+            ));
+
+        let anchor = app.zones.get(ZoneId(1)).expect("anchor");
+        let member = app.zones.get(ZoneId(2)).expect("member");
+        let petals = stack_tray::stack_bloom_petal_rects(app.viewport, anchor, 2);
+        let selected_petal = petals[1];
+        let preview =
+            stack_tray::focused_bloom_preview_rect(app.viewport, selected_petal, &petals, member);
+
+        assert_eq!(
+            main_nchittest_kind(
+                &app,
+                &win,
+                selected_petal.x + selected_petal.width * 0.5,
+                selected_petal.y + selected_petal.height * 0.5
+            ),
+            HitKind::Client
+        );
+        assert_eq!(
+            main_nchittest_kind(
+                &app,
+                &win,
+                preview.x + preview.width * 0.5,
+                preview.y + preview.height * 0.5
+            ),
+            HitKind::Client
+        );
+    }
+
+    #[test]
+    fn main_nchittest_aux_modal_does_not_block_blank_desktop() {
         let (app, win) = app_and_window_with_minibar(Vec::new());
         app.settings_open.set(true);
 
-        assert_eq!(main_nchittest_kind(&app, &win, 0.0, 0.0), HitKind::Client);
+        assert_eq!(
+            main_nchittest_kind(&app, &win, 420.0, 280.0),
+            HitKind::Transparent
+        );
+    }
+
+    #[test]
+    fn settings_nchittest_drags_from_painted_header_but_not_close_button() {
+        let viewport = Size {
+            width: 480.0,
+            height: 853.0,
+        };
+        let header = bento_nano_app::settings_panel::settings_header_rect(viewport);
+        let close = bento_nano_app::settings_panel::settings_close_button_rect_m1(viewport);
+
+        assert_eq!(
+            settings_nchittest_kind(viewport, header.x + 120.0, header.y + header.height * 0.5),
+            HitKind::Caption
+        );
+        assert_eq!(
+            settings_nchittest_kind(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5
+            ),
+            HitKind::Client
+        );
+    }
+
+    #[test]
+    fn search_nchittest_keeps_margin_transparent_and_header_draggable() {
+        let viewport = Size {
+            width: 620.0,
+            height: 540.0,
+        };
+        let panel = bento_nano_app::business::search_bar::search_panel_rect(viewport);
+        let close = bento_nano_app::business::search_bar::search_close_rect(viewport);
+        assert_eq!(
+            search_nchittest_kind(viewport, 2.0, 2.0),
+            HitKind::Transparent
+        );
+        assert_eq!(
+            search_nchittest_kind(viewport, panel.x + 120.0, panel.y + 24.0),
+            HitKind::Caption
+        );
+        assert_eq!(
+            search_nchittest_kind(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5,
+            ),
+            HitKind::Client
+        );
+    }
+
+    #[test]
+    fn about_nchittest_drags_from_identity_header_but_not_close_button() {
+        let viewport = Size {
+            width: 640.0,
+            height: 520.0,
+        };
+        let close = bento_nano_app::business::about::close_button_rect(viewport);
+
+        assert_eq!(
+            about_nchittest_kind(viewport, 240.0, 72.0),
+            HitKind::Caption
+        );
+        assert_eq!(
+            about_nchittest_kind(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5
+            ),
+            HitKind::Client
+        );
+        assert_eq!(
+            about_nchittest_kind(viewport, 240.0, 300.0),
+            HitKind::Client
+        );
+    }
+
+    #[test]
+    fn zone_editor_nchittest_drags_only_header_and_preserves_close_input() {
+        let viewport = Size {
+            width: 480.0,
+            height: 460.0,
+        };
+        let header = bento_nano_app::zone_editor_geometry::zone_editor_header_rect(viewport);
+        let close = bento_nano_app::zone_editor_geometry::zone_editor_close_rect(viewport);
+        let input = bento_nano_app::zone_editor_geometry::zone_editor_name_input_rect(viewport);
+
+        assert_eq!(
+            zone_editor_nchittest_kind(viewport, header.x + 96.0, header.y + header.height * 0.5),
+            HitKind::Caption
+        );
+        assert_eq!(
+            zone_editor_nchittest_kind(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5
+            ),
+            HitKind::Client
+        );
+        assert_eq!(
+            zone_editor_nchittest_kind(
+                viewport,
+                input.x + input.width * 0.5,
+                input.y + input.height * 0.5
+            ),
+            HitKind::Client
+        );
+    }
+
+    #[test]
+    fn auxiliary_panel_nchittest_drags_header_without_swallowing_close_edge() {
+        let viewport = Size {
+            width: 720.0,
+            height: 540.0,
+        };
+        assert_eq!(
+            auxiliary_panel_nchittest_kind(viewport, 180.0, 26.0),
+            HitKind::Caption
+        );
+        assert_eq!(
+            auxiliary_panel_nchittest_kind(viewport, 680.0, 26.0),
+            HitKind::Client
+        );
+        assert_eq!(
+            auxiliary_panel_nchittest_kind(viewport, 180.0, 92.0),
+            HitKind::Client
+        );
+        assert_eq!(
+            auxiliary_panel_nchittest_kind(viewport, -1.0, 26.0),
+            HitKind::Transparent
+        );
+    }
+
+    #[test]
+    fn bulk_manager_nchittest_keeps_header_search_and_close_interactive() {
+        let viewport = Size {
+            width: 720.0,
+            height: 540.0,
+        };
+        let search =
+            bento_nano_app::business::bulk_manager_panel::bulk_manager_search_rect(viewport);
+        let close = bento_nano_app::business::bulk_manager_panel::bulk_manager_close_rect(viewport);
+
+        assert_eq!(
+            bulk_manager_nchittest_kind(
+                viewport,
+                search.x + search.width * 0.5,
+                search.y + search.height * 0.5
+            ),
+            HitKind::Client
+        );
+        assert_eq!(
+            bulk_manager_nchittest_kind(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5
+            ),
+            HitKind::Client
+        );
+        assert_eq!(
+            bulk_manager_nchittest_kind(viewport, 180.0, 26.0),
+            HitKind::Caption
+        );
+        assert_eq!(
+            bulk_manager_nchittest_kind(viewport, -1.0, 26.0),
+            HitKind::Transparent
+        );
     }
 
     #[test]
@@ -1522,6 +2008,37 @@ mod phase21_tests {
     }
 
     #[test]
+    fn hit_test_zone_item_tracks_expanded_content_scroll() {
+        let mut zone = Zone::new(ZoneId(3), Cow::Borrowed("z"), 10, 10, 240, 180);
+        zone.set_grid_columns(2);
+        for name in ["One", "Two"] {
+            zone.add_item(
+                Cow::Owned(format!("C:/Users/HP/Desktop/{name}.lnk")),
+                Cow::Owned(name.to_owned()),
+            )
+            .expect("first row");
+        }
+        let third = zone
+            .add_item(
+                Cow::Owned("C:/Users/HP/Desktop/Three.lnk".to_owned()),
+                Cow::Borrowed("Three"),
+            )
+            .expect("third item");
+        let app = app_with_zones(vec![zone]);
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
+
+        assert_ne!(
+            hit_test_zone_item(&app, 28.0, 70.0).map(|hit| hit.1),
+            Some(third)
+        );
+        app.set_zone_content_scroll(ZoneId(3), 86.0);
+        assert_eq!(
+            hit_test_zone_item(&app, 28.0, 70.0).map(|hit| hit.1),
+            Some(third)
+        );
+    }
+
+    #[test]
     fn hit_test_zone_item_uses_auto_placed_item_rects_when_wide_cards_shift_following_items() {
         let mut zone = Zone::new(ZoneId(4), Cow::Borrowed("z"), 64, 332, 320, 220);
         zone.set_grid_columns(5);
@@ -1647,6 +2164,28 @@ mod phase21_tests {
     }
 
     #[test]
+    fn hit_test_stack_anchor_uses_stack_capsule_rect_when_collapsed() {
+        let anchor = Zone::new(ZoneId(420), Cow::Borrowed("Anchor"), 100, 100, 240, 180);
+        let child = Zone::new(ZoneId(421), Cow::Borrowed("Child"), 160, 160, 240, 180);
+        let mut app = app_with_zones(vec![anchor, child]);
+        assert!(app.zones.stack(ZoneId(420), ZoneId(421)));
+
+        let anchor = app.zones.get(ZoneId(420)).expect("anchor");
+        let pill = bento_nano_app::zone_pill_geometry::pill_layout_for_zone(anchor, 2);
+        let stack = bento_nano_app::zone_pill_geometry::stack_capsule_layout_for_zone(anchor, 2);
+        assert!(stack.rect.width > pill.rect.width);
+
+        let x_inside_stack_only =
+            pill.rect.right() + (stack.rect.right() - pill.rect.right()) * 0.5;
+        let y = stack.rect.y + stack.rect.height * 0.5;
+        assert_eq!(
+            hit_test_zone(&app, x_inside_stack_only, y),
+            Some(ZoneId(420))
+        );
+        assert_eq!(hit_test_zone(&app, stack.rect.right() + 1.0, y), None);
+    }
+
+    #[test]
     fn hit_test_zone_uses_full_rect_when_expanded() {
         let zone = Zone::new(ZoneId(43), Cow::Borrowed("Docs"), 100, 100, 240, 180);
         let app = app_with_zones(vec![zone]);
@@ -1733,9 +2272,9 @@ mod phase21_tests {
     fn hit_test_zone_morph_complete_uses_full_rect() {
         let zone = Zone::new(ZoneId(46), Cow::Borrowed("Docs"), 100, 100, 240, 180);
         let app = app_with_zones(vec![zone]);
-        // Morph finished at progress=1.0, hover still active — renderer
-        // paints the full expanded chrome, so hit-rect is full rect.
-        app.hovered_zone.set(Some(ZoneId(46)));
+        // Morph finished at progress=1.0 with the zone in a settled expanded
+        // state — renderer paints the full chrome, so hit-rect is full rect.
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Always);
         app.zone_pill_anim_zone.set(Some(ZoneId(46)));
         app.zone_pill_anim_expanding.set(true);
         app.zone_pill_anim_progress.set(1.0);
@@ -1803,14 +2342,15 @@ mod phase21_tests {
     // resolves to the panel.
     #[test]
     fn hit_test_overlapping_expanded_panel_wins_over_buried_pill() {
-        // A = ZoneId(50) will be SELECTED (body visible in default Hover mode).
+        // A = ZoneId(50) will be SELECTED in Click mode.
         // B = ZoneId(51) stays a collapsed pill, declared LATER in zone order so
         // the old single reverse pass would have hit B first.
         let a = Zone::new(ZoneId(50), Cow::Borrowed("Panel"), 100, 100, 240, 180);
         let b = Zone::new(ZoneId(51), Cow::Borrowed("Pill"), 150, 150, 240, 180);
         let app = app_with_zones(vec![a, b]);
-        // Default ZoneDisplayMode::Hover. Select A only → A's body is visible
-        // (expanded/top layer), B remains a collapsed pill (bottom layer).
+        // Click mode makes selection the only structural expansion source:
+        // A is the expanded/top layer, B remains a collapsed bottom-layer pill.
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Click);
         app.selected_zone.set(Some(ZoneId(50)));
 
         // Sanity: the layer predicate splits them as intended.
@@ -1884,8 +2424,9 @@ mod phase21_tests {
             Zone::new(ZoneId(63), Cow::Borrowed("p3"), 300, 200, 240, 180),
         ];
         let app = app_with_zones(zones);
-        // Default Hover mode; select only ZoneId(61) → it is the sole top-layer
-        // zone, the other three stay collapsed pills (bottom layer).
+        // Click mode; select only ZoneId(61) → it is the sole top-layer zone,
+        // while the other three stay collapsed pills (bottom layer).
+        app.set_zone_display_mode(bento_nano_app::ZoneDisplayMode::Click);
         app.selected_zone.set(Some(ZoneId(61)));
 
         // Walk the exact two-pass draw order used by `Renderer::draw_zones`.
@@ -2096,13 +2637,13 @@ mod phase21_tests {
     fn _retired_settings_hit_resolves_visible_backup_entry_restore_in_round_2_m1() {}
 
     /// M1g — reachability: with backup entries seeded, clicking 立即备份 /
-    /// 刷新 / per-row 恢复 resolves to the (previously orphan) backup
+    /// per-row 恢复 resolves to the backup
     /// `SettingsHit` variants. Proves the paint→hit chain is wired — after
     /// this chunk no backup button is painted-but-unwired. Builds the SAME
     /// `SettingsBodyFlags` (idle updater + capped backup count) the hit-tester
     /// derives so the sampled button centres line up with production geometry.
     #[test]
-    fn m1g_settings_hit_resolves_backup_create_refresh_and_per_row_restore() {
+    fn m1g_settings_hit_resolves_backup_create_and_per_row_restore() {
         use bento_nano_app::SettingsBackupEntry;
         use smol_str::SmolStr;
 
@@ -2189,13 +2730,14 @@ mod phase21_tests {
             SettingsHit::CreateSettingsBackup,
         );
         let refresh = bento_nano_app::settings_panel::settings_backup_refresh_button_rect(actions);
-        assert_eq!(
+        assert_ne!(
             settings_hit(
                 &app,
                 refresh.x + refresh.width * 0.5,
                 refresh.y + refresh.height * 0.5
             ),
             SettingsHit::ListSettingsBackups,
+            "the Tauri-parity card has no visible manual Refresh hit target",
         );
         // Per-row 恢复 — index 0 and index 1 each route to their own index.
         for entry_index in 0..visible {
@@ -2219,10 +2761,10 @@ mod phase21_tests {
     }
 
     /// M1g — empty list: with no backup entries there is no per-row restore
-    /// hit (the empty-placeholder row is non-interactive), but 立即备份 /
-    /// 刷新 stay reachable.
+    /// hit (the empty-placeholder row is non-interactive), while 立即备份 stays
+    /// reachable.
     #[test]
-    fn m1g_settings_hit_empty_backup_list_has_no_restore_but_keeps_create_refresh() {
+    fn m1g_settings_hit_empty_backup_list_has_no_restore_but_keeps_create() {
         let app = app_with_zones(vec![]);
         assert!(app.settings_backup_entries.borrow().is_empty());
 
@@ -2549,6 +3091,37 @@ mod phase21_tests {
                 "per-card uninstall must carry the list index",
             );
         }
+
+        // Destructive removal is two-step: once armed, the same right action
+        // becomes Confirm and the adjacent neutral action becomes Cancel.
+        app.settings_plugin_uninstall_confirm.set(Some(0));
+        let first_card = bento_nano_app::settings_panel::settings_plugin_card_rect(
+            app.viewport,
+            scroll_y,
+            &flags,
+            0,
+        );
+        let confirm =
+            bento_nano_app::settings_panel::settings_plugin_uninstall_button_rect(first_card);
+        assert_eq!(
+            settings_hit(
+                &app,
+                confirm.x + confirm.width * 0.5,
+                confirm.y + confirm.height * 0.5,
+            ),
+            SettingsHit::ConfirmUninstallPlugin(0),
+        );
+        let cancel = bento_nano_app::settings_panel::settings_plugin_uninstall_cancel_button_rect(
+            first_card,
+        );
+        assert_eq!(
+            settings_hit(
+                &app,
+                cancel.x + cancel.width * 0.5,
+                cancel.y + cancel.height * 0.5,
+            ),
+            SettingsHit::CancelUninstallPlugin,
+        );
     }
 
     /// M1h — empty list: with no plugins there is no per-card toggle/uninstall
@@ -2613,6 +3186,7 @@ mod phase21_tests {
         );
         assert_ne!(empty_hit, SettingsHit::TogglePlugin(0));
         assert_ne!(empty_hit, SettingsHit::UninstallPlugin(0));
+        assert_ne!(empty_hit, SettingsHit::ConfirmUninstallPlugin(0));
     }
 
     // ── M7 — Encryption §10 inline card hit tests ──────────────────────────
@@ -2777,5 +3351,74 @@ mod phase21_tests {
                 SettingsHit::EditWatchValues,
             );
         }
+    }
+
+    #[test]
+    fn settings_hit_compact_accent_picker_resolves_after_scroll() {
+        let app = app_with_zones(vec![]);
+        let source_count = app.desktop_sources.borrow().len();
+        let flags = bento_nano_app::settings_panel::SettingsBodyFlags::new(
+            app.crash_restart_enabled.get(),
+            app.safe_start_after_hibernation.get(),
+            false,
+            false,
+            bento_nano_app::settings_panel::UpdaterHeightKind::StatusOnly,
+        )
+        .with_source_rows(source_count);
+        let body = bento_nano_app::settings_panel::settings_body_rect(app.viewport);
+        let reserve_delta =
+            bento_nano_app::settings_panel::settings_sources_reserve_delta(source_count);
+        let origin_unscrolled = bento_nano_app::settings_panel::settings_appearance_grid_origin(
+            app.viewport,
+            reserve_delta,
+            &flags,
+        );
+        let layout_unscrolled = bento_nano_app::theme_picker::appearance_layout(
+            origin_unscrolled,
+            bento_nano_app::settings_panel::settings_appearance_inner_width(app.viewport),
+        );
+        let content_h =
+            bento_nano_app::settings_panel::settings_body_content_height(app.viewport, &flags);
+        let max_scroll =
+            bento_nano_app::settings_panel::settings_body_max_scroll(content_h, app.viewport);
+        let scroll_off = (layout_unscrolled.accent_picker.y - body.y)
+            .max(0.0)
+            .min(max_scroll);
+        app.scroll_offset_y.set(scroll_off);
+
+        let folded_scroll = scroll_off + reserve_delta;
+        let origin = bento_nano_app::settings_panel::settings_appearance_grid_origin(
+            app.viewport,
+            folded_scroll,
+            &flags,
+        );
+        let layout = bento_nano_app::theme_picker::appearance_layout(
+            origin,
+            bento_nano_app::settings_panel::settings_appearance_inner_width(app.viewport),
+        );
+        let picker = layout.accent_picker;
+        let (px, py) = (
+            picker.x + picker.width * 0.5,
+            picker.y + picker.height * 0.5,
+        );
+        assert!(
+            py >= body.y && py < body.bottom(),
+            "accent picker centre must scroll into the visible body \
+             (y={}, body=[{}, {}], source_count={}, reserve_delta={}, \
+             max_scroll={}, scroll_off={}, folded_scroll={}, origin_y={})",
+            py,
+            body.y,
+            body.bottom(),
+            source_count,
+            reserve_delta,
+            max_scroll,
+            scroll_off,
+            folded_scroll,
+            origin.y,
+        );
+        assert_eq!(
+            settings_hit(&app, px, py),
+            SettingsHit::OpenAccentColorPicker
+        );
     }
 }

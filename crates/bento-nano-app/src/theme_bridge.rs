@@ -26,9 +26,7 @@ use bento_nano_style::tokens::{
     PALETTE_DARK, PALETTE_LIGHT, PaletteTauri, RadiusTauri, ShadowTauri, TypographyTauri,
 };
 use bento_nano_style::{BorderRadius, Color};
-use bento_nano_theme::{
-    PaletteTokens, RadiusTokens, ShadowTokens, ThemeTokens, radius, shadow,
-};
+use bento_nano_theme::{PaletteTokens, RadiusTokens, ShadowTokens, ThemeTokens, radius, shadow};
 use smol_str::SmolStr;
 
 /// Straight-alpha override (mirrors `render.rs::with_alpha`). Pure, §10.
@@ -204,9 +202,10 @@ pub fn theme_tokens_for_theme(id: &str, base: &ThemeTokens) -> ThemeTokens {
 /// only ones M6b emits.
 fn tauri_font_family_static(tt: TypographyTauri) -> &'static str {
     match tt.font_family {
+        "Segoe UI" => "Segoe UI",
         "Consolas" => "Consolas",
         "Georgia" => "Georgia",
-        _ => "Microsoft YaHei UI",
+        _ => "Segoe UI",
     }
 }
 
@@ -226,10 +225,7 @@ mod tests {
     fn builtin_ocean_blue_resolves_to_exact_const() {
         // The id wins even when the live tokens are the dark default.
         let p = resolve_palette_tauri("ocean-blue", &DARK_DEFAULT.palette);
-        assert_eq!(
-            p,
-            bento_nano_style::tokens::PALETTE_OCEAN_BLUE,
-        );
+        assert_eq!(p, bento_nano_style::tokens::PALETTE_OCEAN_BLUE,);
     }
 
     #[test]
@@ -300,7 +296,11 @@ mod tests {
         // §5.2 net: dark/Rounded keep shadow::DEFAULT.
         for id in ["dark", "light", "midnight", "ocean-blue", "solid"] {
             let st = bento_nano_style::tokens::shadow_tauri_for_theme(id).unwrap();
-            assert_eq!(shadow_tokens_from_tauri(st), shadow::DEFAULT, "{id} shadow drifted");
+            assert_eq!(
+                shadow_tokens_from_tauri(st),
+                shadow::DEFAULT,
+                "{id} shadow drifted"
+            );
         }
     }
 
@@ -339,11 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn theme_tokens_order_sharp_radius_keeps_yahei_font() {
+    fn theme_tokens_order_sharp_radius_keeps_tauri_css_primary_font() {
         let t = theme_tokens_for_theme("order", &LIGHT_DEFAULT);
         // order expanded=8 -> factor 0.5.
         assert_eq!(t.radius.xl.top_left, radius::DEFAULT.xl.top_left * 0.5);
-        assert_eq!(t.typo.font_family.as_str(), "Microsoft YaHei UI");
+        assert_eq!(t.typo.font_family.as_str(), "Segoe UI");
     }
 
     #[test]

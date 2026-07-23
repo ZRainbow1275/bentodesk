@@ -176,6 +176,9 @@ impl WindowSurface {
         unsafe {
             ctx.SetTarget(&target);
             ctx.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // 2026-06-29 V21-T: even on the premultiplied-alpha DComp target,
+            // current Tauri-reference crops keep closer title ink with explicit
+            // ClearType than with Direct2D's alpha-target grayscale fallback.
             ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
         }
 
@@ -223,8 +226,18 @@ pub fn card_geometry(
     })
 }
 
-/// Solid colour brush with premultiplied alpha. CreateSolidColorBrush lives on
-/// the base `ID2D1RenderTarget`; cast the device context to call it.
+#[inline]
+fn straight_alpha_color(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
+    // `D2D1_COLOR_F` is always straight alpha, even when the render target is
+    // premultiplied. Direct2D performs the destination conversion itself.
+    // Premultiplying here would therefore darken every translucent brush a
+    // second time (white@4% became white@0.16% in the final surface).
+    D2D1_COLOR_F { r, g, b, a }
+}
+
+/// Solid colour brush using Direct2D's straight-alpha colour contract.
+/// `CreateSolidColorBrush` lives on the base `ID2D1RenderTarget`; cast the
+/// device context to call it.
 pub fn solid_brush(
     ctx: &ID2D1DeviceContext,
     r: f32,
@@ -232,12 +245,7 @@ pub fn solid_brush(
     b: f32,
     a: f32,
 ) -> Result<ID2D1SolidColorBrush, PlatformError> {
-    let color = D2D1_COLOR_F {
-        r: r * a,
-        g: g * a,
-        b: b * a,
-        a,
-    };
+    let color = straight_alpha_color(r, g, b, a);
     let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
     // SAFETY: rt valid; color lives for the call.
     ok("CreateSolidColorBrush", unsafe {
@@ -365,4 +373,19 @@ pub fn shadow_effect(ctx: &ID2D1DeviceContext, blur: f32) -> Result<ID2D1Effect,
         )
     })?;
     Ok(effect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::straight_alpha_color;
+
+    #[test]
+    fn d2d_brush_color_keeps_rgb_unpremultiplied() {
+        let color = straight_alpha_color(0.25, 0.5, 0.75, 0.2);
+
+        assert!((color.r - 0.25).abs() < f32::EPSILON);
+        assert!((color.g - 0.5).abs() < f32::EPSILON);
+        assert!((color.b - 0.75).abs() < f32::EPSILON);
+        assert!((color.a - 0.2).abs() < f32::EPSILON);
+    }
 }

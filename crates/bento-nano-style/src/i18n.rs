@@ -221,4 +221,46 @@ mod tests {
             "en-US SETTING_PORTABLE_MODE (id 141) must not be blank"
         );
     }
+
+    #[test]
+    fn stack_tray_overlay_strings_are_present_in_both_locales() {
+        let ids = [
+            (
+                zh_ids::BULK_MANAGER_COL_ITEMS,
+                en_ids::BULK_MANAGER_COL_ITEMS,
+            ),
+            (zh_ids::STACK_DISSOLVE, en_ids::STACK_DISSOLVE),
+            (zh_ids::STACK_MEMBERS_LABEL, en_ids::STACK_MEMBERS_LABEL),
+            (zh_ids::STACK_DETACH_MEMBER, en_ids::STACK_DETACH_MEMBER),
+            (zh_ids::STACK_MORE_MEMBERS, en_ids::STACK_MORE_MEMBERS),
+            (
+                zh_ids::STACK_MORE_STACK_MEMBERS,
+                en_ids::STACK_MORE_STACK_MEMBERS,
+            ),
+            (zh_ids::STACK_REORDER_HINT, en_ids::STACK_REORDER_HINT),
+            (zh_ids::FOCUSED_PREVIEW_TITLE, en_ids::FOCUSED_PREVIEW_TITLE),
+            (zh_ids::FOCUSED_PREVIEW_EMPTY, en_ids::FOCUSED_PREVIEW_EMPTY),
+            (
+                zh_ids::STACK_DIMENSION_SEPARATOR,
+                en_ids::STACK_DIMENSION_SEPARATOR,
+            ),
+            (zh_ids::STACK_PREVIEW_ACTIVE, en_ids::STACK_PREVIEW_ACTIVE),
+        ];
+
+        for (zh_id, en_id) in ids {
+            assert_eq!(zh_id, en_id);
+            assert!(
+                !ZH_CN.get(zh_id).is_empty(),
+                "zh-CN StackTray overlay string {zh_id:?} must not be blank"
+            );
+            assert!(
+                !EN_US.get(en_id).is_empty(),
+                "en-US StackTray overlay string {en_id:?} must not be blank"
+            );
+        }
+        assert_eq!(ZH_CN.get(zh_ids::STACK_MEMBERS_LABEL), "成员");
+        assert_eq!(EN_US.get(en_ids::STACK_MEMBERS_LABEL), "Members");
+        assert_eq!(ZH_CN.get(zh_ids::STACK_PREVIEW_ACTIVE), "预览中");
+        assert_eq!(EN_US.get(en_ids::STACK_PREVIEW_ACTIVE), "Preview open");
+    }
 }

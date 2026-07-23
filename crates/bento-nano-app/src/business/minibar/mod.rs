@@ -230,6 +230,8 @@ impl MiniBar {
     ///   `linear-gradient(rgba(18,22,34,0.82), rgba(14,16,26,0.72))`
     ///   gradient — D2D renders a solid fill today; gradient layering is
     ///   tracked as a Wave F follow-up).
+    ///   V21-C2: renderer now consumes the live palette's top + bottom stops;
+    ///   this field remains the legacy/fallback top-stop descriptor.
     /// - border_radius ← `RADIUS.minibar` (14 px — Wave A flagged gap).
     /// - padding ← `SPACING.lg` (16 px) — mirrors the legacy lg slot.
     /// - unpin button tint ← `text_primary`; hover bg ← `surface_hover`.
@@ -546,12 +548,21 @@ mod tests {
             style_tokens::SPACING,
         );
         // Wave A flagged `RADIUS.minibar` = 14 px (resolved gap).
-        assert_eq!(bar.border_radius, BorderRadius::all(style_tokens::RADIUS.minibar));
+        assert_eq!(
+            bar.border_radius,
+            BorderRadius::all(style_tokens::RADIUS.minibar)
+        );
         // Wave A: unique minibar gradient distinct from surface_zen.
-        assert_eq!(bar.background, style_tokens::PALETTE_DARK.minibar_gradient_top);
+        assert_eq!(
+            bar.background,
+            style_tokens::PALETTE_DARK.minibar_gradient_top
+        );
         // Wave B: lg = 16 px.
         assert_eq!(bar.padding.left, style_tokens::SPACING.lg);
-        assert_eq!(bar.unpin_button.tint, style_tokens::PALETTE_DARK.text_primary);
+        assert_eq!(
+            bar.unpin_button.tint,
+            style_tokens::PALETTE_DARK.text_primary
+        );
         assert_eq!(
             bar.unpin_button.hover_background,
             style_tokens::PALETTE_DARK.surface_hover,

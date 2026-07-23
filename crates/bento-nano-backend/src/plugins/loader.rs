@@ -25,7 +25,7 @@ use smol_str::SmolStr;
 use zip::read::ZipArchive;
 
 use super::PluginError;
-use super::manifest::PluginManifest;
+use super::manifest::{PluginManifest, validate_plugin_id};
 use super::registry::{InstalledPlugin, PluginRegistry};
 use crate::themes::{load_theme_file, to_theme_tokens};
 use crate::time;
@@ -79,7 +79,7 @@ pub fn install_from_zip(state_dir: &Path, src: &Path) -> Result<PluginManifest, 
             return Err(PluginError::Conflict(SmolStr::from(manifest.id.clone())));
         }
 
-        let final_dir = install_path_for(state_dir, &manifest.id);
+        let final_dir = install_path_for(state_dir, &manifest.id)?;
         if final_dir.exists() {
             return Err(PluginError::Conflict(SmolStr::from(format!(
                 "{} (install directory already exists)",
@@ -283,12 +283,15 @@ fn validate_payload(_manifest: &PluginManifest, plugin_dir: &Path) -> Result<(),
 pub fn uninstall(id: &str, state_dir: &Path) -> Result<(), PluginError> {
     let mut registry = PluginRegistry::load(state_dir)?;
 
-    let install_path_opt = registry.find(id).map(|p| PathBuf::from(&p.install_path));
-
-    let Some(install_path) = install_path_opt else {
+    if registry.find(id).is_none() {
         tracing::warn!("uninstall: plugin '{id}' is not in the registry");
         return Ok(());
-    };
+    }
+
+    // The registry is persisted user-writable JSON. Never trust its historical
+    // `install_path`: validate the ID and derive the only directory this
+    // lifecycle owns under the active state root.
+    let install_path = install_path_for(state_dir, id)?;
 
     if install_path.exists() {
         std::fs::remove_dir_all(&install_path).map_err(PluginError::Io)?;
@@ -331,8 +334,9 @@ pub fn build_record(manifest: PluginManifest, install_path: &Path) -> InstalledP
 }
 
 /// Return the on-disk path a plugin with `id` would be installed to.
-pub fn install_path_for(state_dir: &Path, id: &str) -> PathBuf {
-    plugins_dir(state_dir).join(id)
+pub fn install_path_for(state_dir: &Path, id: &str) -> Result<PathBuf, PluginError> {
+    validate_plugin_id(id)?;
+    Ok(plugins_dir(state_dir).join(id))
 }
 
 #[cfg(test)]
@@ -428,7 +432,8 @@ mod tests {
         let manifest = install_from_zip(&dir, &src).expect("install");
 
         assert_eq!(manifest.id, "com.example.theme");
-        let install_dir = install_path_for(&dir, "com.example.theme");
+        let install_dir =
+            install_path_for(&dir, "com.example.theme").expect("safe plugin install path");
         assert!(install_dir.join("manifest.json").is_file());
         assert!(install_dir.join("theme.json").is_file());
 
@@ -542,7 +547,7 @@ mod tests {
     #[test]
     fn install_path_for_is_under_plugins_subdir() {
         let dir = scratch_dir();
-        let p = install_path_for(&dir, "com.example.theme");
+        let p = install_path_for(&dir, "com.example.theme").expect("safe plugin install path");
         assert!(
             p.ends_with("plugins/com.example.theme") || p.ends_with("plugins\\com.example.theme")
         );
@@ -551,7 +556,7 @@ mod tests {
     #[test]
     fn build_record_carries_validated_manifest_and_installed_at_is_rfc3339() {
         let dir = scratch_dir();
-        let p = install_path_for(&dir, "com.example.theme");
+        let p = install_path_for(&dir, "com.example.theme").expect("safe plugin install path");
         let rec = build_record(sample_manifest(), &p);
         assert_eq!(rec.id, "com.example.theme");
         assert!(rec.enabled);
@@ -568,7 +573,8 @@ mod tests {
     #[test]
     fn uninstall_removes_registry_entry_and_dir() {
         let dir = scratch_dir();
-        let plug_dir = install_path_for(&dir, "com.example.theme");
+        let plug_dir =
+            install_path_for(&dir, "com.example.theme").expect("safe plugin install path");
         std::fs::create_dir_all(&plug_dir).unwrap();
         std::fs::write(plug_dir.join("theme.json"), "{}").unwrap();
 
@@ -584,9 +590,46 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_ignores_tampered_registry_install_path() {
+        let dir = scratch_dir();
+        let outside_dir = dir.join("outside-plugin-data");
+        std::fs::create_dir_all(&outside_dir).expect("outside dir");
+        let sentinel = outside_dir.join("keep.txt");
+        std::fs::write(&sentinel, "keep").expect("outside sentinel");
+
+        let mut record = build_record(sample_manifest(), &outside_dir);
+        record.install_path = outside_dir.to_string_lossy().into_owned();
+        let mut registry = PluginRegistry::default();
+        registry.plugins.push(record);
+        registry.save(&dir).expect("save tampered registry");
+
+        uninstall("com.example.theme", &dir).expect("safe uninstall");
+
+        assert!(
+            sentinel.is_file(),
+            "uninstall must never follow a persisted path outside plugins/<id>"
+        );
+        assert!(
+            PluginRegistry::load(&dir)
+                .expect("reload")
+                .find("com.example.theme")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn install_path_for_rejects_unsafe_id() {
+        assert!(matches!(
+            install_path_for(Path::new("state"), "../outside"),
+            Err(PluginError::ManifestInvalid(_))
+        ));
+    }
+
+    #[test]
     fn toggle_enabled_flips_persisted_flag() {
         let dir = scratch_dir();
-        let plug_dir = install_path_for(&dir, "com.example.theme");
+        let plug_dir =
+            install_path_for(&dir, "com.example.theme").expect("safe plugin install path");
         std::fs::create_dir_all(&plug_dir).unwrap();
 
         let mut reg = PluginRegistry::default();

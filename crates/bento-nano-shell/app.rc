@@ -1,0 +1,5 @@
+#define IDI_BENTODESK_APP 101
+#define IDI_BENTODESK_TRAY 102
+
+IDI_BENTODESK_APP ICON "app-icon.ico"
+IDI_BENTODESK_TRAY ICON "tray-icon.ico"

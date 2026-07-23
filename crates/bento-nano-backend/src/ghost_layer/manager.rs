@@ -3,14 +3,9 @@
 //! Architecture (inspired by Rainmeter and Stardock Fences):
 //!
 //! The overlay uses `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` to hide from
-//! Alt-Tab and prevent focus stealing. Wave H1 (2026-05-20) parks the
-//! overlay at `HWND_TOPMOST` so every zone pill sits above normal
-//! foreground apps, the way the Tauri 1.2.4 baseline did. The prior
-//! Wave G1 default-z policy let PowerShell / browser windows occlude
-//! most of the 16 pills; before G1 the Mica leak + `HWND_BOTTOM` combo
-//! sank the surface below Explorer's `WorkerW`. Click-through is owned
-//! by `WS_EX_TRANSPARENT` so blank pixels route input to the window
-//! behind, even while topmost.
+//! Alt-Tab and prevent focus stealing. Both the selected-stack DComp host and
+//! legacy attachment path use Tauri's `HWND_BOTTOM` policy: above Explorer's
+//! desktop, below ordinary application windows. Neither path is topmost.
 //!
 //! A WndProc subclass intercepts `WM_WINDOWPOSCHANGING` to prevent Windows
 //! from pushing the overlay behind the desktop when the user clicks elsewhere.
@@ -22,11 +17,9 @@
 //! delegating `WM_NCHITTEST` to the selected-stack shell so blank desktop
 //! space can return `HTTRANSPARENT`.
 //!
-//! Click-through is handled by the selected-stack shell: the shell polls the
-//! cursor against real interactive geometry and toggles `WS_EX_TRANSPARENT`
-//! through [`set_cursor_passthrough`]. Passthrough is ON by default so blank
-//! desktop areas reach Explorer; it is OFF while the pointer is over zones,
-//! toolbars, menus, or modal overlays.
+//! Click-through is handled by the selected-stack shell's exact HWND region;
+//! [`set_cursor_passthrough`] records the matching semantic state without
+//! toggling a full-screen DComp extended style on every frame.
 
 // HWND is `*mut c_void` — Clippy's `not_unsafe_ptr_arg_deref` flags every
 // public function that forwards an HWND into a Win32 API call. In this
@@ -49,11 +42,11 @@ use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SUBCLASSPROC, SetWindowSubclass,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE,
+    GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, HWND_BOTTOM, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, WINDOWPOS, WM_MOUSEACTIVATE, WM_WINDOWPOSCHANGING, WS_BORDER,
-    WS_CAPTION, WS_DLGFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WS_CAPTION, WS_DLGFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::system;
@@ -138,6 +131,27 @@ static EVENT_TX: OnceLock<Sender<GhostLayerEvent>> = OnceLock::new();
 /// `ShowWindow` calls and reset to `false` afterwards.
 static BYPASS_SUBCLASS: AtomicBool = AtomicBool::new(false);
 
+/// Keep the resident Main surface in the desktop layer: above Explorer's
+/// desktop, below every ordinary application window. This is the exact
+/// `HWND_BOTTOM` policy used by the Tauri benchmark.
+fn park_at_desktop_layer(hwnd: HWND, extra_flags: u32) {
+    // SAFETY: callers pass the live Main HWND. The bypass flag only matters for
+    // the legacy subclass path; it is harmless for the lightweight binding.
+    unsafe {
+        BYPASS_SUBCLASS.store(true, Ordering::Release);
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | extra_flags,
+        );
+        BYPASS_SUBCLASS.store(false, Ordering::Release);
+    }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────
 
 /// Wire the WndProc subclass to a [`crossbeam_channel::Sender`] so events
@@ -159,47 +173,15 @@ pub fn cursor_passthrough() -> bool {
     CURSOR_PASSTHROUGH.load(Ordering::Relaxed)
 }
 
-/// Toggle OS-level cursor passthrough for the overlay.
+/// Record cursor passthrough state for the selected-stack overlay.
 ///
 /// This is the selected-stack equivalent of Tauri's
-/// `setIgnoreCursorEvents(true/false)`: when enabled, the main HWND keeps
-/// rendering but mouse input falls through to Explorer/desktop icons; when
-/// disabled, BentoDesk captures input for real zones, toolbars, menus, and
-/// modal overlays.
+/// `setIgnoreCursorEvents(true/false)`. Runtime hit testing is now owned by the
+/// Main HWND region (`Renderer::apply_main_click_through_region`): blank desktop
+/// pixels fall outside the window, and painted chrome remains inside it. Keeping
+/// this function state-only avoids toggling `WS_EX_TRANSPARENT` on the full
+/// resident DComp window, which forces a large DWM private allocation.
 pub fn set_cursor_passthrough(enabled: bool) {
-    let Some(&raw_hwnd) = MAIN_HWND.get() else {
-        CURSOR_PASSTHROUGH.store(enabled, Ordering::Relaxed);
-        return;
-    };
-    let hwnd = raw_hwnd as HWND;
-
-    // SAFETY: `raw_hwnd` is stored during `attach` from a live top-level
-    // HWND. We only mutate the extended-style bitmask for that HWND and
-    // request a non-moving, non-sizing frame refresh; no borrowed pointers
-    // or handles outlive the call.
-    unsafe {
-        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let next_style = if enabled {
-            ex_style | WS_EX_TRANSPARENT as isize
-        } else {
-            ex_style & !(WS_EX_TRANSPARENT as isize)
-        };
-        if next_style != ex_style {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_style);
-            BYPASS_SUBCLASS.store(true, Ordering::Release);
-            SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
-            BYPASS_SUBCLASS.store(false, Ordering::Release);
-        }
-    }
-
     let previous = CURSOR_PASSTHROUGH.swap(enabled, Ordering::Relaxed);
     if previous != enabled {
         tracing::debug!(
@@ -231,16 +213,8 @@ impl Drop for BypassGuard {
 
 /// Show the overlay window without activating it (no focus steal).
 ///
-/// Wave G1 (2026-05-20): the prior `HWND_BOTTOM` reposition sank the
-/// overlay below Explorer's `WorkerW` so the D2D paint was invisible at
-/// rest (only the DWM Mica leak made the surface "appear" present).
-/// Wave H1 (2026-05-20): default z-order let foreground apps push the
-/// overlay behind them, hiding most of the zone pills. The overlay is
-/// now an `HWND_TOPMOST` surface (flag set in `ex_style_for(Main)` and
-/// asserted via `SetWindowPos(HWND_TOPMOST)` in `attach`), so users see
-/// every pill on top of normal windows the way the Tauri 1.2.4 baseline
-/// did. Click-through is still owned by `WS_EX_TRANSPARENT` (toggled by
-/// `set_cursor_passthrough`).
+/// The selected-stack host remains in the normal non-topmost z-order; showing
+/// it without activation must not promote it over the active application.
 pub fn show_window() {
     let Some(&raw_hwnd) = MAIN_HWND.get() else {
         return;
@@ -252,8 +226,9 @@ pub fn show_window() {
     unsafe {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
+    park_at_desktop_layer(hwnd, 0);
     WINDOW_VISIBLE.store(true, Ordering::Relaxed);
-    tracing::debug!("ghost_layer: shown (NOACTIVATE, HWND_TOPMOST)");
+    tracing::debug!("ghost_layer: shown (NOACTIVATE, HWND_BOTTOM)");
 }
 
 /// Hide the overlay window.
@@ -286,23 +261,9 @@ pub fn reposition_to_work_area() {
     };
     let hwnd = raw_hwnd as HWND;
 
-    // SAFETY: HWND valid post-attach; bypass flag is the documented gating
-    // mechanism for our own z-order edits.
-    unsafe {
-        BYPASS_SUBCLASS.store(true, Ordering::Release);
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        BYPASS_SUBCLASS.store(false, Ordering::Release);
-    }
+    park_at_desktop_layer(hwnd, SWP_FRAMECHANGED);
 
-    tracing::info!("ghost_layer: refreshed frame layout without resizing selected-stack HWND");
+    tracing::info!("ghost_layer: refreshed frame layout and restored HWND_BOTTOM desktop layer");
 }
 
 // ─── WndProc subclass ───────────────────────────────────────────────
@@ -371,19 +332,58 @@ unsafe extern "system" fn overlay_subclass_proc(
 
 // ─── Attach / detach ────────────────────────────────────────────────
 
+/// Bind the selected-stack Main HWND to the ghost-layer passthrough controller
+/// without re-running legacy Tauri window surgery.
+///
+/// The selected-stack window factory already creates Main as a borderless DComp
+/// overlay (`WS_POPUP`, `WS_EX_NOREDIRECTIONBITMAP`, normal non-topmost z-order).
+/// The selected stack uses the benchmark's `HWND_BOTTOM` desktop-layer policy;
+/// normal creation z-order alone can leave a newly launched no-activate window
+/// above an already-open browser or editor. Startup still installs the
+/// benchmark's lightweight WndProc subclass so Explorer cannot push Main
+/// behind `WorkerW` during Show Desktop. The expensive legacy DWM/frame-
+/// extension path remains skipped.
+pub fn attach_selected_stack(hwnd: HWND) -> Result<(), GhostLayerError> {
+    if hwnd.is_null() {
+        return Err(GhostLayerError::NullHwnd);
+    }
+
+    let _ = MAIN_HWND.set(hwnd as usize);
+    set_cursor_passthrough(true);
+    CURSOR_PASSTHROUGH.store(true, Ordering::Relaxed);
+
+    // SAFETY: `hwnd` is the live Main top-level window and the callback/id pair
+    // is removed by `detach`. This is the same z-order guard used by the Tauri
+    // benchmark, without legacy DWM non-client mutations.
+    unsafe {
+        let installed =
+            SetWindowSubclass(hwnd, Some(overlay_subclass_proc), OVERLAY_SUBCLASS_ID, 0);
+        if installed == 0 {
+            tracing::warn!("ghost_layer: failed to install selected-stack z-order subclass");
+        }
+    }
+
+    park_at_desktop_layer(hwnd, 0);
+    WINDOW_VISIBLE.store(true, Ordering::Relaxed);
+    tracing::info!(
+        "ghost_layer: attached lightweight selected-stack binding at HWND_BOTTOM with z-order guard"
+    );
+    Ok(())
+}
+
 /// Configure an existing top-level HWND as a non-intrusive desktop overlay.
 ///
 /// Steps (lifted from 1.x):
 /// 1. Strip window decorations (`WS_CAPTION`, `WS_THICKFRAME`, ...).
 /// 2. Set extended styles:
-///    `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT`.
+///    `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`.
 ///    The target HWND is created by the selected-stack window factory with
 ///    `WS_EX_NOREDIRECTIONBITMAP`; `attach` must never add `WS_EX_LAYERED`
 ///    because DirectComposition transparent windows require the two flags to
 ///    stay mutually exclusive.
 /// 3. Install WndProc subclass for z-order protection + NC suppression.
 /// 4. Disable DWM non-client rendering + extend frame fully into client area.
-/// 5. Force frame refresh and assert `HWND_TOPMOST` z-order (Wave H1).
+/// 5. Force frame refresh and park at `HWND_BOTTOM` in normal z-order.
 /// 6. Show without activating.
 /// 7. Re-apply WS_POPUP after a short delay (defends against external code
 ///    that re-touches the style — Tauri did this in 1.x; in nano this still
@@ -450,10 +450,7 @@ pub fn attach(hwnd: HWND) -> Result<(), GhostLayerError> {
     // SAFETY: GetWindowLongPtrW/SetWindowLongPtrW with valid HWND.
     unsafe {
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let new_ex_style = ex_style
-            | WS_EX_TOOLWINDOW as isize
-            | WS_EX_NOACTIVATE as isize
-            | WS_EX_TRANSPARENT as isize;
+        let new_ex_style = ex_style | WS_EX_TOOLWINDOW as isize | WS_EX_NOACTIVATE as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex_style);
     }
     CURSOR_PASSTHROUGH.store(true, Ordering::Relaxed);
@@ -489,33 +486,12 @@ pub fn attach(hwnd: HWND) -> Result<(), GhostLayerError> {
         }
     }
 
-    // ── Step 5: Force a non-moving frame refresh + HWND_TOPMOST ───
+    // ── Step 5: Force a non-moving frame refresh + HWND_BOTTOM ────
     //
-    // Wave G1 (2026-05-20): the prior `HWND_BOTTOM` reposition sank the
-    // overlay below `WorkerW` so the D2D paint never reached the user.
-    // Wave H1 (2026-05-20): default z-order still let foreground apps
-    // (PowerShell, browser, etc.) push the overlay behind them, so only
-    // 2 of 16 zone pills were visible. The Main HWND now carries
-    // `WS_EX_TOPMOST` (set in `bento-nano-platform/src/window.rs::ex_style_for`)
-    // and we explicitly insert after `HWND_TOPMOST` here so the overlay
-    // sits above all normal windows, matching the Tauri 1.2.4 baseline.
-    // `WS_EX_TRANSPARENT` still routes blank-pixel clicks to whatever
-    // window sits behind the overlay, so click-through is preserved.
+    // W13-A restores the source benchmark's desktop-layer contract: Main is
+    // above the shell at rest but below ordinary application windows.
     //
-    // SAFETY: HWND valid; bypass flag toggled to gate the subclass veto.
-    unsafe {
-        BYPASS_SUBCLASS.store(true, Ordering::Release);
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
-        BYPASS_SUBCLASS.store(false, Ordering::Release);
-    }
+    park_at_desktop_layer(hwnd, SWP_FRAMECHANGED);
 
     // ── Step 6: Show without activating ───────────────────────────
     // SAFETY: ShowWindow with valid HWND.
@@ -525,7 +501,7 @@ pub fn attach(hwnd: HWND) -> Result<(), GhostLayerError> {
     WINDOW_VISIBLE.store(true, Ordering::Relaxed);
 
     tracing::info!(
-        "ghost_layer: attached preserving selected-stack HWND bounds — NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT_BY_DEFAULT | NO_DECORATIONS | HWND_TOPMOST | SUBCLASSED"
+        "ghost_layer: attached preserving selected-stack HWND bounds — NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT_BY_DEFAULT | NO_DECORATIONS | HWND_BOTTOM | SUBCLASSED"
     );
 
     // ── Step 7: Deferred style re-apply ──────────────────────────

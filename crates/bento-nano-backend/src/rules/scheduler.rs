@@ -90,6 +90,9 @@ fn scan_due_and_emit(
     state_dir: &std::path::Path,
     event_tx: &Sender<SchedulerEvent>,
 ) -> Result<(), crossbeam_channel::SendError<SchedulerEvent>> {
+    if !super::rules_path(state_dir).is_file() {
+        return Ok(());
+    }
     let rules = load_all(state_dir);
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -169,6 +172,15 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         scan_due_and_emit(&dir, &tx).expect("emit");
         assert!(rx.try_recv().is_err(), "disabled rule must not emit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_due_skips_missing_rules_file() {
+        let dir = scratch_dir();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        scan_due_and_emit(&dir, &tx).expect("missing rules file is an idle tick");
+        assert!(rx.try_recv().is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

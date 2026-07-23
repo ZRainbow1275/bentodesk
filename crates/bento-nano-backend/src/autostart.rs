@@ -264,6 +264,10 @@ mod tests {
     /// real `"BentoDeskNano"` autostart entry and cannot leave a stray
     /// registration behind even if an assert trips mid-test.
     const TEST_VALUE_NAME: &str = "BentoDeskNano__unit_test_marker__";
+    /// Separate marker for the absent-delete test. The Rust test harness runs
+    /// tests concurrently; sharing `TEST_VALUE_NAME` let this test delete the
+    /// round-trip test's value between its write and read.
+    const TEST_ABSENT_VALUE_NAME: &str = "BentoDeskNano__unit_test_absent_marker__";
 
     /// Round-trips the private helpers with a dummy value. This exercises the
     /// real write/read/delete path against `HKCU\...\Run` WITHOUT registering
@@ -292,7 +296,7 @@ mod tests {
     #[test]
     fn delete_absent_is_ok() {
         // Ensure absent first (no-op if it never existed).
-        let _ = run_key_delete(TEST_VALUE_NAME);
-        run_key_delete(TEST_VALUE_NAME).expect("deleting an absent value is success");
+        let _ = run_key_delete(TEST_ABSENT_VALUE_NAME);
+        run_key_delete(TEST_ABSENT_VALUE_NAME).expect("deleting an absent value is success");
     }
 }

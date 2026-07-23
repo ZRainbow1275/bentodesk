@@ -7,9 +7,8 @@
 //! Phase 1 / T-011 — adds the multi-window factory `create_window(kind, parent)`
 //! plus the `WindowKind` taxonomy that drives ex-style selection, default
 //! sizing, focus / activation behaviour, and §11 R5 hibernation eligibility.
-//! `create_transparent_window` remains for the legacy single-Main-window path
-//! (the BentoDesk minibar uses it) until T-077 / T-078 pull MiniBar / Settings
-//! through the factory.
+//! `create_transparent_window` remains for the legacy single-Main-window path;
+//! MiniBar / Settings are now created through the multi-window factory.
 
 use std::ptr;
 
@@ -17,13 +16,33 @@ use windows_sys::Win32::Foundation::{HMODULE, HWND};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, HCURSOR, HICON, IDC_ARROW, LoadCursorW, RegisterClassExW,
-    SW_SHOWNORMAL, ShowWindow, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
-    WS_POPUPWINDOW, WS_VISIBLE,
+    CS_DBLCLKS, CW_USEDEFAULT, CreateWindowExW, HCURSOR, HICON, IDC_ARROW, LoadCursorW, LoadIconW,
+    RegisterClassExW, SW_SHOWNORMAL, ShowWindow, WNDCLASSEXW, WNDPROC, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::errors::PlatformError;
+
+const APP_ICON_RESOURCE_ID: u16 = 101;
+const TRAY_ICON_RESOURCE_ID: u16 = 102;
+const WINDOW_CLASS_STYLE: u32 = CS_DBLCLKS;
+
+#[allow(clippy::manual_dangling_ptr)]
+fn load_module_icon(hinst: HMODULE, resource_id: u16) -> HICON {
+    // SAFETY: Win32 `MAKEINTRESOURCEW(id)` is the documented low-word pointer
+    // sentinel accepted by LoadIconW; both IDs are compiled into app.res.
+    unsafe { LoadIconW(hinst, resource_id as usize as *const u16) }
+}
+
+/// Load the BentoDesk tray icon embedded in the current executable.
+///
+/// The returned handle is a shared module resource and must not be destroyed.
+pub fn load_tray_icon() -> HICON {
+    // SAFETY: null requests the current executable module.
+    let hinst = unsafe { GetModuleHandleW(ptr::null()) };
+    load_module_icon(hinst, TRAY_ICON_RESOURCE_ID)
+}
 
 /// Categorical role of a window. Drives ex-style selection (`ex_style_for`),
 /// default geometry (`default_size`), focus/activation behaviour, intended
@@ -33,24 +52,24 @@ use crate::errors::PlatformError;
 ///
 /// | Kind          | ex-style highlights                                  | Activation | Z-order      | Hibernates? |
 /// |---------------|------------------------------------------------------|------------|--------------|-------------|
-/// | `Main`        | NoRedirectionBitmap + Topmost (fully transparent overlay) | normal | topmost      | NEVER       |
+/// | `Main`        | NoRedirectionBitmap + ToolWindow + NoActivate             | NO steal | below apps | NEVER |
 /// | `IconPicker`  | NoRedirectionBitmap                                  | accepts    | above main   | yes         |
 /// | `CapsulePicker`| NoRedirectionBitmap                                 | accepts    | above main   | yes         |
-/// | `ContextMenu` | NoRedirectionBitmap + Topmost + NoActivate           | NO steal   | topmost      | yes         |
+/// | `ContextMenu` | NoRedirectionBitmap + ToolWindow                     | accepts    | above owner  | yes         |
 /// | `Tooltip`     | ToolWindow + NoActivate + Transparent (click-thru)   | NO steal   | topmost      | yes         |
 /// | `DragPreview` | NoRedirectionBitmap + Layered + Transparent + Topmost| NO steal   | topmost      | yes         |
-/// | `Settings`    | NoRedirectionBitmap (popup-window + caption)         | accepts    | normal-modal | yes         |
-/// | `About`       | NoRedirectionBitmap (popup-window + caption)         | accepts    | normal-modal | yes         |
-/// | `MiniBar`     | NoActivate + Topmost + Layered                       | NO steal   | topmost      | yes         |
+/// | `Settings`    | NoRedirectionBitmap + borderless popup               | accepts    | normal-modal | yes         |
+/// | `About`       | NoRedirectionBitmap + borderless popup               | accepts    | normal-modal | yes         |
+/// | `MiniBar`     | NoRedirectionBitmap + NoActivate + Topmost           | NO steal   | topmost      | yes         |
 /// | `Timeline`    | NoRedirectionBitmap                                  | accepts    | normal-modal | yes         |
 /// | `SnapshotPicker`| NoRedirectionBitmap                                | accepts    | normal-modal | yes         |
 /// | `Search`      | NoRedirectionBitmap                                  | accepts    | normal-modal | yes         |
 ///
-/// `DragPreview` and `MiniBar` use `WS_EX_LAYERED` instead of NoRedirectionBitmap
-/// because they need cursor-following alpha animation (the `WS_EX_LAYERED` path
-/// is the only Win32 transparent-window mode that also follows the cursor
-/// without DComp visual tree work). See §4.1: NoRedirectionBitmap + Layered are
-/// **mutually exclusive** — picking one or the other per kind avoids that trap.
+/// `DragPreview` is the only Layered transparent-window mode because it follows
+/// the cursor via the `UpdateLayeredWindow` pattern. MiniBar is rendered by the
+/// same DComp swap-chain path as other selected-stack aux windows, so it must
+/// keep NoRedirectionBitmap and never request Layered. See §4.1:
+/// NoRedirectionBitmap + Layered are **mutually exclusive**.
 ///
 /// ΔB ruling (master-decomposition §11): `serde::Serialize + Deserialize`
 /// derives are forward-compat surface for the v2.x scripting / plugin
@@ -63,10 +82,9 @@ pub enum WindowKind {
     /// Primary application window. Fully transparent fullscreen overlay
     /// — no DWM Mica/Acrylic, no full-screen scrim. Per-pill + per-modal
     /// surfaces paint their own translucent dark in `Renderer::draw_zones`
-    /// and `Renderer::draw_settings_panel`. Accepts focus, `HWND_TOPMOST`
-    /// z-order (Wave H1 — keeps zone pills above foreground apps the way
-    /// the Tauri 1.2.4 baseline did). Never hibernates (always-resident
-    /// swap chain).
+    /// and `Renderer::draw_settings_panel`. It stays in the normal desktop
+    /// z-order so regular foreground applications cover it, matching the
+    /// Tauri `alwaysOnTop: false` baseline. Never hibernates.
     Main,
     /// Icon picker — full-grid widget gallery for assigning icons to zones.
     /// Accepts focus, sized 1280×720, hibernates when dismissed.
@@ -74,9 +92,9 @@ pub enum WindowKind {
     /// Capsule picker — compact app-launcher style picker. Accepts focus,
     /// 480×600, hibernates on dismiss.
     CapsulePicker,
-    /// Right-click context menu — small floating panel. Topmost,
-    /// NoActivate so the menu doesn't steal focus from the owner window
-    /// when it appears. 240×200 default.
+    /// Right-click context menu — app-rendered, focusable owned popup. Its
+    /// ToolWindow style keeps it out of Alt-Tab/taskbar; activation enables
+    /// Escape/arrow navigation and reliable outside-click dismissal.
     ContextMenu,
     /// Hover tooltip — tiny click-through label. Topmost, NoActivate,
     /// Transparent (mouse passes straight through). 200×40 default.
@@ -89,8 +107,8 @@ pub enum WindowKind {
     /// today). Popup-window with caption; modal-style click-outside
     /// dismissal handled by the shell. 800×600 default.
     Settings,
-    /// About dialog. Popup-window with caption; the runtime content is drawn
-    /// by `bento-nano-app::Renderer::draw_about_panel`. 360×280 default.
+    /// About dialog. Borderless DComp card; the runtime content is drawn
+    /// by `bento-nano-app::Renderer::draw_about_panel`. 640x520 default.
     About,
     /// Pinned-zone mini bar — one HWND per pinned zone. Topmost,
     /// NoActivate. §11 R7 caps the count at 8 (registry refuses the 9th).
@@ -106,7 +124,7 @@ pub enum WindowKind {
     /// Modal-style popup with caption. 720×540 default.
     BulkManager,
     /// Single-zone form editor — name / icon / size / position fields.
-    /// Modal-style popup with caption. 480×360 default.
+    /// Modal-style popup with caption. 480×460 default.
     ZoneEditor,
     /// Single-item filesystem rename dialog.
     ItemFileRename,
@@ -148,20 +166,20 @@ impl WindowKind {
 pub fn default_size(kind: WindowKind) -> (i32, i32) {
     match kind {
         WindowKind::Main => (1920, 1080),
-        WindowKind::IconPicker => (1280, 720),
+        WindowKind::IconPicker => (480, 640),
         WindowKind::CapsulePicker => (480, 600),
         WindowKind::ContextMenu => (240, 200),
         WindowKind::Tooltip => (200, 40),
         WindowKind::DragPreview => (64, 64),
         WindowKind::Settings => (800, 600),
-        WindowKind::About => (360, 280),
+        WindowKind::About => (640, 520),
         WindowKind::MiniBar => (280, 80),
         WindowKind::PalettePicker => (320, 240),
         WindowKind::RulesWizard => (640, 480),
         WindowKind::BulkManager => (720, 540),
-        WindowKind::ZoneEditor => (480, 360),
+        WindowKind::ZoneEditor => (480, 460),
         WindowKind::ItemFileRename => (520, 240),
-        WindowKind::Suggestor => (640, 560),
+        WindowKind::Suggestor => (522, 574),
         WindowKind::Timeline => (820, 600),
         WindowKind::SnapshotPicker => (520, 520),
         WindowKind::Search => (620, 540),
@@ -209,43 +227,50 @@ pub fn ex_style_for(kind: WindowKind) -> (u32, u32) {
             // returns `HTTRANSPARENT` for empty pixels so Explorer keeps
             // receiving desktop-icon clicks.
             //
-            // Wave H1 (2026-05-20) — `WS_EX_TOPMOST` lifts the overlay above
-            // all normal windows so the user always sees the zone pills, the
-            // way the Tauri 1.2.4 baseline did. Blank-pixel click-through is
-            // preserved by the `WS_EX_TRANSPARENT` toggle managed by
-            // `apply_ghost_cursor_passthrough_for_point` (the wndproc subclass
-            // adds the flag on attach and the per-frame timer toggles it off
-            // when the cursor is over a real surface).
+            // W13-A (2026-07-13) — Tauri's real baseline is
+            // `alwaysOnTop: false`: Zone surfaces belong to the desktop layer
+            // and regular application windows must cover them. TOPMOST here
+            // made the full-screen DComp host overlay Word/browser windows.
+            // ToolWindow keeps the host out of Alt-Tab/taskbar; NoActivate
+            // prevents closing another app from foregrounding the fullscreen
+            // transparent host.
             //
-            // V-10 (2026-05-21) — `WS_EX_TRANSPARENT` is now part of the
-            // initial ex_style so the overlay starts click-through. Without
-            // this, the gap between `CreateWindowExW` and the first
-            // `apply_ghost_cursor_passthrough_for_point` tick (driven by the
-            // ghost-layer WM_TIMER ~16ms cadence) leaves the Main HWND opaque
-            // to input — Explorer cannot receive desktop-icon clicks during
-            // launch. The per-frame timer still *clears* the flag whenever the
-            // cursor sits over a real surface (pill / expanded zone), so the
-            // semantic is inverted: default = transparent, real-surface =
-            // opaque. See `set_cursor_passthrough` in
-            // `bento-nano-backend::ghost_layer::manager`.
+            // W13-B — SetWindowRgn is the selected stack's single
+            // click-through authority. Keeping WS_EX_TRANSPARENT on Main made
+            // its correctly-shaped region visible but unable to receive real
+            // mouse input once the host moved below regular applications.
             (
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
+                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 WS_POPUP | WS_VISIBLE,
             )
         }
-        WindowKind::IconPicker | WindowKind::CapsulePicker => {
-            // Picker windows accept focus (user types / clicks selection).
-            // WS_POPUP + NoRedirectionBitmap = focusable transparent surface.
-            (WS_EX_NOREDIRECTIONBITMAP, WS_POPUP | WS_VISIBLE)
+        WindowKind::IconPicker
+        | WindowKind::CapsulePicker
+        | WindowKind::Settings
+        | WindowKind::About
+        | WindowKind::PalettePicker
+        | WindowKind::RulesWizard
+        | WindowKind::BulkManager
+        | WindowKind::ZoneEditor
+        | WindowKind::ItemFileRename
+        | WindowKind::Suggestor
+        | WindowKind::Timeline
+        | WindowKind::SnapshotPicker
+        | WindowKind::Search => {
+            // Every focusable application-owned surface is fully painted by
+            // the native D2D/DComp renderer.  A second OS caption produces the
+            // unfinished "debug window" layer the desktop product must never
+            // expose, and WS_VISIBLE can flash that unpositioned host at (0,0)
+            // before its swap chain exists.  Use one hidden, borderless popup
+            // contract; the shell centres and shows it only after registration.
+            (WS_EX_NOREDIRECTIONBITMAP, WS_POPUP)
         }
         WindowKind::ContextMenu => {
-            // Menus must NOT steal focus from the owner: NoActivate keeps the
-            // owner's caret intact. Topmost so the menu paints above the
-            // BentoCard. NoRedirectionBitmap is still fine here (DComp paint).
-            (
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                WS_POPUP | WS_VISIBLE,
-            )
+            // App-rendered menu: ToolWindow keeps it out of Alt-Tab/taskbar,
+            // while a focusable owned popup receives Escape/arrow navigation
+            // and closes on deactivation. It starts hidden so its DComp slot is
+            // fully seeded before the shell positions and shows the first row.
+            (WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW, WS_POPUP)
         }
         WindowKind::Tooltip => {
             // ToolWindow keeps the tooltip out of the alt-tab list and
@@ -269,50 +294,13 @@ pub fn ex_style_for(kind: WindowKind) -> (u32, u32) {
                 WS_POPUP | WS_VISIBLE,
             )
         }
-        WindowKind::Settings => {
-            // V-1 (TL ruling 2026-05-21) — Settings is a Tauri-style borderless
-            // modal: panel paints its own header (设置 + ×) per frame_060, so
-            // the OS caption + border + sysmenu must be off. NoRedirectionBitmap
-            // keeps DComp composition active for the floating dark card chrome
-            // + drop-shadow ring; WS_EX_TOPMOST keeps it above foreground apps
-            // (Wave H4 ruling carry-over). Bare WS_POPUP means no caption, no
-            // sysmenu, no resize border — exactly what frame_060 shows.
-            (
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST,
-                WS_POPUP | WS_VISIBLE,
-            )
-        }
-        WindowKind::About
-        | WindowKind::PalettePicker
-        | WindowKind::RulesWizard
-        | WindowKind::BulkManager
-        | WindowKind::ZoneEditor
-        | WindowKind::ItemFileRename
-        | WindowKind::Suggestor
-        | WindowKind::Timeline
-        | WindowKind::SnapshotPicker
-        | WindowKind::Search => {
-            // Modal-style wizard/overlay dialogs that still want a native OS
-            // caption + sysmenu (legacy paths not yet migrated to a Tauri-style
-            // borderless shell). WS_POPUPWINDOW = WS_POPUP | WS_BORDER |
-            // WS_SYSMENU; add WS_CAPTION so the title bar shows.
-            // NoRedirectionBitmap keeps DComp composition active for the panel
-            // chrome (Mica-style fill once theme picks it up).
-            //
-            // Wave H4 (2026-05-20) — `WS_EX_TOPMOST` so they stay above active
-            // foreground apps (modal-dialog UX).
-            (
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST,
-                WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE,
-            )
-        }
         WindowKind::MiniBar => {
-            // Pinned MiniBar follows the same alpha-animatable pattern as
-            // DragPreview but without TRANSPARENT (the user must be able
-            // to click the bar to interact with the zone). Layered + Topmost
-            // + NoActivate keeps it floating without focus theft.
+            // MiniBar is painted by the DComp renderer, not UpdateLayeredWindow.
+            // Per spec 4.1 it must use NoRedirectionBitmap exclusively of
+            // Layered; Topmost + NoActivate keeps it floating without focus
+            // theft while still allowing direct clicks on the bar.
             (
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 WS_POPUP | WS_VISIBLE,
             )
         }
@@ -380,10 +368,7 @@ impl<'a> WindowDesc<'a> {
             wnd_proc,
             topmost: matches!(
                 kind,
-                WindowKind::ContextMenu
-                    | WindowKind::Tooltip
-                    | WindowKind::DragPreview
-                    | WindowKind::MiniBar
+                WindowKind::Tooltip | WindowKind::DragPreview | WindowKind::MiniBar
             ),
             kind,
         }
@@ -430,20 +415,24 @@ pub fn create_transparent_window(desc: &WindowDesc<'_>) -> Result<HWND, Platform
 pub fn create_window(desc: &WindowDesc<'_>, parent: HWND) -> Result<HWND, PlatformError> {
     // SAFETY: GetModuleHandleW(null) returns the .exe module; always succeeds.
     let hinst: HMODULE = unsafe { GetModuleHandleW(ptr::null()) };
+    let app_icon = load_module_icon(hinst, APP_ICON_RESOURCE_ID);
     let class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: 0,
+        // Tauri ItemCard opens on native double-click. CS_DBLCLKS makes
+        // user32 emit WM_LBUTTONDBLCLK instead of a second WM_LBUTTONDOWN so
+        // the shell can preserve single-click selection/drag semantics.
+        style: WINDOW_CLASS_STYLE,
         lpfnWndProc: desc.wnd_proc,
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinst,
-        hIcon: 0 as HICON,
+        hIcon: app_icon,
         // SAFETY: LoadCursorW with null hinst + system IDC_ARROW always valid.
         hCursor: unsafe { LoadCursorW(0 as HMODULE, IDC_ARROW) } as HCURSOR,
         hbrBackground: ptr::null_mut(),
         lpszMenuName: ptr::null(),
         lpszClassName: desc.class_name.as_ptr(),
-        hIconSm: 0 as HICON,
+        hIconSm: app_icon,
     };
     // SAFETY: `class` fully initialised; pointer lives for the call.
     let atom = unsafe { RegisterClassExW(&class) };
@@ -509,9 +498,9 @@ pub fn create_window(desc: &WindowDesc<'_>, parent: HWND) -> Result<HWND, Platfo
     // D2D paint and produces a whiteboard look), so the attribute is no
     // longer set for the Main HWND.
 
-    // Fix #17 — legacy caption-bearing dialogs (About / PalettePicker /
-    // RulesWizard / BulkManager / ZoneEditor / ItemFileRename / Suggestor /
-    // Timeline / SnapshotPicker / Search; see `ex_style_for`) carry a native
+    // Fix #17 — legacy caption-bearing dialogs (PalettePicker / RulesWizard /
+    // BulkManager / ItemFileRename / Suggestor / Timeline / SnapshotPicker /
+    // Search; see `ex_style_for`) carry a native
     // OS title bar. BentoDesk Nano is dark-themed, but on Windows 10 1809+
     // those captions render light/white by default — a visible mismatch
     // against the dark panels. Gate the immersive-dark-caption attribute on
@@ -523,8 +512,14 @@ pub fn create_window(desc: &WindowDesc<'_>, parent: HWND) -> Result<HWND, Platfo
         apply_immersive_dark_caption(hwnd);
     }
 
-    // SAFETY: hwnd valid; SW_SHOWNORMAL standard cmd.
-    unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
+    // Respect the kind matrix's initial-visibility contract. Hidden popups
+    // (ContextMenu and ZoneEditor) must be positioned and have their DComp
+    // renderer seeded before a caller explicitly shows them; unconditionally
+    // calling ShowWindow here caused a visible top-left construction flash.
+    if (style & WS_VISIBLE) != 0 {
+        // SAFETY: hwnd valid; SW_SHOWNORMAL standard cmd.
+        unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
+    }
     Ok(hwnd)
 }
 
@@ -622,8 +617,10 @@ fn scale_96_dpi_dimension(value: i32, dpi: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CW_USEDEFAULT, WindowKind, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-        WS_POPUP, default_size, ex_style_for, main_window_rect, scale_96_dpi_dimension,
+        CS_DBLCLKS, CW_USEDEFAULT, WINDOW_CLASS_STYLE, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        WS_VISIBLE, WindowKind, default_size, ex_style_for, main_window_rect,
+        scale_96_dpi_dimension,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
 
@@ -631,6 +628,11 @@ mod tests {
     fn scale_96_dpi_dimension_keeps_96_dpi_identity() {
         assert_eq!(scale_96_dpi_dimension(480, 96), 480);
         assert_eq!(scale_96_dpi_dimension(360, 96), 360);
+    }
+
+    #[test]
+    fn window_class_requests_native_double_click_messages() {
+        assert_ne!(WINDOW_CLASS_STYLE & CS_DBLCLKS, 0);
     }
 
     #[test]
@@ -651,6 +653,11 @@ mod tests {
     #[test]
     fn main_default_size_is_fullscreen_fallback() {
         assert_eq!(default_size(WindowKind::Main), (1920, 1080));
+    }
+
+    #[test]
+    fn icon_picker_default_is_a_compact_dialog_not_a_desktop_slab() {
+        assert_eq!(default_size(WindowKind::IconPicker), (480, 640));
     }
 
     /// Wave C — Main HWND must be a borderless `WS_POPUP` transparent overlay.
@@ -679,49 +686,57 @@ mod tests {
         );
     }
 
-    /// Wave H1 (2026-05-20) — Main HWND must carry `WS_EX_TOPMOST` so the
-    /// fully transparent overlay (zone pills + toolbar) floats above all
-    /// foreground apps, matching the Tauri 1.2.4 baseline. Click-through
-    /// for blank pixels is preserved by `WS_EX_TRANSPARENT` toggled by
-    /// the ghost-layer cursor-passthrough timer.
+    /// W13-A (2026-07-13) — the Tauri benchmark uses `alwaysOnTop: false`.
+    /// Main must remain in normal z-order so regular applications cover the
+    /// desktop surface.
     #[test]
-    fn main_ex_style_is_topmost() {
+    fn main_ex_style_is_not_topmost() {
         let (ex, _) = ex_style_for(WindowKind::Main);
-        assert!(
-            ex & WS_EX_TOPMOST != 0,
-            "Main must request WS_EX_TOPMOST per Wave H1 (pills above foreground apps)"
+        assert_eq!(
+            ex & WS_EX_TOPMOST,
+            0,
+            "Main must not cover foreground applications"
         );
     }
 
-    /// V-10 (2026-05-21) — Main HWND must carry `WS_EX_TRANSPARENT` at creation
-    /// so launch-time clicks fall through to Explorer / desktop icons. The
-    /// ghost-layer cursor-passthrough timer *clears* the flag when the cursor
-    /// is over a real surface (pill / expanded zone), inverting Wave H1's
-    /// "toggled on at first tick" semantics into "default on, cleared when
-    /// over a real surface". Closes the startup interaction-blocked window.
+    /// W13-B — blank desktop click-through is owned by the exact Main HWND
+    /// region. WS_EX_TRANSPARENT would also discard input inside that region.
     #[test]
-    fn main_ex_style_is_transparent_at_creation() {
+    fn main_ex_style_uses_region_instead_of_transparent_window() {
         let (ex, _) = ex_style_for(WindowKind::Main);
-        assert!(
-            ex & WS_EX_TRANSPARENT != 0,
-            "Main must request WS_EX_TRANSPARENT at creation per V-10 (startup click-through)"
+        assert_eq!(
+            ex & WS_EX_TRANSPARENT,
+            0,
+            "Main must receive mouse input inside its installed chrome region"
         );
+    }
+
+    #[test]
+    fn context_menu_is_focusable_owned_toolwindow_and_starts_hidden() {
+        let (ex, style) = ex_style_for(WindowKind::ContextMenu);
+        assert_ne!(ex & WS_EX_NOREDIRECTIONBITMAP, 0);
+        assert_ne!(ex & WS_EX_TOOLWINDOW, 0);
+        assert_eq!(ex & WS_EX_TOPMOST, 0);
+        assert_eq!(ex & WS_EX_NOACTIVATE, 0);
+        assert_ne!(style & WS_POPUP, 0);
+        assert_eq!(style & WS_VISIBLE, 0);
     }
 
     /// V-1 (TL ruling 2026-05-21) — Settings is a Tauri-style borderless modal:
     /// panel paints its own header per frame_060, so the OS caption / border /
-    /// sysmenu must not be on the HWND. Bare `WS_POPUP` keeps NoRedirectionBitmap
-    /// + TOPMOST while stripping every non-popup chrome bit.
+    /// sysmenu must not be on the HWND. Bare `WS_POPUP` keeps DComp while
+    /// stripping every non-popup chrome bit; Settings is not globally topmost.
     #[test]
-    fn settings_ex_style_is_borderless_topmost() {
+    fn settings_ex_style_is_borderless_non_topmost() {
         let (ex, style) = ex_style_for(WindowKind::Settings);
         assert!(
             ex & WS_EX_NOREDIRECTIONBITMAP != 0,
             "Settings must keep NoRedirectionBitmap (DComp panel chrome)"
         );
-        assert!(
-            ex & WS_EX_TOPMOST != 0,
-            "Settings must be TOPMOST so it stays above foreground apps"
+        assert_eq!(
+            ex & WS_EX_TOPMOST,
+            0,
+            "Settings must be occludable by unrelated foreground apps"
         );
         assert!(
             style & WS_POPUP != 0,
@@ -734,6 +749,97 @@ mod tests {
             0,
             "Settings must not request caption / sysmenu / border / resize bits",
         );
+        assert_eq!(
+            style & WS_VISIBLE,
+            0,
+            "Settings must not flash before centring and renderer creation"
+        );
+    }
+
+    #[test]
+    fn search_ex_style_is_borderless_non_topmost_and_starts_hidden() {
+        let (ex, style) = ex_style_for(WindowKind::Search);
+        assert_ne!(ex & WS_EX_NOREDIRECTIONBITMAP, 0);
+        assert_eq!(ex & WS_EX_TOPMOST, 0);
+        assert_ne!(style & WS_POPUP, 0);
+        assert_eq!(style & WS_VISIBLE, 0);
+        const NON_POPUP_BITS: u32 = WS_OVERLAPPEDWINDOW & !WS_POPUP;
+        assert_eq!(style & NON_POPUP_BITS, 0);
+    }
+
+    #[test]
+    fn zone_editor_ex_style_is_borderless_non_topmost_and_starts_hidden() {
+        let (ex, style) = ex_style_for(WindowKind::ZoneEditor);
+        assert_ne!(
+            ex & WS_EX_NOREDIRECTIONBITMAP,
+            0,
+            "ZoneEditor must remain on the native DComp path"
+        );
+        assert_eq!(
+            ex & WS_EX_TOPMOST,
+            0,
+            "ZoneEditor must be occludable by unrelated foreground apps"
+        );
+        assert_ne!(
+            style & WS_POPUP,
+            0,
+            "ZoneEditor must use a borderless popup HWND"
+        );
+        assert_eq!(
+            style & WS_VISIBLE,
+            0,
+            "ZoneEditor must not flash before centring and renderer creation"
+        );
+        const NON_POPUP_BITS: u32 = WS_OVERLAPPEDWINDOW & !WS_POPUP;
+        assert_eq!(
+            style & NON_POPUP_BITS,
+            0,
+            "ZoneEditor must not request caption / sysmenu / border / resize bits",
+        );
+    }
+
+    #[test]
+    fn every_self_painted_aux_window_is_borderless_non_topmost_and_starts_hidden() {
+        const SELF_PAINTED: [WindowKind; 13] = [
+            WindowKind::IconPicker,
+            WindowKind::CapsulePicker,
+            WindowKind::Settings,
+            WindowKind::About,
+            WindowKind::PalettePicker,
+            WindowKind::RulesWizard,
+            WindowKind::BulkManager,
+            WindowKind::ZoneEditor,
+            WindowKind::ItemFileRename,
+            WindowKind::Suggestor,
+            WindowKind::Timeline,
+            WindowKind::SnapshotPicker,
+            WindowKind::Search,
+        ];
+        const NON_POPUP_BITS: u32 = WS_OVERLAPPEDWINDOW & !WS_POPUP;
+        for kind in SELF_PAINTED {
+            let (ex, style) = ex_style_for(kind);
+            assert_ne!(
+                ex & WS_EX_NOREDIRECTIONBITMAP,
+                0,
+                "{kind:?} must remain on the DComp path"
+            );
+            assert_eq!(
+                ex & WS_EX_TOPMOST,
+                0,
+                "{kind:?} must not cover unrelated applications"
+            );
+            assert_ne!(style & WS_POPUP, 0, "{kind:?} must be borderless");
+            assert_eq!(
+                style & NON_POPUP_BITS,
+                0,
+                "{kind:?} must not request native caption/border bits"
+            );
+            assert_eq!(
+                style & WS_VISIBLE,
+                0,
+                "{kind:?} must not flash before centring and renderer creation"
+            );
+        }
     }
 
     /// Wave C — `main_window_rect()` always reports a usable rectangle. In a
@@ -745,5 +851,47 @@ mod tests {
         let (_x, _y, w, h) = main_window_rect();
         assert!(w > 0, "main window rect width must be positive");
         assert!(h > 0, "main window rect height must be positive");
+    }
+
+    #[test]
+    fn main_ex_style_is_non_activating_tool_window() {
+        let (ex, _) = ex_style_for(WindowKind::Main);
+        assert!(
+            ex & WS_EX_TOOLWINDOW != 0,
+            "Main must stay out of Alt-Tab and the taskbar"
+        );
+        assert!(
+            ex & WS_EX_NOACTIVATE != 0,
+            "Main must never steal foreground focus from regular applications"
+        );
+    }
+
+    /// MiniBar uses the selected-stack DComp renderer. Requesting Layered here
+    /// would route it onto the legacy redirection path and violates the
+    /// NoRedirectionBitmap/Layered mutex in spec 4.1.
+    #[test]
+    fn minibar_ex_style_uses_dcomp_no_redirection_bitmap() {
+        let (ex, style) = ex_style_for(WindowKind::MiniBar);
+        assert!(
+            ex & WS_EX_NOREDIRECTIONBITMAP != 0,
+            "MiniBar must keep NoRedirectionBitmap for DComp rendering"
+        );
+        assert_eq!(
+            ex & WS_EX_LAYERED,
+            0,
+            "MiniBar must not request WS_EX_LAYERED with the DComp renderer"
+        );
+        assert!(
+            ex & WS_EX_TOPMOST != 0,
+            "MiniBar must stay topmost as a pinned desktop affordance"
+        );
+        assert!(
+            ex & WS_EX_NOACTIVATE != 0,
+            "MiniBar must not steal focus when clicked"
+        );
+        assert!(
+            style & WS_POPUP != 0,
+            "MiniBar must be a popup window without native chrome"
+        );
     }
 }

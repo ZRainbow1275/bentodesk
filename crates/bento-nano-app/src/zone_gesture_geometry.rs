@@ -8,7 +8,8 @@
 //! integer-only with an `i64` widen so the squared sum cannot overflow, and
 //! the O(n) stack-target scan runs only once on mouse-up, off the hot path.
 
-use bento_nano_zone::{ZoneId, ZoneList};
+use crate::zone_pill_geometry::{pill_layout_for_zone, stack_capsule_layout_for_zone};
+use bento_nano_zone::{Zone, ZoneId, ZoneList};
 
 /// Tauri parity: `ZONE_DRAG_THRESHOLD_PX = 4` (`BentoZone.tsx:72`). Logical
 /// DIP; nano's mouse handlers already operate in logical DIP, so this is
@@ -66,7 +67,14 @@ pub fn exceeds_drag_threshold(dx: i32, dy: i32) -> bool {
 ///   target; mirrors `hit_test_zone`'s filter).
 pub fn stack_target_for_drop(zones: &ZoneList, dragged: ZoneId) -> Option<ZoneId> {
     let self_zone = zones.get(dragged)?;
-    let self_rect = (self_zone.x, self_zone.y, self_zone.w, self_zone.h);
+    // Tauri routes an existing stack through `StackWrapper`'s rigid-cluster
+    // drag path. That producer never runs `findOverlapStackTarget`, so a formed
+    // stack must not be folded into another stack by the ordinary Zone drop
+    // producer (which would create a nested/hidden tree in nano's anchor model).
+    if self_zone.is_stack_anchor() {
+        return None;
+    }
+    let self_rect = zone_drag_capsule_rect(zones, self_zone);
     // The dragged zone's own stack anchor (if any) — used to skip stacking
     // onto a zone already in the same group (Tauri: `other.stack_id ===
     // selfStackId`). `stack_anchor_for` returns the dragged id itself when it
@@ -95,7 +103,7 @@ pub fn stack_target_for_drop(zones: &ZoneList, dragged: ZoneId) -> Option<ZoneId
             }
         }
 
-        let other_rect = (candidate.x, candidate.y, candidate.w, candidate.h);
+        let other_rect = zone_drag_capsule_rect(zones, candidate);
         if let Some(score) = score_stack_candidate(self_rect, other_rect) {
             let better = match best {
                 None => true,
@@ -107,6 +115,37 @@ pub fn stack_target_for_drop(zones: &ZoneList, dragged: ZoneId) -> Option<ZoneId
         }
     }
     best.map(|(id, _)| id)
+}
+
+/// Painted collapsed drop geometry, shared with the renderer/hit-test SSoT.
+///
+/// A Zone's persisted `w/h` describe its expanded panel. Tauri explicitly
+/// scores `getCapsuleBoxPx`, so using `w/h` here creates a large invisible
+/// merge halo whenever a panel is wider/taller than its capsule. Stack anchors
+/// use their dedicated 220×52 capsule rather than the normal per-size pill.
+#[inline]
+pub fn zone_drag_capsule_rect(zones: &ZoneList, zone: &Zone) -> (i32, i32, i32, i32) {
+    let rect = if zone.is_stack_anchor() {
+        let member_count = 1 + zone
+            .stack_members
+            .iter()
+            .filter(|member_id| {
+                zones
+                    .get(**member_id)
+                    .and_then(|member| member.stack_parent)
+                    .is_some_and(|parent| parent == zone.id)
+            })
+            .count();
+        stack_capsule_layout_for_zone(zone, member_count).rect
+    } else {
+        pill_layout_for_zone(zone, zone.items.len()).rect
+    };
+    (
+        rect.x.round() as i32,
+        rect.y.round() as i32,
+        rect.width.round() as i32,
+        rect.height.round() as i32,
+    )
 }
 
 /// Core Tauri overlap/proximity rule on two raw rects `(x, y, w, h)` in DIP.
@@ -274,7 +313,10 @@ mod tests {
         // AABB overlap: y [0,40) vs [50,90) ⇒ none ⇒ pure proximity.
         let s = score_stack_candidate((0, 0, 200, 40), (0, 50, 200, 40)).unwrap();
         // Pure proximity ⇒ score in (0, 1].
-        assert!(s > 0.0 && s <= 1.0, "proximity score must be in (0,1], was {s}");
+        assert!(
+            s > 0.0 && s <= 1.0,
+            "proximity score must be in (0,1], was {s}"
+        );
     }
 
     // ── stack_target_for_drop (ZoneList integration, no window) ───────────
@@ -289,6 +331,27 @@ mod tests {
         zones.add(zone_at(1, 0, 0, 200, 200));
         zones.add(zone_at(2, 5000, 5000, 200, 200));
         assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
+    }
+
+    #[test]
+    fn expanded_panel_size_does_not_create_an_invisible_merge_halo() {
+        let mut zones = ZoneList::new();
+        // The persisted expanded panels overlap by 300×600 DIP, but the
+        // painted medium capsules are only 214×48 and sit 286 DIP apart.
+        // Tauri scores the capsules, so this drop must remain independent.
+        zones.add(zone_at(1, 0, 100, 800, 600));
+        zones.add(zone_at(2, 500, 100, 800, 600));
+
+        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
+    }
+
+    #[test]
+    fn painted_capsule_overlap_forms_a_stack_regardless_of_panel_size() {
+        let mut zones = ZoneList::new();
+        zones.add(zone_at(1, 100, 100, 80, 60));
+        zones.add(zone_at(2, 180, 100, 900, 700));
+
+        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), Some(ZoneId(2)));
     }
 
     #[test]
@@ -361,6 +424,17 @@ mod tests {
         // Now dragged (1) shares anchor (2) with the only candidate (2, the
         // anchor). is_stacked_child(1)==true is irrelevant for the dragged;
         // the candidate 2 shares the anchor with 1 ⇒ skip ⇒ None.
+        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
+    }
+
+    #[test]
+    fn existing_stack_anchor_does_not_enter_the_free_zone_auto_merge_path() {
+        let mut zones = ZoneList::new();
+        zones.add(zone_at(1, 100, 100, 400, 300));
+        zones.add(zone_at(2, 100, 100, 400, 300));
+        zones.add(zone_at(3, 100, 100, 400, 300));
+        assert!(zones.stack(ZoneId(1), ZoneId(2)));
+
         assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
     }
 }

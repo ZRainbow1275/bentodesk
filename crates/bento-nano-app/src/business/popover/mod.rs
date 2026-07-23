@@ -3,8 +3,8 @@
 //! 1.x parallels: the inline `<Portal>` mounted floating chrome used by
 //! `ContextMenu`, `Dropdown`, `AutoLayoutMenu`, `PalettePicker`. Unlike
 //! `Tooltip`, popovers are interactive (the user clicks inside), so the
-//! hosting HWND uses `WindowKind::ContextMenu` (NoActivate + Topmost +
-//! NoRedirectionBitmap) rather than the click-through Tooltip class.
+//! hosting HWND uses a focusable, owned `WindowKind::ContextMenu` ToolWindow
+//! rather than the globally-topmost click-through Tooltip class.
 //!
 //! Visual fidelity reference: `popover.snap.md`.
 //!
@@ -31,6 +31,307 @@ use bento_nano_layout::{Direction, LayoutDesc, LayoutSource};
 use bento_nano_style::tokens::{PaletteTauri, RadiusTauri, SpacingTauri};
 use bento_nano_style::{BorderRadius, Color, Edges, Length, Rect, Size};
 use bento_nano_theme as theme;
+use smallvec::SmallVec;
+use smol_str::SmolStr;
+
+use crate::business::icons::IconKind;
+
+/// Compact selected-stack context-menu metrics. These are logical DIPs, so the
+/// former 248×32 values became a visibly oversized 372×48 menu at 150% DPI.
+/// The tightened geometry keeps the native surface close to the Tauri card
+/// while preserving a full pointer target and readable Chinese labels.
+pub const CONTEXT_MENU_WIDTH: f32 = 220.0;
+pub const CONTEXT_MENU_ROW_HEIGHT: f32 = 28.0;
+pub const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 5.0;
+pub const CONTEXT_MENU_PADDING_Y: f32 = 5.0;
+pub const CONTEXT_MENU_WINDOW_MARGIN: f32 = 8.0;
+pub const CONTEXT_MENU_SUBMENU_GAP: f32 = 8.0;
+pub const CONTEXT_MENU_MAX_SUBMENU_ROWS: usize = 8;
+pub const CONTEXT_MENU_ICON_SIZE: f32 = 15.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuRowKind {
+    Command,
+    Separator,
+    Submenu,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMenuRow {
+    pub command_id: usize,
+    pub label: SmolStr,
+    pub icon: Option<IconKind>,
+    pub kind: ContextMenuRowKind,
+    pub danger: bool,
+}
+
+impl ContextMenuRow {
+    pub fn command(command_id: usize, label: &str, icon: IconKind) -> Self {
+        Self {
+            command_id,
+            label: SmolStr::new(label),
+            icon: Some(icon),
+            kind: ContextMenuRowKind::Command,
+            danger: false,
+        }
+    }
+
+    pub fn danger(command_id: usize, label: &str, icon: IconKind) -> Self {
+        Self {
+            danger: true,
+            ..Self::command(command_id, label, icon)
+        }
+    }
+
+    pub fn submenu(label: &str, icon: IconKind) -> Self {
+        Self {
+            command_id: 0,
+            label: SmolStr::new(label),
+            icon: Some(icon),
+            kind: ContextMenuRowKind::Submenu,
+            danger: false,
+        }
+    }
+
+    pub fn separator() -> Self {
+        Self {
+            command_id: 0,
+            label: SmolStr::new_static(""),
+            icon: None,
+            kind: ContextMenuRowKind::Separator,
+            danger: false,
+        }
+    }
+}
+
+pub type ContextMenuRows = SmallVec<[ContextMenuRow; 16]>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextMenuColumn {
+    Main,
+    Submenu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextMenuHit {
+    pub column: ContextMenuColumn,
+    pub row: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMenuSession {
+    pub main_rows: ContextMenuRows,
+    pub submenu_rows: ContextMenuRows,
+    pub hovered: Option<ContextMenuHit>,
+    pub submenu_open: bool,
+    pub submenu_scroll: usize,
+    pub submenu_on_left: bool,
+    /// Main-surface origin in logical DIPs. Integers keep the session cheaply
+    /// comparable while cursor placement remains pixel-stable at every DPI.
+    pub origin_x: i32,
+    pub origin_y: i32,
+}
+
+impl ContextMenuSession {
+    pub fn new(main_rows: ContextMenuRows, submenu_rows: ContextMenuRows) -> Self {
+        Self {
+            main_rows,
+            submenu_rows,
+            hovered: None,
+            submenu_open: false,
+            submenu_scroll: 0,
+            submenu_on_left: false,
+            origin_x: 0,
+            origin_y: 0,
+        }
+    }
+
+    pub fn set_origin(&mut self, x: f32, y: f32) {
+        self.origin_x = x.round() as i32;
+        self.origin_y = y.round() as i32;
+    }
+
+    pub fn visible_submenu_range(&self) -> std::ops::Range<usize> {
+        let count = self.submenu_rows.len().min(CONTEXT_MENU_MAX_SUBMENU_ROWS);
+        let max_start = self.submenu_rows.len().saturating_sub(count);
+        let start = self.submenu_scroll.min(max_start);
+        start..start + count
+    }
+
+    pub fn clamp_submenu_scroll(&mut self) {
+        let visible = self.submenu_rows.len().min(CONTEXT_MENU_MAX_SUBMENU_ROWS);
+        self.submenu_scroll = self
+            .submenu_scroll
+            .min(self.submenu_rows.len().saturating_sub(visible));
+    }
+}
+
+#[inline]
+pub const fn context_menu_row_extent(kind: ContextMenuRowKind) -> f32 {
+    match kind {
+        ContextMenuRowKind::Command | ContextMenuRowKind::Submenu => CONTEXT_MENU_ROW_HEIGHT,
+        ContextMenuRowKind::Separator => CONTEXT_MENU_SEPARATOR_HEIGHT,
+    }
+}
+
+pub fn context_menu_rows_height(rows: &[ContextMenuRow]) -> f32 {
+    CONTEXT_MENU_PADDING_Y * 2.0
+        + rows
+            .iter()
+            .map(|row| context_menu_row_extent(row.kind))
+            .sum::<f32>()
+}
+
+fn visible_submenu_height(session: &ContextMenuSession) -> f32 {
+    CONTEXT_MENU_PADDING_Y * 2.0
+        + session.visible_submenu_range().len() as f32 * CONTEXT_MENU_ROW_HEIGHT
+}
+
+pub fn context_menu_window_size(session: &ContextMenuSession) -> Size {
+    let submenu_visible = session.submenu_open && !session.submenu_rows.is_empty();
+    let columns_width = CONTEXT_MENU_WIDTH
+        + if submenu_visible {
+            CONTEXT_MENU_SUBMENU_GAP + CONTEXT_MENU_WIDTH
+        } else {
+            0.0
+        };
+    let main_height = context_menu_rows_height(&session.main_rows);
+    let submenu_height = if submenu_visible {
+        visible_submenu_height(session)
+    } else {
+        0.0
+    };
+    Size {
+        width: columns_width + CONTEXT_MENU_WINDOW_MARGIN * 2.0,
+        height: main_height.max(submenu_height) + CONTEXT_MENU_WINDOW_MARGIN * 2.0,
+    }
+}
+
+pub fn context_menu_bounds(session: &ContextMenuSession) -> Rect {
+    let size = context_menu_window_size(session);
+    Rect {
+        x: session.origin_x as f32,
+        y: session.origin_y as f32,
+        width: size.width,
+        height: size.height,
+    }
+}
+
+pub fn context_menu_card_rect(
+    session: &ContextMenuSession,
+    column: ContextMenuColumn,
+) -> Option<Rect> {
+    let main_height = context_menu_rows_height(&session.main_rows);
+    let submenu_visible = session.submenu_open && !session.submenu_rows.is_empty();
+    let second_column_x =
+        CONTEXT_MENU_WINDOW_MARGIN + CONTEXT_MENU_WIDTH + CONTEXT_MENU_SUBMENU_GAP;
+    let origin_x = session.origin_x as f32;
+    let origin_y = session.origin_y as f32;
+    match column {
+        ContextMenuColumn::Main => Some(Rect {
+            x: origin_x
+                + if submenu_visible && session.submenu_on_left {
+                    second_column_x
+                } else {
+                    CONTEXT_MENU_WINDOW_MARGIN
+                },
+            y: origin_y + CONTEXT_MENU_WINDOW_MARGIN,
+            width: CONTEXT_MENU_WIDTH,
+            height: main_height,
+        }),
+        ContextMenuColumn::Submenu if submenu_visible => Some(Rect {
+            x: origin_x
+                + if session.submenu_on_left {
+                    CONTEXT_MENU_WINDOW_MARGIN
+                } else {
+                    second_column_x
+                },
+            y: origin_y + CONTEXT_MENU_WINDOW_MARGIN,
+            width: CONTEXT_MENU_WIDTH,
+            height: visible_submenu_height(session),
+        }),
+        ContextMenuColumn::Submenu => None,
+    }
+}
+
+pub fn context_menu_row_rect(session: &ContextMenuSession, hit: ContextMenuHit) -> Option<Rect> {
+    let card = context_menu_card_rect(session, hit.column)?;
+    match hit.column {
+        ContextMenuColumn::Main => {
+            let row = session.main_rows.get(hit.row)?;
+            let y = session.main_rows[..hit.row]
+                .iter()
+                .fold(card.y + CONTEXT_MENU_PADDING_Y, |cursor, prior| {
+                    cursor + context_menu_row_extent(prior.kind)
+                });
+            Some(Rect {
+                x: card.x,
+                y,
+                width: card.width,
+                height: context_menu_row_extent(row.kind),
+            })
+        }
+        ContextMenuColumn::Submenu => {
+            let range = session.visible_submenu_range();
+            if !range.contains(&hit.row) {
+                return None;
+            }
+            Some(Rect {
+                x: card.x,
+                y: card.y
+                    + CONTEXT_MENU_PADDING_Y
+                    + (hit.row - range.start) as f32 * CONTEXT_MENU_ROW_HEIGHT,
+                width: card.width,
+                height: CONTEXT_MENU_ROW_HEIGHT,
+            })
+        }
+    }
+}
+
+pub fn context_menu_hit_test(
+    session: &ContextMenuSession,
+    x: f32,
+    y: f32,
+) -> Option<ContextMenuHit> {
+    if session.submenu_open {
+        for row in session.visible_submenu_range() {
+            let hit = ContextMenuHit {
+                column: ContextMenuColumn::Submenu,
+                row,
+            };
+            if let Some(rect) = context_menu_row_rect(session, hit)
+                && session.submenu_rows[row].kind != ContextMenuRowKind::Separator
+                && x >= rect.x
+                && x < rect.right()
+                && y >= rect.y
+                && y < rect.bottom()
+            {
+                return Some(hit);
+            }
+        }
+    }
+    for row in 0..session.main_rows.len() {
+        let hit = ContextMenuHit {
+            column: ContextMenuColumn::Main,
+            row,
+        };
+        if let Some(rect) = context_menu_row_rect(session, hit)
+            && session.main_rows[row].kind != ContextMenuRowKind::Separator
+            && x >= rect.x
+            && x < rect.right()
+            && y >= rect.y
+            && y < rect.bottom()
+        {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+pub fn context_menu_contains(session: &ContextMenuSession, x: f32, y: f32) -> bool {
+    let bounds = context_menu_bounds(session);
+    x >= bounds.x && x < bounds.right() && y >= bounds.y && y < bounds.bottom()
+}
 
 /// Where the popover sits relative to its anchor. `Above` is the 1.x
 /// default; `Below` is the auto-flip fallback when the anchor is too
@@ -295,10 +596,111 @@ mod tests {
         );
         assert_eq!(p.background, style_tokens::PALETTE_DARK.surface_expanded);
         assert_eq!(p.border_color, style_tokens::PALETTE_DARK.border_expanded);
-        assert_eq!(p.border_radius, BorderRadius::all(style_tokens::RADIUS.expanded));
+        assert_eq!(
+            p.border_radius,
+            BorderRadius::all(style_tokens::RADIUS.expanded)
+        );
         // Wave A chrome.md: 14 px vertical, 16 px horizontal.
         assert_eq!(p.padding.top, style_tokens::SPACING.s14);
         assert_eq!(p.padding.left, style_tokens::SPACING.lg);
         assert_eq!(p.anchor_margin, style_tokens::SPACING.sm);
+    }
+
+    fn context_session() -> ContextMenuSession {
+        let mut main = ContextMenuRows::new();
+        main.push(ContextMenuRow::command(1, "Edit", IconKind::Edit));
+        main.push(ContextMenuRow::separator());
+        main.push(ContextMenuRow::submenu("Stack", IconKind::Columns));
+        main.push(ContextMenuRow::danger(2, "Delete", IconKind::Trash));
+        let mut submenu = ContextMenuRows::new();
+        submenu.push(ContextMenuRow::command(100, "Target A", IconKind::Grid));
+        submenu.push(ContextMenuRow::command(101, "Target B", IconKind::Grid));
+        ContextMenuSession::new(main, submenu)
+    }
+
+    #[test]
+    fn context_menu_stays_one_compact_column_until_submenu_opens() {
+        let mut session = context_session();
+        let closed = context_menu_window_size(&session);
+        assert_eq!(
+            closed.width,
+            CONTEXT_MENU_WIDTH + CONTEXT_MENU_WINDOW_MARGIN * 2.0
+        );
+        session.submenu_open = true;
+        let open = context_menu_window_size(&session);
+        assert_eq!(
+            open.width,
+            CONTEXT_MENU_WIDTH * 2.0 + CONTEXT_MENU_SUBMENU_GAP + CONTEXT_MENU_WINDOW_MARGIN * 2.0
+        );
+        assert!(open.height >= closed.height);
+    }
+
+    #[test]
+    fn context_menu_hit_test_skips_separator_and_reaches_submenu() {
+        let mut session = context_session();
+        let separator = context_menu_row_rect(
+            &session,
+            ContextMenuHit {
+                column: ContextMenuColumn::Main,
+                row: 1,
+            },
+        )
+        .expect("separator rect");
+        assert_eq!(
+            context_menu_hit_test(&session, separator.x + 20.0, separator.y + 2.0),
+            None
+        );
+
+        session.submenu_open = true;
+        let target = ContextMenuHit {
+            column: ContextMenuColumn::Submenu,
+            row: 1,
+        };
+        let rect = context_menu_row_rect(&session, target).expect("submenu target rect");
+        assert_eq!(
+            context_menu_hit_test(&session, rect.x + 20.0, rect.y + 10.0),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn context_menu_submenu_scroll_is_bounded() {
+        let mut session = context_session();
+        for id in 102..120 {
+            session
+                .submenu_rows
+                .push(ContextMenuRow::command(id, "Extra target", IconKind::Grid));
+        }
+        session.submenu_scroll = usize::MAX;
+        session.clamp_submenu_scroll();
+        assert_eq!(
+            session.submenu_scroll,
+            session
+                .submenu_rows
+                .len()
+                .saturating_sub(CONTEXT_MENU_MAX_SUBMENU_ROWS)
+        );
+        assert_eq!(
+            session.visible_submenu_range().len(),
+            CONTEXT_MENU_MAX_SUBMENU_ROWS
+        );
+    }
+
+    #[test]
+    fn context_menu_origin_translates_cards_and_keeps_submenu_bridge_interactive() {
+        let mut session = context_session();
+        session.set_origin(120.0, 80.0);
+        session.submenu_open = true;
+        let main = context_menu_card_rect(&session, ContextMenuColumn::Main).expect("main card");
+        let submenu =
+            context_menu_card_rect(&session, ContextMenuColumn::Submenu).expect("submenu card");
+        assert_eq!(main.x, 120.0 + CONTEXT_MENU_WINDOW_MARGIN);
+        assert_eq!(main.y, 80.0 + CONTEXT_MENU_WINDOW_MARGIN);
+        let bridge_x = (main.right() + submenu.x) * 0.5;
+        assert!(context_menu_contains(&session, bridge_x, main.y + 20.0));
+        assert_eq!(
+            context_menu_hit_test(&session, bridge_x, main.y + 20.0),
+            None
+        );
     }
 }

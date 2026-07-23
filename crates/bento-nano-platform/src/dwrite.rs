@@ -1,7 +1,8 @@
 //! DirectWrite text layout.
 //!
-//! Spec §5: system fonts only — `Microsoft YaHei UI` (CN) / `Segoe UI Variable`
-//! (EN). No bundled `.ttf` / `.otf`. Glyphs lazy-loaded by DWrite's own cache.
+//! Spec §5: system fonts only — Tauri-primary `Segoe UI` with DWrite system
+//! fallback for CJK glyphs. No bundled `.ttf` / `.otf`. Glyphs lazy-loaded by
+//! DWrite's own cache.
 //!
 //! Spec §12 rendering parameters:
 //!   - `DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`
@@ -17,9 +18,9 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TRIMMING,
-    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
-    IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject, IDWriteTextFormat,
-    IDWriteTextLayout,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteInlineObject,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::core::{PCWSTR, w};
 
@@ -52,7 +53,7 @@ pub fn factory() -> Result<&'static DWriteFactory, PlatformError> {
 /// Font role for [`resolve_default_family`].
 ///
 /// #19-B (2026-05-31): stripped / LTSC / N / Server Windows SKUs may ship
-/// without `Microsoft YaHei UI`, `Consolas`, or `Segoe UI Variable`. Each role
+/// without `Segoe UI`, `Microsoft YaHei UI`, or `Consolas`. Each role
 /// carries its own *universal tail* — a family present since Windows XP — so a
 /// missing preferred family never causes metric drift or blank glyphs. On a
 /// normal Windows the preferred family IS installed, so the resolved family is
@@ -198,7 +199,7 @@ pub fn text_format_from_family_name_with_metrics(
 ) -> Result<IDWriteTextFormat, PlatformError> {
     let f = factory()?;
     // #19-B (2026-05-31): the token-driven dynamic path feeds runtime family
-    // strings here (e.g. "Microsoft YaHei UI" from theme tokens). On a stripped
+    // strings here (e.g. "Segoe UI" from theme tokens). On a stripped
     // SKU where that family is absent, substitute a present PROPORTIONAL
     // fallback so we never silently fall through DWrite's own substitution into
     // a wrong-metric face. On a normal Windows the requested family IS present
@@ -269,7 +270,7 @@ fn apply_line_height(
     })
 }
 
-/// Default font family — Microsoft YaHei UI (Win10/11 builtin).
+/// Legacy CJK fallback literal — Microsoft YaHei UI (Win10/11 builtin).
 pub fn yahei_ui() -> windows::core::PCWSTR {
     w!("Microsoft YaHei UI")
 }
@@ -430,10 +431,44 @@ pub fn create_layout_no_wrap(
     Ok(layout)
 }
 
+/// Build a wrapped layout with character trimming and an optional ellipsis sign.
+///
+/// Stack bloom petal labels have a fixed two-line title slot matching the
+/// Tauri CSS line-clamp contract. DWrite has no line-count setter in the
+/// `IDWriteTextLayout` v1 surface used here, so callers cap the layout height
+/// and this helper keeps regular wrapping on while trimming the final visible
+/// line when the text still overflows.
+pub fn create_layout_wrapped_trimmed(
+    text_utf16: &[u16],
+    fmt: &IDWriteTextFormat,
+    max_w: f32,
+    max_h: f32,
+    sign: Option<&IDWriteInlineObject>,
+    align: TextAlign,
+) -> Result<IDWriteTextLayout, PlatformError> {
+    let layout = create_layout(text_utf16, fmt, max_w, max_h, align)?;
+    // SAFETY: layout is a freshly-created COM interface; both Set* calls
+    // mutate the layout's per-instance state and return HRESULT only on
+    // catastrophic argument errors (we feed canonical enum values).
+    unsafe {
+        ok(
+            "SetWordWrapping",
+            layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP),
+        )?;
+        let trimming = DWRITE_TRIMMING {
+            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+            delimiter: 0,
+            delimiterCount: 0,
+        };
+        ok("SetTrimming", layout.SetTrimming(&trimming, sign))?;
+    }
+    Ok(layout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Graphics::DirectWrite::DWRITE_LINE_SPACING_METHOD;
+    use windows::Win32::Graphics::DirectWrite::{DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD};
 
     #[test]
     fn normalizes_typography_metrics_without_panicking() {
@@ -507,5 +542,61 @@ mod tests {
             assert!(spacing >= 18.0);
             assert!(baseline > 0.0);
         }
+    }
+
+    #[test]
+    fn wrapped_trimmed_layout_keeps_two_line_bloom_title_budget() {
+        let format = match text_format_from_family_name_with_metrics(
+            "Segoe UI",
+            11.5,
+            600,
+            1.25,
+            locale_zh_cn(),
+        ) {
+            Ok(format) => format,
+            Err(_) => return,
+        };
+        let sign = match create_ellipsis_sign(&format) {
+            Ok(sign) => sign,
+            Err(_) => return,
+        };
+        let text: Vec<u16> = "Benchmark Zone 2".encode_utf16().collect();
+        let layout = match create_layout_wrapped_trimmed(
+            &text,
+            &format,
+            88.0,
+            11.5 * 1.25 * 2.0,
+            Some(&sign),
+            TextAlign {
+                h: HAlign::Center,
+                v: VAlign::Near,
+            },
+        ) {
+            Ok(layout) => layout,
+            Err(_) => return,
+        };
+        let mut actual = 0;
+        // SAFETY: `layout` is live; the first call passes no buffer so DWrite
+        // only writes the required line count into `actual`.
+        if unsafe { layout.GetLineMetrics(None, &mut actual) }.is_err() {
+            return;
+        }
+        assert!(
+            actual >= 2,
+            "benchmark bloom label should wrap into at least two lines, got {actual}"
+        );
+        let mut metrics = [DWRITE_LINE_METRICS::default(); 4];
+        // SAFETY: `metrics` is a fixed stack buffer and `actual` points to a
+        // valid u32 for DWrite to fill with the number of written entries.
+        unsafe {
+            layout
+                .GetLineMetrics(Some(&mut metrics), &mut actual)
+                .expect("line metrics");
+        }
+        assert!(
+            metrics[..actual as usize]
+                .iter()
+                .any(|line| line.length > 0)
+        );
     }
 }

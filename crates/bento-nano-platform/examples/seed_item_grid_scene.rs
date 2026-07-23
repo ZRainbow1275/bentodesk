@@ -7,6 +7,7 @@ use bento_nano_platform::storage::{read_zones, write_zones_atomic};
 use bento_nano_zone::{Zone, ZoneId, ZoneItemId, ZoneList};
 
 const ITEM_ROOT_ENV: &str = "BENTODESK_NANO_ITEM_GRID_ITEM_ROOT";
+const URL_FILE_ENV: &str = "BENTODESK_NANO_ITEM_GRID_URL_FILE";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zones_path = zones_path_from_args(env::args().skip(1))?;
@@ -15,15 +16,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let item_root = env::var_os(ITEM_ROOT_ENV).map(PathBuf::from);
+    let url_file = env::var_os(URL_FILE_ENV).map(PathBuf::from);
     if let Some(root) = item_root.as_deref() {
         fs::create_dir_all(root)?;
         write_item_grid_files(root)?;
     }
+    if let Some(path) = url_file.as_deref()
+        && !path.is_file()
+    {
+        return Err(format!(
+            "{URL_FILE_ENV} does not point to a file: {}",
+            path.display()
+        )
+        .into());
+    }
 
-    let zones = item_grid_scene(item_root.as_deref());
+    let zones = item_grid_scene(item_root.as_deref(), url_file.as_deref());
     write_zones_atomic(&zones_path, &zones)?;
     let decoded = read_zones(&zones_path)?;
-    validate_scene(&decoded)?;
+    validate_scene(&decoded, if url_file.is_some() { 3 } else { 2 })?;
 
     println!(
         "seeded item-grid proof scene at {} with {} zone(s)",
@@ -33,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn item_grid_scene(item_root: Option<&Path>) -> ZoneList {
+fn item_grid_scene(item_root: Option<&Path>, url_file: Option<&Path>) -> ZoneList {
     let mut zones = ZoneList::new();
     let mut zone = Zone::new(
         ZoneId(1),
@@ -62,6 +73,17 @@ fn item_grid_scene(item_root: Option<&Path>) -> ZoneList {
     ) {
         position_item(&mut zone, second_id, 1, 0);
     }
+    if let Some(url_file) = url_file
+        && let Some(url_id) = zone.add_item(
+            Cow::Owned(url_file.to_string_lossy().into_owned()),
+            Cow::Borrowed(""),
+        )
+    {
+        // An empty hash deliberately routes the real .url through startup icon
+        // rehydration. The production extractor must parse IconFile/IconIndex,
+        // cache the ICO resource and update this item before runtime capture.
+        position_item(&mut zone, url_id, 2, 0);
+    }
 
     zones.add(zone);
     zones
@@ -89,15 +111,18 @@ fn position_item(zone: &mut Zone, item_id: ZoneItemId, x: i32, y: i32) {
     let _ = zone.move_item(item_id, x, y);
 }
 
-fn validate_scene(zones: &ZoneList) -> Result<(), String> {
+fn validate_scene(zones: &ZoneList, expected_items: usize) -> Result<(), String> {
     if zones.len() != 1 {
         return Err(format!("expected 1 zone, got {}", zones.len()));
     }
     let Some(zone) = zones.get(ZoneId(1)) else {
         return Err("expected zone 1".to_owned());
     };
-    if zone.items.len() != 2 {
-        return Err(format!("expected 2 items, got {}", zone.items.len()));
+    if zone.items.len() != expected_items {
+        return Err(format!(
+            "expected {expected_items} items, got {}",
+            zone.items.len()
+        ));
     }
     if zone.items[0].is_wide || zone.items[1].is_wide {
         return Err("proof items must start as standard cards".to_owned());
@@ -143,8 +168,8 @@ mod tests {
     #[test]
     fn item_grid_scene_has_two_standard_items() {
         let root = Path::new(r"C:\Temp\bento-item-grid-proof");
-        let zones = item_grid_scene(Some(root));
-        validate_scene(&zones).expect("valid scene");
+        let zones = item_grid_scene(Some(root), None);
+        validate_scene(&zones, 2).expect("valid scene");
         let zone = zones.get(ZoneId(1)).expect("zone 1");
         assert_eq!(zone.title.as_ref(), "Item Grid Proof");
         assert_eq!(zone.grid_columns, 5);
@@ -152,6 +177,18 @@ mod tests {
             zone.items[1].path.as_ref(),
             r"C:\Temp\bento-item-grid-proof\grid-beta.txt"
         );
+    }
+
+    #[test]
+    fn optional_url_item_is_seeded_for_real_icon_rehydration() {
+        let root = Path::new(r"C:\Temp\bento-item-grid-proof");
+        let shortcut = root.join("Super Animal Royale.url");
+        let zones = item_grid_scene(Some(root), Some(&shortcut));
+        validate_scene(&zones, 3).expect("valid scene");
+        let zone = zones.get(ZoneId(1)).expect("zone 1");
+        assert_eq!(zone.items[2].path.as_ref(), shortcut.to_string_lossy());
+        assert!(zone.items[2].icon_hash.is_empty());
+        assert_eq!((zone.items[2].x, zone.items[2].y), (2, 0));
     }
 
     #[test]

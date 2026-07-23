@@ -27,12 +27,16 @@ pub enum SearchItemKind {
 /// `id` is the stable identifier the dispatcher uses to route the
 /// "open this hit" command (file path hash for File/Folder, ZoneId for
 /// Zone, settings key for Setting). `title` is the display name, `path`
-/// is the breadcrumb shown beneath it.
+/// is the breadcrumb shown beneath it, and `keywords` contains searchable
+/// aliases that are never rendered (for example both Chinese and English
+/// command names).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchItem {
     pub id: SmolStr,
     pub title: SmolStr,
     pub path: SmolStr,
+    #[serde(default)]
+    pub keywords: SmolStr,
     pub kind: SearchItemKind,
 }
 
@@ -62,11 +66,19 @@ mod tests {
             id: SmolStr::from("zone-1"),
             title: SmolStr::from("Inbox"),
             path: SmolStr::from("/zones/inbox"),
+            keywords: SmolStr::from("收件箱 inbox"),
             kind: SearchItemKind::Zone,
         };
         let json = serde_json::to_string(&item).expect("serialise");
         let back: SearchItem = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(item, back);
+    }
+
+    #[test]
+    fn legacy_search_item_without_keywords_deserialises() {
+        let json = r#"{"id":"zone-1","title":"Inbox","path":"/zones/inbox","kind":"Zone"}"#;
+        let item: SearchItem = serde_json::from_str(json).expect("deserialise");
+        assert!(item.keywords.is_empty());
     }
 
     #[test]

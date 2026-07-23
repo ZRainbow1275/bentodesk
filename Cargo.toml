@@ -29,7 +29,7 @@ members = [
 version      = "0.2.0"
 edition      = "2024"
 rust-version = "1.85"
-license      = "MIT OR Apache-2.0"
+license      = "AGPL-3.0-or-later"
 publish      = false
 authors      = ["BentoDesk Authors"]
 
@@ -51,6 +51,9 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",
+    # Preserve raw SHDoDragDrop HRESULT/effect pairs for lossless source-item
+    # finalisation after a real Shell/OLE desktop drop. Binding metadata only.
+    "Win32_System_Ole",
     # Wave 19 — `OutputDebugStringA` for pre-main probe trigger logging
     # from `bento-nano-platform::allocator`'s `.CRT$XCU` ctor. Stderr is
     # not addressable at CRT init in `/SUBSYSTEM:WINDOWS` builds (no
@@ -68,6 +71,9 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # Wave 15 — `GetCurrentProcess` (kernel32) returns the pseudo-handle
     # consumed by EmptyWorkingSet. Pseudo-handle is never CloseHandle'd.
     "Win32_System_Threading",
+    # Native crash restart for the Nano Settings startup-management controls.
+    # Binding metadata only; no guardian process or new runtime dependency.
+    "Win32_System_Recovery",
     # T-092 system module — `RegGetValueW` for WebView2 runtime version
     # discovery (HKLM lookup of EdgeUpdate `pv` value). Read-only registry
     # access; no admin required.
@@ -199,14 +205,13 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 # crate already configures the subscriber once.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
-# Filesystem watcher (spec §8 whitelist row "文件监听: notify 7 — 默认无 debouncer").
+# Filesystem watcher (spec §8 whitelist row "文件监听: notify 8.2 — 默认无 debouncer").
 # `notify-debouncer-full` is forbidden (§8 forbidden list); the watcher
 # module hand-rolls its own debouncer over `crossbeam-channel`.
 # Default features pull the platform-appropriate backend (ReadDirectoryChangesW
-# on Windows). `notify` is a build-time only crate from the BentoDesk binary's
-# perspective: no async runtime, no extra channels — it talks over the std
-# `mpsc` channel that the watcher module bridges to crossbeam.
-notify = "7"
+# on Windows). No async runtime or second debouncer is introduced; the watcher
+# callback talks to the existing worker through a standard-library channel.
+notify = "8.2"
 
 # Plugin archive install parity (0505) — selected-stack replacement for the
 # source Tauri `install_plugin(path)` command. Default features stay off; only

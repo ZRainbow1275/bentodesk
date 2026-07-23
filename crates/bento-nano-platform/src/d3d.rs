@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_GPU_PREFERENCE,
     DXGI_GPU_PREFERENCE_MINIMUM_POWER, DXGI_GPU_PREFERENCE_UNSPECIFIED, IDXGIAdapter,
-    IDXGIAdapter1, IDXGIFactory2, IDXGIFactory6,
+    IDXGIAdapter1, IDXGIDevice3, IDXGIFactory2, IDXGIFactory6,
 };
 use windows::core::Interface;
 
@@ -100,6 +100,16 @@ pub fn rebuild() -> Result<Arc<D3dDevice>, PlatformError> {
 /// Current device generation — the number of completed device-chain recoveries.
 /// `Acquire` pairs with the `Release` bump in `recover_device_chain` so a reader
 /// that sees the new generation also sees the rebuilt devices.
+pub fn trim() -> Result<(), PlatformError> {
+    let d3d = device()?;
+    if let Ok(dxgi) = d3d.device.cast::<IDXGIDevice3>() {
+        // SAFETY: IDXGIDevice3 comes from this process's live D3D device. Trim
+        // is an advisory idle-memory notification and has no return value.
+        unsafe { dxgi.Trim() };
+    }
+    Ok(())
+}
+
 #[inline]
 pub fn device_generation() -> u64 {
     DEVICE_GEN.load(Ordering::Acquire)

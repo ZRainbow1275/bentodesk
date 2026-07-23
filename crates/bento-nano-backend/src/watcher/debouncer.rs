@@ -94,7 +94,7 @@ impl Debouncer {
         let (tx, rx): (Sender<NotifyMsg>, Receiver<NotifyMsg>) = channel();
 
         let watcher_tx = tx.clone();
-        // notify v7 returns `Result<RecommendedWatcher, notify::Error>`.
+        // notify v8 returns `Result<RecommendedWatcher, notify::Error>`.
         let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let msg = match res {
                 Ok(ev) => NotifyMsg::Event(ev),

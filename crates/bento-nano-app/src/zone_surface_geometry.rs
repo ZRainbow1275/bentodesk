@@ -43,8 +43,11 @@ impl ZoneSurfaceChrome {
             live_badge_radius: radius.md,
             drop_preview_core_radius: radius.sm,
             bloom_connector_radius: radius.sm,
-            bloom_petal_radius: radius.xl,
-            bloom_border_radius: radius.xl,
+            // Tauri StackWrapper.css pins Bloom petals to 16px regardless of
+            // the active theme's card radius. Keeping that literal here also
+            // keeps the fill and stroke on one shared geometry contract.
+            bloom_petal_radius: BorderRadius::all(16.0),
+            bloom_border_radius: BorderRadius::all(16.0),
             bloom_core_radius: radius.lg,
             bloom_index_radius: radius.lg,
             item_status_radius: radius.xl,
@@ -67,6 +70,8 @@ mod tests {
         assert_eq!(chrome.zone_radius, BorderRadius::all(8.0));
         assert_eq!(chrome.icon_chip_radius, BorderRadius::all(6.0));
         assert_eq!(chrome.stack_halo_radius, BorderRadius::all(12.0));
+        assert_eq!(chrome.bloom_petal_radius, BorderRadius::all(16.0));
+        assert_eq!(chrome.bloom_border_radius, BorderRadius::all(16.0));
     }
 
     #[test]
@@ -92,8 +97,8 @@ mod tests {
         assert_eq!(chrome.live_badge_radius, BorderRadius::all(7.0));
         assert_eq!(chrome.drop_preview_core_radius, BorderRadius::all(3.0));
         assert_eq!(chrome.bloom_connector_radius, BorderRadius::all(3.0));
-        assert_eq!(chrome.bloom_petal_radius, BorderRadius::all(17.0));
-        assert_eq!(chrome.bloom_border_radius, BorderRadius::all(17.0));
+        assert_eq!(chrome.bloom_petal_radius, BorderRadius::all(16.0));
+        assert_eq!(chrome.bloom_border_radius, BorderRadius::all(16.0));
         assert_eq!(chrome.bloom_core_radius, BorderRadius::all(11.0));
         assert_eq!(chrome.bloom_index_radius, BorderRadius::all(11.0));
         assert_eq!(chrome.item_status_radius, BorderRadius::all(17.0));

@@ -210,9 +210,7 @@ impl UpdaterPillKind {
 /// M1f — i18n string id for the status pill label of a given updater status.
 /// Each of the 9 variants maps to one of the appended ids 172..181. Returns
 /// the id (the renderer calls `bento_nano_style::t(..)`).
-pub const fn updater_status_label_id(
-    status: &SettingsUpdaterStatus,
-) -> bento_nano_style::StringId {
+pub const fn updater_status_label_id(status: &SettingsUpdaterStatus) -> bento_nano_style::StringId {
     use bento_nano_style::i18n_zh_cn::ids;
     match status {
         SettingsUpdaterStatus::Idle => ids::UPDATER_STATUS_IDLE,
@@ -354,18 +352,29 @@ mod tests {
 
     #[test]
     fn pill_kind_covers_every_status_variant() {
-        assert_eq!(UpdaterPillKind::from_status(&S::Idle), UpdaterPillKind::UpToDate);
         assert_eq!(
-            UpdaterPillKind::from_status(&S::UpToDate { current_version: ver() }),
+            UpdaterPillKind::from_status(&S::Idle),
             UpdaterPillKind::UpToDate
         );
-        assert_eq!(UpdaterPillKind::from_status(&S::Checking), UpdaterPillKind::Busy);
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::UpToDate {
+                current_version: ver()
+            }),
+            UpdaterPillKind::UpToDate
+        );
+        assert_eq!(
+            UpdaterPillKind::from_status(&S::Checking),
+            UpdaterPillKind::Busy
+        );
         assert_eq!(
             UpdaterPillKind::from_status(&S::Available { version: ver() }),
             UpdaterPillKind::Active
         );
         assert_eq!(
-            UpdaterPillKind::from_status(&S::Downloading { chunk_len: 1, total_bytes: Some(2) }),
+            UpdaterPillKind::from_status(&S::Downloading {
+                chunk_len: 1,
+                total_bytes: Some(2)
+            }),
             UpdaterPillKind::Active
         );
         assert_eq!(
@@ -390,9 +399,14 @@ mod tests {
     fn status_label_id_maps_each_variant_to_a_distinct_appended_id() {
         use bento_nano_style::i18n_zh_cn::ids;
         assert_eq!(updater_status_label_id(&S::Idle), ids::UPDATER_STATUS_IDLE);
-        assert_eq!(updater_status_label_id(&S::Checking), ids::UPDATER_STATUS_CHECKING);
         assert_eq!(
-            updater_status_label_id(&S::UpToDate { current_version: ver() }),
+            updater_status_label_id(&S::Checking),
+            ids::UPDATER_STATUS_CHECKING
+        );
+        assert_eq!(
+            updater_status_label_id(&S::UpToDate {
+                current_version: ver()
+            }),
             ids::UPDATER_STATUS_UP_TO_DATE
         );
         assert_eq!(
@@ -400,7 +414,10 @@ mod tests {
             ids::UPDATER_STATUS_AVAILABLE
         );
         assert_eq!(
-            updater_status_label_id(&S::Downloading { chunk_len: 0, total_bytes: None }),
+            updater_status_label_id(&S::Downloading {
+                chunk_len: 0,
+                total_bytes: None
+            }),
             ids::UPDATER_STATUS_DOWNLOADING
         );
         assert_eq!(
@@ -421,12 +438,16 @@ mod tests {
         );
         // Every appended status label id is non-empty in BOTH locales (a blank
         // would paint an empty pill). Spot-check the two endpoints.
-        assert!(!bento_nano_style::i18n_zh_cn::ZH_CN
-            .get(ids::UPDATER_STATUS_IDLE)
-            .is_empty());
-        assert!(!bento_nano_style::i18n_en_us::EN_US
-            .get(ids::UPDATER_STATUS_ERROR)
-            .is_empty());
+        assert!(
+            !bento_nano_style::i18n_zh_cn::ZH_CN
+                .get(ids::UPDATER_STATUS_IDLE)
+                .is_empty()
+        );
+        assert!(
+            !bento_nano_style::i18n_en_us::EN_US
+                .get(ids::UPDATER_STATUS_ERROR)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -440,23 +461,38 @@ mod tests {
         assert!(updater_visible_version(&S::Skipped { version: ver() }).is_some());
         assert!(updater_visible_version(&S::Idle).is_none());
         assert!(updater_visible_version(&S::Checking).is_none());
-        assert!(updater_visible_version(&S::Downloading { chunk_len: 1, total_bytes: Some(2) }).is_none());
+        assert!(
+            updater_visible_version(&S::Downloading {
+                chunk_len: 1,
+                total_bytes: Some(2)
+            })
+            .is_none()
+        );
         assert!(updater_visible_version(&S::Error(SmolStr::new_static("e"))).is_none());
     }
 
     #[test]
     fn progress_fraction_is_chunk_over_total_clamped() {
         // Half-way.
-        let f = updater_progress_fraction(&S::Downloading { chunk_len: 50, total_bytes: Some(100) });
+        let f = updater_progress_fraction(&S::Downloading {
+            chunk_len: 50,
+            total_bytes: Some(100),
+        });
         assert!((f.expect("some") - 0.5).abs() < 1e-6);
         // Floor + ceiling.
         assert_eq!(
-            updater_progress_fraction(&S::Downloading { chunk_len: 0, total_bytes: Some(100) }),
+            updater_progress_fraction(&S::Downloading {
+                chunk_len: 0,
+                total_bytes: Some(100)
+            }),
             Some(0.0)
         );
         // Overshoot clamps to 1.0 (never wider than the track).
         assert_eq!(
-            updater_progress_fraction(&S::Downloading { chunk_len: 250, total_bytes: Some(100) }),
+            updater_progress_fraction(&S::Downloading {
+                chunk_len: 250,
+                total_bytes: Some(100)
+            }),
             Some(1.0)
         );
     }
@@ -465,12 +501,18 @@ mod tests {
     fn progress_fraction_none_when_total_unknown_or_zero() {
         // total_bytes == None → indeterminate (None), never a panic.
         assert_eq!(
-            updater_progress_fraction(&S::Downloading { chunk_len: 999, total_bytes: None }),
+            updater_progress_fraction(&S::Downloading {
+                chunk_len: 999,
+                total_bytes: None
+            }),
             None
         );
         // total_bytes == Some(0) → guarded, no divide-by-zero, indeterminate.
         assert_eq!(
-            updater_progress_fraction(&S::Downloading { chunk_len: 10, total_bytes: Some(0) }),
+            updater_progress_fraction(&S::Downloading {
+                chunk_len: 10,
+                total_bytes: Some(0)
+            }),
             None
         );
         // Non-downloading states paint no bar.
@@ -487,7 +529,9 @@ mod tests {
         assert_eq!(updater_height_kind(&S::Idle), K::StatusOnly);
         assert_eq!(updater_height_kind(&S::Checking), K::StatusOnly);
         assert_eq!(
-            updater_height_kind(&S::UpToDate { current_version: ver() }),
+            updater_height_kind(&S::UpToDate {
+                current_version: ver()
+            }),
             K::StatusOnly
         );
         assert_eq!(
@@ -507,7 +551,10 @@ mod tests {
             K::Versioned
         );
         assert_eq!(
-            updater_height_kind(&S::Downloading { chunk_len: 0, total_bytes: None }),
+            updater_height_kind(&S::Downloading {
+                chunk_len: 0,
+                total_bytes: None
+            }),
             K::Downloading
         );
         assert_eq!(
@@ -531,6 +578,9 @@ mod tests {
         assert!(updater_show_skip(&S::Ready { version: ver() }));
         assert!(!updater_show_skip(&S::Idle));
         assert!(!updater_show_skip(&S::Checking));
-        assert!(!updater_show_skip(&S::Downloading { chunk_len: 0, total_bytes: None }));
+        assert!(!updater_show_skip(&S::Downloading {
+            chunk_len: 0,
+            total_bytes: None
+        }));
     }
 }

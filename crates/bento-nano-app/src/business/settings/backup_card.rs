@@ -309,7 +309,10 @@ mod tests {
     fn format_size_mib_range_emits_two_decimal_mb() {
         // 1 MiB is the MB floor; 2.5 MiB pins the two-decimal precision.
         assert_eq!(format_size(1024 * 1024).as_str(), "1.00 MB");
-        assert_eq!(format_size(2 * 1024 * 1024 + 512 * 1024).as_str(), "2.50 MB");
+        assert_eq!(
+            format_size(2 * 1024 * 1024 + 512 * 1024).as_str(),
+            "2.50 MB"
+        );
     }
 
     #[test]

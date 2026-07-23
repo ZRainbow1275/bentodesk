@@ -87,12 +87,10 @@ fn g3_settings_panel_labels_differ_across_zh_and_en() {
     // en-US, otherwise the Ctrl+, panel keeps speaking English in the
     // baseline locale (the after-ctrl-comma.png regression).
     //
-    // Pulling `t(id)` under each locale exercises the actual paint path
-    // (renderer calls the same function); we then assert non-equality for
-    // the migrated id set instead of pointing at any single string so a
-    // future translator can refine wording without breaking the test.
+    // Compare the two static tables directly. `t(id)` is separately covered in
+    // bento-nano-style; using the process-global locale pointer here races the
+    // locale-toggle test when this integration binary runs in parallel.
     use bento_nano_style::i18n_zh_cn::ids;
-    use bento_nano_style::t;
 
     let migrated = [
         // Row labels — the screenshot's left column.
@@ -147,13 +145,8 @@ fn g3_settings_panel_labels_differ_across_zh_and_en() {
         ids::KEYBINDINGS_RESET,
     ];
 
-    init_locale(&ZH_CN);
-    let zh: Vec<&'static str> = migrated.iter().map(|id| t(*id)).collect();
-    set_locale(&EN_US);
-    let en: Vec<&'static str> = migrated.iter().map(|id| t(*id)).collect();
-    // Restore the global default — the locale pointer is process-global
-    // and other tests in this binary assume zh-CN is the baseline.
-    set_locale(&ZH_CN);
+    let zh: Vec<&'static str> = migrated.iter().map(|id| ZH_CN.get(*id)).collect();
+    let en: Vec<&'static str> = migrated.iter().map(|id| EN_US.get(*id)).collect();
 
     // Every migrated id must yield a non-empty translation in both locales.
     for (idx, (z, e)) in zh.iter().zip(en.iter()).enumerate() {
@@ -173,11 +166,7 @@ fn g3_settings_panel_labels_differ_across_zh_and_en() {
     // shares its glyph across both tables (Win32 API name), so we expect
     // strictly more than half of the migrated ids to differ — well above
     // the wave brief's "≥ 5" threshold.
-    let differing: usize = zh
-        .iter()
-        .zip(en.iter())
-        .filter(|(z, e)| z != e)
-        .count();
+    let differing: usize = zh.iter().zip(en.iter()).filter(|(z, e)| z != e).count();
     assert!(
         differing >= 5,
         "expected ≥ 5 ids to differ across zh-CN/en-US, only {differing} did"

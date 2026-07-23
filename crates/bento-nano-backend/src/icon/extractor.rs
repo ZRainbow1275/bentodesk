@@ -24,6 +24,12 @@ use std::hash::{Hash, Hasher};
 use super::IconError;
 use super::wic;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InternetShortcutIconLocation {
+    path: String,
+    index: i32,
+}
+
 /// Compute a deterministic 16-hex-char hash for a file path. Used as
 /// the icon cache key. `DefaultHasher` is SipHash-1-3 in the current
 /// stdlib, sufficient for non-adversarial cache keying.
@@ -106,17 +112,102 @@ pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
     result
 }
 
+/// Read the icon resource selected by a Windows Internet Shortcut (`.url`).
+///
+/// Explorer stores this in the `[InternetShortcut]` section as `IconFile` and
+/// an optional `IconIndex`. `SHGetFileInfoW` only returns the registered URL
+/// file-type icon on some systems, so parsing the resource is required to
+/// match the icon that the desktop actually paints.
+fn read_internet_shortcut_icon(path: &str) -> Option<InternetShortcutIconLocation> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = decode_internet_shortcut_text(&bytes)?;
+    parse_internet_shortcut_icon(&text)
+}
+
+fn decode_internet_shortcut_text(bytes: &[u8]) -> Option<String> {
+    if let Some(body) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        if body.len() % 2 != 0 {
+            return None;
+        }
+        let units = body
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units).ok();
+    }
+    if let Some(body) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        if body.len() % 2 != 0 {
+            return None;
+        }
+        let units = body
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        return String::from_utf16(&units).ok();
+    }
+
+    let body = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+    std::str::from_utf8(body).ok().map(str::to_owned)
+}
+
+fn parse_internet_shortcut_icon(text: &str) -> Option<InternetShortcutIconLocation> {
+    let mut in_internet_shortcut = false;
+    let mut icon_path = None;
+    let mut icon_index = 0;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.starts_with('[') && line.ends_with(']') {
+            in_internet_shortcut = line[1..line.len() - 1]
+                .trim()
+                .eq_ignore_ascii_case("InternetShortcut");
+            continue;
+        }
+        if !in_internet_shortcut || line.is_empty() || line.starts_with(';') {
+            continue;
+        }
+
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if key.eq_ignore_ascii_case("IconFile") {
+            let unquoted = if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            };
+            if !unquoted.is_empty() {
+                icon_path = Some(unquoted.to_owned());
+            }
+        } else if key.eq_ignore_ascii_case("IconIndex") {
+            icon_index = value.parse::<i32>().unwrap_or(0);
+        }
+    }
+
+    icon_path.map(|path| InternetShortcutIconLocation {
+        path,
+        index: icon_index,
+    })
+}
+
 // ─── Extract → PNG (multi-strategy fallback per file type) ───────────
 
 /// Extract a file's icon as PNG bytes.
 ///
 /// Strategy:
-/// 1. `.lnk` → resolve target via `IShellLinkW`, then for `.exe`
-///    targets try `ExtractIconExW` first; fall back to
-///    `SHGetFileInfoW` on the target; last-resort `SHGetFileInfoW` on
-///    the `.lnk` itself.
-/// 2. `.exe` → `ExtractIconExW` first, then `SHGetFileInfoW`.
-/// 3. Anything else → `SHGetFileInfoW` only.
+/// 1. `.lnk` → ask the Shell for the shortcut's own visible icon first.
+///    This honours `IShellLinkW::SetIconLocation` and therefore matches
+///    Explorer. Only if that fails do we resolve the target and try its
+///    executable / file-type icon.
+/// 2. `.url` → parse its Explorer `IconFile` / `IconIndex`, then fall back to
+///    `SHGetFileInfoW` when the resource is absent or invalid.
+/// 3. `.exe` → `ExtractIconExW` first, then `SHGetFileInfoW`.
+/// 4. Anything else → `SHGetFileInfoW` only.
 ///
 /// Each strategy's output is checked for all-transparent pixels (via
 /// WIC alpha-channel scan) to detect bogus / invisible icons; those
@@ -124,13 +215,30 @@ pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
 pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
     let lower = path.to_ascii_lowercase();
     let is_lnk = lower.ends_with(".lnk");
+    let is_url = lower.ends_with(".url");
 
     if is_lnk {
+        match extract_icon_via_shgetfileinfo(path) {
+            Ok(png) if !wic::decode_png_alpha_check(&png) => {
+                tracing::info!("SHGetFileInfoW matched Explorer shortcut icon: {}", path);
+                return Ok(png);
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "SHGetFileInfoW returned transparent icon for .lnk: {}",
+                    path
+                );
+            }
+            Err(e) => {
+                tracing::debug!("SHGetFileInfoW failed for .lnk {}: {}", path, e);
+            }
+        }
+
         if let Some(target) = resolve_lnk_target(path) {
             tracing::info!("Resolved .lnk target: {} -> {}", path, target);
 
             if target.to_ascii_lowercase().ends_with(".exe") {
-                match extract_icon_via_extract_icon_ex(&target) {
+                match extract_icon_via_extract_icon_ex(&target, 0) {
                     Ok(png) if !wic::decode_png_alpha_check(&png) => {
                         tracing::info!("ExtractIconExW succeeded for target: {}", target);
                         return Ok(png);
@@ -158,24 +266,41 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
             }
         }
 
-        match extract_icon_via_shgetfileinfo(path) {
-            Ok(png) if !wic::decode_png_alpha_check(&png) => Ok(png),
-            Ok(_) => {
-                tracing::debug!(
-                    "SHGetFileInfoW returned transparent icon for .lnk: {}",
-                    path
-                );
-                Err(IconError::AllTransparent {
-                    path: path.to_string(),
-                })
-            }
-            Err(e) => {
-                tracing::debug!("SHGetFileInfoW failed for .lnk {}: {}", path, e);
-                Err(e)
+        Err(IconError::AllTransparent {
+            path: path.to_string(),
+        })
+    } else if is_url {
+        if let Some(location) = read_internet_shortcut_icon(path) {
+            match extract_icon_via_extract_icon_ex(&location.path, location.index) {
+                Ok(png) if !wic::decode_png_alpha_check(&png) => {
+                    tracing::info!(
+                        "ExtractIconExW matched Internet Shortcut icon: {} index={} -> {}",
+                        location.path,
+                        location.index,
+                        path
+                    );
+                    return Ok(png);
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        "ExtractIconExW returned transparent .url resource icon: {} index={}",
+                        location.path,
+                        location.index
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "ExtractIconExW failed for .url resource {} index={}: {}",
+                        location.path,
+                        location.index,
+                        e
+                    );
+                }
             }
         }
+        extract_icon_via_shgetfileinfo(path)
     } else if lower.ends_with(".exe") {
-        match extract_icon_via_extract_icon_ex(path) {
+        match extract_icon_via_extract_icon_ex(path, 0) {
             Ok(png) if !wic::decode_png_alpha_check(&png) => return Ok(png),
             Ok(_) => {
                 tracing::debug!("ExtractIconExW returned transparent icon: {}", path);
@@ -192,7 +317,7 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
 
 /// Strategy 1 — `.exe`/PE files: read embedded icon resource directly
 /// via `ExtractIconExW`. Bypasses Shell shortcut resolution.
-fn extract_icon_via_extract_icon_ex(path: &str) -> Result<Vec<u8>, IconError> {
+fn extract_icon_via_extract_icon_ex(path: &str, icon_index: i32) -> Result<Vec<u8>, IconError> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::UI::Shell::ExtractIconExW;
@@ -207,11 +332,11 @@ fn extract_icon_via_extract_icon_ex(path: &str) -> Result<Vec<u8>, IconError> {
     let mut large_icon = HICON::default();
 
     // SAFETY: ExtractIconExW with a valid null-terminated wide path,
-    // index 0 (first icon), 1 large-icon slot, no small-icon slot.
+    // caller-selected resource index, 1 large-icon slot, no small-icon slot.
     let count = unsafe {
         ExtractIconExW(
             PCWSTR(wide_path.as_ptr()),
-            0,
+            icon_index,
             Some(&mut large_icon),
             None,
             1,
@@ -417,5 +542,55 @@ mod tests {
         // non-.lnk should fail-soft and return None.
         let r = resolve_lnk_target("C:/does-not-exist.txt");
         assert!(r.is_none());
+    }
+
+    #[test]
+    fn internet_shortcut_parser_reads_explorer_icon_resource() {
+        let parsed = parse_internet_shortcut_icon(
+            "[{000214A0-0000-0000-C000-000000000046}]\r\n\
+             Prop3=19,0\r\n\
+             [InternetShortcut]\r\n\
+             IDList=\r\n\
+             IconIndex=3\r\n\
+             URL=steam://rungameid/843380\r\n\
+             IconFile=D:\\Steam\\steam\\games\\fox.ico\r\n",
+        )
+        .expect("icon resource");
+
+        assert_eq!(parsed.path, "D:\\Steam\\steam\\games\\fox.ico");
+        assert_eq!(parsed.index, 3);
+    }
+
+    #[test]
+    fn internet_shortcut_parser_is_case_insensitive_and_unquotes_path() {
+        let parsed = parse_internet_shortcut_icon(
+            "[internetshortcut]\niconfile=\"C:\\Icons\\game.dll\"\niconindex=-42\n",
+        )
+        .expect("quoted icon resource");
+
+        assert_eq!(parsed.path, "C:\\Icons\\game.dll");
+        assert_eq!(parsed.index, -42);
+    }
+
+    #[test]
+    fn internet_shortcut_parser_ignores_icon_outside_target_section() {
+        assert!(parse_internet_shortcut_icon("[Other]\nIconFile=C:\\wrong.ico\n").is_none());
+    }
+
+    #[test]
+    fn internet_shortcut_decoder_accepts_utf16le_bom() {
+        let source = "[InternetShortcut]\r\nIconFile=C:\\Icons\\fox.ico\r\n";
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in source.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let decoded = decode_internet_shortcut_text(&bytes).expect("UTF-16LE shortcut");
+        assert_eq!(
+            parse_internet_shortcut_icon(&decoded)
+                .expect("decoded icon")
+                .path,
+            "C:\\Icons\\fox.ico"
+        );
     }
 }

@@ -6,8 +6,9 @@
 //! that override one ID get the same visual baseline. User-installed JSON
 //! lives at `{app_data}/themes/*.json` and is merged on top, with collisions
 //! against built-in IDs silently rejected (built-in wins). Enabled Theme
-//! plugins contribute `<install_path>/theme.json` through the same
-//! `PluginRegistry` contract as 1.x.
+//! plugins contribute `<state_dir>/plugins/<validated-id>/theme.json` through
+//! the same `PluginRegistry` lifecycle as 1.x. Persisted absolute paths are
+//! metadata only and are never trusted for filesystem access.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ use bento_nano_theme::typo::{FontSizes, FontWeights, LineHeights};
 use bento_nano_theme::{PaletteTokens, ThemeTokens, TypoTokens, radius, shadow, spacing};
 use smol_str::SmolStr;
 
-use crate::plugins::{PluginRegistry, PluginType};
+use crate::plugins::{PluginRegistry, PluginType, install_path_for};
 
 use super::{Theme, ThemeAnimation, ThemeCapsule, ThemeColors, ThemeGlassmorphism};
 
@@ -346,13 +347,25 @@ fn load_plugin_themes(state_dir: &Path, themes: &mut Vec<Theme>) {
             continue;
         }
 
-        let theme_path = PathBuf::from(&plugin.install_path).join("theme.json");
+        // Registry JSON is user-writable state. Derive the owned directory from
+        // the validated ID instead of following a persisted absolute path.
+        let plugin_dir = match install_path_for(state_dir, &plugin.id) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    "themes: skipping plugin '{}' with invalid registry id: {error}",
+                    plugin.id
+                );
+                continue;
+            }
+        };
+        let theme_path = plugin_dir.join("theme.json");
         match load_theme_file(&theme_path) {
             Ok(mut theme) => {
                 theme.is_builtin = false;
                 if themes.iter().any(|existing| existing.id == theme.id) {
                     tracing::warn!(
-                        "themes: skipping plugin theme '{}' from plugin '{}' 鈥?ID collision",
+                        "themes: skipping plugin theme '{}' from plugin '{}' - ID collision",
                         theme.id,
                         plugin.id
                     );
@@ -426,7 +439,7 @@ pub fn to_theme_tokens(theme: &Theme) -> Result<ThemeTokens, ThemeError> {
         radius: radius::DEFAULT,
         shadow: shadow::DEFAULT,
         typo: TypoTokens {
-            font_family: SmolStr::new_static("Microsoft YaHei UI"),
+            font_family: SmolStr::new_static("Segoe UI"),
             sizes: FontSizes {
                 xs: 11.0,
                 sm: 13.0,
@@ -774,6 +787,38 @@ mod tests {
     }
 
     #[test]
+    fn tampered_registry_path_cannot_redirect_theme_loading() {
+        let state_dir = scratch_state_dir("registry-path-tamper");
+        let outside_dir = state_dir.join("outside-plugin-data");
+        std::fs::create_dir_all(&outside_dir).expect("outside dir");
+        write_theme_json(
+            &outside_dir.join("theme.json"),
+            &plugin_theme("redirected-purple", "Redirected Purple"),
+        );
+        let mut registry = PluginRegistry::default();
+        registry.plugins.push(InstalledPlugin {
+            id: "com.test.redirected-purple".into(),
+            name: "Redirected Theme".into(),
+            version: "1.0.0".into(),
+            plugin_type: PluginType::Theme,
+            author: "Tester".into(),
+            description: "Tampered registry path".into(),
+            enabled: true,
+            installed_at: "2026-01-01T00:00:00.000Z".into(),
+            install_path: outside_dir.to_string_lossy().into_owned(),
+        });
+        registry.save(&state_dir).expect("save registry");
+
+        let themes = load_all_themes(&state_dir.join("themes")).expect("load themes");
+        assert!(
+            !themes.iter().any(|theme| theme.id == "redirected-purple"),
+            "theme discovery must use state/plugins/<validated-id>, not persisted install_path"
+        );
+
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
     fn preextracted_manifest_theme_plugin_is_loaded() {
         let state_dir = scratch_state_dir("preextracted");
         let theme = plugin_theme("manifest-purple", "Manifest Purple");
@@ -832,6 +877,7 @@ mod tests {
             Color::from_u8(0x0e, 0xa5, 0xe9, 0xFF)
         );
         assert!(tokens.palette.surface.a > 0.0);
+        assert_eq!(tokens.typo.font_family.as_str(), "Segoe UI");
     }
 
     #[test]

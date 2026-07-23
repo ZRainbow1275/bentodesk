@@ -171,6 +171,161 @@ pub fn item_card_rect_for_item(zone: &Zone, item: &ZoneItem) -> Rect {
     )
 }
 
+/// CSS-grid flow geometry for a visible item subset (for example inline Zone
+/// search results). Returns the painted rectangle and the next free slot, so
+/// renderer and hit-testing can reflow the same filtered sequence without
+/// cloning or mutating the persisted Zone.
+pub fn item_card_rect_for_flow_slot(
+    zone: &Zone,
+    slot: i32,
+    is_wide: bool,
+    item_top_offset: f32,
+) -> (Rect, i32) {
+    item_card_rect_for_flow_slot_in_panel(
+        zone,
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        },
+        slot,
+        is_wide,
+        item_top_offset,
+    )
+}
+
+/// Tauri's `.bento-panel__content` is a real vertical scroll container. These
+/// helpers keep the un-clipped 78-DIP card geometry and translate it by the
+/// live scroll offset; renderer clipping and shell hit-testing then share the
+/// same coordinates instead of shrinking inaccessible bottom rows.
+pub fn item_card_rect_for_item_scrolled(zone: &Zone, item: &ZoneItem, scroll_offset: f32) -> Rect {
+    let mut rect = item_card_rect_for_item(zone, item);
+    rect.y -= scroll_offset.max(0.0);
+    rect.height = item_grid::ITEM_GRID_ROW_HEIGHT_PX;
+    rect
+}
+
+pub fn item_card_rect_for_flow_slot_scrolled(
+    zone: &Zone,
+    slot: i32,
+    is_wide: bool,
+    item_top_offset: f32,
+    scroll_offset: f32,
+) -> (Rect, i32) {
+    let (mut rect, next_slot) = item_card_rect_for_flow_slot(zone, slot, is_wide, item_top_offset);
+    rect.y -= scroll_offset.max(0.0);
+    rect.height = item_grid::ITEM_GRID_ROW_HEIGHT_PX;
+    (rect, next_slot)
+}
+
+/// Axis-aligned viewport for expanded Zone items. The normal content viewport
+/// begins at the 48-DIP header seam; inline search consumes another 44 DIPs.
+pub fn item_content_clip_rect(zone: &Zone, item_top_offset: f32) -> Rect {
+    let top = zone.y as f32 + expanded_zone_grid::HEADER_BAND_HEIGHT + item_top_offset.max(0.0);
+    Rect {
+        x: zone.x as f32,
+        y: top,
+        width: zone.w.max(0) as f32,
+        height: (zone.y as f32 + zone.h.max(0) as f32 - top).max(0.0),
+    }
+}
+
+/// Maximum scroll for the currently visible item flow. `is_wide_items` is the
+/// filtered item sequence (all items for normal mode, query matches for inline
+/// search), so no temporary vector or cloned Zone is needed.
+pub fn item_flow_max_scroll(
+    zone: &Zone,
+    item_top_offset: f32,
+    is_wide_items: impl IntoIterator<Item = bool>,
+) -> f32 {
+    let columns = effective_grid_columns(zone).max(1) as i32;
+    let mut slot = 0_i32;
+    let mut last_row = None;
+    for is_wide in is_wide_items {
+        let span = bounded_column_span(is_wide, columns as u32);
+        let column = slot % columns;
+        if column + span > columns {
+            slot += columns - column;
+        }
+        last_row = Some(slot / columns);
+        slot += span;
+    }
+    let Some(last_row) = last_row else {
+        return 0.0;
+    };
+    let last_card_bottom = zone.y as f32
+        + item_grid::ITEM_GRID_TOP_OFFSET_PX
+        + item_top_offset.max(0.0)
+        + last_row as f32 * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX)
+        + item_grid::ITEM_GRID_ROW_HEIGHT_PX;
+    let content_bottom = last_card_bottom + bento_nano_style::tokens::SPACING.lg;
+    (content_bottom - (zone.y + zone.h) as f32).max(0.0)
+}
+
+/// CSS-grid flow geometry inside an arbitrary panel rectangle. The floating
+/// Bloom preview renders the same `BentoPanel` as an expanded Zone in Tauri,
+/// so it must use the same requested column count, wide-card spans, gaps and
+/// row height rather than a second two-column layout.
+pub fn item_card_rect_for_flow_slot_in_panel(
+    zone: &Zone,
+    panel: Rect,
+    slot: i32,
+    is_wide: bool,
+    item_top_offset: f32,
+) -> (Rect, i32) {
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    );
+    let columns_i = columns.max(1) as i32;
+    let span = bounded_column_span(is_wide, columns);
+    let mut placed_slot = slot.max(0);
+    let column = placed_slot % columns_i;
+    if column + span > columns_i {
+        placed_slot += columns_i - column;
+    }
+    let mut rect = item_card_rect_for_effective_grid_in_panel(
+        zone.grid_columns.max(1),
+        panel,
+        placed_slot % columns_i,
+        placed_slot / columns_i,
+        columns,
+        is_wide,
+    );
+    rect.y += item_top_offset;
+    rect.height = rect.height.min((panel.bottom() - 8.0 - rect.y).max(0.0));
+    (rect, placed_slot + span)
+}
+
+/// Grid coordinate beneath a pointer in an arbitrary BentoPanel rectangle.
+/// Used by both ordinary expanded Zones and the floating Bloom preview so item
+/// reorder/cross-zone drag cannot mistake the preview for empty desktop.
+pub fn item_grid_position_for_panel(
+    panel: Rect,
+    requested_columns: u32,
+    x: f32,
+    y: f32,
+    item_top_offset: f32,
+) -> Option<(i32, i32)> {
+    if panel.width <= 0.0 || panel.height <= 0.0 {
+        return None;
+    }
+    let inset_x = expanded_zone_grid::HEADER_INSET_X;
+    let columns = item_grid::effective_column_count(panel.width, requested_columns.max(1), inset_x)
+        .max(1) as i32;
+    let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    let cell_w =
+        ((panel.width - inset_x * 2.0) - gap * (columns as f32 - 1.0)).max(44.0) / columns as f32;
+    let raw_col = ((x - panel.x - inset_x) / (cell_w + gap)).floor() as i32;
+    let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
+    let raw_row = ((y - panel.y - item_grid::ITEM_GRID_TOP_OFFSET_PX - item_top_offset)
+        / row_stride)
+        .floor() as i32;
+    Some((raw_col.clamp(0, columns - 1), raw_row.max(0)))
+}
+
 /// Shared item-card geometry for a concrete zone item inside an arbitrary
 /// panel rect. Used by the in-flight capsule->panel morph so body content can
 /// fade in on the same timeline without cloning or mutating the persisted zone.
@@ -928,6 +1083,43 @@ mod tests {
     }
 
     #[test]
+    fn expanded_item_scroll_keeps_full_card_geometry_and_shared_clip() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(9), "Docs", 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        let item_id = zone.add_item("C:/Desktop/item-01.txt", "h1").expect("item");
+        let item = zone.item(item_id).expect("item row");
+        let base = item_card_rect_for_item(&zone, item);
+        let scrolled = item_card_rect_for_item_scrolled(&zone, item, 32.0);
+
+        assert_eq!(scrolled.x, base.x);
+        assert_eq!(scrolled.y, base.y - 32.0);
+        assert_eq!(scrolled.width, base.width);
+        assert_eq!(scrolled.height, item_grid::ITEM_GRID_ROW_HEIGHT_PX);
+
+        let normal_clip = item_content_clip_rect(&zone, 0.0);
+        let search_clip = item_content_clip_rect(&zone, 44.0);
+        assert_eq!(
+            normal_clip.y,
+            zone.y as f32 + expanded_zone_grid::HEADER_BAND_HEIGHT
+        );
+        assert_eq!(search_clip.y, normal_clip.y + 44.0);
+        assert_eq!(normal_clip.bottom(), (zone.y + zone.h) as f32);
+        assert_eq!(search_clip.bottom(), normal_clip.bottom());
+    }
+
+    #[test]
+    fn item_flow_max_scroll_accounts_for_search_and_bottom_padding() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(9), "Docs", 64, 332, 320, 220);
+        zone.set_grid_columns(5);
+        let normal = item_flow_max_scroll(&zone, 0.0, std::iter::repeat_n(false, 10));
+        let search = item_flow_max_scroll(&zone, 44.0, std::iter::repeat_n(false, 10));
+
+        assert!(normal > 0.0);
+        assert_eq!(search, normal + 44.0);
+        assert_eq!(item_flow_max_scroll(&zone, 0.0, std::iter::empty()), 0.0);
+    }
+
+    #[test]
     fn paint_rect_applies_snap_inset() {
         let painted = paint_rect(HighlightRect::new(10.0, 20.0, 80.0, 60.0));
 
@@ -1017,5 +1209,55 @@ mod tests {
             target_radius_from_tauri_tokens(style_tokens::RADIUS),
             BorderRadius::all(style_tokens::RADIUS.card)
         );
+    }
+
+    #[test]
+    fn filtered_flow_slots_reflow_and_apply_inline_search_offset() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(12), "Search", 40, 60, 320, 240);
+        zone.set_grid_columns(4);
+
+        let (first, next) = item_card_rect_for_flow_slot(&zone, 0, true, 44.0);
+        let (second, after_second) = item_card_rect_for_flow_slot(&zone, next, false, 44.0);
+
+        assert_eq!(next, 2, "wide result must consume two flow slots");
+        assert_eq!(after_second, 3);
+        assert!(second.x > first.x);
+        assert_eq!(
+            first.y,
+            zone.y as f32 + item_grid::ITEM_GRID_TOP_OFFSET_PX + 44.0
+        );
+    }
+
+    #[test]
+    fn floating_panel_flow_uses_zone_columns_and_shared_pointer_mapping() {
+        let mut zone = Zone::new(bento_nano_zone::ZoneId(13), "Preview", 0, 0, 800, 600);
+        zone.set_grid_columns(4);
+        let panel = Rect {
+            x: 100.0,
+            y: 80.0,
+            width: 360.0,
+            height: 420.0,
+        };
+
+        let (first, next) = item_card_rect_for_flow_slot_in_panel(&zone, panel, 0, false, 0.0);
+        let (second, after_second) =
+            item_card_rect_for_flow_slot_in_panel(&zone, panel, next, false, 0.0);
+        let (searched, _) = item_card_rect_for_flow_slot_in_panel(&zone, panel, 0, false, 44.0);
+
+        assert_eq!(next, 1);
+        assert_eq!(after_second, 2);
+        assert!(second.x > first.right());
+        assert_eq!(searched.y - first.y, 44.0);
+        assert_eq!(
+            item_grid_position_for_panel(
+                panel,
+                zone.grid_columns,
+                first.x + first.width * 0.5,
+                first.y + first.height * 0.5,
+                0.0,
+            ),
+            Some((0, 0))
+        );
+        assert!(first.bottom() <= panel.bottom());
     }
 }

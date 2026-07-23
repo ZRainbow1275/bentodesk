@@ -30,7 +30,7 @@ pub use highlight_overlay::{
     DEFAULT_HIGHLIGHT_DURATION_MS, HighlightPayload, HighlightTarget, emit_clear, emit_highlight,
 };
 pub use manager::{
-    BypassGuard, GhostLayerError, GhostLayerEvent, attach, bypass_subclass_guard,
-    cursor_passthrough, detach, hide_window, is_visible, reposition_to_work_area,
-    set_cursor_passthrough, set_event_sender, show_window,
+    BypassGuard, GhostLayerError, GhostLayerEvent, attach, attach_selected_stack,
+    bypass_subclass_guard, cursor_passthrough, detach, hide_window, is_visible,
+    reposition_to_work_area, set_cursor_passthrough, set_event_sender, show_window,
 };

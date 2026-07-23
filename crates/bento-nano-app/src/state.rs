@@ -32,7 +32,7 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    animator::Animator,
+    animator::{AnimChannel, Animator},
     business::{
         bulk_manager_panel::BulkManagerState,
         capsule_picker::CapsulePickerState,
@@ -40,6 +40,7 @@ use crate::{
         highlight_overlay::HighlightOverlayState,
         item_card::ItemHoverState,
         minibar::{MAX_MINIBARS, MiniBar},
+        popover::ContextMenuSession,
         rules_wizard::RulesWizardState,
         search_bar::SearchBarState,
         smart_group_suggestor::SuggestorState,
@@ -59,10 +60,12 @@ use crate::{
 pub const EXPAND_DELAY_MIN_MS: i32 = 50;
 pub const EXPAND_DELAY_MAX_MS: i32 = 500;
 pub const EXPAND_DELAY_STEP_MS: i32 = 10;
+pub const DEFAULT_EXPAND_DELAY_MS: i32 = 90;
 /// 收起延迟 / Collapse Delay — `SettingsPanel.tsx:616-618`.
 pub const COLLAPSE_DELAY_MIN_MS: i32 = 100;
 pub const COLLAPSE_DELAY_MAX_MS: i32 = 1000;
 pub const COLLAPSE_DELAY_STEP_MS: i32 = 50;
+pub const DEFAULT_COLLAPSE_DELAY_MS: i32 = 200;
 /// 图标缓存大小 / Icon Cache Size — `SettingsPanel.tsx:625-627`.
 pub const ICON_CACHE_MIN: i32 = 100;
 pub const ICON_CACHE_MAX: i32 = 2000;
@@ -77,6 +80,16 @@ pub const CRASH_WINDOW_SECS_MAX: i32 = 60;
 pub const HIBERNATE_DELAY_MIN_MS: i32 = 500;
 pub const HIBERNATE_DELAY_MAX_MS: i32 = 5000;
 pub const HIBERNATE_DELAY_STEP_MS: i32 = 100;
+
+/// V21-N193 — Settings ThemeCard selection-chrome duration. Tauri applies
+/// theme surface variables immediately and transitions only the card chrome
+/// with `--transition-fast: 150ms ease-out`.
+pub const THEME_TRANSITION_MS: u32 = 150;
+/// V21-A settings dialog open scale-in duration. Tauri `.scale-in` uses
+/// `animation: scaleIn 180ms ease-out forwards`.
+pub const SETTINGS_OPEN_ANIMATION_MS: u32 = 180;
+/// V21-A settings dialog starts at the Tauri `scaleIn` source scale.
+pub const SETTINGS_OPEN_SCALE_FROM: f32 = 0.96;
 
 /// M1d — map a slider track fraction `[0,1]` to a stepped value in
 /// `[min, max]`, snapped to `step` and clamped. Pure helper shared by the
@@ -159,6 +172,7 @@ pub enum SettingsTextField {
     None,
     DesktopPath,
     WatchValues,
+    AccentColor,
     Passphrase,
 }
 
@@ -168,6 +182,23 @@ pub const SETTINGS_DESKTOP_PATH_DRAFT_LIMIT: usize = 260;
 /// M7 — char cap for the 监控值 multi-line textarea (one path per line; `\n` is
 /// allowed and NOT treated as a control reject). Counted in scalar values.
 pub const SETTINGS_WATCH_VALUES_DRAFT_LIMIT: usize = 1024;
+/// V21-N15 — char cap for the inline Appearance accent editor (`#rrggbb`).
+pub const SETTINGS_ACCENT_COLOR_DRAFT_LIMIT: usize = 7;
+
+fn normalize_accent_hex_char(ch: char) -> Option<char> {
+    if ch.is_ascii_hexdigit() {
+        Some(ch.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn is_valid_accent_hex(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() == SETTINGS_ACCENT_COLOR_DRAFT_LIMIT
+        && bytes[0] == b'#'
+        && bytes[1..].iter().all(u8::is_ascii_hexdigit)
+}
 
 /// M1a 2026-05-29 — snapshot of every persisted Settings toggle captured
 /// when the panel opens. Cancel/Escape/Close × replay this back onto the
@@ -199,6 +230,11 @@ pub struct SettingsSnapshot {
     pub crash_window_secs: i32,
     pub safe_start_after_hibernation: bool,
     pub hibernate_resume_delay_ms: i32,
+    // Appearance is previewed live while Settings is open, but follows the
+    // same Save/Cancel transaction as the other rows. Keep both values in the
+    // snapshot so Cancel restores the renderer and zone visibility semantics.
+    pub active_theme_id: SmolStr,
+    pub zone_display_mode: ZoneDisplayMode,
     // W2 (#7 fix wave 2026-06-01) — the §2 Paths drafts are Save-gated (NOT
     // immediate), so Cancel/Escape must revert them too. They were silently
     // ignored by snapshot/restore before this fix, leaking mid-edit path/watch
@@ -365,6 +401,32 @@ pub enum ZoneDisplayMode {
     Click,
 }
 
+/// Pointer-intent state for the compact stack Bloom surface.
+///
+/// The Tauri reference keeps the Bloom alive briefly while the cursor crosses
+/// the small gaps between its capsule, petals, and focused preview. It also
+/// distinguishes an incidental petal sweep from a deliberate hover before
+/// opening that member's preview. Keeping those related deadlines in one
+/// copyable cell prevents render, hit-test, and the frame timer from observing
+/// a half-updated combination of flags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackBloomInteractionState {
+    /// First blank-space sample while a Bloom is open; cancelled by re-entry.
+    pub leave_started_ms: Option<u32>,
+    /// Petal currently carrying the immediate active visual.
+    pub active_member: Option<ZoneId>,
+    /// Timestamp used by the 150 ms petal hover-intent gate.
+    pub active_member_started_ms: u32,
+    /// First sample outside the active petal; gives the active ring a short
+    /// gap-crossing grace before it clears.
+    pub active_member_leave_started_ms: Option<u32>,
+    /// Prevents a consumed hover intent from reopening a preview until a fresh
+    /// petal enter occurs.
+    pub hover_preview_opened: bool,
+    /// True only after an explicit petal click commits the focused preview.
+    pub preview_sticky: bool,
+}
+
 impl ZoneDisplayMode {
     pub const fn as_wire(self) -> &'static str {
         match self {
@@ -455,6 +517,28 @@ pub struct TooltipSession {
     pub text: SmolStr,
 }
 
+/// Expanded PanelHeader action button kind shared by shell hit-testing and D2D paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelHeaderButtonKind {
+    /// Magnifier button that opens Search.
+    Search,
+    /// Close button that collapses the expanded panel.
+    Close,
+}
+
+/// Currently hovered expanded PanelHeader button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelHeaderButtonHover {
+    pub zone_id: ZoneId,
+    pub button: PanelHeaderButtonKind,
+}
+
+impl PanelHeaderButtonHover {
+    pub const fn new(zone_id: ZoneId, button: PanelHeaderButtonKind) -> Self {
+        Self { zone_id, button }
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub tree: Tree<WidgetNode>,
@@ -475,10 +559,17 @@ pub struct AppState {
     /// `true` when the SETTINGS button has flipped the panel open. The
     /// modal overlay paints in `Renderer::draw_settings_panel`.
     pub settings_open: Cell<bool>,
+    /// V21-A — raw `GetTickCount` timestamp captured by the real Settings
+    /// producer. The renderer samples it for the open scale-in transform.
+    pub settings_open_started_ms: Cell<u32>,
     /// M1a 2026-05-29 — `true` after the user mutates any persisted Settings
     /// row in the open panel. Save dims when `false` (matches Tauri
     /// `disabled={!dirty()}` at `SettingsPanel.tsx:799`); Save/Cancel clear it.
     pub settings_dirty: Cell<bool>,
+    /// Visible Save failure kept in the sticky footer. A failed validation,
+    /// vault flush, or native side effect must leave Settings open and dirty
+    /// instead of silently closing as if the change had succeeded.
+    pub settings_save_error: RefCell<Option<SmolStr>>,
     /// M6-UI 2026-05-29 — in-flight accent-colour draft picked in the §3
     /// Appearance accent row (Control B). `Some("#rrggbb")` after a swatch
     /// click; the renderer rings the matching swatch, and Save persists it via
@@ -486,6 +577,11 @@ pub struct AppState {
     /// `theme_base_accent`. Cancel clears the draft. `RefCell` because the
     /// value is an owned `SmolStr` (not `Copy`).
     pub settings_draft_accent_color: RefCell<Option<SmolStr>>,
+    /// V21-N16 - explicit request to reset the saved Appearance accent. This
+    /// must stay separate from the hex draft: an empty or malformed draft is an
+    /// editable field state, while this flag means Save should delete the
+    /// persisted accent keys and fall back to the default blue.
+    pub settings_accent_clear_requested: Cell<bool>,
     /// M1a 2026-05-29 — snapshot of the General-section toggle values taken
     /// when the Settings panel opens. Cancel/Escape/Close × restore from
     /// here so cancelled edits never leak into persisted state. `RefCell`
@@ -500,7 +596,8 @@ pub struct AppState {
     pub setting_desktop_embed: Cell<bool>,
     /// Round-2 M1 — top-section toggle: 开机启动. Default off.
     pub setting_autostart: Cell<bool>,
-    /// Round-2 M1 — top-section toggle: 显示在任务栏. Default on.
+    /// Round-2 M1 — top-section toggle: 显示在任务栏. Default off, matching
+    /// the Tauri desktop-overlay default.
     pub setting_show_in_taskbar: Cell<bool>,
     /// Round-2 M1 — top-section toggle: 智能自动分组 (Tauri Smart Auto Group).
     /// M1a 2026-05-29: label retargeted to Tauri parity, field name kept for
@@ -514,9 +611,9 @@ pub struct AppState {
     /// M1i 2026-05-29 — 桌面源 §2 dynamic, READ-ONLY source list. Replaces the
     /// two hardcoded cosmetic-toggle cards with the real resolved Desktop
     /// directories from `bento_nano_backend::desktop_sources::all_desktop_dirs`,
-    /// each classified into a [`DesktopSourceKind`] and tagged with a `watched`
-    /// flag (path present in the watch-paths draft). The shell repopulates this
-    /// on Settings-open and on the Refresh button (`RefreshDesktopSources`); the
+    /// each classified into a [`DesktopSourceKind`] and tagged with Tauri's
+    /// `watched` source flag. The shell repopulates this on Settings-open and on
+    /// the Refresh button (`RefreshDesktopSources`); the
     /// renderer paints one read-only card per entry (Tauri `desktop-source-card`
     /// parity — `SettingsPanel.tsx:320-362`). `SmolStr` (not `PathBuf`) keeps the
     /// display string allocation-light per architecture §10.
@@ -533,13 +630,13 @@ pub struct AppState {
     /// for caret rendering; the non-passphrase arms edit the drafts above.
     pub settings_focused_field: Cell<SettingsTextField>,
     /// M1d 2026-05-29 — Performance §5 slider: 展开延迟 / Expand Delay in ms
-    /// (50..=500, step 10). Save-gated; reverted by Cancel. Deliberately
-    /// produced here to unblock the M3 animation milestone — named exactly
-    /// per `SettingsPanel.tsx:606`. Tauri default 150.
+    /// (50..=500, step 10). Save-gated; reverted by Cancel. The 90 ms release
+    /// default filters fly-over input without making the structural response
+    /// feel delayed.
     pub expand_delay_ms: Cell<i32>,
     /// M1d — Performance §5 slider: 收起延迟 / Collapse Delay in ms
-    /// (100..=1000, step 50). Tauri default 300 (`SettingsPanel.tsx:615`).
-    /// Also unblocks the M3 animation milestone.
+    /// (100..=1000, step 50). The 200 ms release default preserves a short
+    /// re-entry grace while keeping the close response quick.
     pub collapse_delay_ms: Cell<i32>,
     /// M1d — Performance §5 slider: 图标缓存大小 / Icon Cache Size
     /// (100..=2000, step 100, no unit). Tauri default 500
@@ -549,8 +646,7 @@ pub struct AppState {
     /// Startup (always shown). Tauri default off (`SettingsPanel.tsx:639`).
     pub startup_high_priority: Cell<bool>,
     /// M1d — Startup management §6 toggle: 崩溃自动重启 / Crash Auto Restart
-    /// (always shown). Gates the two crash steppers below. Tauri default on
-    /// (`SettingsPanel.tsx:646`).
+    /// (always shown). Gates the two crash steppers below. Tauri default off.
     pub crash_restart_enabled: Cell<bool>,
     /// M1d — Startup management §6 stepper: 最大重试次数 / Max Retries
     /// (1..=10), shown only when `crash_restart_enabled`. Tauri default 3
@@ -597,6 +693,16 @@ pub struct AppState {
     pub passphrase_unlock_required: Cell<bool>,
     /// Visible status for Settings encryption mutations.
     pub settings_encryption_status: RefCell<Option<SettingsBackupStatus>>,
+    /// Hovered Settings encryption mode button. This is intentionally narrow:
+    /// the Settings panel only needs the Tauri `.encryption-mode-btn:hover`
+    /// paint channel today, so we avoid a heap-backed generic hover map.
+    pub settings_encryption_mode_hover: Cell<Option<SettingsEncryptionMode>>,
+    /// Hovered Settings Appearance card/accent swatch. This stays as narrow as
+    /// the inline §3 grid contract instead of adding a generic hover map.
+    pub settings_appearance_hover: Cell<Option<crate::theme_picker::AppearanceHit>>,
+    /// Hovered Settings header close button. Kept as a single bit so the
+    /// Settings panel does not grow a heap-backed generic hover map.
+    pub settings_close_hover: Cell<bool>,
     /// `true` when Settings is currently capturing a passphrase draft.
     pub passphrase_entry_active: Cell<bool>,
     /// Whether the active passphrase draft will set a new passphrase or
@@ -650,6 +756,14 @@ pub struct AppState {
     /// `active_theme_effect_tauri()` accessor. Drives the 3 M6c render
     /// primitives (scanline overlay / neon glow / chromatic title split).
     pub active_theme_effect_tauri: RefCell<EffectTauri>,
+    /// V21-N193 — previous builtin ThemeCard id while Settings selection chrome
+    /// fades from the old card to the new one. `None` also covers custom themes
+    /// that have no inline builtin card.
+    pub theme_transition_from_card: Cell<Option<u8>>,
+    /// Raw `GetTickCount` timestamp captured by the live Settings producer.
+    pub theme_transition_started_ms: Cell<u32>,
+    /// True only while Settings ThemeCard selection chrome is transitioning.
+    pub theme_transition_active: Cell<bool>,
     /// Theme picker rows discovered from built-ins and `{app_data}/themes`.
     pub available_themes: RefCell<Vec<ThemeOption>>,
     /// Visible status for full-theme selection and display-mode settings.
@@ -661,6 +775,9 @@ pub struct AppState {
     /// Last zone under the pointer. Renderer uses this for the real `hover`
     /// display-mode behaviour instead of a static label-only setting.
     pub hovered_zone: Cell<Option<ZoneId>>,
+    /// Expanded PanelHeader button under the pointer. This unlocks Tauri's
+    /// `.panel-header__btn:hover` chrome without adding a per-button heap map.
+    pub panel_header_button_hover: Cell<Option<PanelHeaderButtonHover>>,
     /// Last zone clicked by the user. Renderer uses this for the real `click`
     /// display-mode behaviour.
     pub selected_zone: Cell<Option<ZoneId>>,
@@ -681,6 +798,16 @@ pub struct AppState {
     pub settings_plugin_entries: RefCell<Vec<SettingsPluginEntry>>,
     /// Visible status for plugin list/install/toggle/uninstall actions.
     pub settings_plugin_status: RefCell<Option<SettingsBackupStatus>>,
+    /// Card index awaiting an explicit uninstall confirmation. This mirrors the
+    /// Tauri plugin card's two-step destructive action and is cleared whenever
+    /// Settings closes or the registry refreshes.
+    pub settings_plugin_uninstall_confirm: Cell<Option<usize>>,
+    /// Suppress Settings' outside-click timer while an owned native common
+    /// dialog is closing and until the mouse button that accepted/cancelled it
+    /// has been released. Without this guard the picker button's screen-space
+    /// click is replayed as an outside click and hides Settings before the
+    /// selected result can be shown.
+    pub settings_owned_dialog_release_guard: Cell<bool>,
     /// `true` when the keybindings modal is open above the Settings overlay.
     /// The modal is a native selected-stack D2D surface, not the Tauri
     /// KeybindingsSection webview.
@@ -726,9 +853,9 @@ pub struct AppState {
     /// idiom.
     pub zone_drag_origin: Cell<Option<(i32, i32, bool)>>,
     /// Whether the dragged zone's body was visible before mouse-down selection.
-    /// A drag that starts from a collapsed pill must keep rendering/hitting the
-    /// pill even though mouse-down also selects the zone; a drag that starts from
-    /// an already-expanded body keeps the body.
+    /// The live drag always renders the collapsed capsule; this snapshot exists
+    /// only so release logic can avoid re-expanding a panel that was selected
+    /// before the drag began.
     pub zone_drag_body_visible_at_start: Cell<Option<(ZoneId, bool)>>,
     /// Selection active before the current zone drag began. A drag that started
     /// from a collapsed pill is not a click, so mouse-up restores this selection
@@ -754,12 +881,20 @@ pub struct AppState {
     /// hover enters a different stack and the renderer uses it to decide
     /// whether bloom frames should use a time-based reveal progress.
     pub stack_bloom_anchor: Cell<Option<ZoneId>>,
+    /// True while the bloom petals are running the Tauri reverse-staggered
+    /// exit keyframe after pointer leave. The anchor remains set until the
+    /// visible exit window completes so render and hit-region stay aligned.
+    pub stack_bloom_leaving: Cell<bool>,
     /// `GetTickCount` value captured when the current stack bloom reveal
     /// started. Stored in app state so rendering and hit-testing share the
     /// same animation phase inside the selected-stack pump.
     pub stack_bloom_started_ms: Cell<u32>,
     /// Current 0..1 reveal progress for Stack wrapper bloom frames.
     pub stack_bloom_progress: Cell<f32>,
+    /// Gap grace, petal hover intent, and click-sticky state for the current
+    /// Bloom. The shell advances its deadlines from the existing hover frame
+    /// timer; no extra timer or worker thread is required.
+    pub stack_bloom_interaction: Cell<StackBloomInteractionState>,
     /// Wave G2 — capsule pill expand/shrink transition target.
     /// `Some(zone_id)` while that zone is animating from its collapsed pill
     /// chrome to its expanded body (hover enter) or back (hover leave). The
@@ -772,6 +907,13 @@ pub struct AppState {
     pub zone_pill_anim_started_ms: Cell<u32>,
     /// 0..1 progress along the pill morph. Ticked from the main pump.
     pub zone_pill_anim_progress: Cell<f32>,
+    /// Visible morph at the start of the current segment. Capturing this value
+    /// makes interrupted expand/collapse reversals continue from the exact
+    /// painted shape instead of mirroring raw time through a non-linear curve.
+    pub zone_pill_anim_from_morph: Cell<f32>,
+    /// Wall-clock duration of the current segment. Full travel is 300 ms;
+    /// partial reversals scale with remaining visual distance.
+    pub zone_pill_anim_duration_ms: Cell<u32>,
     /// `true` when the animation is opening (pill → expanded), `false` when
     /// closing (expanded → pill). Determines which end-state is `progress=1`.
     pub zone_pill_anim_expanding: Cell<bool>,
@@ -788,8 +930,8 @@ pub struct AppState {
     /// A3 (2026-05-29) — pure hover-intent / grace-collapse scheduler. The
     /// shell feeds it `on_enter`/`on_leave` from the cursor stream and polls
     /// it once per frame; it defers expand by `expand_delay_ms`, holds the
-    /// 550ms expand-lock so the easeOutBack overshoot can't be race-collapsed,
-    /// and defers collapse by `collapse_delay_ms` so a transient leave doesn't
+    /// expand-lock through the single 300ms visual morph so it cannot be
+    /// race-collapsed, and defers collapse by `collapse_delay_ms` so a transient leave doesn't
     /// drop the zone. `Copy` so a `Cell` keeps the hot path lock-free (§10).
     pub hover_scheduler: Cell<HoverScheduler>,
     /// M3-A2 (2026-05-29) — per-item hover / press scale animation state. The
@@ -861,6 +1003,26 @@ pub struct AppState {
     /// keyboard producers update `query`, and the shell seeds `results` from
     /// the backend search index built from live zones/items/settings/actions.
     pub search_bar: RefCell<SearchBarState>,
+    /// Expanded Zone whose Tauri-parity inline SearchBar currently owns the
+    /// shared search query. `None` keeps the global Search HWND behavior.
+    pub zone_search_target: Cell<Option<ZoneId>>,
+    /// `true` while the inline search field is running its bounded collapse
+    /// animation. The target stays mounted until the zero-terminal frame so
+    /// paint never swaps a live field for empty space in one abrupt step.
+    pub zone_search_closing: Cell<bool>,
+    /// Last real click/keystroke timestamp for the inline search. The existing
+    /// backend poll timer uses it to dismiss an empty, abandoned field without
+    /// keeping a 60 fps timer alive for the entire idle grace period.
+    pub zone_search_last_interaction_ms: Cell<u32>,
+    /// Scroll position of the last wheel-scrolled expanded Zone content area.
+    /// Only one Zone can own the physical wheel at a time, so a compact
+    /// `(ZoneId, offset)` cell is sufficient and avoids a per-frame hash map.
+    /// Switching to another Zone starts that Zone at the top; reopening or
+    /// changing inline search also resets the bounded content scroll.
+    pub zone_content_scroll: Cell<Option<(ZoneId, f32)>>,
+    /// Foreground HWND captured before inline Zone search temporarily focuses
+    /// Main for keyboard input. Stored as an integer to keep Win32 out of state.
+    pub zone_search_previous_foreground: Cell<isize>,
     /// Visible SearchBar status/error text.
     pub search_status: RefCell<Option<SmolStr>>,
     /// Search/Suggestor highlight preview layer painted over real selected-stack
@@ -870,6 +1032,10 @@ pub struct AppState {
     /// before showing `WindowKind::Tooltip`; the renderer consumes it to paint
     /// the selected-stack D2D tooltip surface from the real command payload.
     pub active_tooltip: RefCell<Option<TooltipSession>>,
+    /// Active app-rendered right-click menu. The shell owns window/input and
+    /// command dispatch; the renderer consumes this compact presentation model
+    /// so the popup keeps one opaque D2D visual path instead of OS menu chrome.
+    pub active_context_menu: RefCell<Option<ContextMenuSession>>,
     /// SmartGroupSuggestor runtime state. `ShowSuggestor` scans real Desktop
     /// sources, seeds this list from backend suggestions, and aux-window
     /// keyboard/pointer producers emit `GroupingApply` / `SuggestorDismiss`.
@@ -903,26 +1069,29 @@ impl AppState {
             next_zone_id: Cell::new(1),
             is_pinned: Cell::new(false),
             settings_open: Cell::new(false),
+            settings_open_started_ms: Cell::new(0),
             settings_dirty: Cell::new(false),
+            settings_save_error: RefCell::new(None),
             settings_draft_accent_color: RefCell::new(None),
+            settings_accent_clear_requested: Cell::new(false),
             settings_snapshot: RefCell::new(None),
             scroll_offset_y: Cell::new(0.0),
             setting_desktop_embed: Cell::new(true),
             setting_autostart: Cell::new(false),
-            setting_show_in_taskbar: Cell::new(true),
+            setting_show_in_taskbar: Cell::new(false),
             setting_smart_layout: Cell::new(true),
             setting_portable_mode: Cell::new(false),
             desktop_sources: RefCell::new(Vec::new()),
             desktop_path_draft: RefCell::new(SmolStr::new_static("D:\\Desktop")),
             watch_paths_draft: RefCell::new(SmolStr::default()),
             settings_focused_field: Cell::new(SettingsTextField::None),
-            expand_delay_ms: Cell::new(150),
-            collapse_delay_ms: Cell::new(300),
+            expand_delay_ms: Cell::new(DEFAULT_EXPAND_DELAY_MS),
+            collapse_delay_ms: Cell::new(DEFAULT_COLLAPSE_DELAY_MS),
             icon_cache_size: Cell::new(500),
             startup_high_priority: Cell::new(false),
-            crash_restart_enabled: Cell::new(true),
+            crash_restart_enabled: Cell::new(false),
             crash_max_retries: Cell::new(3),
-            crash_window_secs: Cell::new(60),
+            crash_window_secs: Cell::new(10),
             safe_start_after_hibernation: Cell::new(true),
             hibernate_resume_delay_ms: Cell::new(2000),
             update_check_frequency: Cell::new(UpdateCheckFrequency::Weekly),
@@ -933,6 +1102,9 @@ impl AppState {
             encryption_mode: Cell::new(SettingsEncryptionMode::None),
             passphrase_unlock_required: Cell::new(false),
             settings_encryption_status: RefCell::new(None),
+            settings_encryption_mode_hover: Cell::new(None),
+            settings_appearance_hover: Cell::new(None),
+            settings_close_hover: Cell::new(false),
             passphrase_entry_active: Cell::new(false),
             passphrase_entry_purpose: Cell::new(PassphraseEntryPurpose::Set),
             passphrase_draft: RefCell::new(String::new()),
@@ -948,15 +1120,21 @@ impl AppState {
             active_theme_typography_tauri: RefCell::new(TYPOGRAPHY),
             // M6c — dark default has no effect; repopulated at the choke-point.
             active_theme_effect_tauri: RefCell::new(EffectTauri::None),
+            theme_transition_from_card: Cell::new(None),
+            theme_transition_started_ms: Cell::new(0),
+            theme_transition_active: Cell::new(false),
             available_themes: RefCell::new(Vec::new()),
             settings_theme_status: RefCell::new(None),
             zone_display_mode: Cell::new(ZoneDisplayMode::default()),
             hovered_zone: Cell::new(None),
+            panel_header_button_hover: Cell::new(None),
             selected_zone: Cell::new(None),
             settings_backup_status: RefCell::new(None),
             settings_backup_entries: RefCell::new(Vec::new()),
             settings_plugin_entries: RefCell::new(Vec::new()),
             settings_plugin_status: RefCell::new(None),
+            settings_plugin_uninstall_confirm: Cell::new(None),
+            settings_owned_dialog_release_guard: Cell::new(false),
             settings_keybindings_open: Cell::new(false),
             settings_keybinding_recording: RefCell::new(None),
             settings_keybinding_feedback: RefCell::new(None),
@@ -973,11 +1151,17 @@ impl AppState {
             stack_tray: RefCell::new(None),
             stack_tray_drag: Cell::new(None),
             stack_bloom_anchor: Cell::new(None),
+            stack_bloom_leaving: Cell::new(false),
             stack_bloom_started_ms: Cell::new(0),
             stack_bloom_progress: Cell::new(1.0),
+            stack_bloom_interaction: Cell::new(StackBloomInteractionState::default()),
             zone_pill_anim_zone: Cell::new(None),
             zone_pill_anim_started_ms: Cell::new(0),
             zone_pill_anim_progress: Cell::new(1.0),
+            zone_pill_anim_from_morph: Cell::new(0.0),
+            zone_pill_anim_duration_ms: Cell::new(
+                crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS,
+            ),
             zone_pill_anim_expanding: Cell::new(false),
             pill_animator: RefCell::new(Animator::new()),
             pill_pressed_zone: Cell::new(None),
@@ -999,14 +1183,102 @@ impl AppState {
             timeline_panel: RefCell::new(TimelinePanelState::new()),
             snapshot_picker: RefCell::new(SnapshotPickerState::new()),
             search_bar: RefCell::new(SearchBarState::default()),
+            zone_search_target: Cell::new(None),
+            zone_search_closing: Cell::new(false),
+            zone_search_last_interaction_ms: Cell::new(0),
+            zone_content_scroll: Cell::new(None),
+            zone_search_previous_foreground: Cell::new(0),
             search_status: RefCell::new(None),
             highlight_overlay: RefCell::new(HighlightOverlayState::new()),
             active_tooltip: RefCell::new(None),
+            active_context_menu: RefCell::new(None),
             suggestor: RefCell::new(SuggestorState::new()),
             suggestor_status: RefCell::new(None),
             suggestor_dismissed: RefCell::new(HashSet::new()),
             minibars: RefCell::new(SmallVec::new()),
         }
+    }
+
+    /// Update the hovered expanded PanelHeader button.
+    ///
+    /// Returns `true` only when paint-visible hover chrome changes, letting the
+    /// shell avoid redundant redraws on repeated mouse moves inside the same
+    /// 28-DIP button.
+    pub fn set_panel_header_button_hover(&self, hover: Option<PanelHeaderButtonHover>) -> bool {
+        if self.panel_header_button_hover.get() == hover {
+            return false;
+        }
+        self.panel_header_button_hover.set(hover);
+        true
+    }
+
+    pub fn is_panel_header_button_hovered(
+        &self,
+        zone_id: ZoneId,
+        button: PanelHeaderButtonKind,
+    ) -> bool {
+        self.panel_header_button_hover.get() == Some(PanelHeaderButtonHover { zone_id, button })
+    }
+
+    /// Update the hovered Settings encryption mode button.
+    ///
+    /// Returns `true` only when the paint-visible hover fill changes, letting
+    /// the shell avoid redundant redraws on repeated mouse moves inside the
+    /// same mode button.
+    pub fn set_settings_encryption_mode_hover(
+        &self,
+        hover: Option<SettingsEncryptionMode>,
+    ) -> bool {
+        if self.settings_encryption_mode_hover.get() == hover {
+            return false;
+        }
+        self.settings_encryption_mode_hover.set(hover);
+        true
+    }
+
+    pub fn is_settings_encryption_mode_hovered(&self, mode: SettingsEncryptionMode) -> bool {
+        self.settings_encryption_mode_hover.get() == Some(mode)
+    }
+
+    /// Update the hovered Settings Appearance ThemeCard/accent swatch.
+    ///
+    /// Returns `true` only when the paint-visible hover chrome changes, letting
+    /// the shell avoid redundant redraws on repeated mouse moves in one card.
+    pub fn set_settings_appearance_hover(
+        &self,
+        hover: Option<crate::theme_picker::AppearanceHit>,
+    ) -> bool {
+        if self.settings_appearance_hover.get() == hover {
+            return false;
+        }
+        self.settings_appearance_hover.set(hover);
+        true
+    }
+
+    pub fn is_settings_appearance_card_hovered(&self, id: u8) -> bool {
+        self.settings_appearance_hover.get() == Some(crate::theme_picker::AppearanceHit::Card(id))
+    }
+
+    pub fn is_settings_appearance_accent_hovered(&self, idx: u8) -> bool {
+        self.settings_appearance_hover.get()
+            == Some(crate::theme_picker::AppearanceHit::Accent(idx))
+    }
+
+    pub fn is_settings_appearance_accent_editor_hovered(&self) -> bool {
+        self.settings_appearance_hover.get()
+            == Some(crate::theme_picker::AppearanceHit::AccentEditor)
+    }
+
+    /// Update the hovered Settings header close button.
+    ///
+    /// Returns `true` only when the visible hover chrome changes, mirroring the
+    /// narrow Settings hover channels above.
+    pub fn set_settings_close_hover(&self, hover: bool) -> bool {
+        if self.settings_close_hover.get() == hover {
+            return false;
+        }
+        self.settings_close_hover.set(hover);
+        true
     }
 
     /// Mark zones as mutated this cycle. `consume_dispatcher` reads + clears.
@@ -1034,6 +1306,8 @@ impl AppState {
             crash_window_secs: self.crash_window_secs.get(),
             safe_start_after_hibernation: self.safe_start_after_hibernation.get(),
             hibernate_resume_delay_ms: self.hibernate_resume_delay_ms.get(),
+            active_theme_id: self.active_theme_id.borrow().clone(),
+            zone_display_mode: self.zone_display_mode.get(),
             // W2 — capture the two §2 Paths drafts under the same snapshot so
             // Cancel/Escape replays them back (they're Save-gated like the
             // toggles, not immediate).
@@ -1063,14 +1337,82 @@ impl AppState {
             .set(snap.safe_start_after_hibernation);
         self.hibernate_resume_delay_ms
             .set(snap.hibernate_resume_delay_ms);
+        // Built-in themes can be restored entirely inside AppState. The shell
+        // follows this with its loader-backed restore path so a custom JSON
+        // theme is restored with the same guarantee.
+        let _ = self.apply_active_theme_by_id(snap.active_theme_id.as_str());
+        self.zone_display_mode.set(snap.zone_display_mode);
         // W2 — replay the two §2 Paths drafts so a mid-edit Cancel/Escape never
         // leaks the mutated path/watch values into the rest of the session.
         *self.desktop_path_draft.borrow_mut() = snap.desktop_path_draft.clone();
         *self.watch_paths_draft.borrow_mut() = snap.watch_paths_draft.clone();
     }
 
+    /// V21-N15 — visible value for the inline Appearance accent editor. The
+    /// in-flight draft wins; otherwise we show the persisted Tauri accent and
+    /// finally the blue default used by the Settings preview.
+    pub fn settings_accent_editor_value(&self) -> SmolStr {
+        if self.settings_accent_clear_requested.get() {
+            return SmolStr::new_static("#3b82f6");
+        }
+        self.settings_draft_accent_color
+            .borrow()
+            .clone()
+            .or_else(|| self.theme_base_accent.borrow().clone())
+            .unwrap_or_else(|| SmolStr::new_static("#3b82f6"))
+    }
+
+    /// V21-N15 — focus the inline Appearance accent editor and seed its draft
+    /// from the currently displayed value so Backspace/typing edits a real
+    /// field instead of a placeholder.
+    pub fn focus_settings_accent_color(&self) {
+        if self.settings_accent_clear_requested.replace(false) {
+            *self.settings_draft_accent_color.borrow_mut() = Some(SmolStr::new_static("#3b82f6"));
+        }
+        if self.settings_draft_accent_color.borrow().is_none() {
+            let seed = self.settings_accent_editor_value();
+            *self.settings_draft_accent_color.borrow_mut() = Some(seed);
+        }
+        self.settings_focused_field
+            .set(SettingsTextField::AccentColor);
+    }
+
+    /// V21-N16 - visible inline reset for the Appearance accent. The action is
+    /// Save-gated: the persisted vault is only changed by `SaveSettings`.
+    pub fn request_settings_accent_clear(&self) {
+        self.settings_accent_clear_requested.set(true);
+        self.settings_draft_accent_color.borrow_mut().take();
+        self.settings_focused_field.set(SettingsTextField::None);
+        self.settings_dirty.set(true);
+    }
+
+    /// V21-N16 — accept an OS colour-dialog result as the in-flight Appearance
+    /// accent draft. Persistence remains Save-gated by the shell's
+    /// `SaveSettings` path.
+    pub fn set_settings_accent_color_from_picker(&self, hex: SmolStr) {
+        *self.settings_draft_accent_color.borrow_mut() = Some(hex);
+        self.settings_accent_clear_requested.set(false);
+        self.settings_focused_field.set(SettingsTextField::None);
+        self.settings_dirty.set(true);
+    }
+
+    /// V21-N15 — validated accent draft for persistence. Partial or malformed
+    /// drafts stay visible/editable but are not flushed to the config vault.
+    pub fn settings_valid_accent_draft(&self) -> Option<SmolStr> {
+        if self.settings_accent_clear_requested.get() {
+            return None;
+        }
+        let draft = self.settings_draft_accent_color.borrow();
+        let raw = draft.as_deref()?;
+        if is_valid_accent_hex(raw) {
+            Some(SmolStr::new(raw))
+        } else {
+            None
+        }
+    }
+
     /// M7 (2026-06-01) — append a char into the focused NON-passphrase draft
-    /// (桌面路径 / 监控值). Returns `true` when the draft changed. Append-only
+    /// (桌面路径 / 监控值 / accent hex). Returns `true` when the draft changed. Append-only
     /// (type at end); rejects control chars (but `\n` is allowed for the
     /// WatchValues textarea); caps length by SCALAR-VALUE count (CJK-safe) so a
     /// multi-byte path char counts as one. Event-driven (one allocation per
@@ -1079,6 +1421,9 @@ impl AppState {
     /// `passphrase_draft` + commit-on-Enter flow via
     /// `handle_settings_passphrase_char`.
     pub fn settings_focused_push_char(&self, ch: char) -> bool {
+        if self.settings_focused_field.get() == SettingsTextField::AccentColor {
+            return self.settings_accent_push_char(ch);
+        }
         let (draft, cap, allow_newline) = match self.settings_focused_field.get() {
             SettingsTextField::DesktopPath => (
                 &self.desktop_path_draft,
@@ -1090,7 +1435,11 @@ impl AppState {
                 SETTINGS_WATCH_VALUES_DRAFT_LIMIT,
                 true,
             ),
-            SettingsTextField::None | SettingsTextField::Passphrase => return false,
+            SettingsTextField::None
+            | SettingsTextField::AccentColor
+            | SettingsTextField::Passphrase => {
+                return false;
+            }
         };
         // Reject control chars — except a literal newline for the multi-line
         // WatchValues textarea (one watch path per line).
@@ -1113,10 +1462,27 @@ impl AppState {
     /// value, CJK-safe — never a partial byte). Returns `true` when the draft
     /// changed. Append-only edit model, so the caret is always at the end.
     pub fn settings_focused_backspace(&self) -> bool {
+        if self.settings_focused_field.get() == SettingsTextField::AccentColor {
+            let mut current = self.settings_draft_accent_color.borrow_mut();
+            let Some(raw) = current.as_ref() else {
+                return false;
+            };
+            if raw.is_empty() {
+                return false;
+            }
+            let mut chars = raw.chars();
+            chars.next_back();
+            *current = Some(SmolStr::new(chars.collect::<String>()));
+            return true;
+        }
         let draft = match self.settings_focused_field.get() {
             SettingsTextField::DesktopPath => &self.desktop_path_draft,
             SettingsTextField::WatchValues => &self.watch_paths_draft,
-            SettingsTextField::None | SettingsTextField::Passphrase => return false,
+            SettingsTextField::None
+            | SettingsTextField::AccentColor
+            | SettingsTextField::Passphrase => {
+                return false;
+            }
         };
         let mut current = draft.borrow_mut();
         if current.is_empty() {
@@ -1138,19 +1504,138 @@ impl AppState {
         match self.settings_focused_field.get() {
             SettingsTextField::DesktopPath => self.desktop_path_draft.borrow().chars().count(),
             SettingsTextField::WatchValues => self.watch_paths_draft.borrow().chars().count(),
+            SettingsTextField::AccentColor => self.settings_accent_editor_value().chars().count(),
             SettingsTextField::None | SettingsTextField::Passphrase => 0,
         }
+    }
+
+    fn settings_accent_push_char(&self, ch: char) -> bool {
+        if ch.is_control() {
+            return false;
+        }
+        let mut current = self.settings_draft_accent_color.borrow_mut();
+        let raw = current.as_deref().unwrap_or("");
+        if raw.chars().count() >= SETTINGS_ACCENT_COLOR_DRAFT_LIMIT {
+            return false;
+        }
+        let mut next = String::with_capacity(raw.len() + ch.len_utf8() + 1);
+        next.push_str(raw);
+        if raw.is_empty() {
+            if ch == '#' {
+                next.push('#');
+            } else if let Some(hex) = normalize_accent_hex_char(ch) {
+                next.push('#');
+                next.push(hex);
+            } else {
+                return false;
+            }
+        } else if let Some(hex) = normalize_accent_hex_char(ch) {
+            next.push(hex);
+        } else {
+            return false;
+        }
+        self.settings_accent_clear_requested.set(false);
+        *current = Some(SmolStr::new(next));
+        true
     }
 
     pub fn active_theme_palette(&self) -> PaletteTokens {
         self.active_theme_tokens.borrow().palette
     }
 
-    /// M6a — the active theme's Tauri-parity palette. `PaletteTauri: Copy`, so
-    /// the renderer binds this ONCE per paint fn and reads slots by value
-    /// (no per-frame alloc, no repeated RefCell borrows — §10).
+    /// V21-A — start the Settings dialog scale-in animation from a live shell
+    /// timestamp.
+    pub fn start_settings_open_animation(&self, now_ms: u32) {
+        self.settings_open_started_ms.set(now_ms);
+    }
+
+    /// V21-A — normalized Settings open progress at `now_ms`.
+    pub fn settings_open_animation_progress_at(&self, now_ms: u32) -> f32 {
+        settings_open_animation_progress(self.settings_open_started_ms.get(), now_ms)
+    }
+
+    /// V21-A — whether the Settings open animation still needs frame pumping.
+    pub fn settings_open_animation_pending_at(&self, now_ms: u32) -> bool {
+        self.settings_open.get() && self.settings_open_animation_progress_at(now_ms) < 1.0
+    }
+
+    /// M6a/V21-N193 — exact active Tauri-parity palette. Tauri updates theme
+    /// surface variables immediately; only Settings ThemeCard chrome animates.
     pub fn active_theme_tauri(&self) -> PaletteTauri {
         *self.active_theme_tauri.borrow()
+    }
+
+    /// Builtin ThemeCard id for the current active theme. Custom themes have no
+    /// inline card and return `None`. The 17-entry scan occurs only on a theme
+    /// producer, never per frame.
+    pub fn active_theme_card_id(&self) -> Option<u8> {
+        let active = self.active_theme_id.borrow();
+        crate::theme_picker::BUILTIN_THEMES
+            .iter()
+            .find(|preset| preset.theme_id == active.as_str())
+            .map(|preset| preset.id)
+    }
+
+    /// Selection weight for one Settings ThemeCard at `now_ms`. The previous
+    /// card fades `1→0`, the active card fades `0→1`, and all other cards stay
+    /// at zero. Settled cards return exactly `0` or `1`.
+    pub fn theme_card_selection_progress_at(
+        &self,
+        card_id: u8,
+        is_active: bool,
+        now_ms: u32,
+    ) -> f32 {
+        if !self.theme_transition_active.get() {
+            return if is_active { 1.0 } else { 0.0 };
+        }
+        let progress = theme_transition_progress(self.theme_transition_started_ms.get(), now_ms);
+        if progress >= 1.0 {
+            self.theme_transition_active.set(false);
+            self.theme_transition_from_card.set(None);
+            return if is_active { 1.0 } else { 0.0 };
+        }
+        let eased = theme_transition_ease(progress);
+        if is_active {
+            eased
+        } else if self.theme_transition_from_card.get() == Some(card_id) {
+            1.0 - eased
+        } else {
+            0.0
+        }
+    }
+
+    /// Start the existing 150ms frame lifecycle for Settings selection chrome.
+    /// Global theme palettes have already switched to the target. No Settings
+    /// window or no card identity change means there is nothing to animate.
+    ///
+    /// ponytail: one previous card is enough for normal clicks; add weighted
+    /// endpoints only if sub-150ms multi-click reversal is measured in practice.
+    pub fn start_theme_transition_from(&self, from_card: Option<u8>, now_ms: u32) -> bool {
+        let target_card = self.active_theme_card_id();
+        if !self.settings_open.get() || from_card == target_card {
+            self.theme_transition_from_card.set(None);
+            self.theme_transition_active.set(false);
+            return false;
+        }
+        self.theme_transition_from_card.set(from_card);
+        self.theme_transition_started_ms.set(now_ms);
+        self.theme_transition_active.set(true);
+        true
+    }
+
+    /// Whether Settings selection chrome still needs frame pumping at `now_ms`.
+    pub fn theme_transition_pending_at(&self, now_ms: u32) -> bool {
+        if !self.theme_transition_active.get() {
+            return false;
+        }
+        if !self.settings_open.get()
+            || theme_transition_progress(self.theme_transition_started_ms.get(), now_ms) >= 1.0
+        {
+            self.theme_transition_from_card.set(None);
+            self.theme_transition_active.set(false);
+            return false;
+        }
+        true
     }
 
     /// M6b — the active theme's Tauri-parity radius. `Copy`, bound once per
@@ -1341,8 +1826,70 @@ impl AppState {
 
     pub fn set_zone_display_mode(&self, mode: ZoneDisplayMode) -> bool {
         let changed = self.zone_display_mode.get() != mode;
+        if !changed {
+            return false;
+        }
         self.zone_display_mode.set(mode);
+        // Structural ownership belongs to the mode under which it was produced.
+        // In particular, `selected_zone` is the Click-mode expansion latch. If it
+        // survives Click -> Always -> Hover, Hover inherits an expanded panel
+        // even with the pointer away and can no longer settle back to a capsule.
+        // Clear every mode-owned latch together, then let the new mode's
+        // steady-state predicate become authoritative immediately.
+        self.selected_zone.set(None);
+        let mut scheduler = self.hover_scheduler.get();
+        scheduler.reset();
+        self.hover_scheduler.set(scheduler);
+        self.zone_pill_anim_zone.set(None);
+        self.zone_pill_anim_progress.set(1.0);
+        self.zone_pill_anim_expanding.set(false);
+        self.zone_pill_anim_from_morph.set(0.0);
+        true
+    }
+
+    /// Current scroll offset for `zone_id`. A different Zone never inherits
+    /// the previous Zone's scroll position.
+    pub fn zone_content_scroll_offset(&self, zone_id: ZoneId) -> f32 {
+        self.zone_content_scroll
+            .get()
+            .filter(|(current, _)| *current == zone_id)
+            .map(|(_, offset)| offset)
+            .unwrap_or(0.0)
+    }
+
+    /// Set a finite, non-negative expanded-content scroll offset. Returning
+    /// `true` means paint/hit geometry must be refreshed.
+    pub fn set_zone_content_scroll(&self, zone_id: ZoneId, offset: f32) -> bool {
+        let offset = if offset.is_finite() {
+            offset.max(0.0)
+        } else {
+            0.0
+        };
+        let next = (offset > 0.0).then_some((zone_id, offset));
+        let changed = self.zone_content_scroll.get() != next;
+        self.zone_content_scroll.set(next);
         changed
+    }
+
+    pub fn reset_zone_content_scroll(&self) -> bool {
+        self.zone_content_scroll.replace(None).is_some()
+    }
+
+    /// Current reveal fraction for the inline Zone search field. A manually
+    /// seeded target without an animator entry is treated as settled-open so
+    /// tests and restored state never produce an invisible active search.
+    pub fn zone_search_animation_progress_at(&self, now_ms: u32) -> f32 {
+        let Some(zone_id) = self.zone_search_target.get() else {
+            return 0.0;
+        };
+        let animator = self.pill_animator.borrow();
+        if animator.contains(zone_id, AnimChannel::InlineSearch) {
+            animator.sample(zone_id, AnimChannel::InlineSearch, now_ms)
+        } else if self.zone_search_closing.get() {
+            0.0
+        } else {
+            1.0
+        }
     }
 
     pub fn effective_zone_display_mode(&self, zone: &Zone) -> ZoneDisplayMode {
@@ -1353,14 +1900,30 @@ impl AppState {
     }
 
     pub fn zone_body_visible_for_mode(&self, zone: &Zone) -> bool {
+        // An active inline search is a transient, explicit interaction surface.
+        // Keep its Zone expanded independently of Hover/Click/Always until the
+        // field's reverse animation settles; otherwise leaving the capsule can
+        // hide a still-focused input before its idle timeout.
+        if self.zone_search_target.get() == Some(zone.id) {
+            return true;
+        }
         match self.effective_zone_display_mode(zone) {
             ZoneDisplayMode::Always => true,
-            ZoneDisplayMode::Hover => {
-                self.hovered_zone.get() == Some(zone.id)
-                    || self.selected_zone.get() == Some(zone.id)
-            }
+            ZoneDisplayMode::Hover => self.hover_scheduler.get().expanded_zone() == Some(zone.id),
             ZoneDisplayMode::Click => self.selected_zone.get() == Some(zone.id),
         }
+    }
+
+    /// Shared morph gate. Both directions include raw progress 0.0: the first
+    /// expand frame must paint the recorded pill/start shape rather than briefly
+    /// falling through to the settled expanded renderer, and the first collapse
+    /// frame must retain the complete panel before easing toward the pill.
+    pub fn zone_pill_morph_in_flight(&self, zone: &Zone) -> bool {
+        if zone.is_stack_anchor() || self.zone_pill_anim_zone.get() != Some(zone.id) {
+            return false;
+        }
+        let progress = self.zone_pill_anim_progress.get();
+        progress < 1.0
     }
 
     /// Z-order (2026-06-02) — whether `zone`'s SETTLED render surface is the
@@ -1373,25 +1936,17 @@ impl AppState {
     /// - A normal zone's body follows `zone_body_visible_for_mode`.
     /// - In BOTH cases a RESIZE (armable only on an already-expanded panel) forces
     ///   the body so the resize drag keeps the panel rect.
-    /// - A zone drag preserves the mouse-down visual form: collapsed-pill drags
-    ///   stay pills even though mouse-down also selects the zone; expanded-body
-    ///   drags stay bodies.
+    /// - A zone drag always uses the collapsed capsule. Tauri collapses an
+    ///   expanded panel before moving it and does not drag the large body rect.
     ///
     /// SSoT so paint, hit-rect, and z-layering can never drift.
     pub fn zone_pill_body_visible(&self, zone: &Zone) -> bool {
         let resize_id = self.zone_resize.get().map(|t| t.0);
-        let drag_started_collapsed = self
+        let is_dragged = self
             .zone_drag
             .get()
-            .filter(|(dragged, _, _)| *dragged == zone.id)
-            .and_then(|(dragged, _, _)| {
-                self.zone_drag_body_visible_at_start
-                    .get()
-                    .filter(|(recorded, _)| *recorded == dragged)
-                    .map(|(_, body_visible)| !body_visible)
-            })
-            .unwrap_or(false);
-        if drag_started_collapsed {
+            .is_some_and(|(dragged, _, _)| dragged == zone.id);
+        if is_dragged {
             return Some(zone.id) == resize_id;
         }
         if zone.is_stack_anchor() {
@@ -1415,11 +1970,7 @@ impl AppState {
             return true;
         }
         // Morph in flight (pill ↔ panel). Anchors don't morph.
-        if !zone.is_stack_anchor() && self.zone_pill_anim_zone.get() == Some(zone.id) {
-            let p = self.zone_pill_anim_progress.get();
-            return p > 0.0 && p < 1.0;
-        }
-        false
+        self.zone_pill_morph_in_flight(zone)
     }
 
     pub fn show_tooltip_text(&self, text: SmolStr) -> bool {
@@ -1584,6 +2135,64 @@ impl WindowState {
     }
 }
 
+#[inline]
+pub fn settings_open_animation_progress(started_ms: u32, now_ms: u32) -> f32 {
+    if SETTINGS_OPEN_ANIMATION_MS == 0 {
+        return 1.0;
+    }
+    (now_ms.wrapping_sub(started_ms) as f32 / SETTINGS_OPEN_ANIMATION_MS as f32).clamp(0.0, 1.0)
+}
+
+#[inline]
+pub fn settings_open_animation_ease(t: f32) -> f32 {
+    css_ease_out(t.clamp(0.0, 1.0))
+}
+
+#[inline]
+pub fn settings_open_animation_scale(eased: f32) -> f32 {
+    SETTINGS_OPEN_SCALE_FROM + (1.0 - SETTINGS_OPEN_SCALE_FROM) * eased.clamp(0.0, 1.0)
+}
+
+#[inline]
+pub fn theme_transition_progress(started_ms: u32, now_ms: u32) -> f32 {
+    if THEME_TRANSITION_MS == 0 {
+        return 1.0;
+    }
+    (now_ms.wrapping_sub(started_ms) as f32 / THEME_TRANSITION_MS as f32).clamp(0.0, 1.0)
+}
+
+#[inline]
+pub fn theme_transition_ease(t: f32) -> f32 {
+    css_ease_out(t.clamp(0.0, 1.0))
+}
+
+#[inline]
+fn css_ease_out(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..12 {
+        let mid = (lo + hi) * 0.5;
+        if cubic_bezier_axis(0.0, 0.58, mid) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    cubic_bezier_axis(0.0, 1.0, (lo + hi) * 0.5)
+}
+
+#[inline]
+fn cubic_bezier_axis(c1: f32, c2: f32, t: f32) -> f32 {
+    let inv = 1.0 - t;
+    3.0 * inv * inv * t * c1 + 3.0 * inv * t * t * c2 + t * t * t
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -1592,6 +2201,86 @@ mod tests {
     use bento_nano_theme::{ThemeTokens, palette, radius, shadow, spacing, typo};
 
     use super::*;
+
+    #[test]
+    fn panel_header_button_hover_tracks_visible_changes_only() {
+        let app = AppState::new();
+        let search = PanelHeaderButtonHover::new(ZoneId(7), PanelHeaderButtonKind::Search);
+        let close = PanelHeaderButtonHover::new(ZoneId(7), PanelHeaderButtonKind::Close);
+
+        assert_eq!(app.panel_header_button_hover.get(), None);
+        assert!(!app.is_panel_header_button_hovered(ZoneId(7), PanelHeaderButtonKind::Search));
+
+        assert!(app.set_panel_header_button_hover(Some(search)));
+        assert!(app.is_panel_header_button_hovered(ZoneId(7), PanelHeaderButtonKind::Search));
+        assert!(!app.set_panel_header_button_hover(Some(search)));
+
+        assert!(app.set_panel_header_button_hover(Some(close)));
+        assert!(app.is_panel_header_button_hovered(ZoneId(7), PanelHeaderButtonKind::Close));
+
+        assert!(app.set_panel_header_button_hover(None));
+        assert_eq!(app.panel_header_button_hover.get(), None);
+        assert!(!app.set_panel_header_button_hover(None));
+    }
+
+    #[test]
+    fn settings_encryption_mode_hover_tracks_visible_changes_only() {
+        let app = AppState::new();
+
+        assert_eq!(app.settings_encryption_mode_hover.get(), None);
+        assert!(!app.is_settings_encryption_mode_hovered(SettingsEncryptionMode::Dpapi));
+
+        assert!(app.set_settings_encryption_mode_hover(Some(SettingsEncryptionMode::Dpapi)));
+        assert!(app.is_settings_encryption_mode_hovered(SettingsEncryptionMode::Dpapi));
+        assert!(!app.set_settings_encryption_mode_hover(Some(SettingsEncryptionMode::Dpapi)));
+
+        assert!(app.set_settings_encryption_mode_hover(Some(SettingsEncryptionMode::Passphrase)));
+        assert!(app.is_settings_encryption_mode_hovered(SettingsEncryptionMode::Passphrase));
+
+        assert!(app.set_settings_encryption_mode_hover(None));
+        assert_eq!(app.settings_encryption_mode_hover.get(), None);
+        assert!(!app.set_settings_encryption_mode_hover(None));
+    }
+
+    #[test]
+    fn settings_appearance_hover_tracks_visible_changes_only() {
+        let app = AppState::new();
+
+        assert_eq!(app.settings_appearance_hover.get(), None);
+        assert!(!app.is_settings_appearance_card_hovered(5));
+
+        assert!(
+            app.set_settings_appearance_hover(Some(crate::theme_picker::AppearanceHit::Card(5)))
+        );
+        assert!(app.is_settings_appearance_card_hovered(5));
+        assert!(!app.is_settings_appearance_accent_hovered(5));
+        assert!(
+            !app.set_settings_appearance_hover(Some(crate::theme_picker::AppearanceHit::Card(5)))
+        );
+
+        assert!(
+            app.set_settings_appearance_hover(Some(crate::theme_picker::AppearanceHit::Accent(3)))
+        );
+        assert!(app.is_settings_appearance_accent_hovered(3));
+        assert!(!app.is_settings_appearance_card_hovered(5));
+
+        assert!(app.set_settings_appearance_hover(None));
+        assert_eq!(app.settings_appearance_hover.get(), None);
+        assert!(!app.set_settings_appearance_hover(None));
+    }
+
+    #[test]
+    fn settings_close_hover_tracks_visible_changes_only() {
+        let app = AppState::new();
+
+        assert!(!app.settings_close_hover.get());
+        assert!(app.set_settings_close_hover(true));
+        assert!(app.settings_close_hover.get());
+        assert!(!app.set_settings_close_hover(true));
+        assert!(app.set_settings_close_hover(false));
+        assert!(!app.settings_close_hover.get());
+        assert!(!app.set_settings_close_hover(false));
+    }
 
     #[test]
     fn settings_focused_field_default_is_none() {
@@ -1667,6 +2356,133 @@ mod tests {
         *app.desktop_path_draft.borrow_mut() = SmolStr::new("C:\\桌面");
         // 5 scalar values: C : \ 桌 面 (CJK counts as ONE each).
         assert_eq!(app.settings_focused_caret(), 5);
+    }
+
+    #[test]
+    fn settings_accent_editor_seeds_from_persisted_or_default() {
+        let app = AppState::new();
+        assert_eq!(app.settings_accent_editor_value().as_str(), "#3b82f6");
+        *app.theme_base_accent.borrow_mut() = Some(SmolStr::new_static("#f97316"));
+        assert_eq!(app.settings_accent_editor_value().as_str(), "#f97316");
+
+        app.focus_settings_accent_color();
+        assert_eq!(
+            app.settings_focused_field.get(),
+            SettingsTextField::AccentColor
+        );
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#f97316")
+        );
+    }
+
+    #[test]
+    fn settings_accent_clear_request_falls_back_to_default_and_refocuses_as_draft() {
+        let app = AppState::new();
+        *app.theme_base_accent.borrow_mut() = Some(SmolStr::new_static("#f97316"));
+        *app.settings_draft_accent_color.borrow_mut() = Some(SmolStr::new_static("#abcdef"));
+        app.settings_focused_field
+            .set(SettingsTextField::AccentColor);
+        app.settings_dirty.set(false);
+
+        app.request_settings_accent_clear();
+
+        assert!(app.settings_accent_clear_requested.get());
+        assert!(app.settings_draft_accent_color.borrow().is_none());
+        assert_eq!(app.settings_focused_field.get(), SettingsTextField::None);
+        assert!(app.settings_dirty.get());
+        assert_eq!(app.settings_accent_editor_value().as_str(), "#3b82f6");
+        assert_eq!(app.settings_valid_accent_draft(), None);
+
+        app.focus_settings_accent_color();
+        assert!(!app.settings_accent_clear_requested.get());
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#3b82f6")
+        );
+        assert_eq!(
+            app.settings_focused_field.get(),
+            SettingsTextField::AccentColor
+        );
+    }
+
+    #[test]
+    fn settings_accent_picker_result_is_save_gated_draft() {
+        let app = AppState::new();
+        app.settings_accent_clear_requested.set(true);
+        app.settings_focused_field
+            .set(SettingsTextField::AccentColor);
+        app.settings_dirty.set(false);
+
+        app.set_settings_accent_color_from_picker(SmolStr::new_static("#14b8a6"));
+
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#14b8a6")
+        );
+        assert!(!app.settings_accent_clear_requested.get());
+        assert_eq!(app.settings_focused_field.get(), SettingsTextField::None);
+        assert!(app.settings_dirty.get());
+        assert_eq!(
+            app.settings_valid_accent_draft().as_deref(),
+            Some("#14b8a6")
+        );
+    }
+
+    #[test]
+    fn settings_accent_editor_accepts_only_partial_hex_draft() {
+        let app = AppState::new();
+        app.settings_focused_field
+            .set(SettingsTextField::AccentColor);
+        *app.settings_draft_accent_color.borrow_mut() = None;
+
+        assert!(app.settings_focused_push_char('A'));
+        assert!(app.settings_focused_push_char('b'));
+        assert!(app.settings_focused_push_char('C'));
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#abc")
+        );
+        assert!(!app.settings_focused_push_char('g'));
+        assert!(!app.settings_focused_push_char('#'));
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#abc")
+        );
+        assert!(app.settings_focused_push_char('d'));
+        assert!(app.settings_focused_push_char('E'));
+        assert!(app.settings_focused_push_char('f'));
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#abcdef")
+        );
+        assert!(!app.settings_focused_push_char('0'));
+        assert_eq!(
+            app.settings_valid_accent_draft().as_deref(),
+            Some("#abcdef")
+        );
+    }
+
+    #[test]
+    fn settings_accent_editor_backspace_caret_and_invalid_save_filter() {
+        let app = AppState::new();
+        app.settings_focused_field
+            .set(SettingsTextField::AccentColor);
+        *app.settings_draft_accent_color.borrow_mut() = Some(SmolStr::new_static("#ab"));
+
+        assert_eq!(app.settings_focused_caret(), 3);
+        assert_eq!(app.settings_valid_accent_draft(), None);
+        assert!(app.settings_focused_backspace());
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#a")
+        );
+        assert!(app.settings_focused_backspace());
+        assert_eq!(
+            app.settings_draft_accent_color.borrow().as_deref(),
+            Some("#")
+        );
+        assert_eq!(app.settings_valid_accent_draft(), None);
     }
 
     #[test]
@@ -1782,6 +2598,94 @@ mod tests {
             app.active_theme_palette().bg,
             bento_nano_theme::LIGHT_DEFAULT.palette.bg,
         );
+    }
+
+    #[test]
+    fn theme_transition_progress_and_ease_match_v21_n2_contract() {
+        assert_eq!(THEME_TRANSITION_MS, 150);
+        assert!((theme_transition_progress(1_000, 1_000) - 0.0).abs() < f32::EPSILON);
+        assert!((theme_transition_progress(1_000, 1_075) - 0.5).abs() < f32::EPSILON);
+        assert!((theme_transition_progress(1_000, 1_150) - 1.0).abs() < f32::EPSILON);
+        assert!((theme_transition_ease(0.25) - 0.378_138).abs() < 0.001);
+        assert!((theme_transition_ease(0.5) - 0.684_643).abs() < 0.001);
+        assert!((theme_transition_ease(0.75) - 0.906_535).abs() < 0.001);
+        assert!(theme_transition_ease(0.5) < 0.875);
+    }
+
+    #[test]
+    fn settings_open_animation_matches_v21_a_scale_in_contract() {
+        assert_eq!(SETTINGS_OPEN_ANIMATION_MS, 180);
+        assert!((SETTINGS_OPEN_SCALE_FROM - 0.96).abs() < f32::EPSILON);
+        assert!((settings_open_animation_progress(2_000, 2_000) - 0.0).abs() < f32::EPSILON);
+        assert!((settings_open_animation_progress(2_000, 2_090) - 0.5).abs() < f32::EPSILON);
+        assert!((settings_open_animation_progress(2_000, 2_180) - 1.0).abs() < f32::EPSILON);
+
+        let mid_ease = settings_open_animation_ease(0.5);
+        assert!((mid_ease - 0.684_643).abs() < 0.001);
+        assert!(
+            (settings_open_animation_scale(0.0) - SETTINGS_OPEN_SCALE_FROM).abs() < f32::EPSILON
+        );
+        assert!((settings_open_animation_scale(mid_ease) - 0.987_386).abs() < 0.001);
+        assert!((settings_open_animation_scale(1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn settings_open_animation_pump_only_while_open_and_unsettled() {
+        let app = AppState::new();
+        let started = 6_000;
+
+        app.start_settings_open_animation(started);
+        assert!(!app.settings_open_animation_pending_at(started));
+
+        app.settings_open.set(true);
+        assert!(app.settings_open_animation_pending_at(started));
+        assert!(app.settings_open_animation_pending_at(started + SETTINGS_OPEN_ANIMATION_MS - 1));
+        assert!(!app.settings_open_animation_pending_at(started + SETTINGS_OPEN_ANIMATION_MS));
+    }
+
+    #[test]
+    fn live_theme_transition_switches_palette_immediately_and_animates_cards() {
+        let app = AppState::new();
+        let started = 4_000;
+        app.settings_open.set(true);
+        let from_card = app.active_theme_card_id();
+        assert_eq!(from_card, Some(0));
+
+        assert_eq!(app.apply_active_theme_by_id("light"), Some(true));
+        assert_eq!(app.active_theme_card_id(), Some(1));
+        assert_eq!(
+            app.active_theme_tauri(),
+            bento_nano_style::tokens::PALETTE_LIGHT
+        );
+        assert_eq!(app.active_theme_palette(), LIGHT_DEFAULT.palette);
+        assert!(app.start_theme_transition_from(from_card, started));
+        assert!(app.theme_transition_pending_at(started));
+
+        assert_eq!(app.theme_card_selection_progress_at(0, false, started), 1.0);
+        assert_eq!(app.theme_card_selection_progress_at(1, true, started), 0.0);
+
+        let mid_ms = started + THEME_TRANSITION_MS / 2;
+        let old_mid = app.theme_card_selection_progress_at(0, false, mid_ms);
+        let new_mid = app.theme_card_selection_progress_at(1, true, mid_ms);
+        assert!(old_mid > 0.0 && old_mid < 1.0);
+        assert!(new_mid > 0.0 && new_mid < 1.0);
+        assert!((old_mid + new_mid - 1.0).abs() < 0.001);
+
+        let settled_ms = started + THEME_TRANSITION_MS;
+        assert_eq!(
+            app.theme_card_selection_progress_at(0, false, settled_ms),
+            0.0
+        );
+        assert_eq!(
+            app.theme_card_selection_progress_at(1, true, settled_ms),
+            1.0
+        );
+        assert!(!app.theme_transition_pending_at(settled_ms));
+        assert_eq!(app.theme_transition_from_card.get(), None);
+
+        app.settings_open.set(false);
+        assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
+        assert!(!app.start_theme_transition_from(Some(1), settled_ms + 1));
     }
 
     #[test]
@@ -2018,6 +2922,67 @@ mod tests {
     }
 
     #[test]
+    fn zone_content_scroll_is_bounded_to_its_current_zone() {
+        let app = AppState::new();
+        assert_eq!(app.zone_content_scroll_offset(ZoneId(4)), 0.0);
+
+        assert!(app.set_zone_content_scroll(ZoneId(4), 86.0));
+        assert_eq!(app.zone_content_scroll_offset(ZoneId(4)), 86.0);
+        assert_eq!(app.zone_content_scroll_offset(ZoneId(5)), 0.0);
+        assert!(!app.set_zone_content_scroll(ZoneId(4), 86.0));
+
+        assert!(app.set_zone_content_scroll(ZoneId(5), f32::INFINITY));
+        assert_eq!(app.zone_content_scroll_offset(ZoneId(4)), 0.0);
+        assert_eq!(app.zone_content_scroll_offset(ZoneId(5)), 0.0);
+        assert!(!app.reset_zone_content_scroll());
+    }
+
+    #[test]
+    fn inline_zone_search_progress_has_stable_open_and_animated_states() {
+        let app = AppState::new();
+        let zone_id = ZoneId(4);
+        assert_eq!(app.zone_search_animation_progress_at(100), 0.0);
+
+        app.zone_search_target.set(Some(zone_id));
+        assert_eq!(app.zone_search_animation_progress_at(100), 1.0);
+
+        app.pill_animator.borrow_mut().start(
+            zone_id,
+            AnimChannel::InlineSearch,
+            100,
+            180,
+            0.0,
+            1.0,
+            crate::animator::Easing::EaseOutCubic,
+        );
+        assert_eq!(app.zone_search_animation_progress_at(100), 0.0);
+        assert!(app.zone_search_animation_progress_at(190) > 0.5);
+        assert_eq!(app.zone_search_animation_progress_at(280), 1.0);
+
+        app.zone_search_closing.set(true);
+        app.pill_animator
+            .borrow_mut()
+            .cancel(zone_id, AnimChannel::InlineSearch);
+        assert_eq!(app.zone_search_animation_progress_at(300), 0.0);
+    }
+
+    #[test]
+    fn active_inline_search_holds_hover_zone_open_until_target_clears() {
+        let mut app = AppState::new();
+        let zone_id = ZoneId(4);
+        app.zones
+            .add(Zone::new(zone_id, "Search", 10, 20, 240, 180));
+        app.set_zone_display_mode(ZoneDisplayMode::Hover);
+        let zone = app.zones.get(zone_id).expect("zone");
+
+        assert!(!app.zone_pill_body_visible(zone));
+        app.zone_search_target.set(Some(zone_id));
+        assert!(app.zone_pill_body_visible(zone));
+        app.zone_search_target.set(None);
+        assert!(!app.zone_pill_body_visible(zone));
+    }
+
+    #[test]
     fn zone_pill_anim_defaults_are_settled() {
         // Wave G2 — fresh AppState must report no pill morph in flight so
         // the renderer's morph branch stays dormant until hover starts one.
@@ -2025,6 +2990,11 @@ mod tests {
         assert_eq!(app.zone_pill_anim_zone.get(), None);
         assert_eq!(app.zone_pill_anim_started_ms.get(), 0);
         assert!((app.zone_pill_anim_progress.get() - 1.0).abs() < f32::EPSILON);
+        assert!((app.zone_pill_anim_from_morph.get() - 0.0).abs() < f32::EPSILON);
+        assert_eq!(
+            app.zone_pill_anim_duration_ms.get(),
+            crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        );
         assert!(!app.zone_pill_anim_expanding.get());
     }
 
@@ -2036,10 +3006,26 @@ mod tests {
         app.set_zone_display_mode(ZoneDisplayMode::Hover);
         assert!(!app.zone_body_visible_for_mode(&zone));
         app.hovered_zone.set(Some(zone.id));
+        assert!(!app.zone_body_visible_for_mode(&zone));
+        {
+            let mut scheduler = app.hover_scheduler.get();
+            scheduler.mark_expanded(zone.id, 100);
+            app.hover_scheduler.set(scheduler);
+        }
         assert!(app.zone_body_visible_for_mode(&zone));
         app.hovered_zone.set(None);
-        app.selected_zone.set(Some(zone.id));
         assert!(app.zone_body_visible_for_mode(&zone));
+        {
+            let mut scheduler = app.hover_scheduler.get();
+            scheduler.reset();
+            app.hover_scheduler.set(scheduler);
+        }
+        assert!(!app.zone_body_visible_for_mode(&zone));
+        app.selected_zone.set(Some(zone.id));
+        assert!(
+            !app.zone_body_visible_for_mode(&zone),
+            "ordinary clicks must not expand a hover-mode Zone"
+        );
 
         app.selected_zone.set(None);
         app.set_zone_display_mode(ZoneDisplayMode::Click);
@@ -2050,6 +3036,69 @@ mod tests {
         app.selected_zone.set(None);
         app.set_zone_display_mode(ZoneDisplayMode::Always);
         assert!(app.zone_body_visible_for_mode(&zone));
+    }
+
+    #[test]
+    fn changing_display_mode_cancels_stale_hover_intent_and_morph() {
+        let app = AppState::new();
+        let mut scheduler = app.hover_scheduler.get();
+        scheduler.on_enter(ZoneId(7), 100, 150);
+        app.hover_scheduler.set(scheduler);
+        app.selected_zone.set(Some(ZoneId(7)));
+        app.zone_pill_anim_zone.set(Some(ZoneId(7)));
+        app.zone_pill_anim_progress.set(0.4);
+        app.zone_pill_anim_expanding.set(true);
+
+        assert!(app.set_zone_display_mode(ZoneDisplayMode::Click));
+        assert_eq!(app.selected_zone.get(), None);
+        assert!(!app.hover_scheduler.get().is_pending());
+        assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+        assert_eq!(app.zone_pill_anim_zone.get(), None);
+        assert_eq!(app.zone_pill_anim_progress.get(), 1.0);
+        assert!(!app.zone_pill_anim_expanding.get());
+    }
+
+    #[test]
+    fn click_selection_does_not_leak_into_restored_hover_mode() {
+        let app = AppState::new();
+        let zone = Zone::new(ZoneId(7), Cow::Borrowed("docs"), 10, 10, 160, 120);
+
+        assert!(app.set_zone_display_mode(ZoneDisplayMode::Click));
+        app.selected_zone.set(Some(zone.id));
+        assert!(app.zone_body_visible_for_mode(&zone));
+
+        assert!(app.set_zone_display_mode(ZoneDisplayMode::Always));
+        assert_eq!(app.selected_zone.get(), None);
+        assert!(app.zone_body_visible_for_mode(&zone));
+
+        assert!(app.set_zone_display_mode(ZoneDisplayMode::Hover));
+        assert_eq!(app.selected_zone.get(), None);
+        assert!(!app.zone_body_visible_for_mode(&zone));
+    }
+
+    #[test]
+    fn zone_pill_morph_in_flight_keeps_both_start_frames_on_top() {
+        let app = AppState::new();
+        let zone = Zone::new(ZoneId(10), Cow::Borrowed("docs"), 10, 10, 160, 120);
+
+        app.zone_pill_anim_zone.set(Some(zone.id));
+        app.zone_pill_anim_expanding.set(true);
+        app.zone_pill_anim_progress.set(0.0);
+        assert!(app.zone_pill_morph_in_flight(&zone));
+        assert!(app.zone_on_top(&zone));
+
+        app.zone_pill_anim_progress.set(0.25);
+        assert!(app.zone_pill_morph_in_flight(&zone));
+        assert!(app.zone_on_top(&zone));
+
+        app.zone_pill_anim_expanding.set(false);
+        app.zone_pill_anim_progress.set(0.0);
+        assert!(app.zone_pill_morph_in_flight(&zone));
+        assert!(app.zone_on_top(&zone));
+
+        app.zone_pill_anim_progress.set(1.0);
+        assert!(!app.zone_pill_morph_in_flight(&zone));
+        assert!(!app.zone_on_top(&zone));
     }
 
     #[test]
@@ -2070,20 +3119,22 @@ mod tests {
     }
 
     #[test]
-    fn zone_drag_from_expanded_body_preserves_expanded_body() {
+    fn zone_drag_from_expanded_body_collapses_to_capsule() {
         let app = AppState::new();
         let zone = Zone::new(ZoneId(9), Cow::Borrowed("docs"), 10, 10, 160, 120);
 
         app.set_zone_display_mode(ZoneDisplayMode::Hover);
-        app.selected_zone.set(Some(zone.id));
+        let mut scheduler = app.hover_scheduler.get();
+        scheduler.mark_expanded(zone.id, 100);
+        app.hover_scheduler.set(scheduler);
         assert!(app.zone_pill_body_visible(&zone));
 
         app.zone_drag.set(Some((zone.id, 4, 4)));
         app.zone_drag_body_visible_at_start
             .set(Some((zone.id, true)));
 
-        assert!(app.zone_pill_body_visible(&zone));
-        assert!(app.zone_on_top(&zone));
+        assert!(!app.zone_pill_body_visible(&zone));
+        assert!(!app.zone_on_top(&zone));
     }
 
     /// M1a 2026-05-29 — `snapshot_settings`/`restore_settings` are the single
@@ -2120,6 +3171,8 @@ mod tests {
         app.crash_window_secs.set(45);
         app.safe_start_after_hibernation.set(false);
         app.hibernate_resume_delay_ms.set(3500);
+        assert_eq!(app.apply_active_theme_by_id("ocean-blue"), Some(true));
+        app.zone_display_mode.set(ZoneDisplayMode::Click);
         // W2 (#7 fix wave) — set the two §2 Paths drafts to non-default values
         // so the snapshot/restore round-trip is exercised for them too.
         *app.desktop_path_draft.borrow_mut() = SmolStr::new("E:\\Custom\\Desktop");
@@ -2143,6 +3196,8 @@ mod tests {
                 crash_window_secs: 45,
                 safe_start_after_hibernation: false,
                 hibernate_resume_delay_ms: 3500,
+                active_theme_id: SmolStr::new_static("ocean-blue"),
+                zone_display_mode: ZoneDisplayMode::Click,
                 desktop_path_draft: SmolStr::new("E:\\Custom\\Desktop"),
                 watch_paths_draft: SmolStr::new("E:\\Watch\\A\nE:\\Watch\\B"),
             }
@@ -2163,6 +3218,8 @@ mod tests {
         app.crash_window_secs.set(5);
         app.safe_start_after_hibernation.set(true);
         app.hibernate_resume_delay_ms.set(500);
+        assert_eq!(app.apply_active_theme_by_id("dark"), Some(true));
+        app.zone_display_mode.set(ZoneDisplayMode::Always);
         *app.desktop_path_draft.borrow_mut() = SmolStr::new("Z:\\scribbled");
         *app.watch_paths_draft.borrow_mut() = SmolStr::new("Z:\\scribbled\nZ:\\again");
 
@@ -2183,6 +3240,8 @@ mod tests {
         assert_eq!(app.crash_window_secs.get(), 45);
         assert!(!app.safe_start_after_hibernation.get());
         assert_eq!(app.hibernate_resume_delay_ms.get(), 3500);
+        assert_eq!(app.active_theme_id.borrow().as_str(), "ocean-blue");
+        assert_eq!(app.zone_display_mode.get(), ZoneDisplayMode::Click);
         // W2 — the two §2 Paths drafts round-trip through snapshot → restore.
         assert_eq!(
             app.desktop_path_draft.borrow().as_str(),
@@ -2210,8 +3269,8 @@ mod tests {
             show_in_taskbar: false,
             auto_group_enabled: true,
             portable_mode: true,
-            expand_delay_ms: 150,
-            collapse_delay_ms: 300,
+            expand_delay_ms: DEFAULT_EXPAND_DELAY_MS,
+            collapse_delay_ms: DEFAULT_COLLAPSE_DELAY_MS,
             icon_cache_size: 500,
             startup_high_priority: false,
             crash_restart_enabled: true,
@@ -2219,6 +3278,8 @@ mod tests {
             crash_window_secs: 60,
             safe_start_after_hibernation: true,
             hibernate_resume_delay_ms: 2000,
+            active_theme_id: SmolStr::new_static("dark"),
+            zone_display_mode: ZoneDisplayMode::Hover,
             desktop_path_draft: SmolStr::new("D:\\Desktop"),
             watch_paths_draft: SmolStr::default(),
         };
@@ -2338,13 +3399,20 @@ mod tests {
         assert_eq!(slider_fraction_to_value(2.0, 1, 10, 0), 10);
     }
 
-    /// M1d 2026-05-29 — the crash steppers + sliders default to in-range Tauri
-    /// values and the bounds are the exact Tauri min/max. Pin the defaults so a
-    /// future edit cannot silently seed an out-of-range Cell (which the panel
-    /// would then clamp on first paint, hiding the drift).
+    /// Performance/startup controls seed valid values. Pin the release motion
+    /// defaults as well as their ranges so first-run response cannot silently
+    /// drift back to the slower reference cadence.
     #[test]
     fn m1d_perf_startup_defaults_in_range() {
         let app = AppState::new();
+        assert_eq!(DEFAULT_EXPAND_DELAY_MS, 90);
+        assert_eq!(DEFAULT_COLLAPSE_DELAY_MS, 200);
+        assert!(
+            DEFAULT_EXPAND_DELAY_MS as u32 + crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+                <= 400
+        );
+        assert_eq!(app.expand_delay_ms.get(), DEFAULT_EXPAND_DELAY_MS);
+        assert_eq!(app.collapse_delay_ms.get(), DEFAULT_COLLAPSE_DELAY_MS);
         assert!((EXPAND_DELAY_MIN_MS..=EXPAND_DELAY_MAX_MS).contains(&app.expand_delay_ms.get()));
         assert!(
             (COLLAPSE_DELAY_MIN_MS..=COLLAPSE_DELAY_MAX_MS).contains(&app.collapse_delay_ms.get())

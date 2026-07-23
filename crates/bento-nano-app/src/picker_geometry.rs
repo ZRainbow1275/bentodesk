@@ -5,11 +5,12 @@
 
 use bento_nano_style::{Rect, Shadow, Size};
 
-pub const ICON_SLOT_WIDTH: f32 = 112.0;
-pub const ICON_SLOT_HEIGHT: f32 = 64.0;
-pub const ICON_SLOT_GAP: f32 = 10.0;
-pub const ICON_SLOT_MAX_COLUMNS: usize = 10;
+pub const ICON_SLOT_WIDTH: f32 = 56.0;
+pub const ICON_SLOT_HEIGHT: f32 = 56.0;
+pub const ICON_SLOT_GAP: f32 = 8.0;
+pub const ICON_SLOT_MAX_COLUMNS: usize = 6;
 pub const ICON_SLOT_MIN_COLUMNS: usize = 3;
+pub const PICKER_CLOSE_SIZE: f32 = 32.0;
 
 pub const PALETTE_SWATCH_SIZE: f32 = 26.0;
 pub const PALETTE_SWATCH_GAP: f32 = 8.0;
@@ -18,6 +19,7 @@ pub const PALETTE_SWATCH_COLUMNS: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconPickerHit {
     Icon(usize),
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +52,16 @@ pub fn icon_picker_columns(viewport: Size) -> usize {
     let content_width = (panel.width - 36.0).max(ICON_SLOT_WIDTH);
     let raw = ((content_width + ICON_SLOT_GAP) / (ICON_SLOT_WIDTH + ICON_SLOT_GAP)).floor();
     (raw as usize).clamp(ICON_SLOT_MIN_COLUMNS, ICON_SLOT_MAX_COLUMNS)
+}
+
+pub fn icon_picker_close_rect(viewport: Size) -> Rect {
+    let panel = picker_panel(viewport);
+    Rect {
+        x: panel.right() - 14.0 - PICKER_CLOSE_SIZE,
+        y: panel.y + 10.0,
+        width: PICKER_CLOSE_SIZE,
+        height: PICKER_CLOSE_SIZE,
+    }
 }
 
 pub fn icon_picker_selected_rect(viewport: Size) -> Rect {
@@ -93,6 +105,9 @@ pub fn icon_picker_hit_test(
     y: f32,
     icon_count: usize,
 ) -> Option<IconPickerHit> {
+    if contains_point(icon_picker_close_rect(viewport), x, y) {
+        return Some(IconPickerHit::Close);
+    }
     for index in 0..icon_count {
         if contains_point(icon_picker_slot_rect(viewport, index), x, y) {
             return Some(IconPickerHit::Icon(index));
@@ -195,6 +210,30 @@ mod tests {
                 width: 342.0,
                 height: 202.0,
             }
+        );
+    }
+
+    #[test]
+    fn compact_icon_picker_uses_six_columns_and_a_real_close_target() {
+        let viewport = Size {
+            width: 480.0,
+            height: 640.0,
+        };
+        assert_eq!(icon_picker_columns(viewport), 6);
+        let first = icon_picker_slot_rect(viewport, 0);
+        let seventh = icon_picker_slot_rect(viewport, 6);
+        assert_eq!(first.x, seventh.x);
+        assert!(seventh.y > first.y);
+
+        let close = icon_picker_close_rect(viewport);
+        assert_eq!(
+            icon_picker_hit_test(
+                viewport,
+                close.x + close.width * 0.5,
+                close.y + close.height * 0.5,
+                30,
+            ),
+            Some(IconPickerHit::Close)
         );
     }
 }

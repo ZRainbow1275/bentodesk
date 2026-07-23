@@ -4,8 +4,8 @@
 //! updater auto-download, etc.). The widget is intentionally tiny so it can
 //! be inlined into the renderer's hot path without crossing module borders.
 //!
-//! Visual reference: Tauri 1.2.4 `frame_060.png` — 38 × 22 DIP track with a
-//! 16 × 16 DIP knob. The off-state knob hugs the left edge of the track,
+//! Visual reference: Tauri `SettingsPanel.css` — 44 x 24 DIP track with a
+//! 20 x 20 DIP knob. The off-state knob hugs the left edge of the track,
 //! the on-state knob hugs the right edge; the colours come from the active
 //! palette (`accent_blue` when on, `surface_subtle` when off — both already
 //! defined in `bento_nano_style::tokens`).
@@ -107,6 +107,13 @@ mod tests {
         assert_eq!(s.track.y, 200.0);
         assert_eq!(s.track.width, SETTINGS_TOGGLE_TRACK_W);
         assert_eq!(s.track.height, SETTINGS_TOGGLE_TRACK_H);
+    }
+
+    #[test]
+    fn layout_matches_tauri_settings_source_switch_size() {
+        assert_eq!(SETTINGS_TOGGLE_TRACK_W, 44.0);
+        assert_eq!(SETTINGS_TOGGLE_TRACK_H, 24.0);
+        assert_eq!(SETTINGS_TOGGLE_KNOB_D, 20.0);
     }
 
     #[test]

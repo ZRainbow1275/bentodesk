@@ -55,6 +55,46 @@ pub const CARD_PRESS_DURATION_MS: u32 = 80;
 pub const CARD_HOVER_DURATION_MS: u32 = 150;
 /// Hover-lift vertical offset — Tauri `translateY(-1px)`.
 pub const CARD_HOVER_LIFT_DY: f32 = -1.0;
+/// First-mount item-card entrance duration — Tauri `.item-enter`.
+pub const CARD_ENTER_DURATION_MS: u32 = 250;
+/// First-mount item-card stagger. The reference uses 30 ms, but the native
+/// 300 ms morph has only a 50 ms content tail after the 250 ms item keyframe.
+/// Distributing that tail across the first six slots keeps a visible cascade
+/// while every card reaches its real terminal state with the panel.
+pub const CARD_ENTER_STAGGER_MS: u32 = 10;
+/// First-mount item-card base delay. Tauri `ItemCard.tsx` only applies
+/// `index * 0.03s`; the parent bento/content layers own their own visibility
+/// delays, so the item animation itself has no extra base delay.
+pub const CARD_ENTER_START_DELAY_MS: u32 = 0;
+/// Expanded-panel morph envelope — follows the single selected-stack
+/// pill-to-panel wall-clock duration so item content cannot complete early while
+/// the panel geometry is still catching up to the video reference.
+pub const CARD_ENTER_MORPH_ENVELOPE_MS: u32 = crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS;
+/// Last stagger slot that can still finish inside the morph envelope.
+pub const CARD_ENTER_MAX_STAGGER_INDEX: usize = 5;
+/// Tauri `@keyframes itemEnter` starts at `translateY(6px)`.
+pub const CARD_ENTER_OFFSET_Y: f32 = 6.0;
+
+/// Staggered first-reveal progress for expanded item cards during the
+/// pill-to-panel morph. The first six slots use the release's compact 10 ms
+/// stagger and Tauri's 250 ms duration; later slots share the final slot so
+/// they are fully settled by the end of the morph instead of popping when the
+/// steady panel path takes over.
+#[inline]
+pub fn card_enter_progress_for_morph(morph: f32, item_index: usize) -> f32 {
+    let morph_ms = morph.clamp(0.0, 1.0) * CARD_ENTER_MORPH_ENVELOPE_MS as f32;
+    let stagger_index = item_index.min(CARD_ENTER_MAX_STAGGER_INDEX) as f32;
+    let start_ms = CARD_ENTER_START_DELAY_MS as f32 + stagger_index * CARD_ENTER_STAGGER_MS as f32;
+    let raw = ((morph_ms - start_ms) / CARD_ENTER_DURATION_MS as f32).clamp(0.0, 1.0);
+    crate::animator::ease_out_cubic(raw)
+}
+
+/// Vertical offset for Tauri `itemEnter`: 6px at the first frame, 0px when
+/// settled.
+#[inline]
+pub fn card_enter_translate_y(progress: f32) -> f32 {
+    CARD_ENTER_OFFSET_Y * (1.0 - progress.clamp(0.0, 1.0))
+}
 
 /// Compose hover + press into the item-card scale multiplier. `hover_t` and
 /// `press_t` are 0..1 animator progress values (e.g. from a future per-item
@@ -287,8 +327,8 @@ pub struct ItemCardChrome {
     pub ghost_shadow: Color,
     /// Destructive fill for items whose backing file is missing.
     pub missing_background: Color,
-    /// Primary item label text. P3.2 — Tauri `.item-card__name` uses
-    /// `color: var(--text-primary)` (#F0F0F5 opaque), not `--text-secondary`.
+    /// Secondary item label text. V21-C3 — Tauri `.item-card__name` uses
+    /// `color: var(--text-secondary)` (#C0C0CC opaque).
     pub text: Color,
     /// Icon glyph text.
     pub icon_text: Color,
@@ -310,13 +350,14 @@ pub struct ItemCardChrome {
 impl ItemCardChrome {
     /// Build ItemCard chrome from explicit active palette tokens.
     pub fn from_palette(palette: PaletteTokens) -> Self {
-        // Dark-default surface_subtle / text_primary so callers that only
+        // Dark-default surface_subtle / text_secondary so callers that only
         // have a `PaletteTokens` keep the pre-M6a byte-exact dark card.
         use bento_nano_style::tokens::PALETTE_DARK;
         Self::from_tokens(
             palette,
             radius::DEFAULT,
             PALETTE_DARK.surface_subtle,
+            PALETTE_DARK.text_secondary,
             PALETTE_DARK.text_primary,
             PALETTE_DARK.surface_hover,
             PALETTE_DARK.border_hover,
@@ -331,13 +372,12 @@ impl ItemCardChrome {
     /// `surface_alt @0.46`); missing bg is softened toward Tauri's
     /// `rgba(239,68,68,0.08)` (was `danger @0.55`, far too strong).
     ///
-    /// P3.2 (2026-06-02) — the card name text is `--text-primary` = `#f0f0f5`
-    /// (Tauri `.item-card__name { color: var(--text-primary) }`); it was wrongly
-    /// `--text-secondary` `#c0c0cc`.
+    /// V21-C3 (2026-06-22) — the card name text is `--text-secondary` =
+    /// `#c0c0cc` (Tauri `.item-card__name { color: var(--text-secondary) }`).
     ///
     /// M6a (2026-05-29) — `surface_subtle` (normal card fill) and
-    /// `text_primary` (card name text) now arrive as explicit args from the
-    /// renderer's live `PaletteTauri` (`pal.surface_subtle` / `pal.text_primary`)
+    /// `text_secondary` (card name text) now arrive as explicit args from the
+    /// renderer's live `PaletteTauri` (`pal.surface_subtle` / `pal.text_secondary`)
     /// so the card re-skins with the active theme. The dark-default values
     /// reproduce the prior static `PALETTE_DARK` bytes 1:1 (cfg(test) callers
     /// pass them explicitly to lock byte-parity). The leaf crate stays free of
@@ -346,7 +386,8 @@ impl ItemCardChrome {
         palette: PaletteTokens,
         _radius: RadiusTokens,
         surface_subtle: Color,
-        text_primary: Color,
+        text_secondary: Color,
+        icon_text: Color,
         surface_hover: Color,
         border_hover: Color,
     ) -> Self {
@@ -358,8 +399,8 @@ impl ItemCardChrome {
             ghost_background: with_alpha(palette.surface, 0.86),
             ghost_shadow: with_alpha(palette.scrim, 0.24),
             missing_background: with_alpha(palette.danger, 0.10),
-            text: text_primary,
-            icon_text: with_alpha(palette.text, 0.94),
+            text: text_secondary,
+            icon_text,
             // M3-A3 — Tauri `--shadow-item-hover` is theme-independent
             // (black at fixed alphas in BOTH dark/light variables.css; the
             // dark stack is the parity target). `--surface-hover` /
@@ -532,6 +573,52 @@ mod tests {
         // Tauri `.item-card { transition: all var(--transition-fast) }`,
         // `--transition-fast: 150ms ease-out`.
         assert_eq!(CARD_HOVER_DURATION_MS, 150);
+    }
+
+    #[test]
+    fn card_enter_constants_fit_fast_native_morph_envelope() {
+        assert_eq!(CARD_ENTER_DURATION_MS, 250);
+        assert_eq!(CARD_ENTER_STAGGER_MS, 10);
+        assert_eq!(CARD_ENTER_START_DELAY_MS, 0);
+        assert_eq!(
+            CARD_ENTER_MORPH_ENVELOPE_MS,
+            crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        );
+        assert_eq!(CARD_ENTER_MAX_STAGGER_INDEX, 5);
+        assert!((CARD_ENTER_OFFSET_Y - 6.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn card_enter_progress_staggers_inside_morph_envelope() {
+        assert!(card_enter_progress_for_morph(0.0, 0).abs() < 1e-6);
+
+        let first = card_enter_progress_for_morph(0.20, 0);
+        let second = card_enter_progress_for_morph(0.20, 1);
+        let later = card_enter_progress_for_morph(0.20, 4);
+        assert!(first > second);
+        assert!(second > later);
+
+        for index in [0, CARD_ENTER_MAX_STAGGER_INDEX, 42] {
+            assert!((card_enter_progress_for_morph(1.0, index) - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn card_enter_has_no_base_delay_beyond_native_stagger() {
+        let first = card_enter_progress_for_morph(0.15, 0);
+        let delayed = card_enter_progress_for_morph(0.15, CARD_ENTER_MAX_STAGGER_INDEX);
+
+        assert!(first > 0.0);
+        assert!(delayed.abs() < 1e-6);
+    }
+
+    #[test]
+    fn card_enter_translate_y_follows_tauri_keyframe_endpoints() {
+        assert!((card_enter_translate_y(0.0) - 6.0).abs() < 1e-6);
+        assert!(card_enter_translate_y(0.5) > 0.0);
+        assert!(card_enter_translate_y(0.5) < 6.0);
+        assert!(card_enter_translate_y(1.0).abs() < 1e-6);
+        assert!(card_enter_translate_y(2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -754,12 +841,15 @@ mod tests {
         assert_eq!(chrome.ghost_shadow, with_alpha(palette.scrim, 0.24));
         // Missing fill softened toward Tauri `rgba(239,68,68,0.08)`.
         assert_eq!(chrome.missing_background, with_alpha(palette.danger, 0.10));
-        // P3.2 — name text is the Tauri `--text-primary` (#f0f0f5).
+        // V21-C3 — name text is the Tauri `--text-secondary` (#c0c0cc).
         assert_eq!(
             chrome.text,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary
+        );
+        assert_eq!(
+            chrome.icon_text,
             bento_nano_style::tokens::PALETTE_DARK.text_primary
         );
-        assert_eq!(chrome.icon_text, with_alpha(palette.text, 0.94));
     }
 
     #[test]
@@ -780,6 +870,7 @@ mod tests {
             palette,
             radius,
             bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
             bento_nano_style::tokens::PALETTE_DARK.text_primary,
             bento_nano_style::tokens::PALETTE_DARK.surface_hover,
             bento_nano_style::tokens::PALETTE_DARK.border_hover,
@@ -789,6 +880,39 @@ mod tests {
             chrome.card_radius,
             BorderRadius::all(bento_nano_style::tokens::RADIUS.card)
         );
+    }
+
+    #[test]
+    fn item_card_chrome_icon_text_uses_live_tauri_token() {
+        let palette = bento_nano_theme::current().palette;
+        let dark = ItemCardChrome::from_tokens(
+            palette,
+            radius::DEFAULT,
+            bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
+            bento_nano_style::tokens::PALETTE_DARK.text_primary,
+            bento_nano_style::tokens::PALETTE_DARK.surface_hover,
+            bento_nano_style::tokens::PALETTE_DARK.border_hover,
+        );
+        let light = ItemCardChrome::from_tokens(
+            palette,
+            radius::DEFAULT,
+            bento_nano_style::tokens::PALETTE_LIGHT.surface_subtle,
+            bento_nano_style::tokens::PALETTE_LIGHT.text_secondary,
+            bento_nano_style::tokens::PALETTE_LIGHT.text_primary,
+            bento_nano_style::tokens::PALETTE_LIGHT.surface_hover,
+            bento_nano_style::tokens::PALETTE_LIGHT.border_hover,
+        );
+
+        assert_eq!(
+            dark.icon_text,
+            bento_nano_style::tokens::PALETTE_DARK.text_primary
+        );
+        assert_eq!(
+            light.icon_text,
+            bento_nano_style::tokens::PALETTE_LIGHT.text_primary
+        );
+        assert_ne!(dark.icon_text, light.icon_text);
     }
 
     #[test]
@@ -820,6 +944,7 @@ mod tests {
             palette,
             radius::DEFAULT,
             bento_nano_style::tokens::PALETTE_DARK.surface_subtle,
+            bento_nano_style::tokens::PALETTE_DARK.text_secondary,
             bento_nano_style::tokens::PALETTE_DARK.text_primary,
             bento_nano_style::tokens::PALETTE_DARK.surface_hover,
             bento_nano_style::tokens::PALETTE_DARK.border_hover,

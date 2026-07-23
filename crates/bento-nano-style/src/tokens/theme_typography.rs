@@ -8,7 +8,7 @@
 //! |----------|--------------------------------------------------------|-------------|
 //! | terminal | `"JetBrains Mono", "Consolas", ui-monospace, monospace`| `"Consolas"`|
 //! | editorial| `"Playfair Display", Georgia, "Times New Roman", serif`| `"Georgia"` |
-//! | all 15   | *(unset)* → system UI font                             | `"Microsoft YaHei UI"` |
+//! | all 15   | *(unset)* → system UI font                             | `"Segoe UI"` |
 //!
 //! ## Font-family resolution caveat (LOCK — design doc §1.4 / §7)
 //!
@@ -44,7 +44,7 @@ pub const TYPOGRAPHY_EDITORIAL: TypographyTauri = TypographyTauri {
 };
 
 /// M6b — resolve a builtin theme id to its authored `TypographyTauri`. The 15
-/// non-overriding themes return the global `TYPOGRAPHY` ("Microsoft YaHei UI").
+/// non-overriding themes return the global `TYPOGRAPHY` ("Segoe UI").
 /// Unknown ids (custom JSON themes) return `None`; the caller falls back to the
 /// global `TYPOGRAPHY`. Returns `Copy`, no allocation (§10); panic-free (§11).
 pub fn typography_tauri_for_theme(theme_id: &str) -> Option<TypographyTauri> {
@@ -52,8 +52,8 @@ pub fn typography_tauri_for_theme(theme_id: &str) -> Option<TypographyTauri> {
         "terminal" => TYPOGRAPHY_TERMINAL,
         "editorial" => TYPOGRAPHY_EDITORIAL,
         "dark" | "light" | "midnight" | "forest" | "sunset" | "frosted" | "solid"
-        | "ocean-blue" | "rose-gold" | "forest-green" | "order" | "flat" | "brutalism"
-        | "neo" | "cyberpunk" => TYPOGRAPHY,
+        | "ocean-blue" | "rose-gold" | "forest-green" | "order" | "flat" | "brutalism" | "neo"
+        | "cyberpunk" => TYPOGRAPHY,
         _ => return None,
     };
     Some(t)
@@ -66,9 +66,23 @@ mod tests {
     #[test]
     fn lookup_resolves_all_17_builtin_ids() {
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(
                 typography_tauri_for_theme(id).is_some(),
@@ -100,11 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn default_themes_keep_yahei() {
+    fn default_themes_keep_tauri_css_primary() {
         for id in ["dark", "light", "neo", "cyberpunk", "order", "brutalism"] {
             assert_eq!(
                 typography_tauri_for_theme(id).unwrap().font_family,
-                "Microsoft YaHei UI",
+                "Segoe UI",
                 "{id} font drifted",
             );
         }

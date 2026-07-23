@@ -42,7 +42,7 @@ const EXACT_BONUS: u32 = 30;
 const POSTING_INLINE: usize = 8;
 
 /// Inline indexed-token capacity per item — most items tokenise into
-/// fewer than 16 tokens (basename + ~3-deep path + a couple title words).
+/// fewer than 16 tokens (basename + path + title + a few aliases).
 const ITEM_TOKEN_INLINE: usize = 16;
 
 type PostingList = SmallVec<[SmolStr; POSTING_INLINE]>;
@@ -192,12 +192,13 @@ fn score_pair(needle: &SmolStr, indexed: &SmolStr) -> Option<u32> {
     Some(score)
 }
 
-/// Tokenise an item's title + path into a deduplicated list of lowercase
-/// SmolStr tokens.
+/// Tokenise an item's visible title/path plus hidden aliases into a
+/// deduplicated list of lowercase SmolStr tokens.
 fn tokenise(item: &SearchItem) -> ItemTokens {
     let mut out: ItemTokens = SmallVec::new();
     push_unique(&mut out, tokenise_str(item.title.as_str()));
     push_unique(&mut out, tokenise_str(item.path.as_str()));
+    push_unique(&mut out, tokenise_str(item.keywords.as_str()));
     out
 }
 
@@ -237,6 +238,7 @@ mod tests {
             id: SmolStr::from(id),
             title: SmolStr::from(title),
             path: SmolStr::from(path),
+            keywords: SmolStr::default(),
             kind,
         }
     }
@@ -276,6 +278,18 @@ mod tests {
         let hits = idx.query("README", 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id.as_str(), "1");
+    }
+
+    #[test]
+    fn hidden_keywords_match_without_changing_visible_result_copy() {
+        let mut idx = InvertedIndex::new();
+        let mut search_item = item("settings", "打开设置", "操作", SearchItemKind::Action);
+        search_item.keywords = SmolStr::from("open settings");
+        idx.add(search_item);
+        let hits = idx.query("open settings", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title.as_str(), "打开设置");
+        assert_eq!(hits[0].path.as_str(), "操作");
     }
 
     #[test]

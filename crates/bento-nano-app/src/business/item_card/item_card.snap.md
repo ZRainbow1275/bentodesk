@@ -14,11 +14,12 @@ spans 2 grid columns).
 | padding            | 8 px vert / 4 px horiz (Standard); 10 px vert / 12 px horiz (Wide) |
 | layout             | column / center / center (Standard)    |
 |                    | row / start / center (Wide)            |
-| icon size          | 28 px container (Wide) / 36 px (Standard)|
-| name font          | 14 px / weight 400 (`--font-size-md`), single line |
-| name color         | `--text-primary` `#f0f0f5`             |
+| icon size          | 36 px container / 24 px render (Standard); 28 px container / 20 px render (Wide) |
+| name font          | 2026-06-02 reference-frame effective 14 px / weight 400, single line. The later source CSS nominal token is 11 px (`--font-size-xs`), but the video-parity continuation treats captured runtime frames as authoritative when source and frame evidence conflict. |
+| name color         | 2026-06-02 reference-frame primary ink (`--text-primary` / `#f0f0f5` in dark); the later source CSS says `--text-secondary`, but the video-parity continuation treats captured runtime frames as authoritative when source and frame evidence conflict. |
 | name max-lines     | 2 (Standard) / 1 (Wide)                |
 | transition         | `all var(--transition-fast)` = 150 ms ease-out (base) |
+| enter animation    | `itemEnter` 250 ms ease-out, opacity 0→1 + translateY(6 px)→0, staggered by `index * 30 ms` with no extra base delay; parent bento/content layers own their own visibility delays. nano applies this during the pill→expanded morph and caps later slots to finish inside the 500 ms morph envelope. |
 | hover              | translateY(-1px) + scale(1.02), 150 ms ease-out (`--transition-fast`). FIX 1: `CARD_HOVER_LIFT_DY * hover_t` lift; dropped while actively pressed (CSS `:active` scale-only specificity). |
 | hover background   | lerp `--surface-subtle` → `--surface-hover` `rgba(255,255,255,0.08)` by hover_t |
 | hover border       | 1 px stroke, alpha transparent → `--border-hover` `rgba(255,255,255,0.2)` by hover_t |

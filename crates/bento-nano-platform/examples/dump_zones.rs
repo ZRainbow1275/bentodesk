@@ -3,22 +3,103 @@ use std::path::PathBuf;
 
 use bento_nano_platform::storage::read_zones;
 
+const CAPSULE_FIELDS_ENV: &str = "BENTODESK_NANO_DUMP_ZONE_CAPSULES";
+const STACK_FIELDS_ENV: &str = "BENTODESK_NANO_DUMP_ZONE_STACKS";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zones_path = zones_path_from_args(env::args().skip(1))?;
     let zones = read_zones(&zones_path)?;
 
-    println!("id\ttitle\ticon\tvisible\titems");
-    for zone in zones.iter() {
+    let capsule_fields = env_flag(CAPSULE_FIELDS_ENV);
+    let stack_fields = env_flag(STACK_FIELDS_ENV);
+
+    if capsule_fields && stack_fields {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
-            zone.id.0,
-            tsv_escape(zone.title.as_ref()),
-            tsv_escape(zone.icon.as_ref()),
-            zone.visible,
-            zone.items.len()
+            "id\ttitle\ticon\tcapsule_size\tcapsule_shape\tvisible\titems\tstack_parent\tstack_members"
         );
+        for zone in zones.iter() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                zone.id.0,
+                tsv_escape(zone.title.as_ref()),
+                tsv_escape(zone.icon.as_ref()),
+                tsv_escape(zone.capsule_size.as_ref()),
+                tsv_escape(zone.capsule_shape.as_ref()),
+                zone.visible,
+                zone.items.len(),
+                stack_parent_text(zone.stack_parent),
+                stack_members_text(zone.stack_members.as_slice())
+            );
+        }
+    } else if capsule_fields {
+        println!("id\ttitle\ticon\tcapsule_size\tcapsule_shape\tvisible\titems");
+        for zone in zones.iter() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                zone.id.0,
+                tsv_escape(zone.title.as_ref()),
+                tsv_escape(zone.icon.as_ref()),
+                tsv_escape(zone.capsule_size.as_ref()),
+                tsv_escape(zone.capsule_shape.as_ref()),
+                zone.visible,
+                zone.items.len()
+            );
+        }
+    } else if stack_fields {
+        println!("id\ttitle\ticon\tvisible\titems\tstack_parent\tstack_members");
+        for zone in zones.iter() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                zone.id.0,
+                tsv_escape(zone.title.as_ref()),
+                tsv_escape(zone.icon.as_ref()),
+                zone.visible,
+                zone.items.len(),
+                stack_parent_text(zone.stack_parent),
+                stack_members_text(zone.stack_members.as_slice())
+            );
+        }
+    } else {
+        println!("id\ttitle\ticon\tvisible\titems");
+        for zone in zones.iter() {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                zone.id.0,
+                tsv_escape(zone.title.as_ref()),
+                tsv_escape(zone.icon.as_ref()),
+                zone.visible,
+                zone.items.len()
+            );
+        }
     }
     Ok(())
+}
+
+fn stack_parent_text(parent: Option<bento_nano_zone::ZoneId>) -> String {
+    parent
+        .map(|id| id.0.to_string())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn stack_members_text(members: &[bento_nano_zone::ZoneId]) -> String {
+    if members.is_empty() {
+        return "-".to_owned();
+    }
+    members
+        .iter()
+        .map(|id| id.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name).is_ok_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("1")
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 fn zones_path_from_args<I>(mut args: I) -> Result<PathBuf, String>
@@ -80,5 +161,38 @@ mod tests {
     #[test]
     fn tsv_escape_keeps_rows_machine_readable() {
         assert_eq!(tsv_escape("a\tb\r\nc\\d"), "a\\tb\\r\\nc\\\\d");
+    }
+
+    #[test]
+    fn capsule_env_flag_accepts_common_true_values() {
+        assert!(!env_flag("__BENTODESK_NANO_TEST_MISSING_FLAG__"));
+        // Keep env parsing documented without mutating process env in tests.
+        for value in ["1", "true", "yes", "on"] {
+            assert!(matches_truthy_for_test(value));
+        }
+        assert!(!matches_truthy_for_test("0"));
+    }
+
+    fn matches_truthy_for_test(value: &str) -> bool {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("1")
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    }
+
+    #[test]
+    fn stack_fields_use_dash_for_empty_and_csv_for_members() {
+        assert_eq!(stack_parent_text(None), "-");
+        assert_eq!(stack_parent_text(Some(bento_nano_zone::ZoneId(7))), "7");
+        assert_eq!(stack_members_text(&[]), "-");
+        assert_eq!(
+            stack_members_text(&[
+                bento_nano_zone::ZoneId(2),
+                bento_nano_zone::ZoneId(3),
+                bento_nano_zone::ZoneId(4),
+            ]),
+            "2,3,4"
+        );
     }
 }

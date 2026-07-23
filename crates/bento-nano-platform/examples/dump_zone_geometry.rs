@@ -7,10 +7,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let zones_path = zones_path_from_args(env::args().skip(1))?;
     let zones = read_zones(&zones_path)?;
 
-    println!("zone_id\ttitle\tx\ty\tw\th\tvisible\titem_count");
+    println!(
+        "zone_id\ttitle\tx\ty\tw\th\tvisible\titem_count\tcapsule_size\tcapsule_shape\talias\tdisplay_title"
+    );
     for zone in zones.iter() {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             zone.id.0,
             tsv_escape(zone.title.as_ref()),
             zone.x,
@@ -18,7 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             zone.w,
             zone.h,
             zone.visible,
-            zone.items.len()
+            zone.items.len(),
+            tsv_escape(zone.capsule_size.as_ref()),
+            tsv_escape(zone.capsule_shape.as_ref()),
+            tsv_escape(zone.alias.as_deref().unwrap_or_default()),
+            tsv_escape(zone.display_title())
         );
     }
     Ok(())
