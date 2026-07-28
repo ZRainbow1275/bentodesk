@@ -263,7 +263,13 @@ pub fn clamp_zone_to_monitors(zone: &mut Zone, monitors: &[MonitorInfo]) {
 ///   rescued).
 /// - Otherwise: translate the top-left so the window overlaps the nearest
 ///   monitor's work area by exactly 1 px on each axis it had to move.
-pub fn clamp_window_to_monitors(x: i32, y: i32, w: i32, h: i32, monitors: &[MonitorInfo]) -> (i32, i32) {
+pub fn clamp_window_to_monitors(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    monitors: &[MonitorInfo],
+) -> (i32, i32) {
     if monitors.is_empty() {
         return (x, y);
     }
@@ -516,18 +522,30 @@ mod tests {
     fn clamp_window_already_visible_is_returned_unchanged() {
         let monitors = [fake(0, 0, 1920, 1080, true)];
         // Fully inside the work area — must be a no-op.
-        assert_eq!(clamp_window_to_monitors(100, 100, 400, 300, &monitors), (100, 100));
+        assert_eq!(
+            clamp_window_to_monitors(100, 100, 400, 300, &monitors),
+            (100, 100)
+        );
         // 1-px overlap on the right edge still counts as visible (half-open).
-        assert_eq!(clamp_window_to_monitors(1919, 500, 400, 300, &monitors), (1919, 500));
+        assert_eq!(
+            clamp_window_to_monitors(1919, 500, 400, 300, &monitors),
+            (1919, 500)
+        );
     }
 
     #[test]
     fn clamp_window_empty_or_degenerate_is_noop() {
         // Empty monitor list → no-op (defensive guard).
-        assert_eq!(clamp_window_to_monitors(99999, 99999, 400, 300, &[]), (99999, 99999));
+        assert_eq!(
+            clamp_window_to_monitors(99999, 99999, 400, 300, &[]),
+            (99999, 99999)
+        );
         // Zero-area window → no-op even when offscreen.
         let monitors = [fake(0, 0, 1920, 1080, true)];
-        assert_eq!(clamp_window_to_monitors(99999, 99999, 0, 0, &monitors), (99999, 99999));
+        assert_eq!(
+            clamp_window_to_monitors(99999, 99999, 0, 0, &monitors),
+            (99999, 99999)
+        );
     }
 
     // ── clamp_rect_into_union_bounds (M4 live-drag strict inset) ──────────

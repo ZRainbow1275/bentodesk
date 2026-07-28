@@ -1,7 +1,7 @@
 #
-# BentoDesk Nano — self-built minimal-RSS framework workspace.
+# BentoDesk 2.0 — self-built minimal-RSS framework workspace.
 #
-# SPEC LOCK (D:/Desktop/CREATOR FOUR/.trellis/spec/guides/architecture-principles.md):
+# Architecture contract:
 #   §6  mimalloc default-features = false (per-crate where allocator lives)
 #   §7  profile.release = opt-z / lto=fat / codegen-units=1 / panic=abort / strip=symbols / incremental=false
 #   §8  whitelist only — NO tauri/wry/slint/iced/floem/egui/tokio/reqwest/rustls/skia/wgpu/regex/lru/anyhow/image
@@ -17,7 +17,6 @@ members = [
     "crates/bento-nano-layout",
     "crates/bento-nano-style",
     "crates/bento-nano-theme",
-    "crates/bento-nano-animation",
     "crates/bento-nano-zone",
     "crates/bento-nano-widget",
     "crates/bento-nano-app",
@@ -26,12 +25,12 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.2.0"
+version      = "2.0.0"
 edition      = "2024"
 rust-version = "1.85"
 license      = "AGPL-3.0-or-later"
 publish      = false
-authors      = ["BentoDesk Authors"]
+authors      = ["方寒"]
 
 # -----------------------------------------------------------------------------
 # Workspace dependencies (spec §8 whitelist).

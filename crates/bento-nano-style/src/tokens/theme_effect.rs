@@ -122,7 +122,7 @@ pub const EFFECT_NEON_CYBERPUNK: EffectTauri = EffectTauri::Neon(NeonEffect {
 /// (`theme-effects.css:34-40`). 0.45 × 255 = 114.75 → `0x73`.
 pub const EFFECT_CHROMATIC_EDITORIAL: EffectTauri = EffectTauri::Chromatic(ChromaticEffect {
     dx_dip: 1.0,
-    red: Color::from_u8(0xFF, 0x00, 0x50, 0x73),  // rgba(255,0,80,.45)
+    red: Color::from_u8(0xFF, 0x00, 0x50, 0x73), // rgba(255,0,80,.45)
     cyan: Color::from_u8(0x00, 0xC8, 0xFF, 0x73), // rgba(0,200,255,.45)
 });
 
@@ -138,8 +138,9 @@ pub fn effect_tauri_for_theme(theme_id: &str) -> Option<EffectTauri> {
         "cyberpunk" => EFFECT_NEON_CYBERPUNK,
         "editorial" => EFFECT_CHROMATIC_EDITORIAL,
         "dark" | "light" | "midnight" | "forest" | "sunset" | "frosted" | "solid"
-        | "ocean-blue" | "rose-gold" | "forest-green" | "order" | "flat" | "brutalism"
-        | "neo" => EffectTauri::None,
+        | "ocean-blue" | "rose-gold" | "forest-green" | "order" | "flat" | "brutalism" | "neo" => {
+            EffectTauri::None
+        }
         _ => return None,
     };
     Some(e)
@@ -152,9 +153,23 @@ mod tests {
     #[test]
     fn lookup_resolves_all_17_builtin_ids() {
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(
                 effect_tauri_for_theme(id).is_some(),
@@ -221,8 +236,19 @@ mod tests {
     #[test]
     fn fourteen_non_effect_themes_are_none() {
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "solid",
-            "ocean-blue", "rose-gold", "forest-green", "order", "flat", "brutalism",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "solid",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "order",
+            "flat",
+            "brutalism",
             "neo",
         ] {
             assert_eq!(

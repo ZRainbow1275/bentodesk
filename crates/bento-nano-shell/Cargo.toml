@@ -1,6 +1,6 @@
 [package]
 name         = "bento-nano-shell"
-description  = "BentoDesk Nano shell binary — assembles platform + app + widgets."
+description  = "BentoDesk native Windows desktop organizer."
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
@@ -33,7 +33,7 @@ serde_json          = { workspace = true }
 zip = { workspace = true }
 
 [[bin]]
-name = "bento-nano-shell"
+name = "BentoDesk"
 path = "src/main.rs"
 
 [lints]

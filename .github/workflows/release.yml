@@ -1,0 +1,209 @@
+name: Native Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  release:
+    name: Build and publish portable package
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target $env:TARGET
+          rustup show active-toolchain
+
+      - name: Verify tag and source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $shell = $metadata.packages | Where-Object name -eq "bento-nano-shell"
+          $expectedTag = "v$($shell.version)"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag $env:GITHUB_REF_NAME does not match workspace version $($shell.version)"
+          }
+          if ($shell.version -ne "2.0.0") {
+            throw "This workflow currently publishes BentoDesk 2.0.0 only"
+          }
+
+          cargo fmt --all -- --check
+          cargo test --workspace --all-targets --target $env:TARGET
+          cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
+          cargo doc --workspace --no-deps --target $env:TARGET
+
+      - name: Supply-chain checks
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo install cargo-deny --locked --version 0.19.4
+          cargo install cargo-audit --locked --version 0.22.1
+          cargo deny check
+          cargo audit
+
+      - name: Build and assemble package
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = "2.0.0"
+          $packageName = "BentoDesk-$version-windows-x64-portable"
+          $dist = Join-Path $PWD "dist"
+          $stage = Join-Path $dist $packageName
+          $zip = Join-Path $dist "$packageName.zip"
+          $releaseSums = Join-Path $dist "SHA256SUMS.txt"
+
+          cargo build --release --target $env:TARGET -p bento-nano-shell --bin BentoDesk
+
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item "target/$env:TARGET/release/BentoDesk.exe" (Join-Path $stage "BentoDesk.exe")
+          Copy-Item "README.md" (Join-Path $stage "README.md")
+          Copy-Item "README.en.md" (Join-Path $stage "README.en.md")
+          Copy-Item "LICENSE" (Join-Path $stage "LICENSE")
+
+          $payload = @("BentoDesk.exe", "README.md", "README.en.md", "LICENSE")
+          $innerLines = foreach ($name in $payload) {
+            $hash = (Get-FileHash (Join-Path $stage $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          [IO.File]::WriteAllLines(
+            (Join-Path $stage "SHA256SUMS.txt"),
+            $innerLines,
+            [Text.UTF8Encoding]::new($false)
+          )
+
+          $files = @(
+            "BentoDesk.exe", "README.md", "README.en.md", "LICENSE", "SHA256SUMS.txt"
+          ) | ForEach-Object { Join-Path $stage $_ }
+          Compress-Archive -LiteralPath $files -DestinationPath $zip -CompressionLevel Optimal
+
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllLines(
+            $releaseSums,
+            @("$zipHash  $packageName.zip"),
+            [Text.UTF8Encoding]::new($false)
+          )
+
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "checksums=$releaseSums" >> $env:GITHUB_OUTPUT
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+
+      - name: Verify package and extracted runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $zip = "${{ steps.package.outputs.zip }}"
+          $expected = @("BentoDesk.exe", "LICENSE", "README.en.md", "README.md", "SHA256SUMS.txt")
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $actual = @($archive.Entries | ForEach-Object FullName | Sort-Object)
+          } finally {
+            $archive.Dispose()
+          }
+          if (Compare-Object $expected $actual) {
+            throw "Unexpected package entries: $($actual -join ', ')"
+          }
+
+          $extract = Join-Path $env:RUNNER_TEMP "bentodesk-release-extracted"
+          $state = Join-Path $env:RUNNER_TEMP "bentodesk-release-state"
+          $stdout = Join-Path $env:RUNNER_TEMP "bentodesk-release.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "bentodesk-release.stderr.log"
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+
+          $sumLines = Get-Content (Join-Path $extract "SHA256SUMS.txt")
+          foreach ($line in $sumLines) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') {
+              throw "Malformed checksum line: $line"
+            }
+            $actualHash = (Get-FileHash (Join-Path $extract $Matches[2]) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $Matches[1]) {
+              throw "Checksum mismatch for $($Matches[2])"
+            }
+          }
+
+          Import-Module (Join-Path $PWD "tools/proof/ProofTools.psm1") -Force
+          $exe = Join-Path $extract "BentoDesk.exe"
+          $process = $null
+          try {
+            $process = Start-IsolatedBentoDesk `
+              -Executable $exe `
+              -WorkingDirectory $extract `
+              -StateDirectory $state `
+              -StdoutPath $stdout `
+              -StderrPath $stderr
+            $window = Wait-ProofWindow `
+              -TargetProcessId $process.Id `
+              -ClassName "BentoNanoShell" `
+              -TimeoutMs 12000
+            if (-not $window) {
+              throw "Extracted BentoDesk did not create its native main window"
+            }
+            if (-not (Send-ProofQuitHotkey -Window $window)) {
+              throw "Production quit hotkey could not be posted"
+            }
+            if (-not (Wait-ProofProcessExit -TargetProcessId $process.Id -TimeoutMs 8000)) {
+              throw "Extracted BentoDesk did not exit through the production quit path"
+            }
+          } finally {
+            if ($process -and (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
+              Stop-ProofProcessExact -TargetProcessId $process.Id -Executable $exe | Out-Null
+            }
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:GITHUB_REF_NAME
+          $zip = "${{ steps.package.outputs.zip }}"
+          $checksums = "${{ steps.package.outputs.checksums }}"
+          $notes = "docs/release-notes-v2.0.0.md"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          $viewExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($viewExit -eq 0) {
+            gh release upload $tag $zip $checksums --clobber --repo $env:GITHUB_REPOSITORY
+            gh release edit $tag `
+              --title "BentoDesk 2.0.0" `
+              --notes-file $notes `
+              --repo $env:GITHUB_REPOSITORY
+          } elseif ($viewExit -eq 1) {
+            gh release create $tag $zip $checksums `
+              --verify-tag `
+              --title "BentoDesk 2.0.0" `
+              --notes-file $notes `
+              --repo $env:GITHUB_REPOSITORY
+          } else {
+            throw "Could not query release $tag"
+          }

@@ -361,15 +361,9 @@ mod tests {
         // current user's; the `onedrive` token wins over the user-Desktop
         // match by design (case-insensitive).
         let p = PathBuf::from(r"C:\Users\Alice\OneDrive\Desktop");
-        assert_eq!(
-            classify_desktop_source(&p),
-            DesktopSourceKind::OneDrive
-        );
+        assert_eq!(classify_desktop_source(&p), DesktopSourceKind::OneDrive);
         let mixed = PathBuf::from(r"C:\Users\Bob\oneDrive - Contoso\Desktop");
-        assert_eq!(
-            classify_desktop_source(&mixed),
-            DesktopSourceKind::OneDrive
-        );
+        assert_eq!(classify_desktop_source(&mixed), DesktopSourceKind::OneDrive);
     }
 
     #[test]
@@ -391,10 +385,7 @@ mod tests {
             // Guard: a OneDrive-redirected own-Desktop is intentionally
             // OneDrive, not User (see `classify_onedrive_redirected_desktop`).
             if !normalize_key(&user).contains("onedrive") {
-                assert_eq!(
-                    classify_desktop_source(&user),
-                    DesktopSourceKind::User
-                );
+                assert_eq!(classify_desktop_source(&user), DesktopSourceKind::User);
             }
         }
     }

@@ -5,9 +5,9 @@
 //! `IconKind` family used by real zone icons. The legacy `fallback_emoji_for`
 //! table is retained only for compatibility tests around the old 1.x map.
 //!
-//! Status: scaffolding per Wave E Option-A. The `build()` returns the
-//! outer Container; the inner image / glyph composition lands when
-//! widget-library ships `FileIcon`. NOT a `todo!()` stub.
+//! The native renderer consumes the fallback category and size model directly.
+//! `build()` remains the widget-tree geometry descriptor used by compatibility
+//! tests; bitmap/glyph painting is owned by `render::item_cards`.
 
 use bento_nano_layout::Direction;
 use bento_nano_style::Length;

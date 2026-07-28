@@ -328,8 +328,8 @@ mod tests {
     #[test]
     fn extract_file_paths_round_trips_from_bento_data_object() {
         let source = vec![
-            String::from("C:\\Users\\HP\\Desktop\\alpha.txt"),
-            String::from("C:\\Users\\HP\\Desktop\\beta.lnk"),
+            String::from("C:\\Users\\BentoDeskTest\\Desktop\\alpha.txt"),
+            String::from("C:\\Users\\BentoDeskTest\\Desktop\\beta.lnk"),
         ];
         let object: IDataObject = BentoDataObject::new(source.clone()).into();
 

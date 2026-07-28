@@ -1,0 +1,144 @@
+name: Native CI
+
+on:
+  push:
+    branches:
+      - main
+      - work/2.0-native-reshape
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  verify:
+    name: Format, test, audit, and build
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare Rust
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target $env:TARGET
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - name: Verify repository boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tracked = @(git ls-files | Where-Object { Test-Path $_ -PathType Leaf })
+          $generated = @($tracked | Where-Object {
+            $_ -match '^(artifacts|dist|target)/' -or
+            $_ -match '^runtime-proof-' -or
+            $_ -match '(^|/)(handtest|manual-test|runtime-(diagnostic|reference|screen))-'
+          })
+          if ($generated.Count -ne 0) {
+            throw "Generated runtime files are tracked:`n$($generated -join "`n")"
+          }
+
+          $localPathHits = @(git grep -n -I -E '([A-Za-z]:[/\\](Users[/\\]HP|Desktop[/\\]CREATOR FOUR))' -- .)
+          if ($LASTEXITCODE -eq 0) {
+            throw "Machine-local paths are tracked:`n$($localPathHits -join "`n")"
+          }
+          if ($LASTEXITCODE -ne 1) {
+            throw "git grep failed with exit code $LASTEXITCODE"
+          }
+
+          $oversized = @(
+            Get-ChildItem crates -Recurse -Filter *.rs -File |
+              ForEach-Object {
+                $lines = [IO.File]::ReadAllLines($_.FullName).Length
+                if ($lines -gt 800) {
+                  [pscustomobject]@{ Path = $_.FullName; Lines = $lines }
+                }
+              }
+          )
+          if ($oversized.Count -ne 0) {
+            throw "Rust modules over 800 lines:`n$($oversized | Format-Table | Out-String)"
+          }
+
+          $mainLines = [IO.File]::ReadAllLines(
+            (Resolve-Path "crates/bento-nano-shell/src/main.rs")
+          ).Length
+          if ($mainLines -gt 800) {
+            throw "main.rs has $mainLines lines; limit is 800"
+          }
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --workspace --all-targets --target $env:TARGET
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
+
+      - name: Documentation
+        run: cargo doc --workspace --no-deps --target $env:TARGET
+
+      - name: Install supply-chain tools
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo install cargo-deny --locked --version 0.19.4
+          cargo install cargo-audit --locked --version 0.22.1
+
+      - name: Supply-chain checks
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo deny check
+          cargo audit
+
+          $metadata = cargo metadata --locked --format-version 1 | ConvertFrom-Json
+          $packageNames = @($metadata.packages | ForEach-Object name | Sort-Object -Unique)
+          $forbidden = @(
+            "async-std", "dioxus-desktop", "egui", "electron", "floem",
+            "iced", "slint", "tauri", "tokio", "webview2-com", "wry", "xilem"
+          )
+          foreach ($name in $forbidden) {
+            if ($packageNames -contains $name) {
+              throw "Forbidden runtime dependency found: $name"
+            }
+          }
+
+      - name: Release build and identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $shell = $metadata.packages | Where-Object name -eq "bento-nano-shell"
+          if ($shell.version -ne "2.0.0") {
+            throw "Expected BentoDesk 2.0.0, found $($shell.version)"
+          }
+
+          cargo build --release --target $env:TARGET -p bento-nano-shell --bin BentoDesk
+          $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
+          $limit = [int64](2.5 * 1MB)
+          if ($exe.Length -gt $limit) {
+            throw "BentoDesk.exe is $($exe.Length) bytes; limit is $limit"
+          }
+          Write-Host "BentoDesk.exe: $($exe.Length) bytes"
+          Write-Host "SHA-256: $((Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"

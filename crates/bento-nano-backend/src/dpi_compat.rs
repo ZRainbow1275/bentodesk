@@ -47,11 +47,7 @@ fn gdi_system_dpi() -> u32 {
         }
         let dpi = GetDeviceCaps(hdc, LOGPIXELSX);
         ReleaseDC(std::ptr::null_mut(), hdc);
-        if dpi > 0 {
-            dpi as u32
-        } else {
-            DEFAULT_DPI
-        }
+        if dpi > 0 { dpi as u32 } else { DEFAULT_DPI }
     }
 }
 

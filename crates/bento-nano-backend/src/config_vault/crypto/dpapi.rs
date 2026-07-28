@@ -19,7 +19,7 @@ const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
 /// Description string passed as `szDataDescr`. Visible if a user runs
 /// `CryptUnprotectData` from another tool, so identify the artefact.
 #[cfg(windows)]
-const DPAPI_DESCRIPTION: windows_sys::core::PCWSTR = windows_sys::core::w!("BentoDesk-Nano-Vault");
+const DPAPI_DESCRIPTION: windows_sys::core::PCWSTR = windows_sys::core::w!("BentoDesk-Vault");
 
 /// Errors surfaced by the DPAPI helpers. Hand-rolled per spec §8.1.
 #[derive(Debug)]

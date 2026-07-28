@@ -116,9 +116,9 @@ mod tests {
 
     /// Build a `windows::core::Result<()>` carrying the given HRESULT as an error.
     fn err_with(code: i32) -> windows::core::Result<()> {
-        Err(windows::core::Error::from_hresult(
-            windows::core::HRESULT(code),
-        ))
+        Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            code,
+        )))
     }
 
     #[test]

@@ -9,17 +9,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "bento-nano-animation"
-version = "0.2.0"
-dependencies = [
- "bento-nano-style",
- "bento-nano-tree",
- "serde",
-]
-
-[[package]]
 name = "bento-nano-app"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-backend",
  "bento-nano-layout",
@@ -41,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-backend"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-style",
  "bento-nano-theme",
@@ -62,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-layout"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-style",
  "bento-nano-tree",
@@ -72,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-platform"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-zone",
  "crossbeam-channel",
@@ -86,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-shell"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-app",
  "bento-nano-backend",
@@ -110,11 +101,11 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-style"
-version = "0.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "bento-nano-theme"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-style",
  "bento-nano-tree",
@@ -125,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-tree"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-style",
  "serde",
@@ -135,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-widget"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-layout",
  "bento-nano-style",
@@ -148,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "bento-nano-zone"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "bento-nano-style",
  "serde",

@@ -135,9 +135,9 @@ mod tests {
     #[test]
     fn scene_uses_every_supplied_desktop_file() {
         let files = vec![
-            PathBuf::from(r"C:\Users\HP\Desktop\bento-proof-a.pdf"),
-            PathBuf::from(r"C:\Users\HP\Desktop\bento-proof-b.txt"),
-            PathBuf::from(r"C:\Users\HP\Desktop\bento-proof-c.png"),
+            PathBuf::from(r"C:\Users\BentoDeskTest\Desktop\bento-proof-a.pdf"),
+            PathBuf::from(r"C:\Users\BentoDeskTest\Desktop\bento-proof-b.txt"),
+            PathBuf::from(r"C:\Users\BentoDeskTest\Desktop\bento-proof-c.png"),
         ];
         let zones = search_suggestor_scene(&files);
         validate_scene(&zones, files.len()).expect("valid scene");

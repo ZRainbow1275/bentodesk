@@ -57,15 +57,35 @@ const fn rounded(
     ShadowTauri {
         zen: ShadowStack::two(
             Shadow::drop(0.0, 2.0, 8.0, Color::from_u8(0x00, 0x00, 0x00, zen_inner_a)),
-            Shadow::drop(0.0, 8.0, 32.0, Color::from_u8(tint_r, tint_g, tint_b, zen_outer_a)),
+            Shadow::drop(
+                0.0,
+                8.0,
+                32.0,
+                Color::from_u8(tint_r, tint_g, tint_b, zen_outer_a),
+            ),
         ),
         expanded: ShadowStack::two(
-            Shadow::drop(0.0, 4.0, 16.0, Color::from_u8(0x00, 0x00, 0x00, exp_inner_a)),
-            Shadow::drop(0.0, 16.0, 48.0, Color::from_u8(tint_r, tint_g, tint_b, exp_outer_a)),
+            Shadow::drop(
+                0.0,
+                4.0,
+                16.0,
+                Color::from_u8(0x00, 0x00, 0x00, exp_inner_a),
+            ),
+            Shadow::drop(
+                0.0,
+                16.0,
+                48.0,
+                Color::from_u8(tint_r, tint_g, tint_b, exp_outer_a),
+            ),
         ),
         item_hover: ShadowStack::two(
             Shadow::drop(0.0, 2.0, 8.0, Color::from_u8(0x00, 0x00, 0x00, hov_inner_a)),
-            Shadow::drop(0.0, 8.0, 24.0, Color::from_u8(tint_r, tint_g, tint_b, hov_outer_a)),
+            Shadow::drop(
+                0.0,
+                8.0,
+                24.0,
+                Color::from_u8(tint_r, tint_g, tint_b, hov_outer_a),
+            ),
         ),
         ink_card: SHADOW.ink_card,
         ink_popup: SHADOW.ink_popup,
@@ -79,8 +99,7 @@ const fn rounded(
 pub const SHADOW_DARK: ShadowTauri = SHADOW;
 
 /// `light` — faint black drop (`0 2 8 #000@.04`, `0 8 32 #000@.06`).
-pub const SHADOW_LIGHT: ShadowTauri =
-    rounded(0x00, 0x00, 0x00, 0x0A, 0x0F, 0x14, 0x1A, 0x08, 0x0A);
+pub const SHADOW_LIGHT: ShadowTauri = rounded(0x00, 0x00, 0x00, 0x0A, 0x0F, 0x14, 0x1A, 0x08, 0x0A);
 
 /// `midnight` — indigo-tinted L2 (`#0f172a@.40`).
 pub const SHADOW_MIDNIGHT: ShadowTauri =
@@ -99,8 +118,7 @@ pub const SHADOW_FROSTED: ShadowTauri =
     rounded(0x00, 0x00, 0x00, 0x14, 0x1F, 0x1A, 0x29, 0x0D, 0x14);
 
 /// `solid` — heavy black drop (`0 2 8 #000@.20`, `0 8 32 #000@.30`).
-pub const SHADOW_SOLID: ShadowTauri =
-    rounded(0x00, 0x00, 0x00, 0x33, 0x4C, 0x40, 0x73, 0x29, 0x40);
+pub const SHADOW_SOLID: ShadowTauri = rounded(0x00, 0x00, 0x00, 0x33, 0x4C, 0x40, 0x73, 0x29, 0x40);
 
 /// `ocean-blue` — blue-tinted L2 (`#082f49@.40`).
 pub const SHADOW_OCEAN_BLUE: ShadowTauri =
@@ -121,9 +139,24 @@ pub const SHADOW_FOREST_GREEN: ShadowTauri =
 /// `order` — single flat layer (`0 1px 3px #000@.08`); expanded/item_hover use
 /// the same flat shape at slightly heavier / lighter alpha (`presets.ts:339`).
 pub const SHADOW_ORDER: ShadowTauri = ShadowTauri {
-    zen: ShadowStack::one(Shadow::drop(0.0, 1.0, 3.0, Color::from_u8(0x00, 0x00, 0x00, 0x14))),
-    expanded: ShadowStack::one(Shadow::drop(0.0, 2.0, 6.0, Color::from_u8(0x00, 0x00, 0x00, 0x1F))),
-    item_hover: ShadowStack::one(Shadow::drop(0.0, 1.0, 2.0, Color::from_u8(0x00, 0x00, 0x00, 0x0F))),
+    zen: ShadowStack::one(Shadow::drop(
+        0.0,
+        1.0,
+        3.0,
+        Color::from_u8(0x00, 0x00, 0x00, 0x14),
+    )),
+    expanded: ShadowStack::one(Shadow::drop(
+        0.0,
+        2.0,
+        6.0,
+        Color::from_u8(0x00, 0x00, 0x00, 0x1F),
+    )),
+    item_hover: ShadowStack::one(Shadow::drop(
+        0.0,
+        1.0,
+        2.0,
+        Color::from_u8(0x00, 0x00, 0x00, 0x0F),
+    )),
     ink_card: SHADOW.ink_card,
     ink_popup: SHADOW.ink_popup,
     ink_modal: SHADOW.ink_modal,
@@ -259,9 +292,23 @@ mod tests {
     #[test]
     fn lookup_resolves_all_17_builtin_ids() {
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(
                 shadow_tauri_for_theme(id).is_some(),

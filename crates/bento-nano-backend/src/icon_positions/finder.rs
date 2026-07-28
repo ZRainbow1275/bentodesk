@@ -12,8 +12,7 @@ use windows::Win32::System::Com::{
     IServiceProvider,
 };
 use windows::Win32::UI::Shell::{
-    IFolderView, IFolderView2, IShellBrowser, IShellWindows, SWC_DESKTOP, SWFO_NEEDDISPATCH,
-    ShellWindows,
+    IFolderView, IShellBrowser, IShellWindows, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellWindows,
 };
 use windows::core::Result;
 use windows_core::Interface;
@@ -86,27 +85,6 @@ pub(crate) fn find_desktop_folder_view()
     })?;
 
     Ok((guard, folder_view))
-}
-
-/// Acquire `IFolderView2` (extends `IFolderView` with auto-arrange control).
-#[allow(dead_code)]
-pub(crate) fn find_desktop_folder_view2()
--> std::result::Result<(ComGuard, IFolderView2), IconPositionError> {
-    let guard = ComGuard::new()?;
-
-    // SAFETY: ComGuard above proves COM is initialised on this thread.
-    let folder_view = unsafe { find_folder_view_inner() }.map_err(|e| IconPositionError::Com {
-        ctx: "find_desktop_folder_view2",
-        message: e.to_string(),
-    })?;
-
-    // SAFETY: IFolderView2 extends IFolderView; cast via QueryInterface.
-    let folder_view2: IFolderView2 = folder_view.cast().map_err(|e| IconPositionError::Com {
-        ctx: "cast IFolderView -> IFolderView2",
-        message: e.to_string(),
-    })?;
-
-    Ok((guard, folder_view2))
 }
 
 /// Inner implementation: walk the COM chain to get `IFolderView`.

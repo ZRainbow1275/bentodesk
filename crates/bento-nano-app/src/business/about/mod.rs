@@ -34,8 +34,8 @@ pub const AUTHOR: &str = "方寒";
 pub const AUTHOR_EN: &str = "Fang Han";
 pub const GITHUB_HANDLE: &str = "@ZRainbow1275";
 pub const GITHUB_URL: &str = "https://github.com/ZRainbow1275";
-pub const PROJECT_URL: &str = "github.com/ZRainbow1275/bentodesk-nano";
-pub const PROJECT_URL_FULL: &str = "https://github.com/ZRainbow1275/bentodesk-nano";
+pub const PROJECT_URL: &str = "github.com/ZRainbow1275/bentodesk";
+pub const PROJECT_URL_FULL: &str = "https://github.com/ZRainbow1275/bentodesk";
 /// Cargo metadata and the repository LICENSE are authoritative. The old Tauri
 /// translation string still says MIT, but the shipped project is AGPL.
 pub const LICENSE_NAME: &str = "AGPL-3.0-or-later";
@@ -186,6 +186,7 @@ mod tests {
 
     #[test]
     fn version_is_non_empty_and_starts_with_v() {
+        assert_eq!(VERSION, "2.0.0");
         let v = format_version();
         assert!(v.starts_with('v'), "version must start with 'v', got {v}");
         if BUILD_HASH.is_some_and(|hash| !hash.trim().is_empty()) {
@@ -194,6 +195,15 @@ mod tests {
         } else {
             assert_eq!(v.as_str(), format!("v{VERSION}"));
         }
+    }
+
+    #[test]
+    fn product_links_use_the_bentodesk_repository() {
+        assert_eq!(
+            PROJECT_URL_FULL,
+            "https://github.com/ZRainbow1275/bentodesk"
+        );
+        assert!(!PROJECT_URL.contains("nano"));
     }
 
     #[test]

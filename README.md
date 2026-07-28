@@ -1,185 +1,198 @@
 <div align="center">
-  <img src="crates/bento-nano-app/assets/app-icon.png" width="112" alt="BentoDesk icon">
+  <img src="crates/bento-nano-app/assets/app-icon.png" width="112" alt="BentoDesk 图标">
 
-  # BentoDesk Nano
+  # BentoDesk
 
-  **把文件、文件夹和快捷方式收进安静的桌面 Zone。**
+  **由 Rust 驱动，极致优雅的下一代便当盒式 Windows 桌面整理器。**
 
-  [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?logo=windows11&logoColor=white)](https://github.com/ZRainbow1275/bentodesk-nano)
-  [![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-  [![Native Win32](https://img.shields.io/badge/UI-Native%20Win32-3b82f6)](#技术栈)
-  [![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e)](LICENSE)
+  [简体中文](README.md) · [English](README.en.md)
 
-  [简体中文](#简体中文) · [English](#english)
+  [![Latest release](https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&label=release)](https://github.com/ZRainbow1275/bentodesk/releases/latest)
+  [![Downloads](https://img.shields.io/github/downloads/ZRainbow1275/bentodesk/total?style=flat-square&label=downloads)](https://github.com/ZRainbow1275/bentodesk/releases)
+  [![Stars](https://img.shields.io/github/stars/ZRainbow1275/bentodesk?style=flat-square)](https://github.com/ZRainbow1275/bentodesk/stargazers)
+  [![CI](https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml)
+  [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&logo=windows11&logoColor=white)](#系统要求)
+  [![Rust](https://img.shields.io/badge/Rust-2024-000000?style=flat-square&logo=rust&logoColor=white)](#技术栈)
+  [![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square)](LICENSE)
+
+  [下载](https://github.com/ZRainbow1275/bentodesk/releases/latest) ·
+  [功能](#功能) ·
+  [使用](#快速开始) ·
+  [构建](#从源码构建) ·
+  [贡献](#参与贡献)
 </div>
 
----
+<!-- MEDIA: docs/media/hero.webp | 16:9 | BentoDesk 2.0 desktop overview and Zone motion. Replace this comment only with current native UI media supplied by the maintainer. -->
 
-## 简体中文
+## 为什么做 BentoDesk
 
-BentoDesk 是一款 Windows 桌面整理工具。它把散落的文件、文件夹和快捷方式收进可展开的 Zone：平时安静地贴在桌面上，需要时再打开。
+桌面上的文件需要被看见，才会提醒我们继续处理；全部塞进层层文件夹，又很容易变成“看不见就忘记”。可当项目、文档和快捷方式都摊在桌面上，查找和整理本身也会消耗注意力。
 
-整个界面由 Rust、Win32、Direct2D、DirectWrite 与 DirectComposition 直接实现。没有 WebView，没有 Chromium，也不依赖 Tauri 运行时。
+BentoDesk 在桌面上提供一组可以收起、展开和组合的 Zone。它像便当盒一样把不同内容分开放好：平时只保留克制的胶囊，需要时再展开。文件仍由本机 Windows 文件系统管理，BentoDesk 负责组织、呈现和恢复。
 
-<p align="center">
-  <img src="docs/images/zone-expanded.png" width="760" alt="BentoDesk Zone 展开状态">
-</p>
+2.0 使用 Rust 与 Windows 原生图形栈重新实现。它不携带 Tauri、WebView2、Chromium 或 Node.js 运行时。
 
-### 特色
+## 四个特点
 
-- **桌面 Zone**：胶囊、展开面板、堆叠、搜索、拖放与右键操作使用同一套真实状态。
-- **原生文件体验**：读取 Windows 图标，支持 Shell/OLE 拖放、文件夹绑定和桌面源监视。
-- **整理工具**：智能分组建议、批量管理、布局快照和时间线均直接操作真实数据。
-- **外观与交互**：多套明暗主题、强调色、Zone 尺寸、边角和悬停/单击/常驻展开模式。
-- **插件**：支持本地插件包的安装、启停、持久化与确认卸载。
-- **中英双语**：中文系统默认中文，其他系统默认英文；可在设置中随时切换。
+| | |
+| --- | --- |
+| **极致** | 单进程原生运行时；Release EXE 约 2.40 MiB，严格五 Zone 场景下 Private Bytes 保持在 18 MiB 以内。 |
+| **优雅** | Zone、Stack、主题、文字和动画共用一套几何与状态，不再依靠网页图层拼接桌面界面。 |
+| **便捷** | 拖放、搜索、堆叠、批量排列、快照与时间线都直接作用于真实桌面内容。 |
+| **安全** | 数据默认留在本机；设置可使用 DPAPI 或口令加密，插件安装、启停与卸载经过路径和清单校验。 |
 
-### 界面
+## 与常见方案的差别
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/images/zone-editor.png" alt="区域编辑器">
-      <br><sub>区域编辑器</sub>
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/images/theme-settings.png" alt="主题设置">
-      <br><sub>主题与外观</sub>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center">
-      <img src="docs/images/bulk-manager.png" alt="批量管理区域">
-      <br><sub>批量管理</sub>
-    </td>
-  </tr>
-</table>
+| 方案 | 桌面上一眼可见 | 运行时 | 本地数据 | 扩展与整理 |
+| --- | --- | --- | --- | --- |
+| Windows 文件夹 | 打开后可见 | Explorer | 本地 | 文件夹与系统搜索 |
+| 桌面围栏类产品 | 可见 | 各产品不同 | 各产品不同 | 以围栏和布局为主 |
+| Electron / WebView 整理工具 | 可见 | 浏览器内核 + 应用层 | 取决于产品 | Web 技术生态 |
+| **BentoDesk 2.0** | 胶囊常驻，按需展开 | Rust + Win32 + DirectComposition | 本地、可加密 | Zone、Stack、插件、规则、快照与时间线 |
 
-### 技术栈
+BentoDesk 不替代 Explorer，也不承诺适合所有工作流。它专注于一个问题：让需要留在桌面上的内容既能被看见，又不会一直占满屏幕。
+
+## 功能
+
+### Zone：收起时安静，展开时完整
+
+Zone 支持不同宽度、胶囊尺寸和边角；标题、图标、项目数徽标与展开内容使用同一套布局。可以选择悬停展开、单击展开或常驻展开。
+
+<!-- MEDIA: docs/media/zone-motion.webp | 16:9 | One Zone showing collapsed, expand, rapid reversal and settled expanded states. -->
+
+### 拖放、堆叠与桌面融合
+
+支持 Windows Shell/OLE 拖放、Zone 间移动与复制、拖出恢复、文件夹绑定和 Stack。桌面空白区域保持点击穿透；普通应用窗口能够正常遮挡 BentoDesk。
+
+<!-- MEDIA: docs/media/drag-stack.webp | 16:9 | Real file drag into/out of a Zone and two Zones forming a Stack. -->
+
+### 搜索、编辑与批量管理
+
+Zone 内搜索只过滤当前 Zone；全局搜索用于跨 Zone 查找。区域编辑器可以修改名称、别名、图标、强调色、列数、宽度与边角。批量管理支持选择、显示、隐藏、移动、删除和五种布局。
+
+<!-- MEDIA: docs/media/search-bulk.webp | 16:9 | Local Zone search followed by the native bulk manager. -->
+
+### 设置、主题与中英双语
+
+设置窗口是原生、可拖动、可滚动且非置顶的普通窗口。内置明暗主题、强调色、性能参数、启动选项、备份、加密与更新设置。首版默认简体中文，可在 Settings 中切换为 English。
+
+<!-- MEDIA: docs/media/settings-themes.webp | 16:9 | Settings Appearance page switching between verified light and dark themes. -->
+
+### 智能分组、插件与实时文件夹
+
+智能分组建议根据真实桌面文件生成可审阅方案；插件支持本地包安装、启停、持久化与确认卸载；实时文件夹可把受监视目录的变化同步到对应 Zone。
+
+<!-- MEDIA: docs/media/smart-group-plugins.webp | 16:9 | Smart grouping review and plugin management using current native surfaces. -->
+
+### 快照、时间线与恢复
+
+可以保存和载入布局快照，通过时间线恢复结构变化，并从托盘、全局快捷键或原生辅助窗口进入管理工具。恢复包和更新器沿用本地校验边界，不启动浏览器内核或额外应用进程。
+
+<!-- MEDIA: docs/media/snapshots-timeline.webp | 16:9 | Layout snapshot and timeline recovery flow. -->
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest) 下载 `BentoDesk-2.0.0-windows-x64-portable.zip`。
+2. 解压到普通可写目录，运行 `BentoDesk.exe`。
+3. 从托盘菜单新建或管理 Zone。
+4. 把文件、文件夹或快捷方式拖入 Zone。
+5. 在设置中选择主题、展开模式与语言。
+
+便携包无需 Node.js、WebView2 或额外浏览器内核。程序状态默认保存在当前用户目录；如需随程序目录携带，可在设置中启用便携模式。
+
+### 系统要求
+
+- Windows 10 1809+ 或 Windows 11；
+- x86-64 处理器；
+- 建议使用当前 Windows 更新与显卡驱动。
+
+## 当前候选实测
+
+以下数据来自同一台 Windows x64 机器上的隔离场景，只描述本次候选，不代表所有硬件：
+
+| 指标 | 结果 |
+| --- | ---: |
+| Release EXE | 2,518,528 bytes（2.40 MiB） |
+| 严格场景 | 5 Zones / 50 items / 1 process |
+| Private Bytes t30 | 17.43 MiB |
+| Private Bytes t60 | 17.33 MiB |
+| Zone 完整展开 / 收起 | 234 ms / 234 ms |
+| 帧间隔 median / p95 | 16 ms / 16 ms |
+
+测量只包含 BentoDesk 自身进程。主题、窗口层级、动画、批量布局和持久化另有真实运行时验证。
+
+## 技术栈
 
 | 层 | 实现 |
 | --- | --- |
 | 语言与运行时 | Rust 2024，单进程 |
 | 窗口与输入 | Win32 / USER32 / DWM |
 | 图形 | Direct2D、DirectWrite、DirectComposition、D3D11 |
-| 系统集成 | Windows Shell/OLE、WIC、WinHTTP、DPAPI、ReadDirectoryChangesW |
-| 数据 | 本地原子写入、加密设置仓库、无云端必需服务 |
-| 发布 | MSVC x64、静态 CRT、`opt-level = "z"`、Fat LTO |
+| 图标与图像 | Windows Imaging Component、Windows Shell |
+| 文件交互 | Shell/OLE、ReadDirectoryChangesW |
+| 网络与系统安全 | WinHTTP、DPAPI |
+| 数据 | 本地原子写入、加密设置仓库 |
+| 构建 | MSVC x64、静态 CRT、size optimization、Fat LTO |
 
-### 当前发布候选实测
+主要 crate：
 
-以下数字来自 Windows x64、隔离五 Zone 场景，不作为所有机器的固定值：
+```text
+bento-nano-shell      进程入口、Win32 消息路由与系统集成
+bento-nano-app        应用状态、交互、渲染投影
+bento-nano-backend    设置、插件、规则、恢复与更新
+bento-nano-platform   D2D/DWrite/DComp/WIC/Shell/OLE 边界
+bento-nano-zone       Zone 领域模型
+bento-nano-style      主题、排版与视觉 token
+```
 
-| 指标 | 结果 |
-| --- | ---: |
-| Release 可执行文件 | 2.39 MiB |
-| 动画采集后 Private Bytes | 23.25 MiB |
-| 空闲 60 秒 Private Bytes | 23.32 MiB |
-| Zone 展开/收起/反转采样 | 60.7–61.0 FPS |
+内部 crate 名称保留 `bento-nano-*` 是为了延续经过验证的依赖边界；面向用户的产品、可执行文件和版本统一为 BentoDesk 2.0。
 
-### 下载与运行
+## 从源码构建
 
-1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk-nano/releases) 下载 Windows x64 压缩包。
-2. 解压后运行 `BentoDesk-Nano.exe`。
-3. 通过托盘菜单打开设置、关于和管理工具。
+需要：
 
-程序数据保存在当前用户目录；便携模式可在设置中启用。首次运行不需要 Node.js、WebView2 或额外浏览器内核。
-
-### 从源码构建
-
-要求：
-
-- Windows 10/11 x64
-- Rust `1.85+`
-- Visual Studio 2022 Build Tools（MSVC 与 Windows SDK）
+- Windows 10/11 x64；
+- Rust 1.85 或更高版本；
+- Visual Studio 2022 Build Tools（MSVC 与 Windows SDK）。
 
 ```powershell
+git clone https://github.com/ZRainbow1275/bentodesk.git
+cd bentodesk
+
 $env:CARGO_BUILD_JOBS = "1"
 $env:CARGO_INCREMENTAL = "0"
-cargo build --release --target x86_64-pc-windows-msvc
+cargo build --release --target x86_64-pc-windows-msvc -p bento-nano-shell --bin BentoDesk
 ```
 
 输出：
 
 ```text
-target\x86_64-pc-windows-msvc\release\bento-nano-shell.exe
+target\x86_64-pc-windows-msvc\release\BentoDesk.exe
 ```
 
-### 许可证
-
-BentoDesk Nano 以 [GNU AGPL-3.0-or-later](LICENSE) 发布。
-
-作者：方寒（[@ZRainbow1275](https://github.com/ZRainbow1275)）
-
----
-
-## English
-
-BentoDesk is a Windows desktop organizer for files, folders, and shortcuts. It keeps them in expandable Zones that stay quiet on the desktop until they are needed.
-
-The interface is built directly with Rust, Win32, Direct2D, DirectWrite, and DirectComposition. There is no WebView, Chromium, or Tauri runtime.
-
-<p align="center">
-  <img src="docs/images/zone-expanded.png" width="760" alt="Expanded BentoDesk Zone">
-</p>
-
-### Highlights
-
-- **Desktop Zones** — capsules, expanded panels, stacks, search, drag-and-drop, and context actions share one real state.
-- **Native file behavior** — Windows icons, Shell/OLE drag-and-drop, bound folders, and desktop source watching.
-- **Organization tools** — smart grouping suggestions, bulk management, layout snapshots, and timeline history.
-- **Appearance and motion** — light and dark themes, accents, Zone sizes, corner styles, and hover/click/always display modes.
-- **Plugins** — local package installation, enable/disable persistence, and confirmed uninstall.
-- **Chinese and English** — the initial locale follows Windows and can be changed in Settings at any time.
-
-### Native stack
-
-| Layer | Implementation |
-| --- | --- |
-| Language and runtime | Rust 2024, single process |
-| Windows and input | Win32 / USER32 / DWM |
-| Graphics | Direct2D, DirectWrite, DirectComposition, D3D11 |
-| System integration | Windows Shell/OLE, WIC, WinHTTP, DPAPI, ReadDirectoryChangesW |
-| Data | Atomic local storage, encrypted settings vault, no required cloud service |
-| Release profile | MSVC x64, static CRT, size optimization, Fat LTO |
-
-### Measured release candidate
-
-Measured on Windows x64 with an isolated five-Zone scene; results vary by machine:
-
-| Metric | Result |
-| --- | ---: |
-| Release executable | 2.39 MiB |
-| Private Bytes after animation capture | 23.25 MiB |
-| Private Bytes after 60 seconds idle | 23.32 MiB |
-| Zone expand/collapse/reversal capture | 60.7–61.0 FPS |
-
-### Build
-
-Requirements:
-
-- Windows 10/11 x64
-- Rust `1.85+`
-- Visual Studio 2022 Build Tools with MSVC and the Windows SDK
+完整质量检查：
 
 ```powershell
-$env:CARGO_BUILD_JOBS = "1"
-$env:CARGO_INCREMENTAL = "0"
-cargo build --release --target x86_64-pc-windows-msvc
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo doc --workspace --no-deps
+cargo deny check
+cargo audit
 ```
 
-The executable is written to:
+## 参与贡献
 
-```text
-target\x86_64-pc-windows-msvc\release\bento-nano-shell.exe
-```
+欢迎代码、测试、翻译、主题、插件和文档贡献。Issue 与 Pull Request 可以使用中文或 English。
 
-### Download and run
+提交前请至少运行与改动相关的测试，并说明真实验证边界。涉及文件移动、插件、更新或恢复逻辑时，请同时说明数据完整性与回滚方式。
 
-Download the Windows x64 archive from [Releases](https://github.com/ZRainbow1275/bentodesk-nano/releases), extract it, and run `BentoDesk-Nano.exe`. No Node.js, WebView2, or browser runtime is required.
+## 致谢
 
-### License
+感谢 GPT 5.6 Sol 在工程重塑和验证中的协作，感谢 [Tibo](https://x.com/thsottiaux) 带来的产品启发，也感谢 Linux Do 社区长期提供的讨论、测试与反馈。
 
-BentoDesk Nano is released under [GNU AGPL-3.0-or-later](LICENSE).
+BentoDesk 由方寒（[@ZRainbow1275](https://github.com/ZRainbow1275)）维护。
 
-Created by Fang Han ([@ZRainbow1275](https://github.com/ZRainbow1275)).
+## 许可证
+
+BentoDesk 以 [GNU AGPL-3.0-or-later](LICENSE) 发布。使用、修改或分发本项目时，请遵守许可证要求。

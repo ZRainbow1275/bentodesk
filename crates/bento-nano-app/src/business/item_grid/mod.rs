@@ -4,9 +4,9 @@
 //! `Virtual` (≥ 50 items) and `Empty` modes via `pick_layout`. Geometry
 //! constants are locked here so re-layout never goes through string keys.
 //!
-//! Status: scaffolding per Wave E Option-A. The Container body returned by
-//! `build()` is the outer grid host; child cards land when widget-library
-//! ships the `GridLayout` + `VirtualGrid` primitives. NOT a `todo!()` stub.
+//! The native renderer, hit-test and drag geometry consume these constants and
+//! helpers as their shared grid model. `build()` is the compatibility
+//! widget-tree descriptor; item painting is owned by `render::item_cards`.
 
 use bento_nano_layout::Direction;
 use bento_nano_style::Length;
@@ -68,8 +68,8 @@ pub enum LayoutMode {
 }
 
 /// Pick the layout mode for a zone holding `item_count` items.
-/// `_grid_columns` is reserved for a future "always virtualize when
-/// columns × overscan exceeds budget" rule; today it is unused.
+/// `_grid_columns` stays in the compatibility API; the current mode depends
+/// only on item count.
 pub fn pick_layout(item_count: usize, _grid_columns: u32) -> LayoutMode {
     if item_count == 0 {
         LayoutMode::Empty
@@ -100,8 +100,7 @@ pub fn effective_column_count(zone_width: f32, requested_columns: u32, inset_x: 
     columns
 }
 
-/// Build the grid outer container. Children — the ItemCards or virtualizer
-/// surface — land when widget-library ships `GridLayout`/`VirtualGrid`.
+/// Build the compatibility widget-tree descriptor for the grid host.
 pub fn build() -> WidgetNode {
     WidgetNode::Container(ContainerNode {
         direction: Direction::Column,

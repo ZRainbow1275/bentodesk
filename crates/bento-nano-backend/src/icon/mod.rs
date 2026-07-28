@@ -219,18 +219,8 @@ impl HotLru {
         }
     }
 
-    #[allow(dead_code)] // public surface for future preloader sizing
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
     pub fn len(&self) -> usize {
         self.map.len()
-    }
-
-    #[allow(dead_code)] // public surface for future preloader checks
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
     }
 
     pub fn contains(&self, key: &str) -> bool {

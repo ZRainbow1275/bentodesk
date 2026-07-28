@@ -33,9 +33,7 @@ use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{FARPROC, HMODULE, HWND};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC};
-use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleHandleW, GetProcAddress, LoadLibraryA,
-};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
 
 /// `GetDeviceCaps` index for horizontal logical pixels-per-inch (`LOGPIXELSX`).
 const LOGPIXELSX: i32 = 88;
@@ -125,11 +123,7 @@ fn gdi_system_dpi() -> u32 {
         let dpi = GetDeviceCaps(hdc, LOGPIXELSX);
         // ReleaseDC for a screen DC obtained via GetDC(null) is required.
         ReleaseDC(std::ptr::null_mut(), hdc);
-        if dpi > 0 {
-            dpi as u32
-        } else {
-            DEFAULT_DPI
-        }
+        if dpi > 0 { dpi as u32 } else { DEFAULT_DPI }
     }
 }
 

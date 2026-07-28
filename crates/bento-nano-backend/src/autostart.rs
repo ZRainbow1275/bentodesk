@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-//!   BentoDeskNano = "<quoted current_exe path>"
+//!   BentoDesk = "<quoted current_exe path>"
 //! ```
 //!
 //! Per-user (`HKCU`) requires no elevation. The registry is the single source
@@ -31,7 +31,9 @@
 //! - **Spec §11.1** — every `unsafe` block carries a `// SAFETY:` comment.
 
 /// Registry value name written under the `Run` key. Identifies our entry.
-const VALUE_NAME: &str = "BentoDeskNano";
+const VALUE_NAME: &str = "BentoDesk";
+/// Pre-2.0 native value retained as a read/delete compatibility alias.
+const LEGACY_VALUE_NAME: &str = "BentoDeskNano";
 
 /// The per-user autostart subkey, relative to `HKEY_CURRENT_USER`.
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -73,9 +75,13 @@ pub fn set_enabled(enabled: bool) -> Result<(), AutostartError> {
         // Quote the path so embedded spaces are preserved when Windows parses
         // the Run value as a command line.
         let quoted = format!("\"{}\"", exe.display());
-        run_key_set(VALUE_NAME, &quoted)
+        run_key_set(VALUE_NAME, &quoted)?;
+        let _ = run_key_delete(LEGACY_VALUE_NAME);
+        Ok(())
     } else {
-        run_key_delete(VALUE_NAME)
+        let current = run_key_delete(VALUE_NAME);
+        let legacy = run_key_delete(LEGACY_VALUE_NAME);
+        current.and(legacy)
     }
 }
 
@@ -84,7 +90,7 @@ pub fn set_enabled(enabled: bool) -> Result<(), AutostartError> {
 /// settings mirror.
 #[cfg(windows)]
 pub fn is_enabled() -> bool {
-    run_key_exists(VALUE_NAME)
+    run_key_exists(VALUE_NAME) || run_key_exists(LEGACY_VALUE_NAME)
 }
 
 #[cfg(not(windows))]

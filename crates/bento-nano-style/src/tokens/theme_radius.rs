@@ -117,9 +117,23 @@ mod tests {
     #[test]
     fn lookup_resolves_all_17_builtin_ids() {
         for id in [
-            "dark", "light", "midnight", "forest", "sunset", "frosted", "ocean-blue",
-            "rose-gold", "forest-green", "solid", "order", "flat", "brutalism",
-            "editorial", "neo", "terminal", "cyberpunk",
+            "dark",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
+            "solid",
+            "order",
+            "flat",
+            "brutalism",
+            "editorial",
+            "neo",
+            "terminal",
+            "cyberpunk",
         ] {
             assert!(
                 radius_tauri_for_theme(id).is_some(),
@@ -144,10 +158,21 @@ mod tests {
     #[test]
     fn rounded_group_all_share_global_baseline() {
         for id in [
-            "light", "midnight", "forest", "sunset", "frosted", "solid", "ocean-blue",
-            "rose-gold", "forest-green",
+            "light",
+            "midnight",
+            "forest",
+            "sunset",
+            "frosted",
+            "solid",
+            "ocean-blue",
+            "rose-gold",
+            "forest-green",
         ] {
-            assert_eq!(radius_tauri_for_theme(id), Some(RADIUS), "{id} radius drifted");
+            assert_eq!(
+                radius_tauri_for_theme(id),
+                Some(RADIUS),
+                "{id} radius drifted"
+            );
         }
     }
 

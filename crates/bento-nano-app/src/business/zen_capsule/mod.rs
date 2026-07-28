@@ -5,10 +5,9 @@
 //! (`zones[i].appearance`) round-trips through the `CapsuleShape` /
 //! `CapsuleSize` enums via serde.
 //!
-//! Status: scaffolding per Wave E Option-A (snap.md + compile-clean
-//! Container + locked helpers/wire-format). The composition body — icon +
-//! title + badge children — lands when widget-library ships the SvgIcon /
-//! Text primitives we depend on. NOT a `todo!()` stub.
+//! The renderer and hit-test consume this wire/geometry model directly.
+//! `build()` remains the compatibility widget-tree descriptor; native capsule
+//! chrome, icon, title and badge painting live in `render::zone_chrome`.
 
 use bento_nano_layout::Direction;
 use bento_nano_style::{Edges, Length};
@@ -284,15 +283,13 @@ impl CapsuleSize {
 }
 
 /// Build the collapsed-pill subtree for a BentoZone with default
-/// (`Pill` / `Medium`) appearance. The variant-aware constructor below is
-/// what the panel layer will call once the widget primitives ship.
+/// (`Pill` / `Medium`) appearance.
 pub fn build() -> WidgetNode {
     build_with(CapsuleShape::default(), CapsuleSize::default())
 }
 
 /// Build the collapsed-pill subtree with explicit shape + size.
-/// Geometry is locked per `zen_capsule.snap.md`; only the inner composition
-/// (icon + title + badge children) waits on widget-library primitives.
+/// Geometry is locked per `zen_capsule.snap.md`.
 pub fn build_with(_shape: CapsuleShape, size: CapsuleSize) -> WidgetNode {
     WidgetNode::Container(ContainerNode {
         direction: Direction::Row,

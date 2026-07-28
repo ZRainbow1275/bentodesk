@@ -461,9 +461,9 @@ mod tests {
 
     #[test]
     fn display_name_from_path_strips_shortcut_extensions() {
-        let shortcut = Path::new("C:\\Users\\HP\\Desktop\\Docs.lnk");
-        let url = Path::new("C:\\Users\\HP\\Desktop\\Portal.url");
-        let regular = Path::new("C:\\Users\\HP\\Desktop\\notes.txt");
+        let shortcut = Path::new("C:\\Users\\BentoDeskTest\\Desktop\\Docs.lnk");
+        let url = Path::new("C:\\Users\\BentoDeskTest\\Desktop\\Portal.url");
+        let regular = Path::new("C:\\Users\\BentoDeskTest\\Desktop\\notes.txt");
 
         assert_eq!(display_name_from_path(shortcut).as_deref(), Some("Docs"));
         assert_eq!(display_name_from_path(url).as_deref(), Some("Portal"));
@@ -489,8 +489,10 @@ mod tests {
             dpi: 1.0,
         };
 
-        let position =
-            lookup_icon_position_for_path(&saved, Path::new("C:\\Users\\HP\\Desktop\\Docs.lnk"));
+        let position = lookup_icon_position_for_path(
+            &saved,
+            Path::new("C:\\Users\\BentoDeskTest\\Desktop\\Docs.lnk"),
+        );
         assert_eq!(position, Some((10, 20)));
     }
 
@@ -524,15 +526,16 @@ mod tests {
             dpi: 1.0,
         };
 
-        let original = Path::new("C:\\Users\\HP\\Desktop\\Quarterly Plan.lnk");
+        let original = Path::new("C:\\Users\\BentoDeskTest\\Desktop\\Quarterly Plan.lnk");
         assert_eq!(
             lookup_icon_position_for_path(&saved, original),
             Some((100, 200)),
             "tier 1 (original_path) failed",
         );
 
-        let hidden =
-            Path::new("C:\\Users\\HP\\AppData\\BentoDesk\\.bentodesk\\zone-a\\Quarterly Plan.lnk");
+        let hidden = Path::new(
+            "C:\\Users\\BentoDeskTest\\AppData\\BentoDesk\\.bentodesk\\zone-a\\Quarterly Plan.lnk",
+        );
         assert_eq!(
             lookup_icon_position_for_path(&saved, hidden),
             Some((100, 200)),
@@ -579,7 +582,7 @@ mod tests {
 
     #[test]
     fn backup_file_path_has_filename() {
-        let dir = Path::new("C:\\Users\\HP\\AppData");
+        let dir = Path::new("C:\\Users\\BentoDeskTest\\AppData");
         let p = backup_file_path(dir);
         assert!(p.ends_with("icon_layout_backup.json"));
     }

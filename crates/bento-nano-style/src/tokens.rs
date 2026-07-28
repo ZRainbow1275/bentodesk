@@ -438,9 +438,8 @@ pub const TYPOGRAPHY: TypographyTauri = TypographyTauri {
 // Motion — durations + easings for 3 categories (fast / normal / spring).
 // =============================================================================
 
-/// Easing curve identity — paired with `bento-nano-animation::Easing` enum
-/// downstream; we keep an inert tag here so the leaf style crate doesn't
-/// reach back up to `animation`.
+/// Easing curve identity — paired with `bento-nano-tree::Easing` downstream;
+/// the leaf style crate keeps an inert tag instead of depending on tree state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EasingTag {
     /// CSS `ease-out` — fastest decel curve, default for fade/tooltip.

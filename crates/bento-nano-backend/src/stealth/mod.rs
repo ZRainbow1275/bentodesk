@@ -348,7 +348,6 @@ pub(crate) fn paths_equal_str(a: &str, b: &str) -> bool {
 }
 
 /// Strip the Windows extended-length path prefix (`\\?\`).
-#[allow(dead_code)]
 pub(crate) fn strip_unc_prefix(p: &std::path::Path) -> std::path::PathBuf {
     let s = p.to_string_lossy();
     s.strip_prefix(r"\\?\")

@@ -12,21 +12,12 @@
 //!   minibar / popover / tooltip / dialog primitives that live alongside
 //!   the icon_picker entry shipped during the Wave-E cross-domain pass.
 //!
-//! Wave-E launched the cohort with cross-domain scaffolds (business-ui-1
-//! shipped settings snap+scaffold; business-ui-3 shipped the icon_picker
-//! placeholder ahead of its actual claim). Ownership transitions out of
-//! Wave-E follow the master plan, not the original scaffold author.
-//!
 //! Every component carries a `*.snap.md` text spec next to its source per
 //! §11 R3 ruling — corner radius, palette tokens, typography, animation
 //! timing, hover state. The spec is the contract; the Rust composition
 //! materialises it once the upstream widget primitives ship.
 //!
 //! Spec compliance:
-//! - §17 "no half-finished": each `build()` returns a typed Container that
-//!   compiles + lays out cleanly. Not a `todo!()` stub. The composition
-//!   body lands when widget-library ships the primitive surface
-//!   (Toggle / Slider / Input / Modal / Tab / Popup / List / VirtualGrid).
 //! - §11 no panic: zero `unwrap()` / `expect()` / `panic!()` — already
 //!   enforced by the workspace clippy lint config.
 //! - §10 hot path: the `format_size` / `format_bytes` helpers in
@@ -35,7 +26,6 @@
 
 pub mod about;
 pub mod auto_layout_menu;
-pub mod bento_panel;
 pub mod bulk_manager_panel;
 pub mod capsule_picker;
 pub mod debug_overlay;
@@ -55,7 +45,6 @@ pub mod settings;
 pub mod smart_group_suggestor;
 pub mod stack_tray;
 pub mod timeline;
-pub mod toolbar;
 pub mod tooltip;
 pub mod tray_menu;
 pub mod zen_capsule;

@@ -4,18 +4,10 @@
 //! - `timeline_panel.snap.md` (R4-C1 time-machine slider, ~820 px modal)
 //! - `snapshot_picker.snap.md` (440 px snapshot list dialog)
 //!
-//! Status: scaffolding. The chrome Containers + Tone enums + format helpers
-//! land today against the eventual `bento-nano-backend::timeline` surface
-//! (T-089, in flight per the Wave-5d slice — task #93). Composition bodies
-//! depend on List (T-026) for the row stack, Slider (T-016) for the timeline
-//! scrubber, Modal (T-023) for the host dialog, all in flight on
-//! widget-library. NOT a `todo!()` stub.
-//!
-//! Public API: each surface exposes a `build()` returning a valid empty
-//! Container today, keyed by entry point. The shell mounts the panels via
-//! `WindowKind::Timeline` / `WindowKind::SnapshotPicker` HWNDs (already in
-//! the window factory) and the root node id is what `panel::build()` /
-//! `snapshot_picker::build()` return.
+//! The shell mounts these states in native `Timeline` / `SnapshotPicker`
+//! HWNDs and routes real save, load, restore, delete and pin operations through
+//! `bento-nano-backend::timeline`. The `build()` entry points provide the
+//! widget-tree geometry descriptor consumed when each native surface opens.
 
 use bento_nano_backend::timeline::{Checkpoint, CheckpointMeta};
 use bento_nano_layout::Direction;
@@ -29,8 +21,7 @@ pub mod snapshot_picker;
 pub use panel::build as build_timeline_panel;
 pub use snapshot_picker::build as build_snapshot_picker;
 
-/// Default chrome a Timeline-family modal uses while the real composition
-/// lands. Centralises the geometry shared by TimelinePanel and
+/// Default chrome shared by TimelinePanel and
 /// SnapshotPicker (24 px / 0 px outer padding respectively are applied per
 /// surface; this default is a vertical column with no padding so the
 /// caller's `padding` override always wins).

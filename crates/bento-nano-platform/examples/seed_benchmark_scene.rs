@@ -444,7 +444,7 @@ fn write_benchmark_item_files(root: &Path) -> Result<(), std::io::Error> {
             fs::write(
                 path,
                 format!(
-                    "BentoDesk Nano benchmark item zone={} item={}\n",
+                    "BentoDesk benchmark item zone={} item={}\n",
                     zone_index + 1,
                     item_index + 1
                 ),
@@ -468,7 +468,7 @@ fn write_reference_0602_item_files(
             fs::write(
                 path,
                 format!(
-                    "BentoDesk Nano 0602 reference-aligned item zone={} item={}\n",
+                    "BentoDesk 0602 reference-aligned item zone={} item={}\n",
                     zone_index + 1,
                     item_index + 1
                 ),

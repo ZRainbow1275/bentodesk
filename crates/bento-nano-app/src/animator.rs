@@ -4,7 +4,7 @@
 //! channels layered on top of the static pill chrome:
 //!
 //! - `PillHover` keeps geometry fixed and drives the surface-tone reaction;
-//!   hover-in runs over 160 ms and hover-out over 220 ms.
+//!   hover-in runs over 120 ms and hover-out over 160 ms.
 //! - `PillPress` keeps geometry fixed and supplies the press timing channel;
 //!   pointer-down runs over 80 ms and release restores over 120 ms.
 //! - `StatusDotPulse` is retained as a pure helper for a future status-dot
@@ -30,10 +30,10 @@ use bento_nano_zone::ZoneId;
 /// Spec §10 — zero alloc.
 pub const ANIMATOR_CAPACITY: usize = 64;
 
-/// V-8 — hover-in duration. Tauri reference: ~160 ms snap.
-pub const HOVER_IN_DURATION_MS: u32 = 160;
+/// V-8 — hover-in duration, calibrated to the shared fast release cadence.
+pub const HOVER_IN_DURATION_MS: u32 = 120;
 /// V-8 — hover-out duration. Slightly longer so the pill settles gracefully.
-pub const HOVER_OUT_DURATION_MS: u32 = 220;
+pub const HOVER_OUT_DURATION_MS: u32 = 160;
 /// V-8 — press-down duration. Quick haptic cue, sub-100 ms.
 pub const PRESS_DOWN_DURATION_MS: u32 = 80;
 /// V-8 — press-release duration.
@@ -722,8 +722,8 @@ mod tests {
     fn duration_constants_are_pinned() {
         // V-8 contract — these are user-visible feel knobs. Any silent
         // drift would change the pill cadence; pin them.
-        assert_eq!(HOVER_IN_DURATION_MS, 160);
-        assert_eq!(HOVER_OUT_DURATION_MS, 220);
+        assert_eq!(HOVER_IN_DURATION_MS, 120);
+        assert_eq!(HOVER_OUT_DURATION_MS, 160);
         assert_eq!(PRESS_DOWN_DURATION_MS, 80);
         assert_eq!(PRESS_UP_DURATION_MS, 120);
         // #2 step 6 (2026-06-02) — EXPAND_DURATION_MS removed with the dead

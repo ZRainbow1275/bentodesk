@@ -25,14 +25,11 @@ fn main() {
         let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
         let mani = std::path::Path::new(&dir).join("app.manifest");
         let resources = std::path::Path::new(&dir).join("app.res");
-        println!("cargo:rustc-link-arg-bin=bento-nano-shell=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-bin=BentoDesk=/MANIFEST:EMBED");
         println!(
-            "cargo:rustc-link-arg-bin=bento-nano-shell=/MANIFESTINPUT:{}",
+            "cargo:rustc-link-arg-bin=BentoDesk=/MANIFESTINPUT:{}",
             mani.display()
         );
-        println!(
-            "cargo:rustc-link-arg-bin=bento-nano-shell={}",
-            resources.display()
-        );
+        println!("cargo:rustc-link-arg-bin=BentoDesk={}", resources.display());
     }
 }

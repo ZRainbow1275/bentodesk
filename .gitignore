@@ -4,6 +4,7 @@
 
 # Logs / runtime proof artifacts
 *.log
+/artifacts/
 runtime-proof-*.txt
 runtime-proof-*.csv
 runtime-proof-*.json
