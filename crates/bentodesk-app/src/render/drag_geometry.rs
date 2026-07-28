@@ -14,7 +14,7 @@ pub(super) fn active_item_drag_visual(app: &AppState) -> Option<ActiveItemDragVi
     })
 }
 
-pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32, now_ms: u32) -> Option<ZoneId> {
     // Z-order (2026-06-02) — mirror the two-layer draw stack: test `on_top`
     // (expanded/morphing) zones BEFORE `!on_top` (pills) so a point inside an
     // expanded panel resolves to the panel, never a pill drawn behind it. Within
@@ -26,7 +26,7 @@ pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32) -> Option<Zon
             if !zone.is_visible() || zone.is_stacked_child() {
                 continue;
             }
-            if app.zone_on_top(zone) != on_top_layer {
+            if app.zone_on_top_at(zone, now_ms) != on_top_layer {
                 continue;
             }
             let left = zone.x as f32;

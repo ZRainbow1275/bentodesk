@@ -196,9 +196,14 @@ fn inline_zone_search_char_and_escape_animate_closed_on_main_surface() {
     }
     assert!(root.app.borrow().zone_search_target.get().is_none());
     assert!(root.app.borrow().search_bar.borrow().query.is_empty());
-    assert_eq!(root.app.borrow().zone_pill_anim_zone.get(), Some(ZoneId(7)));
-    assert!(!root.app.borrow().zone_pill_anim_expanding.get());
-    assert_eq!(root.app.borrow().zone_pill_anim_from_morph.get(), 1.0);
+    let app = root.app.borrow();
+    let now_ms = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetTickCount().wrapping_add(1_000)
+    };
+    assert!(
+        app.zone_pill_morph_at(ZoneId(7), now_ms)
+            .is_some_and(|morph| morph > 0.0 && morph <= 1.0)
+    );
 }
 
 #[test]

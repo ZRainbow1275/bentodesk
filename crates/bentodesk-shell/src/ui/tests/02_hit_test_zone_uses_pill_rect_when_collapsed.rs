@@ -1,5 +1,23 @@
 // Wave C (05-20 visual parity) — pill hit-test + DPI-rect tests.
 
+fn seed_live_pill_morph(app: &AppState, zone_id: ZoneId, progress: f32) -> u32 {
+    const TEST_DURATION_MS: u32 = 100_000;
+    // A long duration makes the few microseconds between this seed and
+    // `hit_test_zone` immaterial while still exercising the real clock path.
+    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    let elapsed = (progress.clamp(0.0, 1.0) * TEST_DURATION_MS as f32) as u32;
+    app.pill_animator.borrow_mut().start(
+        zone_id,
+        bentodesk_app::animator::AnimChannel::PillMorph,
+        now_ms.wrapping_sub(elapsed),
+        TEST_DURATION_MS,
+        0.0,
+        1.0,
+        bentodesk_app::animator::Easing::PillMorph,
+    );
+    now_ms
+}
+
 #[test]
 fn hit_test_zone_uses_pill_rect_when_collapsed() {
     let zone = Zone::new(ZoneId(42), Cow::Borrowed("Docs"), 100, 100, 240, 180);
@@ -52,9 +70,8 @@ fn hit_test_zone_uses_full_rect_when_expanded() {
 // V-13 (2026-05-21) — during the pill→expanded morph the hit-rect MUST
 // mirror the painted rect, not snap to the full expanded zone box.
 //
-// Real flow on first hover: tick N enters pill (hovered=None, anim=None,
-// pill hit-rect). On the same tick, `update_zone_pill_hover` sets
-// `zone_pill_anim_zone = Some(zone), expanding = true, progress = 0.0`.
+// Real flow on first hover: tick N enters pill (hovered=None, no morph,
+// pill hit-rect). On the same tick, the per-Zone animator starts PillMorph.
 // Tick N+1 (a few ms later) has progress ~0.05 — the renderer paints
 // `morph_pill_to_rect(pill, expanded, eased(0.05))`, basically still
 // pill-sized. Pre-fix, `effective_zone_hit_rect` saw `body_visible=true`
@@ -68,9 +85,7 @@ fn hit_test_zone_morph_just_started_uses_pill_sized_rect() {
     let app = app_with_zones(vec![zone]);
     // Tick N+1 state: hovered_zone set, morph kicked off with tiny progress.
     app.hovered_zone.set(Some(ZoneId(44)));
-    app.zone_pill_anim_zone.set(Some(ZoneId(44)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(0.05);
+    seed_live_pill_morph(&app, ZoneId(44), 0.05);
     // Cursor far outside the pill but inside the legacy 240×180 box:
     // must NOT hit. (Pre-fix this returned Some(ZoneId(44)).)
     assert_eq!(hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0), None);
@@ -88,16 +103,10 @@ fn hit_test_zone_morph_just_started_uses_pill_sized_rect() {
 fn hit_test_zone_morph_in_flight_uses_interpolated_rect() {
     let zone = Zone::new(ZoneId(45), Cow::Borrowed("Docs"), 100, 100, 240, 180);
     let app = app_with_zones(vec![zone]);
-    // Hover + morph half-way through expanding. Renderer paints
-    // morph_pill_to_rect(pill, expanded, ease_out_back(0.5)). Hit-rect
-    // must mirror that exactly (paint–hit parity within 1 DIP). Note the
-    // easeOutBack curve OVERSHOOTS at raw=0.5 (eased ≈ 1.087), so the
-    // morphed rect extrapolates ~8.7% PAST the expanded target — the
-    // hit-rect tracks that bulge, which is the whole point of the V-13 fix.
+    // Hover + morph half-way through expanding. Paint and hit-test both sample
+    // the same per-Zone Animator entry and therefore use the same eased rect.
     app.hovered_zone.set(Some(ZoneId(45)));
-    app.zone_pill_anim_zone.set(Some(ZoneId(45)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(0.5);
+    let now_ms = seed_live_pill_morph(&app, ZoneId(45), 0.5);
     let layout = bentodesk_app::zone_pill_geometry::pill_layout_for_zone(
         app.zones.get(ZoneId(45)).expect("zone"),
         0,
@@ -108,16 +117,17 @@ fn hit_test_zone_morph_in_flight_uses_interpolated_rect() {
         width: 240.0,
         height: 180.0,
     };
-    let eased = bentodesk_app::zone_pill_geometry::ease_out_back_progress(0.5);
+    let eased = app
+        .zone_pill_morph_at(ZoneId(45), now_ms)
+        .expect("seeded morph");
     let morphed =
         bentodesk_app::zone_pill_geometry::morph_pill_to_rect(layout.rect, expanded, eased);
     // Inside the morphed rect → hit.
     let cx = morphed.x + morphed.width * 0.5;
     let cy = morphed.y + morphed.height * 0.5;
     assert_eq!(hit_test_zone(&app, cx, cy), Some(ZoneId(45)));
-    // Just outside the morphed rect (1 DIP beyond right edge) →
-    // no hit. This is the paint-hit parity guarantee.
-    assert_eq!(hit_test_zone(&app, morphed.right() + 1.0, cy), None);
+    // Leave a few DIPs for the real-clock sample taken inside `hit_test_zone`.
+    assert_eq!(hit_test_zone(&app, morphed.right() + 4.0, cy), None);
 }
 
 #[test]
@@ -127,9 +137,6 @@ fn hit_test_zone_morph_complete_uses_full_rect() {
     // Morph finished at progress=1.0 with the zone in a settled expanded
     // state — renderer paints the full chrome, so hit-rect is full rect.
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
-    app.zone_pill_anim_zone.set(Some(ZoneId(46)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(1.0);
     // Far corner of full expanded rect → hit.
     assert_eq!(
         hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
@@ -204,10 +211,11 @@ fn hit_test_overlapping_expanded_panel_wins_over_buried_pill() {
     // A is the expanded/top layer, B remains a collapsed bottom-layer pill.
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Click);
     app.selected_zone.set(Some(ZoneId(50)));
+    let now_ms = 0;
 
     // Sanity: the layer predicate splits them as intended.
-    assert!(app.zone_on_top(app.zones.get(ZoneId(50)).unwrap()));
-    assert!(!app.zone_on_top(app.zones.get(ZoneId(51)).unwrap()));
+    assert!(app.zone_on_top_at(app.zones.get(ZoneId(50)).unwrap(), now_ms));
+    assert!(!app.zone_on_top_at(app.zones.get(ZoneId(51)).unwrap(), now_ms));
 
     // Point P = centre of B's collapsed pill, which sits INSIDE A's expanded
     // 240×180 body (100..340, 100..280).
@@ -235,11 +243,9 @@ fn hit_test_overlapping_morphing_panel_wins_over_buried_pill() {
     let app = app_with_zones(vec![a, b]);
     // A is mid-morph (expanding, halfway) → top layer via zone_on_top.
     app.hovered_zone.set(Some(ZoneId(52)));
-    app.zone_pill_anim_zone.set(Some(ZoneId(52)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(0.5);
-    assert!(app.zone_on_top(app.zones.get(ZoneId(52)).unwrap()));
-    assert!(!app.zone_on_top(app.zones.get(ZoneId(53)).unwrap()));
+    let now_ms = seed_live_pill_morph(&app, ZoneId(52), 0.5);
+    assert!(app.zone_on_top_at(app.zones.get(ZoneId(52)).unwrap(), now_ms));
+    assert!(!app.zone_on_top_at(app.zones.get(ZoneId(53)).unwrap(), now_ms));
 
     // Centre of A's morphed rect (mirrors the painted interpolated rect).
     let pill_a = bentodesk_app::zone_pill_geometry::pill_layout_for_zone(
@@ -252,7 +258,9 @@ fn hit_test_overlapping_morphing_panel_wins_over_buried_pill() {
         width: 240.0,
         height: 180.0,
     };
-    let eased = bentodesk_app::zone_pill_geometry::ease_out_back_progress(0.5);
+    let eased = app
+        .zone_pill_morph_at(ZoneId(52), now_ms)
+        .expect("seeded morph");
     let morphed =
         bentodesk_app::zone_pill_geometry::morph_pill_to_rect(pill_a.rect, expanded_a, eased);
     let cx = morphed.x + morphed.width * 0.5;
@@ -280,6 +288,7 @@ fn draw_order_places_all_pills_before_expanded_panel() {
     // while the other three stay collapsed pills (bottom layer).
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Click);
     app.selected_zone.set(Some(ZoneId(61)));
+    let now_ms = 0;
 
     // Walk the exact two-pass draw order used by `Renderer::draw_zones`.
     let mut draw_order = Vec::new();
@@ -288,7 +297,7 @@ fn draw_order_places_all_pills_before_expanded_panel() {
             if !zone.is_visible() || zone.is_stacked_child() {
                 continue;
             }
-            if app.zone_on_top(zone) != on_top_layer {
+            if app.zone_on_top_at(zone, now_ms) != on_top_layer {
                 continue;
             }
             draw_order.push(zone.id);
@@ -313,11 +322,11 @@ fn draw_order_places_all_pills_before_expanded_panel() {
     // And the layer predicate agrees: only ZoneId(61) is on top.
     for id in [ZoneId(60), ZoneId(62), ZoneId(63)] {
         assert!(
-            !app.zone_on_top(app.zones.get(id).unwrap()),
+            !app.zone_on_top_at(app.zones.get(id).unwrap(), now_ms),
             "{id:?} should be a pill"
         );
     }
-    assert!(app.zone_on_top(app.zones.get(ZoneId(61)).unwrap()));
+    assert!(app.zone_on_top_at(app.zones.get(ZoneId(61)).unwrap(), now_ms));
 }
 
 #[test]
@@ -400,32 +409,27 @@ fn settings_hit_resolves_buttons_and_body() {
 
     // Top 5 toggles map to their ToggleX variants in order.
     let scroll_y = 0.0;
-    let r0 =
-        bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 0);
+    let r0 = bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 0);
     assert_eq!(
         settings_hit(&app, r0.x + r0.width * 0.5, r0.y + r0.height * 0.5),
         SettingsHit::ToggleDesktopEmbed
     );
-    let r1 =
-        bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 1);
+    let r1 = bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 1);
     assert_eq!(
         settings_hit(&app, r1.x + r1.width * 0.5, r1.y + r1.height * 0.5),
         SettingsHit::ToggleAutostart
     );
-    let r2 =
-        bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 2);
+    let r2 = bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 2);
     assert_eq!(
         settings_hit(&app, r2.x + r2.width * 0.5, r2.y + r2.height * 0.5),
         SettingsHit::ToggleShowInTaskbar
     );
-    let r3 =
-        bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 3);
+    let r3 = bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 3);
     assert_eq!(
         settings_hit(&app, r3.x + r3.width * 0.5, r3.y + r3.height * 0.5),
         SettingsHit::ToggleSmartLayout
     );
-    let r4 =
-        bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 4);
+    let r4 = bentodesk_app::settings_panel::settings_top_toggle_hit_rect(app.viewport, scroll_y, 4);
     assert_eq!(
         settings_hit(&app, r4.x + r4.width * 0.5, r4.y + r4.height * 0.5),
         SettingsHit::TogglePortableMode

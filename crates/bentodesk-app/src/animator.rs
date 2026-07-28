@@ -12,22 +12,17 @@
 //!   keep the shell frame pump alive on its own.
 //!
 //! Spec §10 (hot-path zero allocation): backing storage is a fixed-size
-//! inline array (`[Option<Entry>; 64]`) — no `Vec`, no `String`, no `Box`.
-//! The animator state lives on `AppState`, the per-frame pump samples it
-//! after the existing `tick_zone_pill_animation` call, and the renderer
-//! reads the eased 0..=1 value at paint time. The persisted pill geometry
-//! tokens (`PILL_HEIGHT`, `RADIUS.capsule`) are NEVER mutated — transforms
-//! apply at draw-time via `Rect`/alpha multipliers (per V-8 contract).
+//! inline array (`[Option<Entry>; 64]`) — no `Vec`, `String`, or `Box`.
+//! Structural morphs share this per-zone store, so rapid Zone hand-offs do
+//! not overwrite one process-global animation slot.
 //!
 //! No new threads / timers. The existing `GetTickCount` cadence in the
 //! shell's render pump is the only time source.
 
 use bentodesk_zone::ZoneId;
 
-/// Maximum simultaneous animator entries. 64 is comfortably above the
-/// 16-zone live seed scene (2 stateful channels × 16 zones = 32 after the
-/// #2 step-6 PillExpand removal) and keeps the inline backing array small.
-/// Spec §10 — zero alloc.
+/// Maximum simultaneous animator entries. 64 covers three stateful channels
+/// across the 16-zone live seed scene while keeping storage inline.
 pub const ANIMATOR_CAPACITY: usize = 64;
 
 /// V-8 — hover-in duration, calibrated to the shared fast release cadence.
@@ -46,11 +41,6 @@ pub const INLINE_SEARCH_IN_DURATION_MS: u32 = 180;
 pub const INLINE_SEARCH_OUT_DURATION_MS: u32 = 140;
 /// Tauri `.spring-emerge` duration used when a new stack capsule mounts.
 pub const STACK_EMERGE_DURATION_MS: u32 = 240;
-// #2 step 6 (2026-06-02) — `EXPAND_DURATION_MS` (=200) and the dead
-// `AnimChannel::PillExpand` it timed were REMOVED. The pill↔panel expand is
-// owned solely by the Wave G2 `zone_pill_anim_*` state machine on the M3
-// easeOutBack curve; the V-8 PillExpand channel was never sampled (render
-// samples only PillHover/PillPress), a dead parallel timeline.
 /// V-8 — status-dot pulse period. 1600 ms full cycle = 0.6 → 1.0 → 0.6.
 pub const PULSE_PERIOD_MS: u32 = 1600;
 /// V-12 (2026-05-21) — pill hover scale **disabled** (0.0). The collapsed
@@ -73,11 +63,10 @@ pub const PULSE_ALPHA_SPAN: f32 = 0.4;
 /// The live per-pill animation channels. Stored alongside the target `ZoneId`
 /// so the same animator can drive an arbitrary number of pills.
 ///
-/// #2 step 6 (2026-06-02) — the dead `PillExpand` channel was removed; the
-/// structural expand is owned by the Wave G2 `zone_pill_anim_*` state machine,
-/// not this animator (the renderer samples only `PillHover`/`PillPress`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimChannel {
+    /// Per-Zone capsule ↔ panel geometry/content morph.
+    PillMorph,
     PillHover,
     PillPress,
     /// Expanded Zone's inline search reveal/collapse channel.
@@ -101,6 +90,8 @@ pub enum Easing {
     /// ease-out-cubic helper was removed in M3 once the live pill morph moved
     /// to the easeOutBack curve; this variant keeps its own inline impl below.)
     EaseOutCubic,
+    /// Shared capsule geometry curve (`cubic-bezier(0, 0, 0.58, 1)`).
+    PillMorph,
 }
 // #2 step 6 (2026-06-02) — the `EaseInOutQuad` selector variant was removed
 // with the dead `PillExpand` channel (it had no other live producer). The
@@ -135,6 +126,9 @@ fn apply_easing(easing: Easing, t: f32) -> f32 {
     match easing {
         Easing::Linear => ease_linear(t),
         Easing::EaseOutCubic => ease_out_cubic(t),
+        Easing::PillMorph => crate::zone_pill_geometry::ease_out_progress(
+            crate::zone_pill_geometry::pill_geometry_progress(t),
+        ),
     }
 }
 
@@ -246,6 +240,15 @@ impl Animator {
         }
     }
 
+    /// Cancel one channel for every Zone.
+    pub fn cancel_channel(&mut self, channel: AnimChannel) {
+        for slot in self.entries.iter_mut() {
+            if slot.is_some_and(|entry| entry.channel == channel) {
+                *slot = None;
+            }
+        }
+    }
+
     /// Whether a concrete `(zone, channel)` animation entry exists. This lets
     /// callers distinguish a settled/default value from a zero-terminal entry
     /// that has just been retired.
@@ -259,22 +262,39 @@ impl Animator {
     /// Sample the eased current value for `(zone, channel)`. Returns 0.0 if
     /// no entry exists. For `StatusDotPulse` the zone is ignored — the
     /// pulse is a global breathing curve sourced from `now_ms`.
-    pub fn sample(&self, zone: ZoneId, channel: AnimChannel, now_ms: u32) -> f32 {
+    pub fn sample_if_present(
+        &self,
+        zone: ZoneId,
+        channel: AnimChannel,
+        now_ms: u32,
+    ) -> Option<f32> {
         if matches!(channel, AnimChannel::StatusDotPulse) {
-            return status_dot_pulse(now_ms);
+            return Some(status_dot_pulse(now_ms));
         }
         for entry in self.entries.iter().flatten() {
             if entry.zone == zone && entry.channel == channel {
                 let elapsed = now_ms.wrapping_sub(entry.start_ms);
                 if elapsed >= entry.duration_ms {
-                    return entry.to;
+                    return Some(entry.to);
                 }
                 let raw = (elapsed as f32) / (entry.duration_ms as f32);
                 let eased = apply_easing(entry.easing, raw);
-                return entry.from + (entry.to - entry.from) * eased;
+                return Some(entry.from + (entry.to - entry.from) * eased);
             }
         }
-        0.0
+        None
+    }
+
+    pub fn sample(&self, zone: ZoneId, channel: AnimChannel, now_ms: u32) -> f32 {
+        self.sample_if_present(zone, channel, now_ms).unwrap_or(0.0)
+    }
+
+    pub fn is_active_entry(&self, zone: ZoneId, channel: AnimChannel, now_ms: u32) -> bool {
+        self.entries.iter().flatten().any(|entry| {
+            entry.zone == zone
+                && entry.channel == channel
+                && now_ms.wrapping_sub(entry.start_ms) < entry.duration_ms
+        })
     }
 
     /// Per-frame retire pass. Drops entries whose `elapsed >= duration` AND
@@ -290,8 +310,9 @@ impl Animator {
                     any_active = true;
                     continue;
                 }
-                // Terminal — keep only if value is non-zero (held state).
-                if entry.to.abs() < f32::EPSILON {
+                // Structural endpoints are owned by the display-mode latch, so
+                // both morph directions retire. Other non-zero channels stay held.
+                if entry.channel == AnimChannel::PillMorph || entry.to.abs() < f32::EPSILON {
                     *slot = None;
                 }
             }
@@ -576,6 +597,30 @@ mod tests {
     }
 
     #[test]
+    fn pill_morph_entries_advance_and_retire_independently() {
+        let mut a = Animator::new();
+        for (zone, from, to) in [(z(20), 0.0, 1.0), (z(21), 1.0, 0.0)] {
+            a.start(
+                zone,
+                AnimChannel::PillMorph,
+                0,
+                240,
+                from,
+                to,
+                Easing::PillMorph,
+            );
+        }
+        let first = a.sample(z(20), AnimChannel::PillMorph, 120);
+        let second = a.sample(z(21), AnimChannel::PillMorph, 120);
+        assert!(first > 0.0 && first < 1.0);
+        assert!(second > 0.0 && second < 1.0);
+        assert!((first + second - 1.0).abs() < 1e-5);
+        assert!(a.tick(239));
+        assert!(!a.tick(240));
+        assert_eq!(a.occupancy(), 0);
+    }
+
+    #[test]
     fn tick_retires_zero_terminal_entries() {
         let mut a = Animator::new();
         a.start(
@@ -737,9 +782,8 @@ mod tests {
     // covers the seeded scene demand.
     #[allow(clippy::assertions_on_constants)]
     fn capacity_above_seed_scene_demand() {
-        // #2 step 6 (2026-06-02) — after removing the dead PillExpand channel
-        // there are 2 stateful per-zone channels (hover/press; StatusDotPulse
-        // is global and never stored). 16 seeded zones × 2 = 32.
-        assert!(ANIMATOR_CAPACITY >= 32);
+        // Structural morph, hover and press can overlap across all 16 seeded
+        // Zones. Inline search and stack-emerge are sparse one-shot channels.
+        assert!(ANIMATOR_CAPACITY >= 16 * 3);
     }
 }

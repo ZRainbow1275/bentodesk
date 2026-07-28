@@ -69,6 +69,8 @@ pub(super) const CHROME_REGION_SHADOW_MARGIN_DIP: f32 = 24.0;
 pub(super) fn chrome_region_rects(app: &AppState) -> SmallVec<[bentodesk_style::Rect; 16]> {
     use bentodesk_style::Rect;
     let mut out: SmallVec<[Rect; 16]> = SmallVec::new();
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
     let vp = app.viewport;
     let full = Rect {
         x: 0.0,
@@ -107,7 +109,7 @@ pub(super) fn chrome_region_rects(app: &AppState) -> SmallVec<[bentodesk_style::
         if !zone.is_visible() || zone.is_stacked_child() {
             continue;
         }
-        let rect = effective_zone_chrome_rect(app, zone);
+        let rect = effective_zone_chrome_rect(app, zone, now_ms);
         // Belt-and-suspenders (ROOT-CAUSE-corrupt-zone-geometry.md): clamp the
         // ZONE BODY rect to the viewport BEFORE inflating so an oversized /
         // corrupt zone can never make the whole window catch clicks. The
@@ -166,7 +168,11 @@ pub(super) fn push_clamped_inflated(
 /// the helper can't be imported; both sides consume the same `zone_pill_geometry`
 /// SSoT so they stay in lockstep). Three cases: pill-morph in flight, collapsed
 /// pill, expanded body. Pure / allocation-free.
-pub(super) fn effective_zone_chrome_rect(app: &AppState, zone: &Zone) -> bentodesk_style::Rect {
+pub(super) fn effective_zone_chrome_rect(
+    app: &AppState,
+    zone: &Zone,
+    now_ms: u32,
+) -> bentodesk_style::Rect {
     use bentodesk_style::Rect;
     // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
     // explicitly selected (a focused member), NOT on hover (hover shows the
@@ -189,16 +195,8 @@ pub(super) fn effective_zone_chrome_rect(app: &AppState, zone: &Zone) -> bentode
     // Case 1 — pill morph in flight (mirrors effective_zone_hit_rect case 1).
     // Anchors don't morph (the paint-side pill_anim_active also excludes them).
     // #2 step 8 (2026-06-02) — shared `current_morph_rect` SSoT so paint == hit.
-    if app.zone_pill_morph_in_flight(zone) {
-        let raw = app.zone_pill_anim_progress.get();
-        let (_morph, rect) = zone_pill_geometry::current_morph_rect(
-            pill_layout.rect,
-            expanded_rect,
-            app.zone_pill_anim_from_morph.get(),
-            raw,
-            app.zone_pill_anim_expanding.get(),
-        );
-        return rect;
+    if let Some(morph) = app.zone_pill_morph_at(zone.id, now_ms) {
+        return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
     }
 
     if !body_visible {

@@ -17,10 +17,9 @@ impl AppState {
         let mut scheduler = self.hover_scheduler.get();
         scheduler.reset();
         self.hover_scheduler.set(scheduler);
-        self.zone_pill_anim_zone.set(None);
-        self.zone_pill_anim_progress.set(1.0);
-        self.zone_pill_anim_expanding.set(false);
-        self.zone_pill_anim_from_morph.set(0.0);
+        self.pill_animator
+            .borrow_mut()
+            .cancel_channel(AnimChannel::PillMorph);
         true
     }
 
@@ -91,16 +90,22 @@ impl AppState {
         }
     }
 
-    /// Shared morph gate. Both directions include raw progress 0.0: the first
-    /// expand frame must paint the recorded pill/start shape rather than briefly
-    /// falling through to the settled expanded renderer, and the first collapse
-    /// frame must retain the complete panel before easing toward the pill.
-    pub fn zone_pill_morph_in_flight(&self, zone: &Zone) -> bool {
-        if zone.is_stack_anchor() || self.zone_pill_anim_zone.get() != Some(zone.id) {
-            return false;
+    pub fn zone_pill_morph_at(&self, zone_id: ZoneId, now_ms: u32) -> Option<f32> {
+        let zone = self.zones.get(zone_id)?;
+        if zone.is_stack_anchor() {
+            return None;
         }
-        let progress = self.zone_pill_anim_progress.get();
-        progress < 1.0
+        self.pill_animator
+            .borrow()
+            .sample_if_present(zone_id, AnimChannel::PillMorph, now_ms)
+    }
+
+    pub fn zone_pill_morph_in_flight_at(&self, zone: &Zone, now_ms: u32) -> bool {
+        !zone.is_stack_anchor()
+            && self
+                .pill_animator
+                .borrow()
+                .is_active_entry(zone.id, AnimChannel::PillMorph, now_ms)
     }
 
     /// Z-order (2026-06-02) — whether `zone`'s SETTLED render surface is the
@@ -142,12 +147,12 @@ impl AppState {
     /// inside an expanded panel resolves to the panel, never a pill behind it).
     /// Stack anchors never run the morph, so for them this collapses to the
     /// body-visible rule. SSoT shared by paint and hit so the two can't drift.
-    pub fn zone_on_top(&self, zone: &Zone) -> bool {
+    pub fn zone_on_top_at(&self, zone: &Zone, now_ms: u32) -> bool {
         if self.zone_pill_body_visible(zone) {
             return true;
         }
         // Morph in flight (pill ↔ panel). Anchors don't morph.
-        self.zone_pill_morph_in_flight(zone)
+        self.zone_pill_morph_in_flight_at(zone, now_ms)
     }
 
     pub fn show_tooltip_text(&self, text: SmolStr) -> bool {

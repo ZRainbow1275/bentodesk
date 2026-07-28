@@ -22,7 +22,7 @@ use crossbeam_channel::Sender;
 use serde::{Deserialize, Serialize};
 
 use super::hide::{ensure_stealth, hidden_dir_for, unique_hidden_path};
-use super::sync::{SafetyManifest, load_manifest, manifest_add, manifest_remove, save_manifest};
+use super::sync::{load_manifest, manifest_add, manifest_remove, save_manifest};
 use super::{StealthConfig, StealthError, StealthEvent, paths_equal_str, paths_match, status};
 
 mod model;
@@ -115,9 +115,9 @@ fn resolve_restore_identity(
 
 /// Restore one hidden file by moving it back to `original_path`.
 ///
-/// Returns `Ok(())` on success or when the destination already holds a
-/// file (treated as already-restored — the hidden copy is removed to avoid
-/// duplication). Returns `Err` only on hard I/O failure.
+/// Returns `Ok(())` only after the hidden source has moved back. An existing
+/// destination is a collision: both copies are preserved and an error is
+/// returned for the caller to resolve explicitly.
 pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), StealthError> {
     let source = Path::new(hidden_path);
     let dest = Path::new(original_path);
@@ -143,11 +143,13 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), Stealt
 
     if dest.exists() {
         tracing::warn!(
-            "Restore destination already exists, skipping rename: {}",
+            "Restore destination already exists; preserving both copies: {}",
             original_path
         );
-        let _ = std::fs::remove_file(source);
-        return Ok(());
+        return Err(StealthError::Io {
+            path: dest.to_path_buf(),
+            message: "restore destination already exists; hidden source preserved".to_owned(),
+        });
     }
 
     // Same-drive rename (instant). Fall back to copy + delete on EXDEV.
@@ -158,6 +160,12 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), Stealt
             original_path,
             e
         );
+        if !source.is_file() {
+            return Err(StealthError::Io {
+                path: source.to_path_buf(),
+                message: format!("directory rename failed; hidden source preserved: {e}"),
+            });
+        }
         match std::fs::copy(source, dest) {
             Ok(_) => {
                 if let Err(rm_err) = std::fs::remove_file(source) {
@@ -167,6 +175,16 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), Stealt
                         rm_err,
                         hidden_path
                     );
+                    let cleanup = std::fs::remove_file(dest)
+                        .err()
+                        .map(|cleanup_err| format!("; destination cleanup failed: {cleanup_err}"))
+                        .unwrap_or_default();
+                    return Err(StealthError::Io {
+                        path: source.to_path_buf(),
+                        message: format!(
+                            "copied restore but could not remove hidden source: {rm_err}{cleanup}"
+                        ),
+                    });
                 }
             }
             Err(e2) => {
@@ -324,8 +342,8 @@ pub fn restore_zone_items_with_dirs(
     report
 }
 
-/// Production wrapper for [`restore_zone_items_with_dirs`] that also
-/// removes manifest entries for every attempted item.
+/// Production wrapper for [`restore_zone_items_with_dirs`] that removes only
+/// manifest entries whose original is visible and hidden source is gone.
 pub fn restore_zone_items(
     config: &StealthConfig,
     items: &[StealthItem],
@@ -335,12 +353,14 @@ pub fn restore_zone_items(
 
     let report = restore_zone_items_with_dirs(items, &desktop_dir, &hdir);
 
-    // `manifest_remove` is a no-op for entries it cannot find, so calling
-    // it for every item (including skipped ones) is safe and keeps the
-    // manifest converging on the layout state.
     for item in items {
         if let Some(orig) = item.original_path.as_deref() {
-            if let Err(e) = manifest_remove(&hdir, orig) {
+            let restored = Path::new(orig).exists()
+                && item
+                    .hidden_path
+                    .as_deref()
+                    .is_none_or(|hidden| !Path::new(hidden).exists());
+            if restored && let Err(e) = manifest_remove(&hdir, orig) {
                 tracing::warn!("restore_zone_items: manifest_remove failed for {orig}: {e}");
             }
         }
@@ -612,7 +632,7 @@ pub fn restore_all_hidden(
     tracing::info!("  Layout tier: restored={}, failed={}", restored, failed);
 
     // -- Tier 2: Restore from manifest --------------------------------
-    let manifest = load_manifest(&hdir)?;
+    let mut manifest = load_manifest(&hdir)?;
     let mut manifest_restored = 0u32;
     let mut manifest_failed = 0u32;
 
@@ -671,9 +691,13 @@ pub fn restore_all_hidden(
         tracing::info!("  Scan tier: restored {} orphaned files", scan_restored);
     }
 
-    // Clear the manifest.
-    if let Err(e) = save_manifest(&hdir, &SafetyManifest::default()) {
-        tracing::warn!("restore_all_hidden: failed to clear manifest: {e}");
+    // Commit only successful restores. Collision/failure entries remain a
+    // recovery record as long as their hidden source still exists.
+    manifest
+        .entries
+        .retain(|entry| Path::new(&entry.hidden_path).exists());
+    if let Err(e) = save_manifest(&hdir, &manifest) {
+        tracing::warn!("restore_all_hidden: failed to update manifest: {e}");
     }
 
     let total = restored + manifest_restored + scan_restored;
@@ -707,7 +731,10 @@ fn scan_and_restore_orphans(dir: &Path, desktop_path: &str) -> u32 {
         let file_path = entry.path();
 
         if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-            if name == "manifest.json" || name == "manifest.json.tmp" {
+            if matches!(
+                name,
+                "manifest.json" | "manifest.json.tmp" | "manifest.json.bak"
+            ) {
                 continue;
             }
         }

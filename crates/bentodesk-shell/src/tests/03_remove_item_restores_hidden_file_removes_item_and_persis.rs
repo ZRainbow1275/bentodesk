@@ -430,12 +430,23 @@ fn successful_drag_out_removes_stealth_item_after_shell_moved_hidden_file() {
     let state_dir = zones_path.parent().expect("scratch parent");
     std::fs::create_dir_all(state_dir).expect("state dir");
     let original = state_dir.join("Desktop").join("moved-out.url");
-    let hidden = state_dir
-        .join(".bentodesk")
-        .join("91")
-        .join("moved-out.url");
-    let original_path = original.to_string_lossy().to_string();
-    let hidden_path = hidden.to_string_lossy().to_string();
+    std::fs::create_dir_all(original.parent().expect("desktop")).expect("desktop");
+    std::fs::write(&original, b"drag-out bytes").expect("source");
+    let config = bentodesk_backend::stealth::StealthConfig {
+        desktop_path: SmolStr::new(original.parent().expect("desktop").to_string_lossy()),
+        app_data_dir: SmolStr::new(state_dir.to_string_lossy()),
+    };
+    let (original_path, hidden_path) = bentodesk_backend::stealth::hide_file(
+        &config,
+        &original.to_string_lossy(),
+        "91",
+        "File",
+        None,
+        None,
+        None,
+    )
+    .expect("hide with recovery manifest");
+    let hidden = std::path::PathBuf::from(&hidden_path);
     let zone_id = ZoneId(91);
     let item_id = {
         let mut app = root.app.borrow_mut();
@@ -454,9 +465,10 @@ fn successful_drag_out_removes_stealth_item_after_shell_moved_hidden_file() {
         item_id
     };
 
-    // Mirrors the state after Explorer accepted DROPEFFECT_MOVE: the
-    // hidden source has already left BentoDesk's storage, so neither peer
-    // path exists at the old location.
+    // Mirrors the state after Explorer accepted DROPEFFECT_MOVE.
+    let external = state_dir.join("External").join("moved-out.url");
+    std::fs::create_dir_all(external.parent().expect("external")).expect("external");
+    std::fs::rename(&hidden, &external).expect("shell moved hidden source");
     assert!(!hidden.exists());
     assert!(!original.exists());
     finalize_item_drag_out(
@@ -491,6 +503,20 @@ fn successful_drag_out_removes_stealth_item_after_shell_moved_hidden_file() {
     }
     let reloaded = storage::read_zones(&zones_path).expect("persisted zones");
     assert!(reloaded.item(zone_id, item_id).is_none());
+    assert_eq!(
+        bentodesk_backend::stealth::load_manifest(
+            &original.parent().expect("desktop").join(".bentodesk")
+        )
+        .expect("manifest")
+        .entries
+        .len(),
+        0,
+        "successful external MOVE must not leave stale recovery metadata"
+    );
+    assert_eq!(
+        std::fs::read(external).expect("external payload"),
+        b"drag-out bytes"
+    );
 
     let _ = std::fs::remove_dir_all(state_dir);
 }
@@ -576,7 +602,9 @@ fn item_file_display_path_prefers_original_visible_path() {
         0,
         0,
     );
-    item.original_path = Some(Cow::Owned("C:/Users/BentoDeskTest/Desktop/report.pdf".to_owned()));
+    item.original_path = Some(Cow::Owned(
+        "C:/Users/BentoDeskTest/Desktop/report.pdf".to_owned(),
+    ));
     item.hidden_path = Some(Cow::Owned(
         "C:/Users/BentoDeskTest/Desktop/.bentodesk/z/report.pdf".to_owned(),
     ));

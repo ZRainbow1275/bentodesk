@@ -42,7 +42,20 @@ pub(super) fn log_animation_proof_state(
     };
     let item_hover = app.item_hover.get();
     let item_hover_active = item_hover.is_active(now_ms);
-    let pill_animator_occupancy = app.pill_animator.borrow().occupancy();
+    let (pill_animator_occupancy, pill_morph_zone, pill_morph_value, pill_morph_active) = {
+        let morph_zone = app
+            .hovered_zone
+            .get()
+            .or_else(|| hover_scheduler.expanded_zone())
+            .or_else(|| app.selected_zone.get());
+        let animator = app.pill_animator.borrow();
+        let morph_value = morph_zone
+            .and_then(|zone| animator.sample_if_present(zone, AnimChannel::PillMorph, now_ms))
+            .unwrap_or(0.0);
+        let morph_active = morph_zone
+            .is_some_and(|zone| animator.is_active_entry(zone, AnimChannel::PillMorph, now_ms));
+        (animator.occupancy(), morph_zone, morph_value, morph_active)
+    };
     let (highlight_targets, highlight_pulses, highlight_auto_clear_ms) = {
         let overlay = app.highlight_overlay.borrow();
         (
@@ -57,7 +70,7 @@ pub(super) fn log_animation_proof_state(
     };
     log_static(
         format!(
-            "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_anim_zone={} pill_anim_progress={:.3} pill_anim_morph={:.3} pill_anim_duration_ms={} pill_anim_expanding={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} stack_bloom_leaving={} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
+            "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_morph_zone={} pill_morph_value={:.3} pill_morph_active={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} stack_bloom_leaving={} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
             proof_active_drag_label(app),
             proof_zone_id_label(app.zone_drag.get().map(|(id, _, _)| id)),
             proof_zone_id_label(app.zone_resize.get().map(|(id, _, _)| id)),
@@ -65,11 +78,9 @@ pub(super) fn log_animation_proof_state(
             app.stack_tray_drag.get().is_some(),
             proof_zone_id_label(app.hovered_zone.get()),
             proof_zone_id_label(app.selected_zone.get()),
-            proof_zone_id_label(app.zone_pill_anim_zone.get()),
-            app.zone_pill_anim_progress.get(),
-            sampled_zone_pill_morph(app),
-            app.zone_pill_anim_duration_ms.get(),
-            app.zone_pill_anim_expanding.get(),
+            proof_zone_id_label(pill_morph_zone),
+            pill_morph_value,
+            pill_morph_active,
             pill_animator_occupancy,
             proof_zone_id_label(app.stack_bloom_anchor.get()),
             app.stack_bloom_progress.get(),
@@ -89,22 +100,13 @@ pub(super) fn log_animation_proof_state(
 pub(super) fn reset_pointer_drag_hover_channels(
     app: &AppState,
     dragged_zone: Option<ZoneId>,
-    now_ms: u32,
+    _now_ms: u32,
 ) {
     if let Some(zone_id) = dragged_zone {
         let mut anim = app.pill_animator.borrow_mut();
+        anim.cancel(zone_id, bentodesk_app::animator::AnimChannel::PillMorph);
         anim.cancel(zone_id, bentodesk_app::animator::AnimChannel::PillHover);
         anim.cancel(zone_id, bentodesk_app::animator::AnimChannel::PillPress);
-        drop(anim);
-        if app.zone_pill_anim_zone.get() == Some(zone_id) {
-            app.zone_pill_anim_zone.set(None);
-            app.zone_pill_anim_progress.set(1.0);
-            app.zone_pill_anim_from_morph.set(0.0);
-            app.zone_pill_anim_duration_ms
-                .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
-            app.zone_pill_anim_expanding.set(false);
-            app.zone_pill_anim_started_ms.set(now_ms);
-        }
     }
     app.pill_pressed_zone.set(None);
     app.hovered_zone.set(None);
@@ -164,15 +166,6 @@ pub(super) fn tick_stack_bloom_animation(app: &AppState, now_ms: u32) -> bool {
     changed || progress < 1.0
 }
 
-#[inline]
-pub(super) fn sampled_zone_pill_morph(app: &AppState) -> f32 {
-    zone_pill_geometry::current_morph_progress(
-        app.zone_pill_anim_from_morph.get(),
-        app.zone_pill_anim_progress.get(),
-        app.zone_pill_anim_expanding.get(),
-    )
-}
-
 pub(super) fn begin_zone_pill_segment(
     app: &AppState,
     zone_id: ZoneId,
@@ -180,114 +173,53 @@ pub(super) fn begin_zone_pill_segment(
     expanding: bool,
     now_ms: u32,
 ) {
-    // Reverse from the exact visible boundary. Geometry and expanded content
-    // consume this same monotonic morph, so there is no second alpha timeline
-    // to jump when the pointer changes direction mid-flight.
     let from = from_morph.clamp(0.0, 1.0);
     let target = if expanding { 1.0 } else { 0.0 };
-    app.zone_pill_anim_zone.set(Some(zone_id));
-    app.zone_pill_anim_from_morph.set(from);
-    app.zone_pill_anim_duration_ms
-        .set(zone_pill_geometry::pill_segment_duration_ms(from, target));
-    app.zone_pill_anim_expanding.set(expanding);
-    app.zone_pill_anim_started_ms.set(now_ms);
-    app.zone_pill_anim_progress.set(0.0);
+    let duration_ms = zone_pill_geometry::pill_segment_duration_ms(from, target);
+    app.pill_animator.borrow_mut().start(
+        zone_id,
+        AnimChannel::PillMorph,
+        now_ms,
+        duration_ms,
+        from,
+        target,
+        Easing::PillMorph,
+    );
+    if animation_proof_log_enabled() {
+        log_static(
+            format!(
+                "pill_morph_segment: now_ms={now_ms} zone={} from={from:.3} to={target:.3} duration_ms={duration_ms}\n",
+                zone_id.0
+            )
+            .as_str(),
+        );
+    }
 }
 
-/// Start or reverse the capsule pill transition for the current hover target.
-/// The segment records its painted start morph, so reversing an eased curve is
-/// continuous instead of mirroring raw time (which is only correct for linear
-/// interpolation). Stack anchors remain owned by the Bloom animation.
-pub(super) fn update_zone_pill_hover(
+pub(super) fn transition_zone_pill(
     app: &AppState,
-    hover_zone: Option<ZoneId>,
+    zone_id: ZoneId,
+    expanding: bool,
     now_ms: u32,
 ) -> bool {
-    // Resolve the previous "expanded under hover" zone so we know what to
-    // collapse if the pointer moved off it.
-    let prev_zone = app.zone_pill_anim_zone.get();
-    let prev_expanding = app.zone_pill_anim_expanding.get();
-
-    // Treat stack anchors as non-pill so they don't steal the animation slot.
-    let next_zone = hover_zone.and_then(|id| {
-        let zone = app.zones.get(id)?;
-        if zone.is_stack_anchor() {
-            None
-        } else {
-            Some(id)
-        }
-    });
-
-    // Steady state: pointer is on the same target as the current animation.
-    if next_zone == prev_zone && prev_expanding {
-        return false;
-    }
-
-    // Pointer moved to a different (or null) target — start a transition.
-    let mut changed = false;
-    if let Some(prev_id) = prev_zone {
-        if prev_expanding && Some(prev_id) != next_zone {
-            // Was expanding `prev_id`, but pointer left — continue from the
-            // exact shape painted by the current eased segment.
-            let current = sampled_zone_pill_morph(app);
-            begin_zone_pill_segment(app, prev_id, current, false, now_ms);
-            changed = true;
-        }
-    }
-
-    if let Some(next_id) = next_zone {
-        if Some(next_id) != prev_zone || !prev_expanding {
-            // Either no prior animation, or it was a collapse. A same-zone
-            // reversal samples the in-flight shape; a new zone starts at its
-            // collapsed pill.
-            let from = if prev_zone == Some(next_id) && !prev_expanding {
-                sampled_zone_pill_morph(app)
-            } else {
-                0.0
-            };
-            begin_zone_pill_segment(app, next_id, from, true, now_ms);
-            changed = true;
-        }
-    } else if prev_zone.is_some() && !prev_expanding && app.zone_pill_anim_progress.get() >= 1.0 {
-        // Already collapsed — clear stale state so the renderer skips the
-        // morph branch entirely.
-        app.zone_pill_anim_zone.set(None);
-        app.zone_pill_anim_progress.set(1.0);
-        app.zone_pill_anim_from_morph.set(0.0);
-        app.zone_pill_anim_duration_ms
-            .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
-        changed = true;
-    }
-
-    changed
-}
-
-/// Wave G2 — advance the pill morph progress for whichever zone is currently
-/// animating. Returns `true` while the animation is still in flight so the
-/// shell keeps pumping frames; clears state when the collapse fully settles.
-pub(super) fn tick_zone_pill_animation(app: &AppState, now_ms: u32) -> bool {
-    let Some(_zone) = app.zone_pill_anim_zone.get() else {
+    let Some(zone) = app.zones.get(zone_id) else {
         return false;
     };
-    let elapsed = now_ms.wrapping_sub(app.zone_pill_anim_started_ms.get());
-    let duration_ms = app.zone_pill_anim_duration_ms.get().max(1);
-    let progress = (elapsed as f32 / duration_ms as f32).clamp(0.0, 1.0);
-    let prev = app.zone_pill_anim_progress.get();
-    let changed = (prev - progress).abs() > 0.001;
-    app.zone_pill_anim_progress.set(progress);
-    if changed || progress < 1.0 {
-        log_animation_proof_state(app, "zone_morph_tick", now_ms, None, None);
+    if zone.is_stack_anchor() {
+        return false;
     }
-    // Collapsing finished — drop the anim slot so the renderer falls back
-    // to the steady pill chrome (no allocation per frame).
-    if progress >= 1.0 && !app.zone_pill_anim_expanding.get() {
-        app.zone_pill_anim_zone.set(None);
-        app.zone_pill_anim_from_morph.set(0.0);
-        app.zone_pill_anim_duration_ms
-            .set(zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
-        log_animation_proof_state(app, "hover_collapse_settled", now_ms, None, None);
+    let from = app
+        .zone_pill_morph_at(zone_id, now_ms)
+        .unwrap_or(if expanding { 0.0 } else { 1.0 });
+    let target = if expanding { 1.0 } else { 0.0 };
+    if (from - target).abs() < f32::EPSILON {
+        app.pill_animator
+            .borrow_mut()
+            .cancel(zone_id, AnimChannel::PillMorph);
+        return false;
     }
-    changed || progress < 1.0
+    begin_zone_pill_segment(app, zone_id, from, expanding, now_ms);
+    true
 }
 
 /// Structural hover is a display-mode capability, not a generic pointer
@@ -305,11 +237,11 @@ pub(super) fn zone_structurally_expands_on_hover(app: &AppState, zone_id: ZoneId
         .unwrap_or(false)
 }
 
-/// A3 (2026-05-29) — true when leaving `zone` should auto-collapse it. The
-/// same policy gates enter and leave so Click/Always can never inherit one
-/// half of the Hover state machine.
+/// Hover and Click both auto-return after the pointer leaves; Always is pinned.
 pub(super) fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> bool {
-    zone_structurally_expands_on_hover(app, zone_id)
+    app.zones
+        .get(zone_id)
+        .is_some_and(|zone| app.effective_zone_display_mode(zone) != ZoneDisplayMode::Always)
 }
 
 /// A3 — feed the hover-intent and grace-collapse scheduler from a hover-target
@@ -321,9 +253,13 @@ pub(super) fn zone_auto_collapses_on_leave(app: &AppState, zone_id: ZoneId) -> b
 /// chrome and never enter the pill scheduler.
 pub(super) fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, now_ms: u32) {
     // Treat stack anchors as non-pill so they don't engage the scheduler.
+    let mut scheduler = app.hover_scheduler.get();
+    let expanded = scheduler.expanded_zone();
     let next_zone = hover_zone.and_then(|id| {
         let zone = app.zones.get(id)?;
-        if zone.is_stack_anchor() || !zone_structurally_expands_on_hover(app, id) {
+        if zone.is_stack_anchor()
+            || (!zone_structurally_expands_on_hover(app, id) && expanded != Some(id))
+        {
             None
         } else {
             Some(id)
@@ -331,22 +267,18 @@ pub(super) fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, 
     });
     let expand_delay = app.expand_delay_ms.get().max(0) as u32;
     let collapse_delay = app.collapse_delay_ms.get().max(0) as u32;
-    let mut scheduler = app.hover_scheduler.get();
-    let expanded = scheduler.expanded_zone();
-
     match next_zone {
         Some(zone) => {
-            // Cursor is over a zone. native morphs a single zone at a time, so
-            // a direct zone→zone hand-off is handled by the morph's single
-            // slot (the new expand replaces the old expanded body — Tauri
-            // treats position as instant). on_enter cancels any pending
+            // Cursor is over a zone. Each Zone owns its own morph entry, so a
+            // direct hand-off can finish A's collapse while B expands.
+            // on_enter cancels any pending
             // collapse for this zone (re-enter aborts the grace) and arms the
             // hover-intent expand timer when it isn't already expanded.
             scheduler.on_enter(zone, now_ms, expand_delay);
         }
         None => {
             // Cursor moved to empty space. Arm the grace collapse for the
-            // expanded zone (HOVER mode only); clears any pending expand.
+            // expanded Hover/Click zone; clears any pending expand.
             let auto = expanded
                 .map(|z| zone_auto_collapses_on_leave(app, z))
                 .unwrap_or(false);
@@ -362,23 +294,29 @@ pub(super) fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, 
 }
 
 /// A3 — poll the scheduler once per frame and apply any due expand/collapse to
-/// the Wave G2 morph state machine. Returns `true` when a structural change
-/// fired (the caller should request a redraw). The morph itself is still
-/// advanced by `tick_zone_pill_animation`; this just flips the target.
+/// the per-Zone morph state machine. Returns `true` when a structural change
+/// fired (the caller should request a redraw).
 pub(super) fn poll_hover_scheduler(app: &AppState, now_ms: u32) -> bool {
     let mut scheduler = app.hover_scheduler.get();
+    let previous_expanded = scheduler.expanded_zone();
     let action = scheduler.poll(now_ms);
     app.hover_scheduler.set(scheduler);
     match action {
         zone_pill_geometry::HoverAction::None => false,
         zone_pill_geometry::HoverAction::Expand(zone) => {
-            let changed = update_zone_pill_hover(app, Some(zone), now_ms);
+            let previous_changed = previous_expanded
+                .filter(|previous| *previous != zone)
+                .is_some_and(|previous| transition_zone_pill(app, previous, false, now_ms));
+            let changed = transition_zone_pill(app, zone, true, now_ms);
             log_animation_proof_state(app, "hover_expand_fired", now_ms, None, None);
-            changed
+            previous_changed || changed
         }
-        zone_pill_geometry::HoverAction::Collapse(_zone) => {
+        zone_pill_geometry::HoverAction::Collapse(zone) => {
+            if app.selected_zone.get() == Some(zone) {
+                app.selected_zone.set(None);
+            }
             app.reset_zone_content_scroll();
-            let changed = update_zone_pill_hover(app, None, now_ms);
+            let changed = transition_zone_pill(app, zone, false, now_ms);
             log_animation_proof_state(app, "hover_collapse_fired", now_ms, None, None);
             changed
         }
@@ -402,14 +340,8 @@ pub(super) fn collapse_zone_from_header(app: &AppState, zone_id: ZoneId, now_ms:
     app.hover_scheduler.set(scheduler);
     app.set_panel_header_button_hover(None);
     let scroll_changed = app.reset_zone_content_scroll();
-    let morph_changed = if app.zone_pill_anim_zone.get().is_some() {
-        update_zone_pill_hover(app, None, now_ms)
-    } else if body_was_visible {
-        // Click-selected zones can be fully open without a hover scheduler
-        // marker. Closing still begins from the visible panel instead of
-        // dropping directly to the capsule.
-        begin_zone_pill_segment(app, zone_id, 1.0, false, now_ms);
-        true
+    let morph_changed = if app.zone_pill_morph_at(zone_id, now_ms).is_some() || body_was_visible {
+        transition_zone_pill(app, zone_id, false, now_ms)
     } else {
         false
     };
@@ -419,8 +351,8 @@ pub(super) fn collapse_zone_from_header(app: &AppState, zone_id: ZoneId, now_ms:
 
 /// V-8 (2026-05-21) — drive the pill hover animator channel.
 ///
-/// The Wave G2 `update_zone_pill_hover` above handles the **rect/radius
-/// morph** between pill and expanded body (a structural transition). V-8
+/// `transition_zone_pill` handles the **rect/radius morph** between pill and
+/// expanded body (a structural transition). V-8
 /// layers a separate hover micro-animation on top: a small ~4% scale-up
 /// with brightened shadow/surface. This helper feeds the dedicated
 /// `pill_animator` so the rect morph keeps its own state machine intact.
@@ -684,5 +616,20 @@ pub(super) fn release_pill_press_animator(app: &AppState, now_ms: u32) -> bool {
 /// samples them, so they must not keep the main window repainting by themselves.
 pub(super) fn tick_pill_animator(app: &AppState, now_ms: u32) -> bool {
     let mut anim = app.pill_animator.borrow_mut();
+    if animation_proof_log_enabled() {
+        let occupancy = anim.occupancy();
+        for zone in app.zones.iter() {
+            if let Some(value) = anim.sample_if_present(zone.id, AnimChannel::PillMorph, now_ms) {
+                log_static(
+                    format!(
+                        "pill_morph_tick: now_ms={now_ms} zone={} value={value:.3} active={} occupancy={occupancy}\n",
+                        zone.id.0,
+                        anim.is_active_entry(zone.id, AnimChannel::PillMorph, now_ms)
+                    )
+                    .as_str(),
+                );
+            }
+        }
+    }
     anim.tick(now_ms)
 }

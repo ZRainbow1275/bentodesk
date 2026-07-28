@@ -187,8 +187,14 @@ pub(super) fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x
         // from the capsule instead of letting `selected_zone` expose a full
         // panel for one frame on mouse-up.
         let now_ms = unsafe { GetTickCount() };
-        begin_zone_pill_segment(&app, zone_id, 0.0, true, now_ms);
-        true
+        let mut scheduler = app.hover_scheduler.get();
+        let previous = scheduler.expanded_zone();
+        scheduler.mark_expanded(zone_id, now_ms);
+        app.hover_scheduler.set(scheduler);
+        let previous_changed = previous
+            .filter(|id| *id != zone_id)
+            .is_some_and(|id| transition_zone_pill(&app, id, false, now_ms));
+        previous_changed | transition_zone_pill(&app, zone_id, true, now_ms)
     } else {
         false
     };
@@ -584,9 +590,40 @@ pub(super) fn remove_item_model_after_shell_move(
     zone_id: ZoneId,
     item_id: bentodesk_zone::ZoneItemId,
 ) {
-    let mut app = root.app.borrow_mut();
-    if app.zones.remove_item(zone_id, item_id) {
-        app.mark_dirty();
+    let removed_item = {
+        let mut app = root.app.borrow_mut();
+        let item = app.zones.item(zone_id, item_id).cloned();
+        if app.zones.remove_item(zone_id, item_id) {
+            app.mark_dirty();
+            item
+        } else {
+            None
+        }
+    };
+    let Some(item) = removed_item else {
+        return;
+    };
+    let (Some(original), Some(hidden)) =
+        (item.original_path.as_deref(), item.hidden_path.as_deref())
+    else {
+        return;
+    };
+    if Path::new(hidden).exists() {
+        return;
+    }
+    let Some(config) = stealth_config_for_source(root, original) else {
+        return;
+    };
+    let result = bentodesk_backend::stealth::hidden_dir_for(&config)
+        .and_then(|dir| bentodesk_backend::stealth::manifest_remove(&dir, original));
+    if let Err(error) = result {
+        tracing::warn!(
+            target: "bentodesk::stealth",
+            original,
+            hidden,
+            %error,
+            "drag-out completed but stale recovery manifest entry could not be removed"
+        );
     }
 }
 

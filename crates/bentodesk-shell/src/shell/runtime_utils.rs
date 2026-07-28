@@ -185,21 +185,12 @@ pub(super) fn request_theme_surface_redraw(root: &AppRoot, animate_transition: b
     }
 }
 
-pub(super) fn zone_pill_animation_active(app: &AppState) -> bool {
-    app.zone_pill_anim_zone
-        .get()
-        .and_then(|zone_id| app.zones.get(zone_id))
-        .map(|zone| !zone.is_stack_anchor() && app.zone_pill_anim_progress.get() < 1.0)
-        .unwrap_or(false)
-}
-
 pub(super) fn hover_frame_pump_needed(app: &AppState) -> bool {
     // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
     let now_ms = unsafe { GetTickCount() };
     app.hover_scheduler.get().is_pending()
         || stack_bloom_animation_active(app)
-        || zone_pill_animation_active(app)
-        || app.pill_animator.borrow().occupancy() > 0
+        || app.pill_animator.borrow().is_active(now_ms)
         || app.settings_open_animation_pending_at(now_ms)
         || app.theme_transition_pending_at(now_ms)
 }
@@ -213,8 +204,12 @@ pub(super) fn stack_bloom_cursor_watch_active(app: &AppState) -> bool {
     app.stack_bloom_anchor.get().is_some() && !app.stack_bloom_leaving.get()
 }
 
+pub(super) fn main_hover_cursor_watch_active(app: &AppState) -> bool {
+    app.hovered_zone.get().is_some() || stack_bloom_cursor_watch_active(app)
+}
+
 pub(super) fn hover_frame_timer_needed(app: &AppState) -> bool {
-    hover_frame_pump_needed(app) || stack_bloom_cursor_watch_active(app)
+    hover_frame_pump_needed(app) || main_hover_cursor_watch_active(app)
 }
 
 pub(super) fn arm_hover_frame_timer(hwnd: HWND) {
@@ -251,16 +246,15 @@ pub(super) fn handle_hover_frame_timer(hwnd: HWND) {
                 (animating, settled)
             }
         };
-        let watch_stack_cursor = {
+        let watch_main_cursor = {
             let app = root.app.borrow();
-            stack_bloom_cursor_watch_active(&app)
+            main_hover_cursor_watch_active(&app)
         };
-        if watch_stack_cursor {
+        if watch_main_cursor {
             // Once blank pixels switch the Main HWND to WS_EX_TRANSPARENT,
             // Windows no longer routes the follow-up WM_MOUSEMOVE that would
-            // close a stable stack bloom. Reuse this already-armed frame timer
-            // as a cursor sentinel only while a bloom is visible; no idle
-            // timer and no stable-state redraw are introduced.
+            // close a stable Zone surface. Reuse this already-armed timer as a
+            // cursor sentinel; no idle redraw loop is introduced.
             unsafe {
                 let p = get_slot_ptr(hwnd);
                 if !p.is_null() {
@@ -299,9 +293,9 @@ pub(super) fn handle_hover_frame_timer(hwnd: HWND) {
         if hover_frame_pump_needed(&app) || renderer_animating {
             drop(app);
             request_redraw(hwnd);
-        } else if stack_bloom_cursor_watch_active(&app) {
-            // Stable bloom: keep only the cursor sentinel alive. Repainting at
-            // 60 fps here would waste CPU/GPU while nothing is animating.
+        } else if main_hover_cursor_watch_active(&app) {
+            // Stable Zone hover: keep only the cursor sentinel alive. Blank
+            // transparent pixels otherwise suppress the leave WM_MOUSEMOVE.
             drop(app);
         } else {
             drop(app);

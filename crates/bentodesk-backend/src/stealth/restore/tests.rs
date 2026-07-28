@@ -244,18 +244,32 @@ fn restore_file_moves_back_to_original() {
 }
 
 #[test]
-fn restore_file_skips_when_destination_already_exists() {
+fn restore_file_collision_preserves_both_copies() {
     let tmp = tempdir();
     let hidden = tmp.as_path().join(".bentodesk").join("doc.txt");
     let original = tmp.as_path().join("desktop").join("doc.txt");
-    touch_file(&hidden);
-    touch_file(&original);
+    if let Some(parent) = hidden.parent() {
+        std::fs::create_dir_all(parent).expect("hidden parent");
+    }
+    if let Some(parent) = original.parent() {
+        std::fs::create_dir_all(parent).expect("original parent");
+    }
+    std::fs::write(&hidden, b"hidden bytes").expect("hidden");
+    std::fs::write(&original, b"desktop bytes").expect("original");
 
-    restore_file(&original.to_string_lossy(), &hidden.to_string_lossy()).expect("restore");
+    let result = restore_file(&original.to_string_lossy(), &hidden.to_string_lossy());
 
-    // Destination preserved; hidden source removed to avoid duplication.
+    assert!(result.is_err());
     assert!(original.exists());
-    assert!(!hidden.exists());
+    assert!(hidden.exists());
+    assert_eq!(
+        std::fs::read(&original).expect("desktop bytes"),
+        b"desktop bytes"
+    );
+    assert_eq!(
+        std::fs::read(&hidden).expect("hidden bytes"),
+        b"hidden bytes"
+    );
 }
 
 #[test]
@@ -268,6 +282,69 @@ fn restore_file_errors_when_source_missing() {
         result,
         Err(StealthError::RestoreSourceMissing { .. })
     ));
+}
+
+#[test]
+fn restore_all_collision_retains_hidden_payload_and_manifest_entry() {
+    let tmp = tempdir();
+    let desktop = tmp.as_path().join("desktop");
+    let app_data = tmp.as_path().join("appdata");
+    let hidden_root = desktop.join(".bentodesk");
+    let hidden = hidden_root.join("zone-a").join("doc.txt");
+    let original = desktop.join("doc.txt");
+    touch_file(&hidden);
+    if let Some(parent) = original.parent() {
+        std::fs::create_dir_all(parent).expect("desktop");
+    }
+    std::fs::write(&original, b"new desktop copy").expect("collision");
+    let config = StealthConfig {
+        desktop_path: smol_str::SmolStr::new(desktop.to_string_lossy()),
+        app_data_dir: smol_str::SmolStr::new(app_data.to_string_lossy()),
+    };
+    manifest_add(
+        &hidden_root,
+        super::super::sync::ManifestAddParams {
+            original_path: original.to_string_lossy().as_ref(),
+            hidden_path: hidden.to_string_lossy().as_ref(),
+            zone_id: "zone-a",
+            file_size_bytes: 7,
+            display_name: "doc.txt",
+            icon_x: None,
+            icon_y: None,
+            file_type: "File",
+        },
+    )
+    .expect("manifest");
+
+    assert_eq!(
+        restore_all_hidden(&config, &[], None).expect("restore all"),
+        0
+    );
+    assert!(hidden.exists());
+    assert_eq!(
+        std::fs::read(&original).expect("desktop"),
+        b"new desktop copy"
+    );
+    let manifest = load_manifest(&hidden_root).expect("remaining manifest");
+    assert_eq!(manifest.entries.len(), 1);
+    assert_eq!(manifest.entries[0].hidden_path, hidden.to_string_lossy());
+}
+
+#[test]
+fn orphan_scan_never_moves_manifest_backup_to_desktop() {
+    let tmp = tempdir();
+    let hidden_root = tmp.as_path().join(".bentodesk");
+    let desktop = tmp.as_path().join("desktop");
+    let backup = hidden_root.join("manifest.json.bak");
+    touch_file(&backup);
+    std::fs::create_dir_all(&desktop).expect("desktop");
+
+    assert_eq!(
+        scan_and_restore_orphans(&hidden_root, &desktop.to_string_lossy()),
+        0
+    );
+    assert!(backup.exists());
+    assert!(!desktop.join("manifest.json.bak").exists());
 }
 
 // ── verify_references ──────────────────────────────────────────

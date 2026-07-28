@@ -166,18 +166,14 @@ fn active_inline_search_holds_hover_zone_open_until_target_clears() {
 
 #[test]
 fn zone_pill_anim_defaults_are_settled() {
-    // Wave G2 — fresh AppState must report no pill morph in flight so
-    // the renderer's morph branch stays dormant until hover starts one.
     let app = AppState::new();
-    assert_eq!(app.zone_pill_anim_zone.get(), None);
-    assert_eq!(app.zone_pill_anim_started_ms.get(), 0);
-    assert!((app.zone_pill_anim_progress.get() - 1.0).abs() < f32::EPSILON);
-    assert!((app.zone_pill_anim_from_morph.get() - 0.0).abs() < f32::EPSILON);
-    assert_eq!(
-        app.zone_pill_anim_duration_ms.get(),
-        crate::zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+    assert_eq!(app.pill_animator.borrow().occupancy(), 0);
+    assert!(
+        app.pill_animator
+            .borrow()
+            .sample_if_present(ZoneId(1), AnimChannel::PillMorph, 0)
+            .is_none()
     );
-    assert!(!app.zone_pill_anim_expanding.get());
 }
 
 #[test]
@@ -227,17 +223,26 @@ fn changing_display_mode_cancels_stale_hover_intent_and_morph() {
     scheduler.on_enter(ZoneId(7), 100, 150);
     app.hover_scheduler.set(scheduler);
     app.selected_zone.set(Some(ZoneId(7)));
-    app.zone_pill_anim_zone.set(Some(ZoneId(7)));
-    app.zone_pill_anim_progress.set(0.4);
-    app.zone_pill_anim_expanding.set(true);
+    app.pill_animator.borrow_mut().start(
+        ZoneId(7),
+        AnimChannel::PillMorph,
+        100,
+        240,
+        0.0,
+        1.0,
+        crate::animator::Easing::PillMorph,
+    );
 
     assert!(app.set_zone_display_mode(ZoneDisplayMode::Click));
     assert_eq!(app.selected_zone.get(), None);
     assert!(!app.hover_scheduler.get().is_pending());
     assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
-    assert_eq!(app.zone_pill_anim_zone.get(), None);
-    assert_eq!(app.zone_pill_anim_progress.get(), 1.0);
-    assert!(!app.zone_pill_anim_expanding.get());
+    assert!(
+        app.pill_animator
+            .borrow()
+            .sample_if_present(ZoneId(7), AnimChannel::PillMorph, 120)
+            .is_none()
+    );
 }
 
 #[test]
@@ -263,24 +268,21 @@ fn zone_pill_morph_in_flight_keeps_both_start_frames_on_top() {
     let app = AppState::new();
     let zone = Zone::new(ZoneId(10), Cow::Borrowed("docs"), 10, 10, 160, 120);
 
-    app.zone_pill_anim_zone.set(Some(zone.id));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(0.0);
-    assert!(app.zone_pill_morph_in_flight(&zone));
-    assert!(app.zone_on_top(&zone));
-
-    app.zone_pill_anim_progress.set(0.25);
-    assert!(app.zone_pill_morph_in_flight(&zone));
-    assert!(app.zone_on_top(&zone));
-
-    app.zone_pill_anim_expanding.set(false);
-    app.zone_pill_anim_progress.set(0.0);
-    assert!(app.zone_pill_morph_in_flight(&zone));
-    assert!(app.zone_on_top(&zone));
-
-    app.zone_pill_anim_progress.set(1.0);
-    assert!(!app.zone_pill_morph_in_flight(&zone));
-    assert!(!app.zone_on_top(&zone));
+    app.pill_animator.borrow_mut().start(
+        zone.id,
+        AnimChannel::PillMorph,
+        100,
+        240,
+        0.0,
+        1.0,
+        crate::animator::Easing::PillMorph,
+    );
+    assert!(app.zone_pill_morph_in_flight_at(&zone, 100));
+    assert!(app.zone_on_top_at(&zone, 100));
+    assert!(app.zone_pill_morph_in_flight_at(&zone, 220));
+    assert!(app.zone_on_top_at(&zone, 220));
+    assert!(!app.zone_pill_morph_in_flight_at(&zone, 340));
+    assert!(!app.zone_on_top_at(&zone, 340));
 }
 
 #[test]
@@ -297,7 +299,7 @@ fn zone_drag_from_collapsed_pill_suppresses_mouse_down_selection_expand() {
         .set(Some((zone.id, false)));
 
     assert!(!app.zone_pill_body_visible(&zone));
-    assert!(!app.zone_on_top(&zone));
+    assert!(!app.zone_on_top_at(&zone, 0));
 }
 
 #[test]
@@ -316,7 +318,7 @@ fn zone_drag_from_expanded_body_collapses_to_capsule() {
         .set(Some((zone.id, true)));
 
     assert!(!app.zone_pill_body_visible(&zone));
-    assert!(!app.zone_on_top(&zone));
+    assert!(!app.zone_on_top_at(&zone, 0));
 }
 
 /// M1a 2026-05-29 — `snapshot_settings`/`restore_settings` are the single

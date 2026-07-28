@@ -28,8 +28,7 @@ use super::*;
 pub const EXPAND_LOCK_MS: u32 = ZONE_PILL_GEOMETRY_DURATION_MS + 20;
 
 /// Action the [`HoverScheduler`] asks the shell to perform on a `poll`. The
-/// shell maps `Expand`/`Collapse` onto the existing `update_zone_pill_hover`
-/// morph triggers.
+/// shell maps `Expand`/`Collapse` onto the per-Zone morph animator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoverAction {
     /// Nothing due this frame.
@@ -114,8 +113,7 @@ impl HoverScheduler {
     /// Cursor left whatever it was over. Clears a pending expand-intent and,
     /// if the carried zone is expanded, arms a collapse at
     /// `max(now + collapse_delay_ms, expand_lock_until)`. `auto_collapse`
-    /// gates display-mode: only HOVER mode auto-collapses (Tauri
-    /// `BentoZone.tsx:589` — ALWAYS mode is a no-op).
+    /// gates display-mode: Hover and Click return to a capsule; Always is pinned.
     pub fn on_leave(&mut self, now_ms: u32, collapse_delay_ms: u32, auto_collapse: bool) {
         // A leave always cancels a not-yet-fired expand intent.
         self.expand_zone = None;

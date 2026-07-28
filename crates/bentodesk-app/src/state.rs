@@ -423,33 +423,8 @@ pub struct AppState {
     /// Bloom. The shell advances its deadlines from the existing hover frame
     /// timer; no extra timer or worker thread is required.
     pub stack_bloom_interaction: Cell<StackBloomInteractionState>,
-    /// Wave G2 — capsule pill expand/shrink transition target.
-    /// `Some(zone_id)` while that zone is animating from its collapsed pill
-    /// chrome to its expanded body (hover enter) or back (hover leave). The
-    /// renderer uses this + `zone_pill_progress` to paint an intermediate
-    /// morphing rectangle for ≤ `ZONE_PILL_ANIM_DURATION_MS` instead of an
-    /// instant swap. Direction is implied by `zone_pill_expanding`: `true`
-    /// for collapse→expanded, `false` for expanded→collapse.
-    pub zone_pill_anim_zone: Cell<Option<ZoneId>>,
-    /// `GetTickCount` value captured when the current pill morph started.
-    pub zone_pill_anim_started_ms: Cell<u32>,
-    /// 0..1 progress along the pill morph. Ticked from the main pump.
-    pub zone_pill_anim_progress: Cell<f32>,
-    /// Visible morph at the start of the current segment. Capturing this value
-    /// makes interrupted expand/collapse reversals continue from the exact
-    /// painted shape instead of mirroring raw time through a non-linear curve.
-    pub zone_pill_anim_from_morph: Cell<f32>,
-    /// Wall-clock duration of the current segment. Full travel is 300 ms;
-    /// partial reversals scale with remaining visual distance.
-    pub zone_pill_anim_duration_ms: Cell<u32>,
-    /// `true` when the animation is opening (pill → expanded), `false` when
-    /// closing (expanded → pill). Determines which end-state is `progress=1`.
-    pub zone_pill_anim_expanding: Cell<bool>,
-    /// V-8 (2026-05-21) capsule pill animator for hover / press feedback.
-    /// The Wave G2 `zone_pill_anim_*` fields above drive the structural
-    /// rect/radius morph in `draw_zones`. `StatusDotPulse` helpers remain in
-    /// `animator.rs`, but the current paint path has no status-dot consumer,
-    /// so pulse state must not keep the shell repaint pump alive by itself.
+    /// Fixed-capacity per-Zone animator for structural morph, hover, press,
+    /// inline search, and stack-emerge channels.
     pub pill_animator: RefCell<Animator>,
     /// V-8 — zone currently registered as "pressed" (mouse-down inside a
     /// pill rect). Cleared on mouse-up regardless of release location so

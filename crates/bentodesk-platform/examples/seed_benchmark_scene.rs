@@ -12,6 +12,7 @@ const ICONS: [&str; 5] = ["folder", "file", "terminal", "settings", "search"];
 const ACCENTS: [&str; 5] = ["#3b82f6", "#22c55e", "#f59e0b", "#ec4899", "#8b5cf6"];
 const ITEM_ROOT_ENV: &str = "BENTODESK_BENCHMARK_ITEM_ROOT";
 const CAPSULE_VARIANTS_ENV: &str = "BENTODESK_BENCHMARK_CAPSULE_VARIANTS";
+const ZONE_DISPLAY_MODE_ENV: &str = "BENTODESK_BENCHMARK_ZONE_DISPLAY_MODE";
 const REFERENCE_0602_ENV: &str = "BENTODESK_BENCHMARK_REFERENCE_0602";
 const REFERENCE_0602_BROWSER_ITEM_COUNT_ENV: &str =
     "BENTODESK_BENCHMARK_REFERENCE_0602_BROWSER_ITEM_COUNT";
@@ -168,11 +169,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let zones = if reference_0602 {
+    let mut zones = if reference_0602 {
         reference_0602_scene_with_options(item_root.as_deref(), reference_0602_browser_item_count)
     } else {
         benchmark_scene_with_options(item_root.as_deref(), capsule_variants)
     };
+    if let Some(mode) = env::var_os(ZONE_DISPLAY_MODE_ENV) {
+        let mode = mode
+            .into_string()
+            .map_err(|_| format!("{ZONE_DISPLAY_MODE_ENV} must be valid UTF-8"))?;
+        apply_zone_display_mode_override(&mut zones, mode.as_str())?;
+    }
     if let Some(root) = item_root.as_deref() {
         if reference_0602 {
             write_reference_0602_item_files(root, reference_0602_browser_item_count)?;
@@ -279,6 +286,18 @@ fn benchmark_scene_with_options(item_root: Option<&Path>, capsule_variants: bool
         let _ = zones.stack(ZoneId(1), ZoneId(3));
     }
     zones
+}
+
+fn apply_zone_display_mode_override(zones: &mut ZoneList, mode: &str) -> Result<(), String> {
+    if !matches!(mode, "hover" | "always" | "click") {
+        return Err(format!(
+            "{ZONE_DISPLAY_MODE_ENV} must be hover, always, or click"
+        ));
+    }
+    for zone in zones.iter_mut() {
+        zone.set_display_mode(Some(Cow::Owned(mode.to_owned())));
+    }
+    Ok(())
 }
 
 fn reference_0602_scene_with_options(
@@ -596,6 +615,18 @@ mod tests {
         assert_eq!(fourth.capsule_shape.as_ref(), "pill");
         assert_eq!(fifth.capsule_size.as_ref(), "small");
         assert_eq!(fifth.capsule_shape.as_ref(), "circle");
+    }
+
+    #[test]
+    fn benchmark_scene_display_mode_override_is_validated_and_applied() {
+        let mut zones = benchmark_scene_with_item_root(None);
+        assert!(apply_zone_display_mode_override(&mut zones, "popup").is_err());
+        apply_zone_display_mode_override(&mut zones, "click").expect("click override");
+        assert!(
+            zones
+                .iter()
+                .all(|zone| zone.display_mode.as_deref() == Some("click"))
+        );
     }
 
     #[test]

@@ -88,8 +88,8 @@ impl Renderer {
         // restores paint == hit. The resize-force itself now lives inside the
         // shared `AppState::zone_pill_body_visible` SSoT.
         let item_drag = active_item_drag_visual(app);
-        let drag_target_id =
-            item_drag.and_then(|drag| hit_test_render_zone(app, drag.last_x, drag.last_y));
+        let drag_target_id = item_drag
+            .and_then(|drag| hit_test_render_zone(app, drag.last_x, drag.last_y, anim_now_ms));
         let dragged_item_wide = item_drag
             .and_then(|drag| {
                 app.zones
@@ -115,7 +115,7 @@ impl Renderer {
                 if !zone.is_visible() || zone.is_stacked_child() {
                     continue;
                 }
-                if zone_draw_layer(app, zone) != draw_layer {
+                if zone_draw_layer(app, zone, anim_now_ms) != draw_layer {
                     continue;
                 }
                 // Wave C (05-20 visual parity) — collapsed pill render path.
@@ -138,8 +138,7 @@ impl Renderer {
                 // instead of snapping between collapsed pill and expanded body.
                 // Stack anchors don't run the pill↔panel morph (they toggle between
                 // the compact pill and the focused-member panel without it).
-                let pill_anim_active = app.zone_pill_morph_in_flight(zone);
-                if pill_anim_active {
+                if let Some(morph) = app.zone_pill_morph_at(zone.id, anim_now_ms) {
                     let count = zone.items.len();
                     let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
                     let expanded_rect = bentodesk_style::Rect {
@@ -148,20 +147,6 @@ impl Renderer {
                         width: zone.w as f32,
                         height: zone.h as f32,
                     };
-                    let raw = app.zone_pill_anim_progress.get();
-                    // The shared monotonic `current_morph_rect` is the single
-                    // structural visual state, so paint == hit
-                    // geometry (effective_zone_chrome_rect / effective_zone_hit_rect
-                    // call the same helper). `draw_zone_pill_morph` re-derives the
-                    // rect from the same `morph` via `morph_pill_to_rect`, so the
-                    // returned rect here is discarded but stays bit-identical.
-                    let (morph, _morph_rect) = zone_pill_geometry::current_morph_rect(
-                        pill_layout.rect,
-                        expanded_rect,
-                        app.zone_pill_anim_from_morph.get(),
-                        raw,
-                        app.zone_pill_anim_expanding.get(),
-                    );
                     // V21-C9 — still sample the V-8 PillHover channel at the
                     // morph boundary, but keep the collapsed endpoint at the
                     // exact Tauri `surface_zen` token. Tauri has no hover
