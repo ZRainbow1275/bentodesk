@@ -20,6 +20,7 @@ env:
   CARGO_BUILD_JOBS: "1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.94.0"
   RUST_BACKTRACE: "1"
   TARGET: x86_64-pc-windows-msvc
 
@@ -37,7 +38,7 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target $env:TARGET
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy --target $env:TARGET
           rustup show active-toolchain
           rustc --version
           cargo --version

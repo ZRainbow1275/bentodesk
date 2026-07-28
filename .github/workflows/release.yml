@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable tag to publish
+        required: true
+        default: v2.0.0
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +23,8 @@ env:
   CARGO_BUILD_JOBS: "1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RUSTUP_TOOLCHAIN: "1.94.0"
   TARGET: x86_64-pc-windows-msvc
 
 jobs:
@@ -29,12 +38,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Prepare Rust
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target $env:TARGET
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy --target $env:TARGET
           rustup show active-toolchain
 
       - name: Verify tag and source
@@ -45,8 +55,8 @@ jobs:
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $shell = $metadata.packages | Where-Object name -eq "bento-nano-shell"
           $expectedTag = "v$($shell.version)"
-          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
-            throw "Tag $env:GITHUB_REF_NAME does not match workspace version $($shell.version)"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Tag $env:RELEASE_TAG does not match workspace version $($shell.version)"
           }
           if ($shell.version -ne "2.0.0") {
             throw "This workflow currently publishes BentoDesk 2.0.0 only"
@@ -185,7 +195,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:RELEASE_TAG
           $zip = "${{ steps.package.outputs.zip }}"
           $checksums = "${{ steps.package.outputs.checksums }}"
           $notes = "docs/release-notes-v2.0.0.md"
