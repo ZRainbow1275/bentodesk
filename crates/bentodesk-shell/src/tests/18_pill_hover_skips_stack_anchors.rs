@@ -15,8 +15,8 @@ fn pill_hover_skips_stack_anchors() {
     }
     {
         let app = root.app.borrow();
-        assert!(!update_zone_pill_hover(&app, Some(ZoneId(1)), 1_000));
-        assert_eq!(app.zone_pill_anim_zone.get(), None);
+        assert!(!transition_zone_pill(&app, ZoneId(1), true, 1_000));
+        assert!(app.zone_pill_morph_at(ZoneId(1), 1_000).is_none());
     }
 }
 

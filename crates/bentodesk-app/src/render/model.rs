@@ -288,10 +288,10 @@ pub(super) fn zone_drag_visual_opacity(app: &AppState, zone_id: ZoneId) -> f32 {
 }
 
 #[inline]
-pub(super) fn zone_draw_layer(app: &AppState, zone: &Zone) -> u8 {
+pub(super) fn zone_draw_layer(app: &AppState, zone: &Zone, now_ms: u32) -> u8 {
     if moved_zone_drag_source(app, zone.id) {
         2
-    } else if app.zone_on_top(zone) {
+    } else if app.zone_on_top_at(zone, now_ms) {
         1
     } else {
         0

@@ -317,7 +317,7 @@ pub fn hide_file(
     let hdir = zone_hidden_dir_for(config, zone_id)?;
     let dest = unique_hidden_path(&hdir, source);
 
-    // Same-drive rename should be instant.
+    // Same-drive rename is atomic and also supports non-empty directories.
     if let Err(e) = std::fs::rename(source, &dest) {
         tracing::warn!(
             "fs::rename failed for hide ({} -> {:?}): {}. Trying copy+delete fallback.",
@@ -325,9 +325,16 @@ pub fn hide_file(
             dest,
             e
         );
+        if !source.is_file() {
+            return Err(StealthError::Io {
+                path: source.to_path_buf(),
+                message: format!("directory rename failed; source left untouched: {e}"),
+            });
+        }
         // Cross-drive fallback. Rare since `.bentodesk/` lives on the
         // desktop drive but possible if the user mounts Desktop on a
-        // junction point that crosses volumes.
+        // junction point that crosses volumes. Files can use copy+delete;
+        // directories fail closed because recursive copying is not atomic.
         match std::fs::copy(source, &dest) {
             Ok(_) => {
                 if let Err(e2) = std::fs::remove_file(source) {
@@ -371,9 +378,8 @@ pub fn hide_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    // Track in the global manifest. Failures here are logged but do NOT
-    // unwind the move — the file is already physically hidden, the
-    // manifest update is recovery metadata.
+    // The manifest is the recovery commit record. If it cannot be written,
+    // put the item back rather than leave user data hidden and untracked.
     let global_dir = hidden_dir_for(config)?;
     if let Err(e) = super::sync::manifest_add(
         &global_dir,
@@ -388,9 +394,21 @@ pub fn hide_file(
             file_type,
         },
     ) {
-        tracing::warn!(
-            "hide_file: manifest_add failed for {file_path}: {e} — file is hidden but unrecorded"
-        );
+        tracing::error!("hide_file: manifest_add failed for {file_path}: {e}; rolling back move");
+        match super::restore::restore_file(file_path, &hidden_path_str) {
+            Ok(()) => {
+                let _ = cleanup_zone_dir(config, zone_id);
+                return Err(e);
+            }
+            Err(rollback) => {
+                return Err(StealthError::Io {
+                    path: source.to_path_buf(),
+                    message: format!(
+                        "manifest write failed ({e}); rollback from {hidden_path_str} also failed ({rollback})"
+                    ),
+                });
+            }
+        }
     }
 
     tracing::info!(
@@ -589,6 +607,76 @@ mod tests {
         assert!(Path::new(&hidden).exists(), "destination should exist");
         assert!(hidden.contains(".bentodesk"));
         assert!(hidden.contains("zone-1"));
+    }
+
+    #[test]
+    fn non_empty_folder_hide_and_restore_preserves_nested_bytes() {
+        let tmp = tempdir();
+        let cfg = config_for(tmp.as_path());
+        let folder = tmp.as_path().join("Project");
+        let nested = folder.join("nested").join("payload.bin");
+        std::fs::create_dir_all(nested.parent().expect("nested parent")).expect("create tree");
+        let bytes = [0_u8, 1, 2, 0xff, 42, 99];
+        std::fs::write(&nested, bytes).expect("seed nested payload");
+
+        let (_, hidden) = hide_file(
+            &cfg,
+            &folder.to_string_lossy(),
+            "zone-folder",
+            "Folder",
+            None,
+            None,
+            None,
+        )
+        .expect("hide folder");
+        assert!(!folder.exists());
+        assert_eq!(
+            std::fs::read(Path::new(&hidden).join("nested").join("payload.bin"))
+                .expect("read hidden payload"),
+            bytes
+        );
+
+        crate::stealth::restore_file_tracked(&cfg, &folder.to_string_lossy(), &hidden, None)
+            .expect("restore folder");
+        assert!(!Path::new(&hidden).exists());
+        assert_eq!(
+            std::fs::read(&nested).expect("read restored payload"),
+            bytes
+        );
+        assert!(
+            crate::stealth::load_manifest(&hidden_dir_for(&cfg).expect("hidden root"))
+                .expect("manifest")
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn manifest_failure_rolls_hidden_file_back_to_source() {
+        let tmp = tempdir();
+        let cfg = config_for(tmp.as_path());
+        let global = hidden_dir_for(&cfg).expect("hidden root");
+        std::fs::create_dir(global.join("manifest.json.tmp")).expect("block manifest temp file");
+        let source = tmp.as_path().join("rollback.txt");
+        std::fs::write(&source, b"must survive").expect("seed source");
+
+        let result = hide_file(
+            &cfg,
+            &source.to_string_lossy(),
+            "zone-rollback",
+            "File",
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&source).expect("rolled back bytes"),
+            b"must survive"
+        );
+        let zone_dir = global.join("zone-rollback");
+        assert!(!zone_dir.exists() || zone_dir.read_dir().expect("zone dir").next().is_none());
     }
 
     #[test]

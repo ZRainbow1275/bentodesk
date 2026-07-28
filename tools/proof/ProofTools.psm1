@@ -247,6 +247,9 @@ public static class BentoDeskProofNative {
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -284,6 +287,8 @@ public static class BentoDeskProofNative {
     public const uint SMTO_ABORTIFHUNG = 0x0002;
     public const uint WM_HOTKEY = 0x0312;
     public const uint WM_MOUSEMOVE = 0x0200;
+    public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 =
+        new IntPtr(-4);
     public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
@@ -305,6 +310,16 @@ public static class BentoDeskProofNative {
     }
 }
 '@
+}
+
+$script:PreviousProofDpiContext =
+    [BentoDeskProofNative]::SetThreadDpiAwarenessContext(
+        [BentoDeskProofNative]::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    )
+if ($script:PreviousProofDpiContext -eq [IntPtr]::Zero) {
+    throw [System.ComponentModel.Win32Exception]::new(
+        [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    )
 }
 
 function Get-ProofWindowsForPid {
@@ -397,11 +412,14 @@ function Send-ProofMouseMove {
         [int]$SleepMs = 0
     )
 
+    $scale = [Math]::Max(1.0, [double]$Window.dpi / 96.0)
+    $deviceX = [int][Math]::Round($ClientX * $scale)
+    $deviceY = [int][Math]::Round($ClientY * $scale)
     if ($MoveSystemCursor) {
         [void][BentoDeskProofNative]::SetForegroundWindow([IntPtr]$Window.hwnd)
         [void][BentoDeskProofNative]::SetCursorPos(
-            [int]($Window.client.left + $ClientX),
-            [int]($Window.client.top + $ClientY)
+            [int]($Window.client.left + $deviceX),
+            [int]($Window.client.top + $deviceY)
         )
         Start-Sleep -Milliseconds 35
     }
@@ -410,13 +428,13 @@ function Send-ProofMouseMove {
         [IntPtr]$Window.hwnd,
         [BentoDeskProofNative]::WM_MOUSEMOVE,
         [UIntPtr]::Zero,
-        (New-ProofMouseLParam -X $ClientX -Y $ClientY),
+        (New-ProofMouseLParam -X $deviceX -Y $deviceY),
         [BentoDeskProofNative]::SMTO_ABORTIFHUNG,
         2500,
         [ref]$nativeResult
     )
     if ($sent -eq [IntPtr]::Zero) {
-        throw "WM_MOUSEMOVE timed out at client=($ClientX,$ClientY)"
+        throw "WM_MOUSEMOVE timed out at logical-client=($ClientX,$ClientY)"
     }
     if ($SleepMs -gt 0) {
         Start-Sleep -Milliseconds $SleepMs

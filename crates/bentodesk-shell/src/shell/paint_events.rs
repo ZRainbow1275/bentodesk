@@ -89,8 +89,8 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
         }
         // A3 (2026-05-29) — poll the hover-intent / grace-collapse scheduler on
         // the frame-tick timestamp (no WM_TIMER, fits the immediate-mode pump).
-        // When an expand/collapse deadline elapses this flips the Wave G2 morph
-        // target, which `tick_zone_pill_animation` below then advances.
+        // When an expand/collapse deadline elapses this starts a per-Zone morph
+        // entry in the shared fixed-capacity animator.
         if poll_hover_scheduler(&app, now) {
             any_active = true;
         }
@@ -99,12 +99,8 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
         if app.hover_scheduler.get().is_pending() {
             any_active = true;
         }
-        // Wave G2 — capsule pill expand/shrink morph.
-        if tick_zone_pill_animation(&app, now) {
-            any_active = true;
-        }
-        // V-8 hover / press animator. Keeps the frame-pump alive only while
-        // sampled pill visual entries are in flight.
+        // Structural morph + hover / press animator. Keeps the frame-pump alive
+        // only while sampled visual entries are in flight.
         if tick_pill_animator(&app, now) {
             any_active = true;
         }

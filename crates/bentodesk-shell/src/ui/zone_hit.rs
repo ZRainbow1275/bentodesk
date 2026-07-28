@@ -6,8 +6,8 @@ use super::*;
 /// currently painting (paint–hit parity to within 1 DIP). Three cases,
 /// matching `Renderer::draw_zones` precisely:
 ///
-/// 1. **Pill-morph in-flight** (`zone_pill_anim_zone == this zone` and
-///    progress is strictly between 0 and 1, and not a stack anchor) — the
+/// 1. **Pill-morph present** (a per-Zone `PillMorph` entry exists and the Zone
+///    is not a stack anchor) — the
 ///    renderer paints `morph_pill_to_rect(pill, expanded, eased)` so the
 ///    hit-rect lerps in lockstep. Without this, a single mouse-move tick
 ///    after hover starts snapped the hit-rect to the full expanded body
@@ -19,7 +19,7 @@ use super::*;
 ///    stored `(x, y, w, h)` rectangle is authoritative.
 ///
 /// Pure / allocation-free.
-fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
+fn effective_zone_hit_rect(app: &AppState, zone: &Zone, now_ms: u32) -> Rect {
     // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
     // explicitly selected (a focused member), NOT on hover (hover shows the
     // bloom). #5 (2026-06-02) — only a RESIZE (armable solely on an already-
@@ -42,21 +42,9 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone) -> Rect {
 
     // V-13 case 1 — pill morph in flight. Anchors don't morph (the paint-side
     // pill_anim_active also excludes them).
-    // V-13 paint–hit parity: during the ~10% easeOutBack overshoot the painted
-    // rect bulges past the expanded target; the hit-rect must bulge with it or
-    // clicks fall outside the visible shape. The segment-start→easeOutBack→rect
-    // math is the shared `current_morph_rect` SSoT, the SAME helper render.rs paints with, so
-    // paint == hit is enforced (no chance of the two formulas drifting).
-    if app.zone_pill_morph_in_flight(zone) {
-        let raw = app.zone_pill_anim_progress.get();
-        let (_morph, rect) = zone_pill_geometry::current_morph_rect(
-            pill_layout.rect,
-            expanded_rect,
-            app.zone_pill_anim_from_morph.get(),
-            raw,
-            app.zone_pill_anim_expanding.get(),
-        );
-        return rect;
+    // V-13 paint–hit parity: the same sampled morph drives both surfaces.
+    if let Some(morph) = app.zone_pill_morph_at(zone.id, now_ms) {
+        return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
     }
 
     if !body_visible {
@@ -88,15 +76,17 @@ pub const ZONE_RESIZE_CORNER: f32 = 12.0;
 /// Uses the shared `AppState::zone_on_top` SSoT so the hit stack and the paint
 /// stack can't drift.
 pub fn hit_test_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
     for on_top_layer in [true, false] {
         for z in app.zones.iter().rev() {
             if !z.is_visible() || z.is_stacked_child() {
                 continue;
             }
-            if app.zone_on_top(z) != on_top_layer {
+            if app.zone_on_top_at(z, now_ms) != on_top_layer {
                 continue;
             }
-            let rect = effective_zone_hit_rect(app, z);
+            let rect = effective_zone_hit_rect(app, z, now_ms);
             if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
                 return Some(z.id);
             }

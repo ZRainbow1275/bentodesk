@@ -237,9 +237,6 @@ fn stack_bloom_petal_hover_intent_then_click_commits_before_second_click_closes(
 
 #[test]
 fn pill_hover_expand_then_leave_shrinks_back_to_pill() {
-    // Wave G2 — capsule pill expand-on-hover / shrink-on-leave morph
-    // wiring. Models the renderer's pump: mouse enters a zone → start
-    // expand; mouse leaves → start collapse; ticks drive progress.
     let root = test_app_root();
     {
         let mut app = root.app.borrow_mut();
@@ -251,42 +248,33 @@ fn pill_hover_expand_then_leave_shrinks_back_to_pill() {
     let duration = zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS;
     {
         let app = root.app.borrow();
-        // 1. Pointer enters the pill.
-        assert!(update_zone_pill_hover(&app, Some(ZoneId(1)), 1_000));
-        assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
-        assert!(app.zone_pill_anim_expanding.get());
-        assert!(app.zone_pill_anim_progress.get().abs() < f32::EPSILON);
-        assert!(app.zone_pill_anim_from_morph.get().abs() < f32::EPSILON);
-        assert_eq!(app.zone_pill_anim_duration_ms.get(), duration);
-
-        // 2. Tick halfway through the morph.
-        assert!(tick_zone_pill_animation(&app, 1_000 + duration / 2));
-        let halfway = app.zone_pill_anim_progress.get();
+        assert!(transition_zone_pill(&app, ZoneId(1), true, 1_000));
+        assert_eq!(app.zone_pill_morph_at(ZoneId(1), 1_000), Some(0.0));
+        assert!(tick_pill_animator(&app, 1_000 + duration / 2));
+        let halfway = app
+            .zone_pill_morph_at(ZoneId(1), 1_000 + duration / 2)
+            .expect("expanding morph");
         assert!(halfway > 0.0 && halfway < 1.0);
 
-        // 3. Tick to completion — expand finishes, slot retained so the
-        //    renderer keeps the steady-state expanded body until the
-        //    pointer leaves.
-        assert!(tick_zone_pill_animation(&app, 1_000 + duration));
-        assert!((app.zone_pill_anim_progress.get() - 1.0).abs() < f32::EPSILON);
-        assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
-
-        // 4. Pointer leaves — start collapse animation (same zone).
-        assert!(update_zone_pill_hover(&app, None, 2_000));
-        assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
-        assert!(!app.zone_pill_anim_expanding.get());
-        assert!((app.zone_pill_anim_from_morph.get() - 1.0).abs() < f32::EPSILON);
-
-        // 5. Tick the collapse halfway.
-        assert!(tick_zone_pill_animation(&app, 2_000 + duration / 2));
-        let collapse_mid = app.zone_pill_anim_progress.get();
-        assert!(collapse_mid > 0.0 && collapse_mid < 1.0);
-
-        // 6. Tick to completion — pill anim slot is cleared so the
-        //    renderer falls back to the steady collapsed pill chrome.
-        assert!(tick_zone_pill_animation(&app, 2_000 + duration));
-        assert_eq!(app.zone_pill_anim_zone.get(), None);
-        assert!(!tick_zone_pill_animation(&app, 2_000 + duration + 1));
+        assert!(transition_zone_pill(
+            &app,
+            ZoneId(1),
+            false,
+            1_000 + duration / 2
+        ));
+        let after_reverse = app
+            .zone_pill_morph_at(ZoneId(1), 1_000 + duration / 2)
+            .expect("collapsing morph");
+        assert!((after_reverse - halfway).abs() < 0.0001);
+        let collapse_duration = zone_pill_geometry::pill_segment_duration_ms(halfway, 0.0);
+        assert!(!tick_pill_animator(
+            &app,
+            1_000 + duration / 2 + collapse_duration
+        ));
+        assert!(
+            app.zone_pill_morph_at(ZoneId(1), 1_000 + duration / 2 + collapse_duration)
+                .is_none()
+        );
     }
 }
 
@@ -297,37 +285,34 @@ fn pill_hover_content_envelope_matches_fast_release_duration() {
 }
 
 #[test]
-fn pill_hover_reverse_keeps_the_current_visual_morph() {
+fn rapid_multi_zone_handoff_keeps_each_morph_independent() {
     let root = test_app_root();
     {
         let mut app = root.app.borrow_mut();
         app.zones
             .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+        app.zones
+            .add(Zone::new(ZoneId(2), "Docs", 400, 100, 240, 180));
+        app.zones
+            .add(Zone::new(ZoneId(3), "Media", 700, 100, 240, 180));
     }
 
     let app = root.app.borrow();
-    assert!(update_zone_pill_hover(&app, Some(ZoneId(1)), 1_000));
-    assert!(tick_zone_pill_animation(&app, 1_100));
+    assert!(transition_zone_pill(&app, ZoneId(1), true, 1_000));
+    assert!(transition_zone_pill(&app, ZoneId(1), false, 1_080));
+    assert!(transition_zone_pill(&app, ZoneId(2), true, 1_080));
+    assert!(transition_zone_pill(&app, ZoneId(2), false, 1_120));
+    assert!(transition_zone_pill(&app, ZoneId(3), true, 1_120));
 
-    let before_leave = sampled_zone_pill_morph(&app);
-    assert!(before_leave > 0.0 && before_leave < 1.0);
-    assert!(update_zone_pill_hover(&app, None, 1_100));
-    let after_leave = sampled_zone_pill_morph(&app);
-    assert!((before_leave - after_leave).abs() < 0.0001);
-    assert!(app.zone_pill_anim_duration_ms.get() < zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS);
-    assert!(
-        app.zone_pill_anim_duration_ms.get()
-            >= zone_pill_geometry::ZONE_PILL_MIN_SEGMENT_DURATION_MS
-    );
-
-    let collapse_duration = app.zone_pill_anim_duration_ms.get();
-    let reverse_at = 1_100 + collapse_duration / 4;
-    assert!(tick_zone_pill_animation(&app, reverse_at));
-    let before_reenter = sampled_zone_pill_morph(&app);
-    assert!(before_reenter > 0.0 && before_reenter < before_leave);
-    assert!(update_zone_pill_hover(&app, Some(ZoneId(1)), reverse_at));
-    let after_reenter = sampled_zone_pill_morph(&app);
-    assert!((before_reenter - after_reenter).abs() < 0.0001);
+    let animator = app.pill_animator.borrow();
+    for zone in [ZoneId(1), ZoneId(2), ZoneId(3)] {
+        assert!(
+            animator.contains(zone, bentodesk_app::animator::AnimChannel::PillMorph),
+            "Zone {} lost its independent structural morph",
+            zone.0
+        );
+    }
+    assert_eq!(animator.occupancy(), 3);
 }
 
 #[test]
@@ -339,15 +324,10 @@ fn header_close_animates_a_click_selected_panel_from_its_visible_shape() {
     app.selected_zone.set(Some(ZoneId(1)));
 
     assert!(app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
-    assert_eq!(app.zone_pill_anim_zone.get(), None);
     assert!(collapse_zone_from_header(&app, ZoneId(1), 1_500));
     assert_eq!(app.selected_zone.get(), None);
-    assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
-    assert!(!app.zone_pill_anim_expanding.get());
-    assert!((app.zone_pill_anim_from_morph.get() - 1.0).abs() < f32::EPSILON);
-    assert!(app.zone_pill_anim_progress.get().abs() < f32::EPSILON);
-    assert!(app.zone_pill_morph_in_flight(app.zones.get(ZoneId(1)).unwrap()));
-    assert!((sampled_zone_pill_morph(&app) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(app.zone_pill_morph_at(ZoneId(1), 1_500), Some(1.0));
+    assert!(app.zone_pill_morph_in_flight_at(app.zones.get(ZoneId(1)).unwrap(), 1_500));
 }
 
 #[test]
@@ -437,16 +417,14 @@ fn header_close_clears_mouse_down_selection_and_scheduler_expansion() {
         scheduler.mark_expanded(ZoneId(1), 1_000);
         scheduler
     });
-    app.zone_pill_anim_zone.set(Some(ZoneId(1)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(1.0);
+    begin_zone_pill_segment(&app, ZoneId(1), 0.0, true, 1_000);
 
     assert!(app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
     assert!(collapse_zone_from_header(&app, ZoneId(1), 1_500));
     assert_eq!(app.selected_zone.get(), None);
     assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
     assert_eq!(app.hovered_zone.get(), Some(ZoneId(1)));
-    assert!(!app.zone_pill_anim_expanding.get());
+    assert_eq!(app.zone_pill_morph_at(ZoneId(1), 1_500), Some(1.0));
     assert!(!app.zone_pill_body_visible(app.zones.get(ZoneId(1)).unwrap()));
 }
 
@@ -459,10 +437,7 @@ fn pointer_drag_reset_clears_hover_morph_channels_without_tray_drag_guard() {
     app.stack_bloom_anchor.set(Some(ZoneId(1)));
     app.stack_bloom_leaving.set(true);
     app.stack_bloom_progress.set(0.25);
-    app.zone_pill_anim_zone.set(Some(ZoneId(1)));
-    app.zone_pill_anim_expanding.set(true);
-    app.zone_pill_anim_progress.set(0.5);
-    app.zone_pill_anim_started_ms.set(900);
+    begin_zone_pill_segment(&app, ZoneId(1), 0.0, true, 900);
     app.hover_scheduler.set({
         let mut scheduler = zone_pill_geometry::HoverScheduler::new();
         scheduler.on_enter(ZoneId(1), 1_000, 150);
@@ -508,13 +483,7 @@ fn pointer_drag_reset_clears_hover_morph_channels_without_tray_drag_guard() {
     assert_eq!(app.stack_bloom_anchor.get(), None);
     assert!(!app.stack_bloom_leaving.get());
     assert_eq!(app.stack_bloom_progress.get(), 1.0);
-    assert_eq!(app.zone_pill_anim_zone.get(), None);
-    assert_eq!(app.zone_pill_anim_progress.get(), 1.0);
-    assert_eq!(app.zone_pill_anim_from_morph.get(), 0.0);
-    assert_eq!(
-        app.zone_pill_anim_duration_ms.get(),
-        zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
-    );
+    assert!(app.zone_pill_morph_at(ZoneId(1), 1_020).is_none());
     assert!(!app.hover_scheduler.get().is_pending());
     assert!(!app.item_hover.get().is_active(1_020));
     assert!(

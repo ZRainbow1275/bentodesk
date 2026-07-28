@@ -208,13 +208,18 @@ fn hover_scheduler_defers_expand_and_collapse_via_settings_delays() {
     assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
     // Polling before the delay does nothing.
     assert!(!poll_hover_scheduler(&app, 1_000 + expand_delay - 1));
-    assert_eq!(app.zone_pill_anim_zone.get(), None);
+    assert!(
+        app.zone_pill_morph_at(ZoneId(1), 1_000 + expand_delay - 1)
+            .is_none()
+    );
 
     // 2. At now + expand_delay the morph flips to expanding.
     assert!(poll_hover_scheduler(&app, 1_000 + expand_delay));
     assert_eq!(app.hover_scheduler.get().expanded_zone(), Some(ZoneId(1)));
-    assert_eq!(app.zone_pill_anim_zone.get(), Some(ZoneId(1)));
-    assert!(app.zone_pill_anim_expanding.get());
+    assert_eq!(
+        app.zone_pill_morph_at(ZoneId(1), 1_000 + expand_delay),
+        Some(0.0)
+    );
 
     // 3. Cursor leaves to empty space after the shared morph-derived
     //    expand-lock; collapse is ARMED.
@@ -223,11 +228,14 @@ fn hover_scheduler_defers_expand_and_collapse_via_settings_delays() {
     assert!(app.hover_scheduler.get().is_pending());
     // Before now + collapse_delay the morph is still expanding.
     assert!(!poll_hover_scheduler(&app, leave + collapse_delay - 1));
-    assert!(app.zone_pill_anim_expanding.get());
+    assert!(app.zone_pill_morph_at(ZoneId(1), leave).is_some());
 
     // 4. At now + collapse_delay the collapse morph fires.
     assert!(poll_hover_scheduler(&app, leave + collapse_delay));
-    assert!(!app.zone_pill_anim_expanding.get());
+    assert_eq!(
+        app.zone_pill_morph_at(ZoneId(1), leave + collapse_delay),
+        Some(1.0)
+    );
     assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
 }
 
@@ -240,45 +248,69 @@ fn hover_frame_pump_needed_tracks_pending_scheduler_and_morph() {
         let mut app = root.app.borrow_mut();
         app.zones
             .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
-        app.expand_delay_ms.set(DEFAULT_EXPAND_DELAY_MS);
-        app.collapse_delay_ms.set(DEFAULT_COLLAPSE_DELAY_MS);
+        app.expand_delay_ms.set(0);
     }
     let app = root.app.borrow();
     assert!(!hover_frame_pump_needed(&app));
 
-    drive_hover_scheduler(&app, Some(ZoneId(1)), 1_000);
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    drive_hover_scheduler(&app, Some(ZoneId(1)), now_ms);
     assert!(hover_frame_pump_needed(&app));
 
-    let expand_at = 1_000 + DEFAULT_EXPAND_DELAY_MS as u32;
-    assert!(poll_hover_scheduler(&app, expand_at));
+    assert!(poll_hover_scheduler(&app, now_ms));
     assert!(hover_frame_pump_needed(&app));
-    assert!(tick_zone_pill_animation(
+    assert!(!tick_pill_animator(
         &app,
-        expand_at + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+        now_ms + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
     ));
     assert!(!hover_frame_pump_needed(&app));
 
-    drive_hover_scheduler(
-        &app,
-        None,
-        expand_at + zone_pill_geometry::EXPAND_LOCK_MS + 10,
-    );
+    begin_zone_pill_segment(&app, ZoneId(1), 1.0, false, now_ms);
     assert!(hover_frame_pump_needed(&app));
+    assert!(!tick_pill_animator(
+        &app,
+        now_ms + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
+    ));
+    assert!(!hover_frame_pump_needed(&app));
+}
 
+#[test]
+fn click_mode_leave_clears_selection_and_auto_collapses() {
+    let root = test_app_root();
+    {
+        let mut app = root.app.borrow_mut();
+        app.zones
+            .add(Zone::new(ZoneId(1), "Compiler", 100, 100, 240, 180));
+        app.set_zone_display_mode(ZoneDisplayMode::Click);
+        app.selected_zone.set(Some(ZoneId(1)));
+        let mut scheduler = app.hover_scheduler.get();
+        scheduler.mark_expanded(ZoneId(1), 1_000);
+        app.hover_scheduler.set(scheduler);
+    }
+    let app = root.app.borrow();
+    drive_hover_scheduler(&app, None, 1_500);
+    assert!(app.hover_scheduler.get().is_pending());
     assert!(poll_hover_scheduler(
         &app,
-        expand_at + zone_pill_geometry::EXPAND_LOCK_MS + 10 + DEFAULT_COLLAPSE_DELAY_MS as u32
+        1_500 + DEFAULT_COLLAPSE_DELAY_MS as u32
     ));
-    assert!(hover_frame_pump_needed(&app));
-    assert!(tick_zone_pill_animation(
-        &app,
-        expand_at
-            + zone_pill_geometry::EXPAND_LOCK_MS
-            + 10
-            + DEFAULT_COLLAPSE_DELAY_MS as u32
-            + zone_pill_geometry::ZONE_PILL_ANIM_DURATION_MS
-    ));
+    assert_eq!(app.selected_zone.get(), None);
+    assert_eq!(app.hover_scheduler.get().expanded_zone(), None);
+    assert_eq!(
+        app.zone_pill_morph_at(ZoneId(1), 1_500 + DEFAULT_COLLAPSE_DELAY_MS as u32),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn stable_zone_hover_keeps_cursor_sentinel_without_repaint_pump() {
+    let root = test_app_root();
+    let app = root.app.borrow();
+    app.hovered_zone.set(Some(ZoneId(7)));
+    assert!(main_hover_cursor_watch_active(&app));
     assert!(!hover_frame_pump_needed(&app));
+    assert!(hover_frame_timer_needed(&app));
 }
 
 #[test]

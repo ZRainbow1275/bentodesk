@@ -542,6 +542,86 @@ fn alpha2_wm_dropfiles_chain_runs_stealth_hide_for_each_dropped_file() {
 }
 
 #[test]
+fn folder_drop_chain_round_trips_non_empty_tree_without_byte_loss() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("folder-drop-roundtrip");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    let desktop_dir = state_dir.join("Desktop");
+    let source = desktop_dir.join("Release Assets");
+    let nested = source.join("icons").join("app.bin");
+    let readme = source.join("README.txt");
+    std::fs::create_dir_all(nested.parent().expect("nested parent")).expect("nested tree");
+    let binary: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+    std::fs::write(&nested, &binary).expect("nested binary");
+    std::fs::write(&readme, b"BentoDesk folder round-trip").expect("readme");
+    let desktop_source = desktop_dir.to_string_lossy().to_string();
+    let zone_id = ZoneId(7575);
+    {
+        let mut app = root.app.borrow_mut();
+        app.zones_path = zones_path.clone();
+        app.zones
+            .add(Zone::new(zone_id, "Folder Drop", 0, 0, 240, 160));
+    }
+
+    assert!(add_item_to_zone_with(
+        &root,
+        zone_id,
+        source.to_string_lossy().as_ref(),
+        Some(desktop_source.as_str()),
+        |_| Some("folder-hash".to_owned()),
+    ));
+    let (item_id, hidden) = {
+        let app = root.app.borrow();
+        let item = app
+            .zones
+            .get(zone_id)
+            .expect("zone")
+            .items
+            .first()
+            .expect("folder item");
+        (
+            item.id,
+            std::path::PathBuf::from(item.hidden_path.as_deref().expect("hidden folder")),
+        )
+    };
+    assert!(!source.exists());
+    assert_eq!(
+        std::fs::read(hidden.join("icons").join("app.bin")).expect("hidden binary"),
+        binary
+    );
+    assert_eq!(
+        std::fs::read(hidden.join("README.txt")).expect("hidden readme"),
+        b"BentoDesk folder round-trip"
+    );
+
+    assert!(remove_item_from_zone(
+        &root,
+        zone_id,
+        bentodesk_app::ItemId(item_id.0),
+    ));
+    flush_dirty_zones(&root);
+    assert!(!hidden.exists());
+    assert_eq!(
+        std::fs::read(&nested).expect("restored binary"),
+        binary,
+        "nested payload must be byte-identical after add/remove"
+    );
+    assert_eq!(
+        std::fs::read(&readme).expect("restored readme"),
+        b"BentoDesk folder round-trip"
+    );
+    assert!(root.app.borrow().zones.item(zone_id, item_id).is_none());
+    assert!(
+        bentodesk_backend::stealth::load_manifest(&desktop_dir.join(".bentodesk"))
+            .expect("manifest")
+            .entries
+            .is_empty()
+    );
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
 fn add_item_rejects_missing_and_outside_desktop_with_visible_status() {
     let root = test_app_root();
     let zones_path = scratch_zones_path("item-add-reject");
@@ -598,5 +678,48 @@ fn add_item_rejects_missing_and_outside_desktop_with_visible_status() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn add_item_rejects_missing_zone_before_moving_source() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("item-add-missing-zone");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    let desktop_dir = state_dir.join("Desktop");
+    std::fs::create_dir_all(&desktop_dir).expect("desktop dir");
+    let source = desktop_dir.join("keep-me.txt");
+    std::fs::write(&source, b"keep me").expect("source");
+    root.app.borrow_mut().zones_path = zones_path.clone();
+
+    assert!(add_item_to_zone_with(
+        &root,
+        ZoneId(9_999),
+        source.to_string_lossy().as_ref(),
+        Some(desktop_dir.to_string_lossy().as_ref()),
+        |_| Some("unused".to_owned()),
+    ));
+
+    assert_eq!(std::fs::read(&source).expect("source retained"), b"keep me");
+    assert!(!desktop_dir.join(".bentodesk").exists());
+    assert!(!root.app.borrow().dirty.get());
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn failed_zone_flush_keeps_dirty_for_retry() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("dirty-retry");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    std::fs::create_dir_all(&zones_path).expect("directory blocks file write");
+    {
+        let mut app = root.app.borrow_mut();
+        app.zones_path = zones_path.clone();
+        app.mark_dirty();
+    }
+
+    flush_dirty_zones(&root);
+
+    assert!(root.app.borrow().dirty.get());
     let _ = std::fs::remove_dir_all(state_dir);
 }

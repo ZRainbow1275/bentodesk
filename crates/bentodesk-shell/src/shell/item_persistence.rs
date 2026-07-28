@@ -20,8 +20,23 @@ pub(super) fn flush_dirty_zones(root: &AppRoot) {
         return;
     }
     if app.dirty.get() && !app.zones_path.as_os_str().is_empty() {
-        let _ = storage::write_zones_atomic(&app.zones_path, &app.zones);
-        app.dirty.set(false);
+        match storage::write_zones_atomic(&app.zones_path, &app.zones) {
+            Ok(()) => app.dirty.set(false),
+            Err(error) => {
+                tracing::error!(
+                    path = %app.zones_path.display(),
+                    %error,
+                    "zone persistence failed; dirty state retained"
+                );
+                log_static(
+                    format!(
+                        "storage: write_zones_atomic failed path={} error={error}; dirty retained\n",
+                        app.zones_path.display()
+                    )
+                    .as_str(),
+                );
+            }
+        }
     }
 }
 
@@ -94,13 +109,19 @@ pub(super) fn hide_item_file(
     }
 }
 
-pub(super) fn restore_item_file(item: &bentodesk_zone::ZoneItem) -> bool {
+pub(super) fn restore_item_file(root: &AppRoot, item: &bentodesk_zone::ZoneItem) -> bool {
     let (Some(original), Some(hidden)) =
         (item.original_path.as_deref(), item.hidden_path.as_deref())
     else {
         return true;
     };
-    match bentodesk_backend::stealth::restore_file(original, hidden) {
+    let result = match stealth_config_for_source(root, original) {
+        Some(config) => {
+            bentodesk_backend::stealth::restore_file_tracked(&config, original, hidden, None)
+        }
+        None => bentodesk_backend::stealth::restore_file(original, hidden),
+    };
+    match result {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!(
@@ -144,7 +165,7 @@ pub(super) fn remove_item_from_zone(
 
     let display_path = item_file_display_path(&item);
     let leaf = item_operation_leaf(display_path.as_str()).to_owned();
-    if !restore_item_file(&item) {
+    if !restore_item_file(root, &item) {
         tracing::warn!(
             target: "bentodesk::items",
             ?zone_id,
@@ -310,6 +331,33 @@ where
         );
         return true;
     }
+    let add_rejection = {
+        let app = root.app.borrow();
+        match app.zones.get(zone_id) {
+            None => Some("zone missing"),
+            Some(zone) if zone.items.iter().any(|item| item.id.0 == u64::MAX) => {
+                Some("item id overflow")
+            }
+            Some(_) => None,
+        }
+    };
+    if let Some(reason) = add_rejection {
+        tracing::warn!(
+            target: "bentodesk::items",
+            ?zone_id,
+            path,
+            reason,
+            "AddItem rejected before filesystem move"
+        );
+        set_item_operation_status(
+            root,
+            localized_current(
+                format!("添加项目失败：区域 {}", zone_id.0),
+                format!("Add item rejected: zone {}", zone_id.0),
+            ),
+        );
+        return true;
+    }
 
     let item_path = bentodesk_app::ItemPath::new(path);
     let icon_hash = icon_hash_for_path(&item_path).unwrap_or_default();
@@ -320,8 +368,8 @@ where
         std::borrow::Cow::Owned(hidden.effective_path.clone()),
         Some(path),
         std::borrow::Cow::Owned(icon_hash),
-        hidden.original_path.map(std::borrow::Cow::Owned),
-        hidden.hidden_path.map(std::borrow::Cow::Owned),
+        hidden.original_path.clone().map(std::borrow::Cow::Owned),
+        hidden.hidden_path.clone().map(std::borrow::Cow::Owned),
     ) {
         Some(item_id) => {
             app.mark_dirty();
@@ -349,18 +397,57 @@ where
             true
         }
         None => {
+            drop(app);
+            let recovery_retained = match (
+                hidden.original_path.as_deref(),
+                hidden.hidden_path.as_deref(),
+            ) {
+                (Some(original), Some(hidden_path)) => {
+                    let rollback = match stealth_config_for_source(root, original) {
+                        Some(config) => bentodesk_backend::stealth::restore_file_tracked(
+                            &config,
+                            original,
+                            hidden_path,
+                            None,
+                        ),
+                        None => bentodesk_backend::stealth::restore_file(original, hidden_path),
+                    };
+                    if let Err(error) = rollback {
+                        tracing::error!(
+                            target: "bentodesk::stealth",
+                            ?zone_id,
+                            original,
+                            hidden = hidden_path,
+                            %error,
+                            "AddItem model insert failed and rollback failed; recovery record retained"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
             tracing::warn!(
                 target: "bentodesk::items",
                 ?zone_id,
                 path,
                 "AddItem rejected: zone missing or item id overflow"
             );
-            app.item_operation_status
-                .borrow_mut()
-                .replace(localized_current(
-                    format!("添加项目失败：区域 {}", zone_id.0),
-                    format!("Add item rejected: zone {}", zone_id.0),
-                ));
+            set_item_operation_status(
+                root,
+                if recovery_retained {
+                    localized_current(
+                        format!("添加项目失败；{leaf} 已保留在安全恢复区"),
+                        format!("Add failed; {leaf} retained in recovery storage"),
+                    )
+                } else {
+                    localized_current(
+                        format!("添加项目失败：区域 {}", zone_id.0),
+                        format!("Add item rejected: zone {}", zone_id.0),
+                    )
+                },
+            );
             true
         }
     }

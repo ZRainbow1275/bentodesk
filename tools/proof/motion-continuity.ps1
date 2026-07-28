@@ -20,19 +20,18 @@ function ConvertFrom-AnimStateLine {
     foreach ($match in [regex]::Matches($Line, '(\w+)=([^ ]+)')) {
         $values[$match.Groups[1].Value] = $match.Groups[2].Value
     }
-    if ($values.Contains('now_ms')) {
-        $values.now_ms = [uint64]$values.now_ms
+    foreach ($name in @('now_ms', 'duration_ms', 'zone', 'occupancy')) {
+        if ($values.Contains($name)) {
+            $values[$name] = [uint64]$values[$name]
+        }
     }
-    foreach ($name in @('pill_anim_progress', 'pill_anim_morph', 'stack_bloom_progress')) {
+    foreach ($name in @('value', 'from', 'to', 'pill_morph_value', 'stack_bloom_progress')) {
         if ($values.Contains($name)) {
             $values[$name] = [double]::Parse(
                 [string]$values[$name],
                 [Globalization.CultureInfo]::InvariantCulture
             )
         }
-    }
-    if ($values.Contains('pill_anim_duration_ms')) {
-        $values.pill_anim_duration_ms = [int]$values.pill_anim_duration_ms
     }
     return [pscustomobject]$values
 }
@@ -167,8 +166,10 @@ try {
     # startup remains WS_EX_TOPMOST=false.
     Set-ProofWindowInputForeground -Window $mainWindow
 
-    $leaveX = [Math]::Max(8, [int]$mainWindow.client.width - 24)
-    $leaveY = [Math]::Max(8, [int]$mainWindow.client.height - 24)
+    $logicalWidth = [int][Math]::Floor($mainWindow.client.width * 96.0 / $mainWindow.dpi)
+    $logicalHeight = [int][Math]::Floor($mainWindow.client.height * 96.0 / $mainWindow.dpi)
+    $leaveX = [Math]::Max(8, $logicalWidth - 24)
+    $leaveY = [Math]::Max(8, $logicalHeight - 24)
     Send-ProofMouseMove `
         -Window $mainWindow `
         -ClientX $leaveX `
@@ -221,6 +222,25 @@ try {
 
     Send-ProofMouseMove -Window $mainWindow -ClientX $leaveX -ClientY $leaveY -MoveSystemCursor -SleepMs 520
     $start = Get-LogLineCount -Path $stderrPath
+    Send-ProofMouseMove -Window $mainWindow -ClientX 106 -ClientY 356 -MoveSystemCursor -SleepMs 120
+    Send-ProofMouseMove -Window $mainWindow -ClientX 466 -ClientY 356 -MoveSystemCursor -SleepMs 90
+    Request-ProofPaint -Window $mainWindow -SleepMs 20
+    [void]$screenshots.Add((Save-ProofWindowShot `
+        -Window $mainWindow `
+        -Path (Join-Path $runDirectory '04-multi-zone-overlap.png')))
+    Start-Sleep -Milliseconds 340
+    Request-ProofPaint -Window $mainWindow
+    [void]$screenshots.Add((Save-ProofWindowShot `
+        -Window $mainWindow `
+        -Path (Join-Path $runDirectory '05-zone-five-expanded.png')))
+    [void]$stages.Add([pscustomobject]@{
+        name = 'rapid-multi-zone-handoff'
+        start_line = $start
+        end_line = Get-LogLineCount -Path $stderrPath
+    })
+
+    Send-ProofMouseMove -Window $mainWindow -ClientX $leaveX -ClientY $leaveY -MoveSystemCursor -SleepMs 520
+    $start = Get-LogLineCount -Path $stderrPath
     Send-ProofMouseMove -Window $mainWindow -ClientX 120 -ClientY 84 -MoveSystemCursor -SleepMs 620
     [void]$stages.Add([pscustomobject]@{
         name = 'stack-enter'
@@ -252,6 +272,9 @@ try {
     if ($process -and (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
         [void](Stop-ProofProcessExact -TargetProcessId $process.Id -Executable $proofExe)
     }
+    if ($process) {
+        $process.WaitForExit()
+    }
 }
 
 $stderrLines = if (Test-Path -LiteralPath $stderrPath) {
@@ -261,90 +284,122 @@ $stderrLines = if (Test-Path -LiteralPath $stderrPath) {
 }
 $stderrLines = [string[]]@($stderrLines)
 $animRows = New-Object System.Collections.ArrayList
+$morphSegments = New-Object System.Collections.ArrayList
+$morphTicks = New-Object System.Collections.ArrayList
 for ($index = 0; $index -lt $stderrLines.Count; $index++) {
     if ($stderrLines[$index] -match '^anim_state: ') {
         [void]$animRows.Add((ConvertFrom-AnimStateLine -Line $stderrLines[$index] -LineNumber ($index + 1)))
+    } elseif ($stderrLines[$index] -match '^pill_morph_segment: ') {
+        [void]$morphSegments.Add((ConvertFrom-AnimStateLine -Line $stderrLines[$index] -LineNumber ($index + 1)))
+    } elseif ($stderrLines[$index] -match '^pill_morph_tick: ') {
+        [void]$morphTicks.Add((ConvertFrom-AnimStateLine -Line $stderrLines[$index] -LineNumber ($index + 1)))
     }
 }
 
 $expandStage = $stages | Where-Object { $_.name -eq 'full-expand' } | Select-Object -First 1
 $collapseStage = $stages | Where-Object { $_.name -eq 'full-collapse' } | Select-Object -First 1
 $reversalStage = $stages | Where-Object { $_.name -eq 'rapid-reversal' } | Select-Object -First 1
+$multiStage = $stages | Where-Object { $_.name -eq 'rapid-multi-zone-handoff' } | Select-Object -First 1
 $stackEnterStage = $stages | Where-Object { $_.name -eq 'stack-enter' } | Select-Object -First 1
 $stackExitStage = $stages | Where-Object { $_.name -eq 'stack-exit' } | Select-Object -First 1
 
-$expandRows = if ($expandStage) { Get-StageRows -AllRows $animRows -Stage $expandStage } else { @() }
-$collapseRows = if ($collapseStage) { Get-StageRows -AllRows $animRows -Stage $collapseStage } else { @() }
-$reversalRows = if ($reversalStage) { Get-StageRows -AllRows $animRows -Stage $reversalStage } else { @() }
+$expandSegments = if ($expandStage) { Get-StageRows -AllRows $morphSegments -Stage $expandStage } else { @() }
+$collapseSegments = if ($collapseStage) { Get-StageRows -AllRows $morphSegments -Stage $collapseStage } else { @() }
+$reversalSegments = if ($reversalStage) { Get-StageRows -AllRows $morphSegments -Stage $reversalStage } else { @() }
+$multiSegments = if ($multiStage) { Get-StageRows -AllRows $morphSegments -Stage $multiStage } else { @() }
+$expandTicks = if ($expandStage) { @(Get-StageRows -AllRows $morphTicks -Stage $expandStage | Where-Object { $_.zone -eq 4 }) } else { @() }
+$collapseTicks = if ($collapseStage) { @(Get-StageRows -AllRows $morphTicks -Stage $collapseStage | Where-Object { $_.zone -eq 4 }) } else { @() }
+$reversalTicks = if ($reversalStage) { @(Get-StageRows -AllRows $morphTicks -Stage $reversalStage | Where-Object { $_.zone -eq 4 }) } else { @() }
+$multiTicks = if ($multiStage) { @(Get-StageRows -AllRows $morphTicks -Stage $multiStage) } else { @() }
 $stackEnterRows = if ($stackEnterStage) { Get-StageRows -AllRows $animRows -Stage $stackEnterStage } else { @() }
 $stackExitRows = if ($stackExitStage) { Get-StageRows -AllRows $animRows -Stage $stackExitStage } else { @() }
 
-$expandStart = $expandRows | Where-Object { $_.phase -eq 'hover_expand_fired' -and $_.pill_anim_zone -eq '4' } | Select-Object -First 1
-$expandTicks = @($expandRows | Where-Object {
-    $_.phase -eq 'zone_morph_tick' -and $_.pill_anim_zone -eq '4' -and $_.pill_anim_expanding -eq 'true'
-})
-$expandTerminal = $expandTicks | Where-Object { $_.pill_anim_morph -ge 0.999 } | Select-Object -First 1
+$expandStart = $expandSegments | Where-Object {
+    $_.zone -eq 4 -and $_.from -le 0.001 -and $_.to -ge 0.999
+} | Select-Object -First 1
+$expandTerminal = $expandTicks | Where-Object { $_.value -ge 0.999 } | Select-Object -First 1
 $expandDuration = if ($expandStart -and $expandTerminal) {
     [int64]($expandTerminal.now_ms - $expandStart.now_ms)
 } else {
     $null
 }
 
-$collapseStart = $collapseRows | Where-Object { $_.phase -eq 'hover_collapse_fired' -and $_.pill_anim_zone -eq '4' } | Select-Object -First 1
-$collapseTicks = @($collapseRows | Where-Object {
-    $_.phase -eq 'zone_morph_tick' -and $_.pill_anim_zone -eq '4' -and $_.pill_anim_expanding -eq 'false'
-})
-$collapseTerminal = $collapseTicks | Where-Object { $_.pill_anim_morph -le 0.001 } | Select-Object -First 1
+$collapseStart = $collapseSegments | Where-Object {
+    $_.zone -eq 4 -and $_.from -ge 0.999 -and $_.to -le 0.001
+} | Select-Object -First 1
+$collapseTerminal = $collapseTicks | Where-Object { $_.value -le 0.001 } | Select-Object -First 1
 $collapseDuration = if ($collapseStart -and $collapseTerminal) {
     [int64]($collapseTerminal.now_ms - $collapseStart.now_ms)
 } else {
     $null
 }
 
-$reversalExpandEvents = @($reversalRows | Where-Object {
-    $_.phase -eq 'hover_expand_fired' -and $_.pill_anim_zone -eq '4'
+$reversalExpandEvents = @($reversalSegments | Where-Object {
+    $_.zone -eq 4 -and $_.to -ge 0.999
 })
-$resumeEvent = if ($reversalExpandEvents.Count -ge 2) { $reversalExpandEvents[1] } else { $null }
+$resumeEvent = $reversalExpandEvents | Select-Object -Last 1
 $collapseBeforeResume = if ($resumeEvent) {
-    $reversalRows |
+    $reversalTicks |
         Where-Object {
             $_.line_number -lt $resumeEvent.line_number -and
-            $_.phase -eq 'zone_morph_tick' -and
-            $_.pill_anim_zone -eq '4' -and
-            $_.pill_anim_expanding -eq 'false'
+            $_.zone -eq 4
         } |
         Select-Object -Last 1
 } else {
     $null
 }
 $reversalBoundaryDelta = if ($resumeEvent -and $collapseBeforeResume) {
-    [Math]::Abs($resumeEvent.pill_anim_morph - $collapseBeforeResume.pill_anim_morph)
+    [Math]::Abs($resumeEvent.from - $collapseBeforeResume.value)
 } else {
     $null
 }
 
-$allMorphTicks = @($animRows | Where-Object { $_.phase -eq 'zone_morph_tick' })
+$multiCollapseA = $multiSegments | Where-Object {
+    $_.zone -eq 4 -and $_.to -le 0.001
+} | Select-Object -First 1
+$multiExpandB = $multiSegments | Where-Object {
+    $_.zone -eq 5 -and $_.to -ge 0.999
+} | Select-Object -First 1
+$multiTerminalB = $multiTicks | Where-Object {
+    $_.zone -eq 5 -and $_.value -ge 0.999
+} | Select-Object -First 1
+$multiOverlapTimes = @(
+    $multiTicks |
+        Where-Object { $_.active -eq 'true' } |
+        Group-Object now_ms |
+        Where-Object { @($_.Group | Select-Object -ExpandProperty zone -Unique).Count -ge 2 }
+)
+
+$allMorphTicks = @($morphTicks)
+$tickTimes = @($allMorphTicks | Select-Object -ExpandProperty now_ms -Unique)
 $tickIntervals = New-Object System.Collections.ArrayList
-for ($index = 1; $index -lt $allMorphTicks.Count; $index++) {
-    $delta = [int64]($allMorphTicks[$index].now_ms - $allMorphTicks[$index - 1].now_ms)
+for ($index = 1; $index -lt $tickTimes.Count; $index++) {
+    $delta = [int64]($tickTimes[$index] - $tickTimes[$index - 1])
     if ($delta -gt 0 -and $delta -le 100) {
         [void]$tickIntervals.Add([double]$delta)
     }
 }
 $terminalDuplicates = 0
-for ($index = 1; $index -lt $allMorphTicks.Count; $index++) {
-    $previous = $allMorphTicks[$index - 1]
-    $current = $allMorphTicks[$index]
-    if (
-        $previous.pill_anim_zone -eq $current.pill_anim_zone -and
-        $previous.pill_anim_expanding -eq $current.pill_anim_expanding -and
-        $current.now_ms -gt $previous.now_ms -and
-        (
-            ($previous.pill_anim_morph -eq 0.0 -and $current.pill_anim_morph -eq 0.0) -or
-            ($previous.pill_anim_morph -eq 1.0 -and $current.pill_anim_morph -eq 1.0)
-        )
-    ) {
-        $terminalDuplicates++
+foreach ($zoneGroup in @($allMorphTicks | Group-Object zone)) {
+    $zoneTicks = @($zoneGroup.Group)
+    for ($index = 1; $index -lt $zoneTicks.Count; $index++) {
+        $previous = $zoneTicks[$index - 1]
+        $current = $zoneTicks[$index]
+        $segmentBetween = @($morphSegments | Where-Object {
+            $_.zone -eq $current.zone -and
+            $_.line_number -gt $previous.line_number -and
+            $_.line_number -le $current.line_number
+        }).Count -gt 0
+        if (
+            -not $segmentBetween -and
+            $current.now_ms -gt $previous.now_ms -and
+            (
+                ($previous.value -eq 0.0 -and $current.value -eq 0.0) -or
+                ($previous.value -eq 1.0 -and $current.value -eq 1.0)
+            )
+        ) {
+            $terminalDuplicates++
+        }
     }
 }
 
@@ -366,22 +421,27 @@ $stackExitDuration = if ($stackExitTicks.Count -ge 2) {
 }
 
 $assertions = [ordered]@{
-    full_expand_220_to_260_ms = [bool]($expandDuration -ge 220 -and $expandDuration -le 260)
+    full_expand_segment_240_ms = [bool]($expandStart -and $expandStart.duration_ms -eq 240)
+    full_expand_wall_time_220_to_320_ms = [bool]($expandDuration -ge 220 -and $expandDuration -le 320)
     full_expand_monotonic = [bool](Test-Monotonic -Values @(
-        $expandTicks | ForEach-Object { $_.pill_anim_morph }
+        $expandTicks | ForEach-Object { $_.value }
     ) -Increasing $true)
     full_expand_exact_endpoint = [bool]($expandTerminal)
-    full_collapse_220_to_260_ms = [bool]($collapseDuration -ge 220 -and $collapseDuration -le 260)
+    full_collapse_segment_240_ms = [bool]($collapseStart -and $collapseStart.duration_ms -eq 240)
+    full_collapse_wall_time_220_to_320_ms = [bool]($collapseDuration -ge 220 -and $collapseDuration -le 320)
     full_collapse_monotonic = [bool](Test-Monotonic -Values @(
-        $collapseTicks | ForEach-Object { $_.pill_anim_morph }
+        $collapseTicks | ForEach-Object { $_.value }
     ) -Increasing $false)
     full_collapse_exact_endpoint = [bool]($collapseTerminal)
     reversal_continuity_delta_le_008 = [bool]($null -ne $reversalBoundaryDelta -and $reversalBoundaryDelta -le 0.08)
     reversal_segment_uses_remaining_distance = [bool](
         $resumeEvent -and
-        $resumeEvent.pill_anim_duration_ms -ge 50 -and
-        $resumeEvent.pill_anim_duration_ms -lt 240
+        $resumeEvent.duration_ms -ge 50 -and
+        $resumeEvent.duration_ms -lt 240
     )
+    multi_zone_handoff_segments_both_survive = [bool]($multiCollapseA -and $multiExpandB)
+    multi_zone_handoff_has_active_overlap = [bool]($multiOverlapTimes.Count -ge 1)
+    multi_zone_handoff_reaches_zone_five_endpoint = [bool]($multiTerminalB)
     no_duplicate_terminal_tick = ($terminalDuplicates -eq 0)
     frame_tick_median_le_20_ms = [bool](
         $tickIntervals.Count -ge 20 -and
@@ -394,7 +454,7 @@ $assertions = [ordered]@{
     stack_enter_le_480_ms = [bool]($null -ne $stackEnterDuration -and $stackEnterDuration -le 480)
     stack_exit_le_140_ms = [bool]($null -ne $stackExitDuration -and $stackExitDuration -le 140)
     screenshots_nonblank = [bool](
-        $screenshots.Count -ge 5 -and @($screenshots | Where-Object { -not $_.nonblank }).Count -eq 0
+        $screenshots.Count -ge 7 -and @($screenshots | Where-Object { -not $_.nonblank }).Count -eq 0
     )
     production_quit_hotkey = [bool]($quitPosted -and $exitedThroughQuit)
 }
@@ -416,10 +476,13 @@ $summary = [ordered]@{
     main_window = $mainWindow
     input_boundary = 'isolated proof HWND is temporarily promoted to HWND_TOPMOST so real cursor reconciliation can exercise a desktop-layer app while other applications are open; runtime-performance separately verifies production WS_EX_TOPMOST=false'
     measurements = [ordered]@{
-        full_expand_ms = $expandDuration
-        full_collapse_ms = $collapseDuration
+        full_expand_segment_ms = if ($expandStart) { $expandStart.duration_ms } else { $null }
+        full_expand_wall_ms = $expandDuration
+        full_collapse_segment_ms = if ($collapseStart) { $collapseStart.duration_ms } else { $null }
+        full_collapse_wall_ms = $collapseDuration
         reversal_boundary_delta = $reversalBoundaryDelta
-        reversal_resume_duration_ms = if ($resumeEvent) { $resumeEvent.pill_anim_duration_ms } else { $null }
+        reversal_resume_duration_ms = if ($resumeEvent) { $resumeEvent.duration_ms } else { $null }
+        multi_zone_overlap_tick_count = $multiOverlapTimes.Count
         morph_tick_count = $allMorphTicks.Count
         tick_interval_count = $tickIntervals.Count
         tick_median_ms = Get-Percentile -Values @($tickIntervals) -Percentile 0.5
@@ -433,6 +496,8 @@ $summary = [ordered]@{
     stages = @($stages)
     screenshots = @($screenshots)
     anim_state_log_count = $animRows.Count
+    morph_segment_log_count = $morphSegments.Count
+    morph_tick_log_count = $morphTicks.Count
     commands = @($commands)
     failure = $failure
 }

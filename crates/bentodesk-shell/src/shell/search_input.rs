@@ -74,8 +74,8 @@ pub(super) fn open_inline_zone_search(root: &AppRoot, zone_id: ZoneId, hwnd: HWN
         let expand_from = app.zones.get(zone_id).and_then(|zone| {
             if zone.is_stack_anchor() || app.zone_pill_body_visible(zone) {
                 None
-            } else if app.zone_pill_anim_zone.get() == Some(zone_id) {
-                Some(sampled_zone_pill_morph(&app))
+            } else if let Some(morph) = app.zone_pill_morph_at(zone_id, now_ms) {
+                Some(morph)
             } else {
                 Some(0.0)
             }
