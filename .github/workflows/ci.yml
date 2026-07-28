@@ -57,12 +57,15 @@ jobs:
             throw "Generated runtime files are tracked:`n$($generated -join "`n")"
           }
 
+          $PSNativeCommandUseErrorActionPreference = $false
           $localPathHits = @(git grep -n -I -E '([A-Za-z]:[/\\](Users[/\\]HP|Desktop[/\\]CREATOR FOUR))' -- .)
-          if ($LASTEXITCODE -eq 0) {
+          $grepExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($grepExit -eq 0) {
             throw "Machine-local paths are tracked:`n$($localPathHits -join "`n")"
           }
-          if ($LASTEXITCODE -ne 1) {
-            throw "git grep failed with exit code $LASTEXITCODE"
+          if ($grepExit -ne 1) {
+            throw "git grep failed with exit code $grepExit"
           }
 
           $oversized = @(
