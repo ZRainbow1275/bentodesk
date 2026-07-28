@@ -1,0 +1,38 @@
+[package]
+name         = "bentodesk-app"
+description  = "Application state + event dispatcher + render orchestrator for BentoDesk."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+bentodesk-platform = { path = "../bentodesk-platform" }
+bentodesk-tree     = { path = "../bentodesk-tree" }
+bentodesk-style    = { path = "../bentodesk-style" }
+bentodesk-layout   = { path = "../bentodesk-layout" }
+bentodesk-widget   = { path = "../bentodesk-widget" }
+bentodesk-theme    = { path = "../bentodesk-theme" }
+bentodesk-zone     = { path = "../bentodesk-zone" }
+# Wave-E business::timeline scaffold reads CheckpointMeta / DeltaSummary /
+# DesktopSnapshot directly from the backend (T-089 + T-097, shipped). Direct
+# dep keeps the Phase 1 single-process invariant (spec §2) — no IPC veneer.
+bentodesk-backend  = { path = "../bentodesk-backend" }
+smol_str            = { workspace = true }
+smallvec            = { workspace = true }
+crossbeam-channel   = { workspace = true }
+# ΔB ruling (master-decomposition §11): every Command variant + payload type
+# derives serde so the v2.x scripting/plugin shape is preserved at zero
+# runtime cost. Single-process Phase 1 never serializes at runtime.
+serde               = { workspace = true }
+tracing             = { workspace = true }
+windows             = { workspace = true }
+windows-sys         = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

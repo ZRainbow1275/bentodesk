@@ -59,13 +59,17 @@ jobs:
           }
 
           $PSNativeCommandUseErrorActionPreference = $false
-          $localPathHits = @(git grep -n -I -E '([A-Za-z]:[/\\](Users[/\\]HP|Desktop[/\\]CREATOR FOUR))' -- .)
+          $pathCandidates = @(git grep -n -I -E '([A-Za-z]:[/\\](Users|Desktop)[/\\])' -- .)
           $grepExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
-          if ($grepExit -eq 0) {
+          $localPathHits = @($pathCandidates | Where-Object {
+            $_ -notmatch 'C:/Users/BentoDeskTest/' -and
+            $_ -notmatch 'C:/Desktop/'
+          })
+          if ($localPathHits.Count -ne 0) {
             throw "Machine-local paths are tracked:`n$($localPathHits -join "`n")"
           }
-          if ($grepExit -ne 1) {
+          if ($grepExit -notin @(0, 1)) {
             throw "git grep failed with exit code $grepExit"
           }
           $global:LASTEXITCODE = 0
@@ -84,7 +88,7 @@ jobs:
           }
 
           $mainLines = [IO.File]::ReadAllLines(
-            (Resolve-Path "crates/bento-nano-shell/src/main.rs")
+            (Resolve-Path "crates/bentodesk-shell/src/main.rs")
           ).Length
           if ($mainLines -gt 800) {
             throw "main.rs has $mainLines lines; limit is 800"
@@ -134,12 +138,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = $metadata.packages | Where-Object name -eq "bento-nano-shell"
+          $shell = $metadata.packages | Where-Object name -eq "bentodesk-shell"
           if ($shell.version -ne "2.0.0") {
             throw "Expected BentoDesk 2.0.0, found $($shell.version)"
           }
 
-          cargo build --release --target $env:TARGET -p bento-nano-shell --bin BentoDesk
+          cargo build --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
           $limit = [int64](2.5 * 1MB)
           if ($exe.Length -gt $limit) {

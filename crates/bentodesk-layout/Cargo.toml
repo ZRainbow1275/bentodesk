@@ -1,0 +1,23 @@
+[package]
+name         = "bentodesk-layout"
+description  = "Flexbox-lite layout engine for BentoDesk."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+bentodesk-tree  = { path = "../bentodesk-tree" }
+bentodesk-style = { path = "../bentodesk-style" }
+smallvec         = { workspace = true }
+# `serde` (with `alloc`) is required to fix smol_str 0.3.6's serde impl when
+# building this crate alone (`cargo build -p bentodesk-layout`). Transitively
+# pulled via tree → smol_str/serde, which needs `serde_core`'s alloc-gated
+# Visitor methods that only activate when serde itself has `alloc`. Identical
+# fix applied to bentodesk-widget for the same reason.
+serde            = { workspace = true }
+
+[lints]
+workspace = true

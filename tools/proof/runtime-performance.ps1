@@ -41,7 +41,7 @@ try {
         $build = Invoke-ProofCommand `
             -Name '01-release-build' `
             -FilePath 'cargo' `
-            -Arguments @('build', '--release', '-p', 'bento-nano-shell', '--bin', 'BentoDesk') `
+            -Arguments @('build', '--release', '-p', 'bentodesk-shell', '--bin', 'BentoDesk') `
             -WorkingDirectory $repo `
             -LogDirectory $runDirectory
         [void]$commands.Add($build)
@@ -54,7 +54,7 @@ try {
     }
 
     $previousSeed = Set-ProofProcessEnvironment -Values @{
-        BENTODESK_NANO_BENCHMARK_ITEM_ROOT = $itemRoot
+        BENTODESK_BENCHMARK_ITEM_ROOT = $itemRoot
     }
     try {
         $seed = Invoke-ProofCommand `
@@ -62,7 +62,7 @@ try {
             -FilePath 'cargo' `
             -Arguments @(
                 'run', '--quiet',
-                '-p', 'bento-nano-platform',
+                '-p', 'bentodesk-platform',
                 '--example', 'seed_benchmark_scene',
                 '--target', 'x86_64-pc-windows-msvc',
                 '--', $stateDirectory
@@ -94,7 +94,7 @@ try {
         -StateDirectory $stateDirectory `
         -StdoutPath $stdoutPath `
         -StderrPath $stderrPath
-    $mainWindow = Wait-ProofWindow -TargetProcessId $process.Id -ClassName 'BentoNanoShell' -TimeoutMs 12000
+    $mainWindow = Wait-ProofWindow -TargetProcessId $process.Id -ClassName 'BentoDeskShell' -TimeoutMs 12000
     if (-not $mainWindow) {
         throw 'BentoDesk main window was not found'
     }

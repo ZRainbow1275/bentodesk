@@ -189,7 +189,6 @@ function Start-IsolatedBentoDesk {
 
     $environment = @{
         BENTODESK_STATE_DIR = $StateDirectory
-        BENTODESK_NANO_STATE_DIR = $null
     }
     foreach ($entry in $ExtraEnvironment.GetEnumerator()) {
         $environment[$entry.Key] = $entry.Value

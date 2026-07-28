@@ -1,0 +1,40 @@
+[package]
+name         = "bentodesk-shell"
+description  = "BentoDesk native Windows desktop organizer."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+bentodesk-platform = { path = "../bentodesk-platform" }
+bentodesk-tree     = { path = "../bentodesk-tree" }
+bentodesk-style    = { path = "../bentodesk-style" }
+bentodesk-layout   = { path = "../bentodesk-layout" }
+bentodesk-widget   = { path = "../bentodesk-widget" }
+bentodesk-app      = { path = "../bentodesk-app" }
+bentodesk-zone     = { path = "../bentodesk-zone" }
+bentodesk-backend  = { path = "../bentodesk-backend" }
+mimalloc            = { workspace = true }
+smol_str            = { workspace = true }
+smallvec            = { workspace = true }
+crossbeam-channel   = { workspace = true }
+windows-sys         = { workspace = true }
+windows             = { workspace = true }
+tracing             = { workspace = true }
+# Context Capsule envelope persistence mirrors the 1.x JSON capsule metadata
+# while keeping the selected-stack zones payload base64-encoded inside it.
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true }
+
+[[bin]]
+name = "BentoDesk"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/ZRainbow1275/bentodesk/discussions
+    about: Ask questions, share setups, or discuss an idea before filing an issue.
+  - name: Private security report
+    url: https://github.com/ZRainbow1275/bentodesk/security/advisories/new
+    about: Report a vulnerability without exposing it publicly.

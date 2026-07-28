@@ -38,7 +38,7 @@ try {
         @('04-doc', 'cargo', @('doc', '--workspace', '--no-deps')),
         @('05-deny', 'cargo', @('deny', 'check')),
         @('06-audit', 'cargo', @('audit')),
-        @('07-release-build', 'cargo', @('build', '--release', '-p', 'bento-nano-shell', '--bin', 'BentoDesk'))
+        @('07-release-build', 'cargo', @('build', '--release', '-p', 'bentodesk-shell', '--bin', 'BentoDesk'))
     )
     foreach ($spec in $commandSpecs) {
         $result = Invoke-ProofCommand `

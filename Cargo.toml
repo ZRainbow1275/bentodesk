@@ -12,16 +12,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/bento-nano-platform",
-    "crates/bento-nano-tree",
-    "crates/bento-nano-layout",
-    "crates/bento-nano-style",
-    "crates/bento-nano-theme",
-    "crates/bento-nano-zone",
-    "crates/bento-nano-widget",
-    "crates/bento-nano-app",
-    "crates/bento-nano-shell",
-    "crates/bento-nano-backend",
+    "crates/bentodesk-platform",
+    "crates/bentodesk-tree",
+    "crates/bentodesk-layout",
+    "crates/bentodesk-style",
+    "crates/bentodesk-theme",
+    "crates/bentodesk-zone",
+    "crates/bentodesk-widget",
+    "crates/bentodesk-app",
+    "crates/bentodesk-shell",
+    "crates/bentodesk-backend",
 ]
 
 [workspace.package]
@@ -40,7 +40,7 @@ authors      = ["方寒"]
 [workspace.dependencies]
 
 # Note: SVG → D2D conversion is a hand-rolled 200-LOC parser in
-# `bento-nano-platform::svg`, not a third-party crate (`lunasvg-rs` does not
+# `bentodesk-platform::svg`, not a third-party crate (`lunasvg-rs` does not
 # exist; `resvg`/`usvg` are §8 forbidden — see svg.rs comment for the rationale).
 #
 # --- Win32 plain API surface (spec §3.1.1, §3.2) ---
@@ -54,7 +54,7 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # finalisation after a real Shell/OLE desktop drop. Binding metadata only.
     "Win32_System_Ole",
     # Wave 19 — `OutputDebugStringA` for pre-main probe trigger logging
-    # from `bento-nano-platform::allocator`'s `.CRT$XCU` ctor. Stderr is
+    # from `bentodesk-platform::allocator`'s `.CRT$XCU` ctor. Stderr is
     # not addressable at CRT init in `/SUBSYSTEM:WINDOWS` builds (no
     # console attached, `GetStdHandle(STD_ERROR_HANDLE)` returns NULL);
     # `OutputDebugStringA` routes to the attached debugger AND to the
@@ -70,7 +70,7 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # Wave 15 — `GetCurrentProcess` (kernel32) returns the pseudo-handle
     # consumed by EmptyWorkingSet. Pseudo-handle is never CloseHandle'd.
     "Win32_System_Threading",
-    # Native crash restart for the Nano Settings startup-management controls.
+    # Native crash restart for the Settings startup-management controls.
     # Binding metadata only; no guardian process or new runtime dependency.
     "Win32_System_Recovery",
     # T-092 system module — `RegGetValueW` for WebView2 runtime version

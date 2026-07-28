@@ -1,0 +1,27 @@
+[package]
+name         = "bentodesk-widget"
+description  = "Widget library (Container, Text, Image, Button) for BentoDesk."
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+authors      = { workspace = true }
+
+[dependencies]
+bentodesk-tree   = { path = "../bentodesk-tree" }
+bentodesk-style  = { path = "../bentodesk-style" }
+bentodesk-layout = { path = "../bentodesk-layout" }
+bentodesk-theme  = { path = "../bentodesk-theme" }
+smol_str          = { workspace = true }
+smallvec          = { workspace = true }
+# Required to force `serde`'s `alloc` feature on for single-crate `cargo build
+# -p bentodesk-widget` (R9 mandate). Without this, `smol_str/serde` activates
+# but `serde_core::de::Visitor`'s `visit_string`/`visit_byte_buf` (alloc-gated)
+# are unavailable, breaking smol_str 0.3.6's serde impl. App / backend / shell
+# pull `serde` with alloc directly so their single-crate builds already pass;
+# widget didn't, hence the regression. Build-only proc-macro + zero runtime.
+serde             = { workspace = true }
+
+[lints]
+workspace = true

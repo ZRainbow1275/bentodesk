@@ -9,17 +9,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "bento-nano-app"
+name = "bentodesk-app"
 version = "2.0.0"
 dependencies = [
- "bento-nano-backend",
- "bento-nano-layout",
- "bento-nano-platform",
- "bento-nano-style",
- "bento-nano-theme",
- "bento-nano-tree",
- "bento-nano-widget",
- "bento-nano-zone",
+ "bentodesk-backend",
+ "bentodesk-layout",
+ "bentodesk-platform",
+ "bentodesk-style",
+ "bentodesk-theme",
+ "bentodesk-tree",
+ "bentodesk-widget",
+ "bentodesk-zone",
  "crossbeam-channel",
  "serde",
  "serde_json",
@@ -31,12 +31,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-nano-backend"
+name = "bentodesk-backend"
 version = "2.0.0"
 dependencies = [
- "bento-nano-style",
- "bento-nano-theme",
- "bento-nano-zone",
+ "bentodesk-style",
+ "bentodesk-theme",
+ "bentodesk-zone",
  "crossbeam-channel",
  "minisign-verify",
  "notify",
@@ -52,20 +52,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-nano-layout"
+name = "bentodesk-layout"
 version = "2.0.0"
 dependencies = [
- "bento-nano-style",
- "bento-nano-tree",
+ "bentodesk-style",
+ "bentodesk-tree",
  "serde",
  "smallvec",
 ]
 
 [[package]]
-name = "bento-nano-platform"
+name = "bentodesk-platform"
 version = "2.0.0"
 dependencies = [
- "bento-nano-zone",
+ "bentodesk-zone",
  "crossbeam-channel",
  "libmimalloc-sys",
  "serde",
@@ -76,17 +76,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-nano-shell"
+name = "bentodesk-shell"
 version = "2.0.0"
 dependencies = [
- "bento-nano-app",
- "bento-nano-backend",
- "bento-nano-layout",
- "bento-nano-platform",
- "bento-nano-style",
- "bento-nano-tree",
- "bento-nano-widget",
- "bento-nano-zone",
+ "bentodesk-app",
+ "bentodesk-backend",
+ "bentodesk-layout",
+ "bentodesk-platform",
+ "bentodesk-style",
+ "bentodesk-tree",
+ "bentodesk-widget",
+ "bentodesk-zone",
  "crossbeam-channel",
  "mimalloc",
  "serde",
@@ -100,48 +100,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-nano-style"
+name = "bentodesk-style"
 version = "2.0.0"
 
 [[package]]
-name = "bento-nano-theme"
+name = "bentodesk-theme"
 version = "2.0.0"
 dependencies = [
- "bento-nano-style",
- "bento-nano-tree",
+ "bentodesk-style",
+ "bentodesk-tree",
  "serde",
  "smallvec",
  "smol_str",
 ]
 
 [[package]]
-name = "bento-nano-tree"
+name = "bentodesk-tree"
 version = "2.0.0"
 dependencies = [
- "bento-nano-style",
+ "bentodesk-style",
  "serde",
  "smallvec",
  "smol_str",
 ]
 
 [[package]]
-name = "bento-nano-widget"
+name = "bentodesk-widget"
 version = "2.0.0"
 dependencies = [
- "bento-nano-layout",
- "bento-nano-style",
- "bento-nano-theme",
- "bento-nano-tree",
+ "bentodesk-layout",
+ "bentodesk-style",
+ "bentodesk-theme",
+ "bentodesk-tree",
  "serde",
  "smallvec",
  "smol_str",
 ]
 
 [[package]]
-name = "bento-nano-zone"
+name = "bentodesk-zone"
 version = "2.0.0"
 dependencies = [
- "bento-nano-style",
+ "bentodesk-style",
  "serde",
  "serde_json",
  "smallvec",

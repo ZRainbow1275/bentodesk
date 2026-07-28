@@ -53,7 +53,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
           $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = $metadata.packages | Where-Object name -eq "bento-nano-shell"
+          $shell = $metadata.packages | Where-Object name -eq "bentodesk-shell"
           $expectedTag = "v$($shell.version)"
           if ($env:RELEASE_TAG -ne $expectedTag) {
             throw "Tag $env:RELEASE_TAG does not match workspace version $($shell.version)"
@@ -89,15 +89,15 @@ jobs:
           $zip = Join-Path $dist "$packageName.zip"
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
 
-          cargo build --release --target $env:TARGET -p bento-nano-shell --bin BentoDesk
+          cargo build --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
 
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item "target/$env:TARGET/release/BentoDesk.exe" (Join-Path $stage "BentoDesk.exe")
           Copy-Item "README.md" (Join-Path $stage "README.md")
-          Copy-Item "README.en.md" (Join-Path $stage "README.en.md")
+          Copy-Item "README.zh-CN.md" (Join-Path $stage "README.zh-CN.md")
           Copy-Item "LICENSE" (Join-Path $stage "LICENSE")
 
-          $payload = @("BentoDesk.exe", "README.md", "README.en.md", "LICENSE")
+          $payload = @("BentoDesk.exe", "README.md", "README.zh-CN.md", "LICENSE")
           $innerLines = foreach ($name in $payload) {
             $hash = (Get-FileHash (Join-Path $stage $name) -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
@@ -109,7 +109,7 @@ jobs:
           )
 
           $files = @(
-            "BentoDesk.exe", "README.md", "README.en.md", "LICENSE", "SHA256SUMS.txt"
+            "BentoDesk.exe", "README.md", "README.zh-CN.md", "LICENSE", "SHA256SUMS.txt"
           ) | ForEach-Object { Join-Path $stage $_ }
           Compress-Archive -LiteralPath $files -DestinationPath $zip -CompressionLevel Optimal
 
@@ -131,7 +131,7 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
 
           $zip = "${{ steps.package.outputs.zip }}"
-          $expected = @("BentoDesk.exe", "LICENSE", "README.en.md", "README.md", "SHA256SUMS.txt")
+          $expected = @("BentoDesk.exe", "LICENSE", "README.md", "README.zh-CN.md", "SHA256SUMS.txt")
           $archive = [IO.Compression.ZipFile]::OpenRead($zip)
           try {
             $actual = @($archive.Entries | ForEach-Object FullName | Sort-Object)
@@ -171,7 +171,7 @@ jobs:
               -StderrPath $stderr
             $window = Wait-ProofWindow `
               -TargetProcessId $process.Id `
-              -ClassName "BentoNanoShell" `
+              -ClassName "BentoDeskShell" `
               -TimeoutMs 12000
             if (-not $window) {
               throw "Extracted BentoDesk did not create its native main window"

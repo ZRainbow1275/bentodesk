@@ -217,7 +217,7 @@ try {
             -FilePath 'cargo' `
             -Arguments @(
                 'build', '--release',
-                '-p', 'bento-nano-shell',
+                '-p', 'bentodesk-shell',
                 '--bin', 'BentoDesk',
                 '--target', 'x86_64-pc-windows-msvc'
             ) `
@@ -233,7 +233,7 @@ try {
         -FilePath 'cargo' `
         -Arguments @(
             'build',
-            '-p', 'bento-nano-shell',
+            '-p', 'bentodesk-shell',
             '--example', 'dump_zone_capsules',
             '--target', 'x86_64-pc-windows-msvc'
         ) `
@@ -248,8 +248,8 @@ try {
     }
 
     $previousSeed = Set-ProofProcessEnvironment -Values @{
-        BENTODESK_NANO_BENCHMARK_ITEM_ROOT = $itemRoot
-        BENTODESK_NANO_BENCHMARK_REFERENCE_0602 = '1'
+        BENTODESK_BENCHMARK_ITEM_ROOT = $itemRoot
+        BENTODESK_BENCHMARK_REFERENCE_0602 = '1'
     }
     try {
         $seed = Invoke-ProofCommand `
@@ -257,7 +257,7 @@ try {
             -FilePath 'cargo' `
             -Arguments @(
                 'run', '--quiet',
-                '-p', 'bento-nano-platform',
+                '-p', 'bentodesk-platform',
                 '--example', 'seed_benchmark_scene',
                 '--target', 'x86_64-pc-windows-msvc',
                 '--', $stateDirectory
@@ -287,7 +287,7 @@ try {
         -StderrPath $stderrPath
     $mainWindow = Wait-ProofWindow `
         -TargetProcessId $process.Id `
-        -ClassName 'BentoNanoShell' `
+        -ClassName 'BentoDeskShell' `
         -TimeoutMs 12000
     if (-not $mainWindow) {
         throw 'BentoDesk main window was not found'
