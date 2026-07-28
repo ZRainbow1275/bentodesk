@@ -123,12 +123,8 @@ mod tests {
     use crate::i18n_en_us::{EN_US, ids as en_ids};
     use crate::i18n_zh_cn::{ZH_CN, ids as zh_ids};
 
-    // The locale pointer is process-global. The unit tests in this module
-    // run in a single binary, so we serialise via deterministic ordering:
-    // each test ends by reinstalling the same pointer state it expects the
-    // next test to find. Cargo test runs are single-threaded by default
-    // for our crate (no `#[cfg(test)] use std::thread`), but we still avoid
-    // ordering assumptions where reasonable.
+    // The locale pointer is process-global. Keep all pointer mutations in one
+    // test so Cargo's parallel test runner cannot interleave locale changes.
 
     #[test]
     fn stringid_is_two_bytes() {
@@ -144,17 +140,11 @@ mod tests {
     }
 
     #[test]
-    fn t_returns_zh_cn_string_after_init() {
+    fn t_initializes_and_switches_locale() {
         init_locale(&ZH_CN);
         assert_eq!(t(zh_ids::APP_NAME), "BentoDesk");
         assert_eq!(t(zh_ids::TOOLBAR_PIN), "钉住");
         assert_eq!(t(zh_ids::SETTINGS_LOCALE), "语言");
-    }
-
-    #[test]
-    fn t_switches_locale_on_set_locale() {
-        init_locale(&ZH_CN);
-        assert_eq!(t(zh_ids::TOOLBAR_SETTINGS), "设置");
         set_locale(&EN_US);
         assert_eq!(t(en_ids::TOOLBAR_SETTINGS), "Settings");
         // Same numeric id, different table → different string.
