@@ -62,9 +62,10 @@ jobs:
           $pathCandidates = @(git grep -n -I -E '([A-Za-z]:[/\\](Users|Desktop)[/\\])' -- .)
           $grepExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
+          $fixtureUserPath = 'C:[/\\]Users[/\\](BentoDeskTest|Alice|Bob|Test|Public|X1?|Desktop|\.{3})([/\\]|"|$)'
           $localPathHits = @($pathCandidates | Where-Object {
-            $_ -notmatch 'C:/Users/BentoDeskTest/' -and
-            $_ -notmatch 'C:/Desktop/'
+            $_ -notmatch $fixtureUserPath -and
+            $_ -notmatch 'C:[/\\]Desktop[/\\]'
           })
           if ($localPathHits.Count -ne 0) {
             throw "Machine-local paths are tracked:`n$($localPathHits -join "`n")"
