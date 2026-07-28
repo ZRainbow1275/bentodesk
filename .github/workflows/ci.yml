@@ -67,6 +67,7 @@ jobs:
           if ($grepExit -ne 1) {
             throw "git grep failed with exit code $grepExit"
           }
+          $global:LASTEXITCODE = 0
 
           $oversized = @(
             Get-ChildItem crates -Recurse -Filter *.rs -File |
