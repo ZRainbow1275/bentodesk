@@ -92,12 +92,6 @@ const TRAY_ICON_GUID: windows_sys::core::GUID = windows_sys::core::GUID {
     data3: 0x4B70,
     data4: [0xA1, 0x10, 0xB3, 0xA7, 0x0D, 0x35, 0xB5, 0x05],
 };
-const LIVE_FOLDER_PICKER_HOST_ARG: &str = "--bentodesk-live-folder-picker-host";
-const LIVE_FOLDER_PICKER_HOST_SELECTED_EXIT: i32 = 0;
-const LIVE_FOLDER_PICKER_HOST_ERROR_EXIT: i32 = 1;
-const LIVE_FOLDER_PICKER_HOST_CANCEL_EXIT: i32 = 2;
-const LIVE_FOLDER_PICKER_HOST_TIMEOUT: Duration = Duration::from_secs(300);
-const LIVE_FOLDER_PICKER_HOST_POLL: Duration = Duration::from_millis(100);
 const GMEM_INVALID_HANDLE_FLAG: u32 = 0x8000;
 const DROPFILES_HEADER_LEN: usize = 20;
 const MAX_RAW_DROPFILES_BYTES: usize = 64 * 1024;

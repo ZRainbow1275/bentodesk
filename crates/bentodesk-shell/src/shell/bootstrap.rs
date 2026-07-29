@@ -53,14 +53,8 @@ pub(super) fn run() {
         show_fatal_box("BentoDesk — 致命错误 / Fatal Error", &msg);
     }));
 
-    if let Some(code) = live_folder_picker_host_exit_code_from_args() {
-        std::process::exit(code);
-    }
-
-    // Mc-1b — single-instance guard. Placed AFTER the live-folder picker-host
-    // early-exit (that self-spawned child legitimately exits above, BEFORE
-    // this point, so it is correctly exempt from the guard) and BEFORE locale
-    // init / window creation. Without this, autorun + a manual double-click
+    // Mc-1b — single-instance guard. Placed before locale init / window
+    // creation. Without this, autorun + a manual double-click
     // produce two processes racing zones.bin / vault.bin / the tray / hotkeys
     // / the watcher.
     //

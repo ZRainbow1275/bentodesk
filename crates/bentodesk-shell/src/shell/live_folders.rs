@@ -160,236 +160,14 @@ pub(super) fn set_live_folder_error(root: &AppRoot, message: impl Into<SmolStr>)
     set_live_folder_status(root, message);
 }
 
-pub(super) fn live_folder_picker_host_exit_code_from_args() -> Option<i32> {
-    let mut args = std::env::args();
-    let _exe = args.next();
-    let flag = args.next()?;
-    if flag != LIVE_FOLDER_PICKER_HOST_ARG {
-        return None;
-    }
-
-    let zone_id = match args.next() {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(value) => ZoneId(value),
-            Err(error) => {
-                log_static(
-                    format!("live-folder: picker host invalid zone id {raw}: {error}\n").as_str(),
-                );
-                return Some(LIVE_FOLDER_PICKER_HOST_ERROR_EXIT);
-            }
-        },
-        None => ZoneId(0),
-    };
-
-    let result_path = args.next().map(PathBuf::from);
-    Some(live_folder_picker_host_exit_code(
-        zone_id,
-        result_path.as_deref(),
-    ))
-}
-
-pub(super) enum LiveFolderPickerHostOutcome {
-    Selected(SmolStr),
-    Canceled,
-    Error(String),
-}
-
-pub(super) fn live_folder_picker_host_exit_code(
-    zone_id: ZoneId,
-    result_path: Option<&Path>,
-) -> i32 {
-    log_static(
-        format!(
-            "live-folder: picker host mode pid={} opening zone_id={}\n",
-            std::process::id(),
-            zone_id.0
-        )
-        .as_str(),
-    );
-    // SAFETY: The helper mode runs before the normal D2D/DComp shell initializes
-    // and owns the full Shell picker lifetime in this short-lived process.
-    let outcome = match unsafe { select_live_folder_from_dialog_on_sta(ptr::null_mut(), zone_id) } {
-        Ok(Some(folder)) => LiveFolderPickerHostOutcome::Selected(folder),
-        Ok(None) => LiveFolderPickerHostOutcome::Canceled,
-        Err(error) => LiveFolderPickerHostOutcome::Error(error),
-    };
-    if let Some(path) = result_path
-        && let Err(error) = write_live_folder_picker_host_result(path, &outcome)
-    {
-        log_static(format!("live-folder: picker host result write failed: {error}\n").as_str());
-        return LIVE_FOLDER_PICKER_HOST_ERROR_EXIT;
-    }
-    match outcome {
-        LiveFolderPickerHostOutcome::Selected(folder) => {
-            println!("{folder}");
-            LIVE_FOLDER_PICKER_HOST_SELECTED_EXIT
-        }
-        LiveFolderPickerHostOutcome::Canceled => LIVE_FOLDER_PICKER_HOST_CANCEL_EXIT,
-        LiveFolderPickerHostOutcome::Error(error) => {
-            log_static(format!("live-folder: picker host failed: {error}\n").as_str());
-            LIVE_FOLDER_PICKER_HOST_ERROR_EXIT
-        }
-    }
-}
-
-pub(super) fn write_live_folder_picker_host_result(
-    path: &Path,
-    outcome: &LiveFolderPickerHostOutcome,
-) -> Result<(), String> {
-    let content = match outcome {
-        LiveFolderPickerHostOutcome::Selected(folder) => format!("selected\n{folder}\n"),
-        LiveFolderPickerHostOutcome::Canceled => "canceled\n".to_owned(),
-        LiveFolderPickerHostOutcome::Error(error) => format!("error\n{error}\n"),
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("create result dir {} failed: {error}", parent.display()))?;
-    }
-    std::fs::write(path, content)
-        .map_err(|error| format!("write picker result {} failed: {error}", path.display()))
-}
-
-pub(super) fn read_live_folder_picker_host_result(path: &Path) -> Result<Option<SmolStr>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| format!("read picker result {} failed: {error}", path.display()))?;
-    let mut lines = content.lines();
-    match lines.next() {
-        Some("selected") => {
-            let folder = lines.next().unwrap_or_default().trim();
-            if folder.is_empty() {
-                Err("native folder picker host returned an empty folder path".to_owned())
-            } else {
-                Ok(Some(SmolStr::new(folder)))
-            }
-        }
-        Some("canceled") => Ok(None),
-        Some("error") => {
-            let message = lines.collect::<Vec<_>>().join("\n");
-            if message.trim().is_empty() {
-                Err("native folder picker host reported an error".to_owned())
-            } else {
-                Err(message)
-            }
-        }
-        Some(status) => Err(format!(
-            "native folder picker host returned unknown status {status}"
-        )),
-        None => Err("native folder picker host returned an empty result file".to_owned()),
-    }
-}
-
-pub(super) fn live_folder_picker_result_path(zone_id: ZoneId) -> PathBuf {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    std::env::temp_dir().join(format!(
-        "bentodesk-live-folder-picker-{}-{}-{millis}.txt",
-        std::process::id(),
-        zone_id.0
-    ))
-}
-
-pub(super) fn quote_windows_arg(arg: &str) -> String {
-    if !arg.is_empty()
-        && !arg
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '"'))
-    {
-        return arg.to_owned();
-    }
-    let mut quoted = String::with_capacity(arg.len() + 2);
-    quoted.push('"');
-    for ch in arg.chars() {
-        if ch == '"' {
-            quoted.push('\\');
-        }
-        quoted.push(ch);
-    }
-    quoted.push('"');
-    quoted
-}
-
 pub(super) fn select_live_folder_from_dialog(
-    _owner: HWND,
+    owner: HWND,
     zone_id: ZoneId,
 ) -> Result<Option<SmolStr>, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("native folder picker host path unavailable: {error}"))?;
-    let result_path = live_folder_picker_result_path(zone_id);
-    if result_path.exists() {
-        std::fs::remove_file(&result_path).map_err(|error| {
-            format!(
-                "remove stale picker result {} failed: {error}",
-                result_path.display()
-            )
-        })?;
-    }
-    log_static(
-        format!(
-            "live-folder: picker host launching pid={} exe={} zone_id={} result={}\n",
-            std::process::id(),
-            exe.display(),
-            zone_id.0,
-            result_path.display()
-        )
-        .as_str(),
-    );
-    let parameters = format!(
-        "{} {} {}",
-        LIVE_FOLDER_PICKER_HOST_ARG,
-        zone_id.0,
-        quote_windows_arg(&result_path.display().to_string())
-    );
-    let operation = widen_dynamic("open");
-    let exe_w = widen_dynamic(&exe.display().to_string());
-    let parameters_w = widen_dynamic(&parameters);
-    // SAFETY: ShellExecuteW is called with null-terminated UTF-16 strings that
-    // remain alive for the duration of the call. The helper process writes its
-    // result to `result_path`; no raw handles are shared with the UI process.
-    let launch_result = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            operation.as_ptr(),
-            exe_w.as_ptr(),
-            parameters_w.as_ptr(),
-            ptr::null(),
-            SW_SHOW,
-        )
-    };
-    if launch_result as isize <= 32 {
-        return Err(format!(
-            "native folder picker host launch failed: ShellExecuteW={}",
-            launch_result as isize
-        ));
-    }
-
-    let started = SystemTime::now();
-    loop {
-        if result_path.exists() {
-            let result = read_live_folder_picker_host_result(&result_path);
-            let _ = std::fs::remove_file(&result_path);
-            log_static(
-                format!(
-                    "live-folder: picker host result received pid={} path={}\n",
-                    std::process::id(),
-                    result_path.display()
-                )
-                .as_str(),
-            );
-            return result;
-        }
-        let elapsed = SystemTime::now()
-            .duration_since(started)
-            .unwrap_or_default();
-        if elapsed >= LIVE_FOLDER_PICKER_HOST_TIMEOUT {
-            return Err(format!(
-                "native folder picker host timed out waiting for {}",
-                result_path.display()
-            ));
-        }
-        std::thread::sleep(LIVE_FOLDER_PICKER_HOST_POLL);
-    }
+    // SAFETY: the shell UI thread is an OLE STA from startup. The nested
+    // OleInitialize/OleUninitialize pair below keeps this call independently
+    // correct when the drag-drop initialization path was unavailable.
+    unsafe { select_live_folder_from_dialog_on_sta(owner, zone_id) }
 }
 
 pub(super) unsafe fn select_live_folder_from_dialog_on_sta(
@@ -397,16 +175,15 @@ pub(super) unsafe fn select_live_folder_from_dialog_on_sta(
     zone_id: ZoneId,
 ) -> Result<Option<SmolStr>, String> {
     log_static("live-folder: picker initializing OLE STA\n");
-    // SAFETY: The picker runs on a dedicated worker thread. OleInitialize
-    // enters the STA/OLE apartment required by Shell common dialogs and is
-    // balanced by OleUninitialize after the dialog object has been dropped.
+    // SAFETY: OleInitialize enters (or increments) the shell UI thread's
+    // STA/OLE apartment and is balanced after the dialog object is dropped.
     unsafe { OleInitialize(None) }
         .map_err(|error| format_windows_error("native folder picker OLE init failed", error))?;
     log_static("live-folder: picker OLE STA initialized\n");
 
     let result = unsafe { select_live_folder_from_file_open_dialog(owner, zone_id) };
-    // SAFETY: This balances the successful OleInitialize call made above in the
-    // same worker thread.
+    // SAFETY: This balances the successful OleInitialize call made above on
+    // this thread.
     unsafe { OleUninitialize() };
     result
 }
@@ -475,9 +252,10 @@ pub(super) unsafe fn select_live_folder_from_file_open_dialog(
         .map_err(|error| format_windows_error("native folder picker result failed", error))?;
     let display_name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
         .map_err(|error| format_windows_error("native folder picker path failed", error))?;
-    let path = unsafe { display_name.to_string() }
-        .map_err(|error| format!("native folder picker path UTF-16 decode failed: {error}"))?;
+    let path = unsafe { display_name.to_string() };
     unsafe { CoTaskMemFree(display_name.as_ptr() as *const _) };
+    let path =
+        path.map_err(|error| format!("native folder picker path UTF-16 decode failed: {error}"))?;
     let folder = path.trim();
     if folder.is_empty() {
         return Err("native folder picker returned an empty folder path".to_owned());

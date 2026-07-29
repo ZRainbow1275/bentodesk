@@ -59,7 +59,9 @@ fn rules_preview_zones_preserve_live_item_assignments() {
         height: 600.0,
     };
     let mut zone = Zone::new(ZoneId(12), "Archive", 80, 60, 240, 180);
-    zone.live_folder_path = Some(std::borrow::Cow::Borrowed("C:/Users/BentoDeskTest/Documents/Live"));
+    zone.live_folder_path = Some(std::borrow::Cow::Borrowed(
+        "C:/Users/BentoDeskTest/Documents/Live",
+    ));
     zone.items.push(ZoneItem {
         id: ZoneItemId(3),
         name: std::borrow::Cow::Borrowed("a.log"),
@@ -69,7 +71,9 @@ fn rules_preview_zones_preserve_live_item_assignments() {
         y: 1,
         is_wide: true,
         file_missing: false,
-        original_path: Some(std::borrow::Cow::Borrowed("C:/Users/BentoDeskTest/Desktop/a.log")),
+        original_path: Some(std::borrow::Cow::Borrowed(
+            "C:/Users/BentoDeskTest/Desktop/a.log",
+        )),
         hidden_path: Some(std::borrow::Cow::Borrowed("C:/Data/.bentodesk/12/a.log")),
         tags: smallvec::SmallVec::new(),
     });
@@ -129,7 +133,10 @@ fn live_folder_rehydrate_binds_persisted_paths_once_after_startup_load() {
     assert!(changed);
     assert_eq!(
         bound,
-        vec![(ZoneId(32), "C:/Users/BentoDeskTest/Desktop/Live".to_string())]
+        vec![(
+            ZoneId(32),
+            "C:/Users/BentoDeskTest/Desktop/Live".to_string()
+        )]
     );
     assert_eq!(refreshed, vec![ZoneId(32)]);
     assert!(root.live_folder_rehydrated.get());
@@ -169,6 +176,20 @@ fn live_folder_rehydrate_reports_binding_failures_visibly() {
             .expect("visible status")
             .contains("Live folder rehydrate failed for zone 35")
     );
+}
+
+#[test]
+fn live_folder_picker_stays_inside_the_shell_process() {
+    let source = include_str!("../shell/live_folders.rs");
+    assert!(!source.contains("std::env::current_exe"));
+    assert!(!source.contains("LIVE_FOLDER_PICKER_HOST"));
+    assert!(source.contains("select_live_folder_from_dialog_on_sta(owner, zone_id)"));
+}
+
+#[test]
+fn native_manifest_version_matches_the_shell_package() {
+    let manifest = include_str!("../../app.manifest");
+    assert!(manifest.contains(&format!("version=\"{}.0\"", env!("CARGO_PKG_VERSION"))));
 }
 
 #[test]
