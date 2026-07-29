@@ -513,7 +513,7 @@ fn position_item(zone: &mut Zone, item_id: ZoneItemId, item_index: u64) {
     let x = (item_index % 5) as i32;
     let y = (item_index / 5) as i32;
     let _ = zone.move_item(item_id, x, y);
-    if item_index % 4 == 0 {
+    if item_index.is_multiple_of(4) {
         let _ = zone.toggle_item_wide(item_id);
     }
 }
@@ -527,7 +527,7 @@ fn position_reference_0602_item(
     let x = (item_index % 5) as i32;
     let y = (item_index / 5) as i32;
     let _ = zone.move_item(item_id, x, y);
-    if zone_index != 0 && item_index % 4 == 0 {
+    if zone_index != 0 && item_index.is_multiple_of(4) {
         let _ = zone.toggle_item_wide(item_id);
     }
 }

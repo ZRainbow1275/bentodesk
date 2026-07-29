@@ -53,6 +53,10 @@ pub enum StorageError {
     Recovery { path: PathBuf, message: String },
     /// `SHGetKnownFolderPath` did not return `S_OK`.
     KnownFolder { ctx: &'static str, hr: i32 },
+    /// `SHGetKnownFolderPath` reported success without returning a path.
+    KnownFolderNull { ctx: &'static str },
+    /// The known-folder path was returned but does not exist on disk.
+    KnownFolderMissing { ctx: &'static str },
 }
 
 impl core::fmt::Display for StorageError {
@@ -87,6 +91,12 @@ impl core::fmt::Display for StorageError {
             Self::KnownFolder { ctx, hr } => {
                 write!(f, "{ctx}: SHGetKnownFolderPath failed (hr={hr:#x})")
             }
+            Self::KnownFolderNull { ctx } => {
+                write!(f, "{ctx}: SHGetKnownFolderPath returned a null path")
+            }
+            Self::KnownFolderMissing { ctx } => {
+                write!(f, "{ctx}: known-folder path does not exist")
+            }
         }
     }
 }
@@ -105,10 +115,10 @@ impl core::error::Error for StorageError {}
 pub fn state_data_dir() -> PathBuf {
     if let Ok(exe_path) = std::env::current_exe() {
         let portable_dir = exe_path.parent().map(|p| p.join("data"));
-        if let Some(ref dir) = portable_dir {
-            if dir.exists() {
-                return dir.clone();
-            }
+        if let Some(ref dir) = portable_dir
+            && dir.exists()
+        {
+            return dir.clone();
         }
     }
 
@@ -158,42 +168,25 @@ fn isolate_debug_data_dir(base: PathBuf) -> PathBuf {
 /// `SHGetKnownFolderPath(FOLDERID_RoamingAppData)` → `%APPDATA%`.
 #[cfg(windows)]
 fn known_folder_roaming_appdata() -> Result<PathBuf, StorageError> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{
-        FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    };
+    use crate::desktop_sources::DesktopSourcesError;
+    use windows_sys::Win32::UI::Shell::FOLDERID_RoamingAppData;
 
-    // SAFETY: SHGetKnownFolderPath writes a COM-allocated PWSTR into our
-    // out-pointer. We free it via CoTaskMemFree below regardless of the
-    // result. `None` for the token argument requests the current user.
-    let pwstr = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) };
-    let pwstr = match pwstr {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(StorageError::KnownFolder {
-                ctx: "FOLDERID_RoamingAppData",
-                hr: e.code().0,
-            });
-        }
-    };
-    if pwstr.as_ptr().is_null() {
-        return Err(StorageError::KnownFolder {
-            ctx: "FOLDERID_RoamingAppData null",
-            hr: 0,
-        });
+    match crate::desktop_sources::known_folder_path(
+        &FOLDERID_RoamingAppData,
+        "FOLDERID_RoamingAppData",
+    ) {
+        Ok(Some(path)) => Ok(path),
+        Ok(None) => Err(StorageError::KnownFolderMissing {
+            ctx: "FOLDERID_RoamingAppData",
+        }),
+        Err(DesktopSourcesError::Hresult { hr, .. }) => Err(StorageError::KnownFolder {
+            ctx: "FOLDERID_RoamingAppData",
+            hr,
+        }),
+        Err(DesktopSourcesError::Null { .. }) => Err(StorageError::KnownFolderNull {
+            ctx: "FOLDERID_RoamingAppData",
+        }),
     }
-    // SAFETY: pwstr is a COM-allocated null-terminated UTF-16 string; convert
-    // to a Rust String, then free via CoTaskMemFree to balance the COM alloc.
-    let path_str = unsafe { pwstr.to_string() };
-    // SAFETY: pwstr was returned by SHGetKnownFolderPath; CoTaskMemFree is the
-    // documented disposal call.
-    unsafe { CoTaskMemFree(Some(pwstr.as_ptr() as *const _)) };
-
-    let path = path_str.map_err(|_| StorageError::KnownFolder {
-        ctx: "PWSTR::to_string",
-        hr: 0,
-    })?;
-    Ok(PathBuf::from(path))
 }
 
 // ─── Path helpers ────────────────────────────────────────────────────

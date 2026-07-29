@@ -235,10 +235,10 @@ pub(super) fn handle_zone_editor_char(root: &AppRoot, codepoint: u32) {
         return;
     }
     let app = root.app.borrow();
-    if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
-        if session.draft_name.chars().count() < NAME_MAX_LEN {
-            session.draft_name.push(ch);
-        }
+    if let Some(session) = app.zone_editor.borrow_mut().as_mut()
+        && session.draft_name.chars().count() < NAME_MAX_LEN
+    {
+        session.draft_name.push(ch);
     }
 }
 
@@ -317,11 +317,11 @@ pub(super) fn handle_item_file_rename_char(root: &AppRoot, codepoint: u32) {
         return;
     }
     let app = root.app.borrow();
-    if let Some(session) = app.item_file_rename.borrow_mut().as_mut() {
-        if session.draft_name.chars().count() < 128 {
-            session.draft_name.push(ch);
-            session.status = None;
-        }
+    if let Some(session) = app.item_file_rename.borrow_mut().as_mut()
+        && session.draft_name.chars().count() < 128
+    {
+        session.draft_name.push(ch);
+        session.status = None;
     }
 }
 

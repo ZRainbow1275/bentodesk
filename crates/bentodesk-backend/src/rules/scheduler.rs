@@ -3,7 +3,7 @@
 //! Replaces 1.x's `tauri::async_runtime::spawn` + `tokio::time::interval`
 //! (forbidden by spec §9 — no async runtime) with a plain
 //! `std::thread::spawn` that sleeps in 1-second slices so the static
-//! [`SHUTDOWN`] flag can preempt within a second of `shutdown()` being
+//! `SHUTDOWN` flag can preempt within a second of `shutdown()` being
 //! called.
 //!
 //! The scheduler does **not** apply rule effects on its own — it produces

@@ -233,10 +233,10 @@ impl HotLru {
             return None;
         }
         // Move key to MRU end.
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            if let Some(k) = self.order.remove(pos) {
-                self.order.push_back(k);
-            }
+        if let Some(pos) = self.order.iter().position(|k| k == key)
+            && let Some(k) = self.order.remove(pos)
+        {
+            self.order.push_back(k);
         }
         self.map.get(key).cloned()
     }
@@ -631,7 +631,7 @@ fn state_cell() -> &'static Mutex<Option<IconState>> {
 /// `lookup_*` call. Subsequent calls overwrite the previous config —
 /// useful for tests; production callers should call exactly once.
 ///
-/// Returns the shared [`IconCache`] handle so the caller can hand it
+/// Returns the shared [`cache::IconCache`] handle so the caller can hand it
 /// to dispatcher callbacks that need direct access (e.g. preloader).
 pub fn init(config: &IconConfig) -> Arc<cache::IconCache> {
     let cache = Arc::new(cache::IconCache::with_warm_dir(256, config.warm_dir()));

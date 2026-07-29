@@ -18,10 +18,10 @@ pub(super) fn dispatch(
             effects.needs_redraw = true;
         }
         Command::LoadIcon(path) => {
-            if let Some(hash) = load_icon_hash_for_path(&path) {
-                if apply_loaded_item_icon(root, &path, hash.as_str()) {
-                    effects.needs_redraw = true;
-                }
+            if let Some(hash) = load_icon_hash_for_path(&path)
+                && apply_loaded_item_icon(root, &path, hash.as_str())
+            {
+                effects.needs_redraw = true;
             }
         }
         Command::ApplyLoadedIcon { path, hash } => {

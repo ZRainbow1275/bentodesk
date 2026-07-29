@@ -175,7 +175,7 @@ pub struct Vault {
 impl Vault {
     /// Open or create the vault at `path`. If the file does not yet exist,
     /// returns an empty vault in `None` mode (caller switches to `Dpapi` /
-    /// `Passphrase` via [`set_mode`] before flushing).
+    /// `Passphrase` via [`Self::set_mode`] before flushing).
     pub fn open(path: &Path) -> Result<Self, VaultError> {
         // `read_json_with_recovery` already handles missing-file → `Ok(None)`
         // and `.bak` rotation per the contract documented in storage::mod.rs:303.
@@ -303,7 +303,7 @@ impl Vault {
     }
 
     /// Set or overwrite a setting. Marks the vault dirty for the next
-    /// [`flush`]. Idempotent at the storage layer; no-op writes are
+    /// [`Self::flush`]. Idempotent at the storage layer; no-op writes are
     /// re-flushed (acceptable — typical UI session emits ≤100 SetSetting
     /// calls and flush is debounced by the caller).
     pub fn set_setting(&mut self, key: &str, value: SettingValue) {
@@ -329,7 +329,7 @@ impl Vault {
     }
 
     /// Switch the encryption mode. Marks the vault dirty so the next
-    /// [`flush`] re-writes the file in the new shape.
+    /// [`Self::flush`] re-writes the file in the new shape.
     pub fn set_mode(&mut self, mode: EncryptionMode) -> Result<(), VaultError> {
         self.mode = mode;
         self.dirty = true;

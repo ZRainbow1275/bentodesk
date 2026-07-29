@@ -19,37 +19,36 @@ pub(super) fn handle_main_window_timer(
             let p = get_slot_ptr(hwnd);
             if !p.is_null() {
                 let slot = &*p;
-                if let Some(root) = app_root() {
-                    if let Some((x, y, passthrough)) =
+                if let Some(root) = app_root()
+                    && let Some((x, y, passthrough)) =
                         refresh_ghost_cursor_passthrough(root, slot, hwnd)
-                    {
-                        if !passthrough {
-                            handle_mouse_move(root, slot, x, y);
+                {
+                    if !passthrough {
+                        handle_mouse_move(root, slot, x, y);
+                        request_redraw(hwnd);
+                    } else {
+                        // V-8.5 (2026-05-21) — passthrough flipped
+                        // ON means the cursor is now over blank
+                        // pixels (or off the overlay entirely).
+                        // `handle_mouse_move` won't fire from here
+                        // and the OS does NOT route a fresh
+                        // `WM_MOUSEMOVE` once `WS_EX_TRANSPARENT`
+                        // is hot. Without this branch the pill
+                        // hover state stays pinned at scale 1.04
+                        // and never plays the 220 ms ease-out
+                        // recover. Calling `clear_hover` here
+                        // fires `update_pill_hover_animator(None)`
+                        // which starts the recover tween for the
+                        // previously-hovered pill, and the
+                        // `tick_pill_animator` per-frame pump
+                        // keeps redrawing until it settles.
+                        let app = root.app.borrow();
+                        let had_hover = app.hovered_zone.get().is_some();
+                        drop(app);
+                        if had_hover {
+                            clear_hover(root);
+                            arm_hover_frame_timer(hwnd);
                             request_redraw(hwnd);
-                        } else {
-                            // V-8.5 (2026-05-21) — passthrough flipped
-                            // ON means the cursor is now over blank
-                            // pixels (or off the overlay entirely).
-                            // `handle_mouse_move` won't fire from here
-                            // and the OS does NOT route a fresh
-                            // `WM_MOUSEMOVE` once `WS_EX_TRANSPARENT`
-                            // is hot. Without this branch the pill
-                            // hover state stays pinned at scale 1.04
-                            // and never plays the 220 ms ease-out
-                            // recover. Calling `clear_hover` here
-                            // fires `update_pill_hover_animator(None)`
-                            // which starts the recover tween for the
-                            // previously-hovered pill, and the
-                            // `tick_pill_animator` per-frame pump
-                            // keeps redrawing until it settles.
-                            let app = root.app.borrow();
-                            let had_hover = app.hovered_zone.get().is_some();
-                            drop(app);
-                            if had_hover {
-                                clear_hover(root);
-                                arm_hover_frame_timer(hwnd);
-                                request_redraw(hwnd);
-                            }
                         }
                     }
                 }

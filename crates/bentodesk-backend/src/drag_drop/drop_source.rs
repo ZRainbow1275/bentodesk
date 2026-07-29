@@ -62,7 +62,7 @@ impl IDropSource_Impl for BentoDropSource_Impl {
         let physical_left_button_down = physical_left_button_down();
         if drag_proof_log_enabled() {
             let count = QUERY_CONTINUE_DRAG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 8 || count % 50 == 0 {
+            if count <= 8 || count.is_multiple_of(50) {
                 log_drag_proof(
                     format!(
                         "drag_drop: QueryContinueDrag count={count} escape={} key_state=0x{:x} physical_left_down={}\n",
@@ -90,7 +90,7 @@ impl IDropSource_Impl for BentoDropSource_Impl {
     fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
         if drag_proof_log_enabled() {
             let count = GIVE_FEEDBACK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if count <= 8 || count % 50 == 0 {
+            if count <= 8 || count.is_multiple_of(50) {
                 log_drag_proof(format!("drag_drop: GiveFeedback count={count}\n").as_str());
             }
         }

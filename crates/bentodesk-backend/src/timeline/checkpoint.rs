@@ -331,16 +331,16 @@ pub fn compute_delta(prev: Option<&DesktopSnapshot>, current_zones: &[BentoZone]
         .collect();
     for cur in current_zones {
         for item in &cur.items {
-            if let Some(&prev_zone_id) = prev_item_zone.get(item.id.as_str()) {
-                if prev_zone_id != cur.id.as_str() {
-                    d.items_moved += 1;
-                }
+            if let Some(&prev_zone_id) = prev_item_zone.get(item.id.as_str())
+                && prev_zone_id != cur.id.as_str()
+            {
+                d.items_moved += 1;
             }
         }
-        if let Some(prev) = prev_zones.iter().find(|z| z.id == cur.id) {
-            if zone_metadata_changed(prev, cur) {
-                d.zones_updated += 1;
-            }
+        if let Some(prev) = prev_zones.iter().find(|z| z.id == cur.id)
+            && zone_metadata_changed(prev, cur)
+        {
+            d.zones_updated += 1;
         }
     }
 

@@ -160,10 +160,8 @@ impl ZoneList {
 
         // A transferred source anchor becomes an ordinary child; its former
         // children are transferred beside it rather than remaining nested.
-        if child_is_anchor {
-            if let Some(source) = self.get_mut(child) {
-                source.stack_members.clear();
-            }
+        if child_is_anchor && let Some(source) = self.get_mut(child) {
+            source.stack_members.clear();
         }
         for member in transfer.iter().copied() {
             if let Some(zone) = self.get_mut(member) {

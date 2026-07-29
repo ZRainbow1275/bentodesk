@@ -34,12 +34,12 @@ pub(super) fn handle_stack_tray_lbutton_down(root: &AppRoot, x: f32, y: f32) -> 
     let Some((hit, anchor, members)) = stack_tray_hit(root, x, y) else {
         return false;
     };
-    if let StackTrayPointerHit::Row(row) = hit {
-        if let Some(member) = members.get(row).copied() {
-            let app = root.app.borrow();
-            app.stack_tray_drag
-                .set(Some(StackTrayDragState::new(anchor, member, row)));
-        }
+    if let StackTrayPointerHit::Row(row) = hit
+        && let Some(member) = members.get(row).copied()
+    {
+        let app = root.app.borrow();
+        app.stack_tray_drag
+            .set(Some(StackTrayDragState::new(anchor, member, row)));
     }
     true
 }
@@ -435,10 +435,8 @@ pub(super) fn handle_snapshot_picker_keydown(root: &AppRoot, vk: u32, hwnd: HWND
                         false
                     }
                 };
-                if should_delete {
-                    if let Some(snapshot_id) = selected_snapshot_id(root) {
-                        root.dispatcher.push(Command::DeleteSnapshot(snapshot_id));
-                    }
+                if should_delete && let Some(snapshot_id) = selected_snapshot_id(root) {
+                    root.dispatcher.push(Command::DeleteSnapshot(snapshot_id));
                 }
             } else {
                 set_snapshot_picker_error(

@@ -233,11 +233,11 @@ impl SearchBarState {
     /// window has elapsed since the last keystroke.
     pub fn tick(&mut self, dt_ms: u32) -> Option<SmolStr> {
         self.now_ms = self.now_ms.saturating_add(dt_ms);
-        if let Some(at_ms) = self.pending_query_at_ms {
-            if self.now_ms.saturating_sub(at_ms) >= DEBOUNCE_MS {
-                self.pending_query_at_ms = None;
-                return Some(self.query.clone());
-            }
+        if let Some(at_ms) = self.pending_query_at_ms
+            && self.now_ms.saturating_sub(at_ms) >= DEBOUNCE_MS
+        {
+            self.pending_query_at_ms = None;
+            return Some(self.query.clone());
         }
         None
     }

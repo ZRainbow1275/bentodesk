@@ -231,11 +231,12 @@ impl Animator {
     /// Cancel an entry, freeing its slot. No-op if not present.
     pub fn cancel(&mut self, zone: ZoneId, channel: AnimChannel) {
         for slot in self.entries.iter_mut() {
-            if let Some(existing) = slot {
-                if existing.zone == zone && existing.channel == channel {
-                    *slot = None;
-                    return;
-                }
+            if let Some(existing) = slot
+                && existing.zone == zone
+                && existing.channel == channel
+            {
+                *slot = None;
+                return;
             }
         }
     }

@@ -96,6 +96,29 @@ pub(super) fn hide_item_file(
             original_path: Some(original),
             hidden_path: Some(hidden),
         },
+        Err(bentodesk_backend::stealth::StealthError::HiddenWithoutManifest {
+            original_path,
+            hidden_path,
+            manifest_error,
+            rollback_error,
+        }) => {
+            tracing::error!(
+                target: "bentodesk::stealth",
+                ?zone_id,
+                original = %original_path.display(),
+                hidden = %hidden_path.display(),
+                manifest_error,
+                rollback_error,
+                "AddItem: file remains hidden without a manifest; retaining recovery paths in the Zone model"
+            );
+            let original = original_path.to_string_lossy().into_owned();
+            let hidden = hidden_path.to_string_lossy().into_owned();
+            HiddenItemPaths {
+                effective_path: hidden.clone(),
+                original_path: Some(original),
+                hidden_path: Some(hidden),
+            }
+        }
         Err(e) => {
             tracing::warn!(
                 target: "bentodesk::stealth",

@@ -409,7 +409,7 @@ impl SuggestorState {
     }
 
     /// User dismissed a single row. Records a `Dismiss` action. Like
-    /// [`apply`], returns `false` for a stale id.
+    /// [`Self::apply`], returns `false` for a stale id.
     pub fn dismiss(&mut self, id: &str) -> bool {
         let Some(entry) = self.entries.iter().find(|e| e.id.as_str() == id) else {
             return false;

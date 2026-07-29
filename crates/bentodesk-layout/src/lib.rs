@@ -269,11 +269,12 @@ impl LayoutEngine {
             tree_len: tree.len(),
             epoch,
         };
-        if let Some(prev) = self.last_key {
-            if prev.matches(&key) && !self.result.is_empty() {
-                self.hit_count += 1;
-                return Ok(&self.result);
-            }
+        if let Some(prev) = self.last_key
+            && prev.matches(&key)
+            && !self.result.is_empty()
+        {
+            self.hit_count += 1;
+            return Ok(&self.result);
         }
 
         self.result.clear();

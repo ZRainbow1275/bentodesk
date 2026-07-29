@@ -152,13 +152,13 @@ fn extract_zip_safely(archive: &mut ZipArchive<File>, dest_dir: &Path) -> Result
             archive_error(format!("cannot read ZIP entry {entry_index}: {error}"))
         })?;
 
-        if let Some(mode) = entry.unix_mode() {
-            if mode & ZIP_UNIX_FILE_TYPE_MASK == ZIP_UNIX_SYMLINK_TYPE {
-                return Err(archive_error(format!(
-                    "ZIP entry '{}' is a symlink, which is not supported",
-                    entry.name()
-                )));
-            }
+        if let Some(mode) = entry.unix_mode()
+            && mode & ZIP_UNIX_FILE_TYPE_MASK == ZIP_UNIX_SYMLINK_TYPE
+        {
+            return Err(archive_error(format!(
+                "ZIP entry '{}' is a symlink, which is not supported",
+                entry.name()
+            )));
         }
 
         let entry_path = entry

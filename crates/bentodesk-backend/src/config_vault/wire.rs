@@ -228,7 +228,7 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, Base64Error> {
         return Ok(Vec::new());
     }
     let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(Base64Error::InvalidLength { len: bytes.len() });
     }
 

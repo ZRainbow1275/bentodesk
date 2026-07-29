@@ -255,15 +255,15 @@ pub(super) fn envelope_entry_from_payload(
     fallback_modified: SystemTime,
     payload: &[u8],
 ) -> CapsuleEntry {
-    if context_capsule_payload_is_json(payload) {
-        if let Ok(envelope) = decode_context_capsule_envelope(payload) {
-            return CapsuleEntry::new(
-                capsule_id,
-                SmolStr::new(envelope.name),
-                SmolStr::new(envelope.icon),
-                envelope.captured_at,
-            );
-        }
+    if context_capsule_payload_is_json(payload)
+        && let Ok(envelope) = decode_context_capsule_envelope(payload)
+    {
+        return CapsuleEntry::new(
+            capsule_id,
+            SmolStr::new(envelope.name),
+            SmolStr::new(envelope.icon),
+            envelope.captured_at,
+        );
     }
     CapsuleEntry::new(
         capsule_id.clone(),

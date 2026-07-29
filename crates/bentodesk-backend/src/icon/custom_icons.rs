@@ -6,12 +6,12 @@
 //! - `tauri::AppHandle` → [`super::IconConfig`].
 //! - `crate::storage::state_data_dir(handle)` → `config.app_data_path()`.
 //! - `image::load_from_memory_with_format(.., Png)` → WIC validate-decode
-//!   via [`super::wic`] (round-trips through `IWICBitmapDecoder`); the
+//!   via `super::wic` (round-trips through `IWICBitmapDecoder`); the
 //!   re-encoded bytes are written to disk so any decoder quirks are
 //!   normalised at upload time.
 //! - `image::load_from_memory_with_format(.., Ico)` → WIC ICO decoder,
 //!   then re-encode the largest frame as PNG.
-//! - `uuid::Uuid::new_v4().to_string()` → [`super::unique_icon_id()`]
+//! - `uuid::Uuid::new_v4().to_string()` → `super::unique_icon_id()`
 //!   (32-hex-char identifier, see `mod.rs`).
 //! - `chrono::Utc::now().to_rfc3339()` → `crate::time::now_rfc3339()`.
 //! - All public structs derive `serde::Serialize/Deserialize` per

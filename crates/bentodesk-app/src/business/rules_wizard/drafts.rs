@@ -3,9 +3,9 @@
 //! drive the step UI.
 //!
 //! Everything in here is **representation**: what the user is typing right
-//! now, plus the reverse mapping from a saved [`Rule`] back into draft form
+//! now, plus the reverse mapping from a saved `Rule` back into draft form
 //! when the wizard opens in Edit mode. Construction of the final
-//! [`Rule`] lives in `mod.rs::RulesWizardState::build_rule`.
+//! `Rule` lives in `mod.rs::RulesWizardState::build_rule`.
 
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;

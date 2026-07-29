@@ -86,7 +86,7 @@ pub fn settings_backup_description_rect(
     }
 }
 
-/// M1g — actions row rect ([立即备份][刷新]). Always shown; below the
+/// M1g — actions row rect (`立即备份`, `刷新`). Always shown; below the
 /// description line.
 pub fn settings_backup_actions_row_rect(
     viewport: Size,

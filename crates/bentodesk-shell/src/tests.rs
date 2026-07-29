@@ -182,6 +182,7 @@ use super::{
     list_settings_backups_for_vault_path,
     load_available_theme_options,
     load_startup_zones_or_migrate_legacy,
+    locale_for_ui_language,
     locale_setting_command_for,
     logical_viewport_from_device_size,
     main_hover_cursor_watch_active,

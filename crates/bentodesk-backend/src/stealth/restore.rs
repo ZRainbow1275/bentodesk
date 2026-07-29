@@ -92,10 +92,10 @@ fn resolve_restore_identity(
                 if path.is_dir() {
                     continue;
                 }
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.eq_ignore_ascii_case(&item.name) {
-                        out.push(path);
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && name.eq_ignore_ascii_case(&item.name)
+                {
+                    out.push(path);
                 }
             }
         }
@@ -132,13 +132,13 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), Stealt
         });
     }
 
-    if let Some(parent) = dest.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| StealthError::Io {
-                path: parent.to_path_buf(),
-                message: e.to_string(),
-            })?;
-        }
+    if let Some(parent) = dest.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| StealthError::Io {
+            path: parent.to_path_buf(),
+            message: e.to_string(),
+        })?;
     }
 
     if dest.exists() {
@@ -166,7 +166,7 @@ pub fn restore_file(original_path: &str, hidden_path: &str) -> Result<(), Stealt
                 message: format!("directory rename failed; hidden source preserved: {e}"),
             });
         }
-        match std::fs::copy(source, dest) {
+        match super::copy_file_without_overwrite(source, dest) {
             Ok(_) => {
                 if let Err(rm_err) = std::fs::remove_file(source) {
                     tracing::error!(
@@ -453,7 +453,7 @@ pub fn reconcile_zone_items_with_dirs(
                         dest,
                         rename_err
                     );
-                    match std::fs::copy(source, &dest) {
+                    match super::copy_file_without_overwrite(source, &dest) {
                         Ok(_) => match std::fs::remove_file(source) {
                             Ok(()) => true,
                             Err(rm_err) => {
@@ -559,30 +559,30 @@ pub fn reconcile_zone_items(
             .map(|p| Path::new(p).exists())
             .unwrap_or(false);
 
-        if !was_hidden && is_hidden_now {
-            if let (Some(original), Some(hidden)) =
+        if !was_hidden
+            && is_hidden_now
+            && let (Some(original), Some(hidden)) =
                 (item.original_path.as_deref(), item.hidden_path.as_deref())
-            {
-                let file_size = std::fs::metadata(hidden).map(|m| m.len()).unwrap_or(0);
-                let display_name = Path::new(hidden)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if let Err(e) = manifest_add(
-                    &hdir,
-                    super::sync::ManifestAddParams {
-                        original_path: original,
-                        hidden_path: hidden,
-                        zone_id,
-                        file_size_bytes: file_size,
-                        display_name: &display_name,
-                        icon_x: None,
-                        icon_y: None,
-                        file_type: "",
-                    },
-                ) {
-                    tracing::warn!("reconcile: manifest_add failed for {original}: {e}");
-                }
+        {
+            let file_size = std::fs::metadata(hidden).map(|m| m.len()).unwrap_or(0);
+            let display_name = Path::new(hidden)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Err(e) = manifest_add(
+                &hdir,
+                super::sync::ManifestAddParams {
+                    original_path: original,
+                    hidden_path: hidden,
+                    zone_id,
+                    file_size_bytes: file_size,
+                    display_name: &display_name,
+                    icon_x: None,
+                    icon_y: None,
+                    file_type: "",
+                },
+            ) {
+                tracing::warn!("reconcile: manifest_add failed for {original}: {e}");
             }
         }
     }
@@ -672,10 +672,10 @@ pub fn restore_all_hidden(
             for entry in entries.flatten() {
                 let entry_path = entry.path();
                 if entry_path.is_dir() {
-                    if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with('.') {
-                            continue;
-                        }
+                    if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
+                        && name.starts_with('.')
+                    {
+                        continue;
                     }
                     scan_restored += scan_and_restore_orphans(&entry_path, &desktop_path);
 
@@ -730,13 +730,13 @@ fn scan_and_restore_orphans(dir: &Path, desktop_path: &str) -> u32 {
     for entry in entries.flatten() {
         let file_path = entry.path();
 
-        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-            if matches!(
+        if let Some(name) = file_path.file_name().and_then(|n| n.to_str())
+            && matches!(
                 name,
                 "manifest.json" | "manifest.json.tmp" | "manifest.json.bak"
-            ) {
-                continue;
-            }
+            )
+        {
+            continue;
         }
         if file_path.is_dir() {
             continue;
@@ -769,16 +769,16 @@ pub fn verify_references(items: &[StealthItem]) -> Vec<String> {
     let mut missing = Vec::new();
 
     for item in items {
-        if let Some(hidden) = &item.hidden_path {
-            if !Path::new(hidden).exists() {
-                tracing::warn!(
-                    "Reference verification: hidden file missing — item='{}', hidden_path='{}'",
-                    item.name,
-                    hidden
-                );
-                if let Some(orig) = &item.original_path {
-                    missing.push(orig.clone());
-                }
+        if let Some(hidden) = &item.hidden_path
+            && !Path::new(hidden).exists()
+        {
+            tracing::warn!(
+                "Reference verification: hidden file missing — item='{}', hidden_path='{}'",
+                item.name,
+                hidden
+            );
+            if let Some(orig) = &item.original_path {
+                missing.push(orig.clone());
             }
         }
     }

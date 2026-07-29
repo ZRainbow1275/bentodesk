@@ -305,10 +305,10 @@ impl Renderer {
         size_pt: f32,
     ) -> Result<IDWriteTextFormat, RenderError> {
         let size_pt = size_pt.max(1.0);
-        if let Some(cached) = self.monospace_format.as_ref() {
-            if (cached.size_pt - size_pt).abs() < f32::EPSILON {
-                return Ok(cached.format.clone());
-            }
+        if let Some(cached) = self.monospace_format.as_ref()
+            && (cached.size_pt - size_pt).abs() < f32::EPSILON
+        {
+            return Ok(cached.format.clone());
         }
         // #19-B (2026-05-31) — resolve a MONOSPACE family that DWrite confirms
         // is installed BEFORE creating the format, so a stripped SKU lacking

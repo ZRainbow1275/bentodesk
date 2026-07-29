@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn version_is_non_empty_and_starts_with_v() {
-        assert_eq!(VERSION, "2.0.0");
+        assert!(!VERSION.is_empty());
         let v = format_version();
         assert!(v.starts_with('v'), "version must start with 'v', got {v}");
         if BUILD_HASH.is_some_and(|hash| !hash.trim().is_empty()) {

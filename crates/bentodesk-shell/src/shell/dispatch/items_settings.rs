@@ -392,16 +392,16 @@ pub(super) fn dispatch(
             if stored_in_vault {
                 let hotkey_changed = apply_hotkey_setting_to_runtime(root, key.as_str(), &value);
                 let app = root.app.borrow();
-                if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
-                    if let bentodesk_app::SettingValue::Str(chord) = &value {
-                        set_keybinding_feedback(
-                            &app,
-                            action,
-                            localized_current(format!("已保存 {chord}"), format!("Saved {chord}")),
-                            false,
-                        );
-                        effects.needs_redraw = true;
-                    }
+                if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX)
+                    && let bentodesk_app::SettingValue::Str(chord) = &value
+                {
+                    set_keybinding_feedback(
+                        &app,
+                        action,
+                        localized_current(format!("已保存 {chord}"), format!("Saved {chord}")),
+                        false,
+                    );
+                    effects.needs_redraw = true;
                 }
                 if apply_setting_value_to_app(&app, key.as_str(), &value) || hotkey_changed {
                     effects.needs_redraw = true;

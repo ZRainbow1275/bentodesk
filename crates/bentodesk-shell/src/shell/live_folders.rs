@@ -213,11 +213,11 @@ pub(super) fn live_folder_picker_host_exit_code(
         Ok(None) => LiveFolderPickerHostOutcome::Canceled,
         Err(error) => LiveFolderPickerHostOutcome::Error(error),
     };
-    if let Some(path) = result_path {
-        if let Err(error) = write_live_folder_picker_host_result(path, &outcome) {
-            log_static(format!("live-folder: picker host result write failed: {error}\n").as_str());
-            return LIVE_FOLDER_PICKER_HOST_ERROR_EXIT;
-        }
+    if let Some(path) = result_path
+        && let Err(error) = write_live_folder_picker_host_result(path, &outcome)
+    {
+        log_static(format!("live-folder: picker host result write failed: {error}\n").as_str());
+        return LIVE_FOLDER_PICKER_HOST_ERROR_EXIT;
     }
     match outcome {
         LiveFolderPickerHostOutcome::Selected(folder) => {

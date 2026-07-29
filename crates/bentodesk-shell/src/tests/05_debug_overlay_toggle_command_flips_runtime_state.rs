@@ -1,4 +1,20 @@
 #[test]
+fn startup_locale_uses_windows_ui_language_primary_id() {
+    assert!(std::ptr::eq(
+        locale_for_ui_language(0x0804),
+        &bentodesk_style::ZH_CN
+    ));
+    assert!(std::ptr::eq(
+        locale_for_ui_language(0x0409),
+        &bentodesk_style::EN_US
+    ));
+    assert!(std::ptr::eq(
+        locale_for_ui_language(0),
+        &bentodesk_style::EN_US
+    ));
+}
+
+#[test]
 fn debug_overlay_toggle_command_flips_runtime_state() {
     let root = test_app_root();
     assert!(!root.app.borrow().debug_overlay.borrow().visible);

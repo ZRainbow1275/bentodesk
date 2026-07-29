@@ -221,46 +221,40 @@ pub(super) fn push_stack_overlay_rects(
     let vp = app.viewport;
     // Open tray — tray body plus the focused preview pane only after a real
     // member is selected; the default anchor management view stays compact.
-    if let Some(state) = app.stack_tray.borrow().clone() {
-        if let Some(anchor) = app.zones.get(state.anchor_zone_id) {
-            if let Some(members) = app.zones.stack_member_ids(anchor.id) {
-                let member_count = members.len();
-                if state.is_management() {
-                    let tray = stack_tray::stack_tray_rect(vp, anchor, member_count);
-                    push_clamped_inflated(out, tray, full, CHROME_REGION_SHADOW_MARGIN_DIP);
-                    let selected_id = if members.contains(&state.selected_member_id) {
-                        state.selected_member_id
-                    } else {
-                        members[0]
-                    };
-                    if stack_tray::focused_preview_visible(anchor.id, selected_id) {
-                        push_clamped_inflated(
-                            out,
-                            stack_tray::focused_preview_rect(vp, tray),
-                            full,
-                            CHROME_REGION_SHADOW_MARGIN_DIP,
-                        );
-                    }
-                } else if let Some(member_index) = members
-                    .iter()
-                    .position(|member_id| *member_id == state.selected_member_id)
-                    && let Some(preview_zone) = app.zones.get(state.selected_member_id)
-                {
-                    let petals = stack_tray::stack_bloom_petal_rects(vp, anchor, member_count);
-                    if let Some(petal) = petals.get(member_index).copied() {
-                        push_clamped_inflated(
-                            out,
-                            stack_tray::focused_bloom_preview_rect(
-                                vp,
-                                petal,
-                                &petals,
-                                preview_zone,
-                            ),
-                            full,
-                            CHROME_REGION_SHADOW_MARGIN_DIP,
-                        );
-                    }
-                }
+    if let Some(state) = app.stack_tray.borrow().clone()
+        && let Some(anchor) = app.zones.get(state.anchor_zone_id)
+        && let Some(members) = app.zones.stack_member_ids(anchor.id)
+    {
+        let member_count = members.len();
+        if state.is_management() {
+            let tray = stack_tray::stack_tray_rect(vp, anchor, member_count);
+            push_clamped_inflated(out, tray, full, CHROME_REGION_SHADOW_MARGIN_DIP);
+            let selected_id = if members.contains(&state.selected_member_id) {
+                state.selected_member_id
+            } else {
+                members[0]
+            };
+            if stack_tray::focused_preview_visible(anchor.id, selected_id) {
+                push_clamped_inflated(
+                    out,
+                    stack_tray::focused_preview_rect(vp, tray),
+                    full,
+                    CHROME_REGION_SHADOW_MARGIN_DIP,
+                );
+            }
+        } else if let Some(member_index) = members
+            .iter()
+            .position(|member_id| *member_id == state.selected_member_id)
+            && let Some(preview_zone) = app.zones.get(state.selected_member_id)
+        {
+            let petals = stack_tray::stack_bloom_petal_rects(vp, anchor, member_count);
+            if let Some(petal) = petals.get(member_index).copied() {
+                push_clamped_inflated(
+                    out,
+                    stack_tray::focused_bloom_preview_rect(vp, petal, &petals, preview_zone),
+                    full,
+                    CHROME_REGION_SHADOW_MARGIN_DIP,
+                );
             }
         }
     }
@@ -271,25 +265,23 @@ pub(super) fn push_stack_overlay_rects(
     // where the bloom is NOT painted (tray open or a member focused/selected) —
     // no invisible dead click targets.
     let bloom_allowed = stack_surface_allows_bloom(app);
-    if let Some(anchor_id) = app.stack_bloom_anchor.get().filter(|_| bloom_allowed) {
-        if let Some(anchor) = app.zones.get(anchor_id) {
-            if let Some(members) = app.zones.stack_member_ids(anchor.id) {
-                let petals = if app.stack_bloom_leaving.get()
-                    && app.stack_bloom_anchor.get() == Some(anchor.id)
-                {
-                    stack_tray::stack_bloom_exit_petal_rects_at(
-                        vp,
-                        anchor,
-                        members.len(),
-                        app.stack_bloom_progress.get(),
-                    )
-                } else {
-                    stack_tray::stack_bloom_petal_rects(vp, anchor, members.len())
-                };
-                for petal in petals {
-                    push_clamped_inflated(out, petal, full, CHROME_REGION_SHADOW_MARGIN_DIP);
-                }
-            }
+    if let Some(anchor_id) = app.stack_bloom_anchor.get().filter(|_| bloom_allowed)
+        && let Some(anchor) = app.zones.get(anchor_id)
+        && let Some(members) = app.zones.stack_member_ids(anchor.id)
+    {
+        let petals =
+            if app.stack_bloom_leaving.get() && app.stack_bloom_anchor.get() == Some(anchor.id) {
+                stack_tray::stack_bloom_exit_petal_rects_at(
+                    vp,
+                    anchor,
+                    members.len(),
+                    app.stack_bloom_progress.get(),
+                )
+            } else {
+                stack_tray::stack_bloom_petal_rects(vp, anchor, members.len())
+            };
+        for petal in petals {
+            push_clamped_inflated(out, petal, full, CHROME_REGION_SHADOW_MARGIN_DIP);
         }
     }
 }

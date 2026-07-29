@@ -182,7 +182,7 @@ pub fn set_process_dpi_awareness() {
 /// Per-window DPI, soft-loaded with graceful degradation.
 ///
 /// `user32!GetDpiForWindow(hwnd)` → `user32!GetDpiForSystem()` →
-/// `GetDeviceCaps(LOGPIXELSX)` → hard fallback [`DEFAULT_DPI`]. Never panics.
+/// `GetDeviceCaps(LOGPIXELSX)` → hard fallback `DEFAULT_DPI`. Never panics.
 // HWND is the Win32 ABI's opaque window handle (`*mut c_void`); we never
 // dereference it in Rust — it is handed straight to `GetDpiForWindow`, which the
 // OS resolves on its side and tolerates stale/invalid handles by returning 0.
@@ -209,7 +209,7 @@ pub fn get_dpi_for_window(hwnd: HWND) -> u32 {
 /// System DPI, soft-loaded with graceful degradation.
 ///
 /// `user32!GetDpiForSystem()` → `GetDeviceCaps(LOGPIXELSX)` → hard fallback
-/// [`DEFAULT_DPI`]. Never panics.
+/// `DEFAULT_DPI`. Never panics.
 pub fn get_dpi_for_system() -> u32 {
     static FP: OnceLock<Option<FnGetDpiForSystem>> = OnceLock::new();
     let cached = *FP.get_or_init(|| {

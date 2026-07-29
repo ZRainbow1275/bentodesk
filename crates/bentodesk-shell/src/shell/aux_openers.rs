@@ -324,12 +324,12 @@ pub(super) fn apply_bulk_zone_updates(
         };
         matched += 1;
         let mut zone_changed = false;
-        if let Some(position) = update.position {
-            if zone.x != position.x || zone.y != position.y {
-                zone.x = position.x;
-                zone.y = position.y;
-                zone_changed = true;
-            }
+        if let Some(position) = update.position
+            && (zone.x != position.x || zone.y != position.y)
+        {
+            zone.x = position.x;
+            zone.y = position.y;
+            zone_changed = true;
         }
         if let Some(size) = update.size {
             let width = size.width.max(80);
@@ -352,16 +352,16 @@ pub(super) fn apply_bulk_zone_updates(
                 zone_changed = true;
             }
         }
-        if let Some(capsule_size) = &update.capsule_size {
-            if zone.capsule_size.as_ref() != capsule_size.as_str() {
-                zone.set_capsule_size(Cow::Owned(capsule_size.to_string()));
-                zone_changed = true;
-            }
+        if let Some(capsule_size) = &update.capsule_size
+            && zone.capsule_size.as_ref() != capsule_size.as_str()
+        {
+            zone.set_capsule_size(Cow::Owned(capsule_size.to_string()));
+            zone_changed = true;
         }
-        if let Some(locked) = update.locked {
-            if zone.set_locked(locked) {
-                zone_changed = true;
-            }
+        if let Some(locked) = update.locked
+            && zone.set_locked(locked)
+        {
+            zone_changed = true;
         }
         if let Some(alias) = &update.alias {
             let trimmed = alias.trim();

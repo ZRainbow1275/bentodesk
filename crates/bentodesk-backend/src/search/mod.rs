@@ -47,7 +47,7 @@ use smol_str::SmolStr;
 
 /// Public façade over the inverted index.
 ///
-/// A thin wrapper around [`index::InvertedIndex`] so the four-method
+/// A thin wrapper around `index::InvertedIndex` so the four-method
 /// surface specified in the F1.2 task body (`new` / `add` / `remove` /
 /// `query` / `clear`) is the only API callers see, leaving room to swap
 /// the storage backing later (e.g. a tantivy-style segment tree) without

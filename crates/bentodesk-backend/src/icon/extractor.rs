@@ -4,8 +4,8 @@
 //! Direct port of `bentodesk/src-tauri/src/icon/extractor.rs`. Three
 //! mechanical changes from the 1.x source:
 //!
-//! 1. `image` crate (forbidden by spec §8) → [`super::wic::encode_png`]
-//!    + [`super::wic::decode_png_alpha_check`]. Same hand-shake: BGRA
+//! 1. `image` crate (forbidden by spec §8) → `super::wic::encode_png`
+//!    + `super::wic::decode_png_alpha_check`. Same hand-shake: BGRA
 //!    pixels read from the HICON via `GetDIBits`, byte-swapped to RGBA,
 //!    encoded to PNG via WIC.
 //! 2. `BentoDeskError::IconError { source: windows::core::Error, .. }`

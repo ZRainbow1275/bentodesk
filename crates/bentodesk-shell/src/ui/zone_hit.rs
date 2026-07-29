@@ -140,10 +140,10 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         let search_query = search_active.then(|| app.search_bar.borrow().query.clone());
         let mut search_slot = 0;
         for item in &z.items {
-            if let Some(query) = search_query.as_ref() {
-                if !search_bar::zone_item_matches_query(item.name.as_ref(), query.as_str()) {
-                    continue;
-                }
+            if let Some(query) = search_query.as_ref()
+                && !search_bar::zone_item_matches_query(item.name.as_ref(), query.as_str())
+            {
+                continue;
             }
             // P3.8 paint-hit parity: reuse the same item-card rectangle SSoT as
             // the renderer and highlight overlay. This keeps the 16-DIP horizontal

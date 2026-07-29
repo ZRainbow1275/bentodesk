@@ -29,7 +29,7 @@
 //!   `state_dir: &Path` instead of `state_data_dir(handle)`.
 //! - `app.emit("rule_notification", …)` replaced by a
 //!   `crossbeam_channel::Sender<RuleEvent>` parameter on
-//!   [`executor::execute`].
+//!   `executor::execute`.
 //!
 //! ## Spec compliance
 //!

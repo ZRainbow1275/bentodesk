@@ -348,7 +348,7 @@ fn item_drag_out_reports_visible_outcomes() {
 }
 
 #[test]
-fn successful_drag_out_moves_by_default_and_ctrl_drag_copies() {
+fn successful_drag_out_uses_the_actual_ole_effect() {
     let root = test_app_root();
     let zone_id = ZoneId(83);
     let (move_item_id, copy_item_id) = {
@@ -380,7 +380,7 @@ fn successful_drag_out_moves_by_default_and_ctrl_drag_copies() {
         &root,
         &move_request,
         "move-out.txt",
-        bentodesk_backend::drag_drop::DragOutcome::Dropped,
+        bentodesk_backend::drag_drop::DragOutcome::Moved,
     );
     {
         let app = root.app.borrow();
@@ -401,18 +401,18 @@ fn successful_drag_out_moves_by_default_and_ctrl_drag_copies() {
         zone_id,
         item_id: copy_item_id,
         path: SmolStr::new("C:/Users/BentoDeskTest/Desktop/copy-out.txt"),
-        copy_only: true,
+        copy_only: false,
     };
     finalize_item_drag_out(
         &root,
         &copy_request,
         "copy-out.txt",
-        bentodesk_backend::drag_drop::DragOutcome::Dropped,
+        bentodesk_backend::drag_drop::DragOutcome::Copied,
     );
     let app = root.app.borrow();
     assert!(
         app.zones.item(zone_id, copy_item_id).is_some(),
-        "Ctrl-drag follows Explorer copy semantics and keeps the source item"
+        "a COPY effect from any target must keep the source item"
     );
     assert_eq!(
         app.item_operation_status
@@ -480,7 +480,7 @@ fn successful_drag_out_removes_stealth_item_after_shell_moved_hidden_file() {
             copy_only: false,
         },
         "moved-out.url",
-        bentodesk_backend::drag_drop::DragOutcome::Dropped,
+        bentodesk_backend::drag_drop::DragOutcome::Moved,
     );
 
     {

@@ -44,7 +44,7 @@ pub const SETTINGS_PANEL_RADIUS: f32 = 16.0;
 pub const SETTINGS_PANEL_SHADOW_ALPHA: f32 = 0.0;
 /// Round-2 M1 — sticky header band height (title + close ×).
 pub const SETTINGS_HEADER_H_M1: f32 = 52.0;
-/// Round-2 M1 — sticky footer band height ([取消] [保存]).
+/// Round-2 M1 — sticky footer band height (`取消`, `保存`).
 pub const SETTINGS_FOOTER_H: f32 = 56.0;
 /// Round-2 M1 — single row height in the scrollable body.
 pub const SETTINGS_ROW_H_M1: f32 = 44.0;
@@ -320,7 +320,7 @@ pub(super) fn settings_body_content_origin(viewport: Size, scroll_offset_y: f32)
 
 /// Tauri General-group title inside the scrollable body. The title starts at
 /// the body's 20-DIP inset; the first toggle row begins after the complete
-/// 44-DIP top/title band through [`settings_body_content_origin`].
+/// 44-DIP top/title band through `settings_body_content_origin`.
 pub fn settings_general_label_rect(viewport: Size, scroll_offset_y: f32) -> Rect {
     let body = settings_body_rect(viewport);
     Rect {

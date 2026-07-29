@@ -171,12 +171,11 @@ pub(super) fn apply_theme_after_plugin_mutation(root: &AppRoot) -> Result<bool, 
         .or_else(|| loaded.iter().find(|theme| theme.is_builtin))
         .cloned()
         .ok_or_else(|| no_themes_available_message().to_owned())?;
-    if theme.id != current_id {
-        if let Some(mtx) = bentodesk_backend::config_vault::Vault::global() {
-            if let Ok(mut vault) = mtx.lock() {
-                let _ = persist_active_theme_to_vault(&mut vault, &theme.id);
-            }
-        }
+    if theme.id != current_id
+        && let Some(mtx) = bentodesk_backend::config_vault::Vault::global()
+        && let Ok(mut vault) = mtx.lock()
+    {
+        let _ = persist_active_theme_to_vault(&mut vault, &theme.id);
     }
     apply_active_theme_selection_to_app(root, options, theme).map_err(|error| error.to_string())
 }

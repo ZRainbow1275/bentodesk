@@ -164,16 +164,14 @@ pub(super) fn select_timeline_checkpoint(root: &AppRoot, index: usize) {
         let app = root.app.borrow();
         app.timeline_panel.borrow_mut().select_index(index)
     };
-    if changed {
-        if let Err(error) = load_selected_timeline_checkpoint(root) {
-            set_timeline_error(
-                root,
-                localized_current(
-                    format!("预览失败：{error}"),
-                    format!("Preview failed: {error}"),
-                ),
-            );
-        }
+    if changed && let Err(error) = load_selected_timeline_checkpoint(root) {
+        set_timeline_error(
+            root,
+            localized_current(
+                format!("预览失败：{error}"),
+                format!("Preview failed: {error}"),
+            ),
+        );
     }
 }
 

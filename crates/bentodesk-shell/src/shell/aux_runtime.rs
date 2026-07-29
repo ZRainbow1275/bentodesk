@@ -152,10 +152,9 @@ pub(super) unsafe extern "system" fn aux_wnd_proc(
                     // recovery instead of discarding it.
                     if let Err(bentodesk_app::RenderError::DeviceLost) =
                         slot.renderer.resize(new_w, new_h)
+                        && let Some(root) = app_root()
                     {
-                        if let Some(root) = app_root() {
-                            handle_device_lost(root, hwnd);
-                        }
+                        handle_device_lost(root, hwnd);
                     }
                 }
             }
@@ -190,10 +189,9 @@ pub(super) unsafe extern "system" fn aux_wnd_proc(
                         // recovery instead of discarding it.
                         if let Err(bentodesk_app::RenderError::DeviceLost) =
                             slot.renderer.resize(new_w, new_h)
+                            && let Some(root) = app_root()
                         {
-                            if let Some(root) = app_root() {
-                                handle_device_lost(root, hwnd);
-                            }
+                            handle_device_lost(root, hwnd);
                         }
                     }
                 }
@@ -271,14 +269,14 @@ pub(super) unsafe extern "system" fn aux_wnd_proc(
                     None
                 }
             };
-            if hidden_kind.is_some_and(|kind| kind != WindowKind::Tooltip) {
-                if let Some(root) = app_root() {
-                    // Tooltips belong to their anchor surface. Hiding any
-                    // focusable auxiliary must also retire the tooltip HWND;
-                    // otherwise its 200×40 dark host survives as the reported
-                    // stray "little black bar" on the desktop.
-                    hide_tooltip(root);
-                }
+            if hidden_kind.is_some_and(|kind| kind != WindowKind::Tooltip)
+                && let Some(root) = app_root()
+            {
+                // Tooltips belong to their anchor surface. Hiding any
+                // focusable auxiliary must also retire the tooltip HWND;
+                // otherwise its 200×40 dark host survives as the reported
+                // stray "little black bar" on the desktop.
+                hide_tooltip(root);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -484,46 +482,43 @@ pub(super) unsafe extern "system" fn aux_wnd_proc(
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
             let slot = &*p;
-            if slot.kind == WindowKind::ZoneEditor {
-                if let Some(root) = app_root() {
-                    handle_zone_editor_char(root, wparam as u32);
-                    request_redraw(hwnd);
-                    return 0;
-                }
+            if slot.kind == WindowKind::ZoneEditor
+                && let Some(root) = app_root()
+            {
+                handle_zone_editor_char(root, wparam as u32);
+                request_redraw(hwnd);
+                return 0;
             }
-            if slot.kind == WindowKind::ItemFileRename {
-                if let Some(root) = app_root() {
-                    handle_item_file_rename_char(root, wparam as u32);
-                    request_redraw(hwnd);
-                    return 0;
-                }
+            if slot.kind == WindowKind::ItemFileRename
+                && let Some(root) = app_root()
+            {
+                handle_item_file_rename_char(root, wparam as u32);
+                request_redraw(hwnd);
+                return 0;
             }
-            if slot.kind == WindowKind::RulesWizard {
-                if let Some(root) = app_root() {
-                    if handle_rules_wizard_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
+            if slot.kind == WindowKind::RulesWizard
+                && let Some(root) = app_root()
+                && handle_rules_wizard_char(root, wparam as u32)
+            {
+                request_redraw(hwnd);
+                return 0;
             }
-            if slot.kind == WindowKind::BulkManager {
-                if let Some(root) = app_root() {
-                    if handle_bulk_manager_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
+            if slot.kind == WindowKind::BulkManager
+                && let Some(root) = app_root()
+                && handle_bulk_manager_char(root, wparam as u32)
+            {
+                request_redraw(hwnd);
+                return 0;
             }
-            if slot.kind == WindowKind::Search {
-                if let Some(root) = app_root() {
-                    if handle_search_char(root, wparam as u32, hwnd) {
-                        // QuerySearch must be applied per character; otherwise
-                        // Enter can race a batch of stale queued query states.
-                        consume_dispatcher(root, hwnd);
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
+            if slot.kind == WindowKind::Search
+                && let Some(root) = app_root()
+                && handle_search_char(root, wparam as u32, hwnd)
+            {
+                // QuerySearch must be applied per character; otherwise
+                // Enter can race a batch of stale queued query states.
+                consume_dispatcher(root, hwnd);
+                request_redraw(hwnd);
+                return 0;
             }
             // W3 (#7 fix wave 2026-06-01) — the Settings section lives on this
             // aux HWND (it holds focus after `SetForegroundWindow`), so its
@@ -531,16 +526,16 @@ pub(super) unsafe extern "system" fn aux_wnd_proc(
             // handlers exactly like the Main WM_CHAR block. Without this branch,
             // typing into the desktop-path / watch / passphrase fields fell to
             // DefWindowProc and did NOTHING (the latent bug this fix closes).
-            if slot.kind == WindowKind::Settings {
-                if let Some(root) = app_root() {
-                    if handle_settings_text_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                    if handle_settings_passphrase_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
+            if slot.kind == WindowKind::Settings
+                && let Some(root) = app_root()
+            {
+                if handle_settings_text_char(root, wparam as u32) {
+                    request_redraw(hwnd);
+                    return 0;
+                }
+                if handle_settings_passphrase_char(root, wparam as u32) {
+                    request_redraw(hwnd);
+                    return 0;
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)

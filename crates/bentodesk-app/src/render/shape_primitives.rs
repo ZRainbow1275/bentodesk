@@ -167,26 +167,27 @@ impl Renderer {
         if let Some(underlay) = frosted_fallback_underlay(tint) {
             self.fill_rounded_rect(rect, underlay, radius)?;
         }
-        if let Some(brush) = self.backdrop_brush.as_ref() {
-            if rect.width > 0.0 && rect.height > 0.0 {
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: rect.x,
-                        top: rect.y,
-                        right: rect.right(),
-                        bottom: rect.bottom(),
-                    },
-                    radiusX: radius.top_left,
-                    radiusY: radius.top_left,
-                };
-                let ctx = self.ctx()?;
-                // Spec §15.1 — Interface::cast canonical for COM cross-cast.
-                let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
-                // SAFETY: rt valid; `rr` lives for the call; the bitmap brush is
-                //         COM-ref-counted and was built for this frame's ctx.
-                unsafe {
-                    rt.FillRoundedRectangle(&rr, brush);
-                }
+        if let Some(brush) = self.backdrop_brush.as_ref()
+            && rect.width > 0.0
+            && rect.height > 0.0
+        {
+            let rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.x,
+                    top: rect.y,
+                    right: rect.right(),
+                    bottom: rect.bottom(),
+                },
+                radiusX: radius.top_left,
+                radiusY: radius.top_left,
+            };
+            let ctx = self.ctx()?;
+            // Spec §15.1 — Interface::cast canonical for COM cross-cast.
+            let rt: ID2D1RenderTarget = ok("DeviceContext::cast<RenderTarget>", ctx.cast())?;
+            // SAFETY: rt valid; `rr` lives for the call; the bitmap brush is
+            //         COM-ref-counted and was built for this frame's ctx.
+            unsafe {
+                rt.FillRoundedRectangle(&rr, brush);
             }
         }
         self.fill_rounded_rect(rect, tint, radius)

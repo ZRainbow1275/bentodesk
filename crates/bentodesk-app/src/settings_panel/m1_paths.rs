@@ -187,7 +187,7 @@ pub fn settings_sources_content_height(source_row_count: usize) -> f32 {
 /// M1i fidelity — the scroll-space SHIFT (>= 0) every section below the 桌面源
 /// block moves UP relative to the fixed [`SETTINGS_SOURCE_ROW_VISIBLE_MAX`]
 /// reserve baseline, for the given live source count. The perf-and-below
-/// geometry fns root at [`settings_perf_origin_y_offset`], which is pinned at
+/// geometry fns root at `settings_perf_origin_y_offset`, which is pinned at
 /// the max-reserve baseline; callers fold this delta into the `scroll_offset_y`
 /// they pass to those fns (shifting content UP by `delta` is identical to
 /// scrolling DOWN by `delta`). This is the single-base-offset reflow mechanism

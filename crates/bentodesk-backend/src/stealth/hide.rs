@@ -218,7 +218,7 @@ pub fn apply_stealth_attrs(_path: &Path) -> Result<(), String> {
 /// Idempotent re-apply of the stealth attribute bundle on `path`.
 ///
 /// No-op when the attributes are already present. Records failure into the
-/// retry queue (drained by [`crate::stealth::sync::AttrGuard::sweep`]) and
+/// retry queue (drained by the `AttrGuard` sweep) and
 /// success into the live status snapshot.
 pub fn ensure_stealth(path: &Path) {
     #[cfg(windows)]
@@ -254,7 +254,7 @@ pub fn ensure_stealth(path: &Path) {
 ///
 /// The 1.x version used `uuid::Uuid::new_v4()`; spec §8 doesn't whitelist
 /// `uuid` for this crate so the native port substitutes a SystemTime + atomic
-/// counter blend (see [`crate::stealth::unique_suffix`]). Equivalent
+/// counter blend (see `crate::stealth::unique_suffix`). Equivalent
 /// uniqueness for the per-zone-subdir scope.
 pub fn unique_hidden_path(hidden_dir: &Path, original: &Path) -> PathBuf {
     let file_name = original
@@ -284,10 +284,32 @@ pub fn unique_hidden_path(hidden_dir: &Path, original: &Path) -> PathBuf {
 
 // ─── Hide entry point ───────────────────────────────────────────────────
 
+fn rollback_after_manifest_failure(
+    config: &StealthConfig,
+    zone_id: &str,
+    original_path: &str,
+    hidden_path: &str,
+    manifest_error: StealthError,
+) -> StealthError {
+    match super::restore::restore_file(original_path, hidden_path) {
+        Ok(()) => {
+            let _ = cleanup_zone_dir(config, zone_id);
+            manifest_error
+        }
+        Err(rollback_error) => StealthError::HiddenWithoutManifest {
+            original_path: PathBuf::from(original_path),
+            hidden_path: PathBuf::from(hidden_path),
+            manifest_error: manifest_error.to_string(),
+            rollback_error: rollback_error.to_string(),
+        },
+    }
+}
+
 /// Hide `file_path` by moving it into `.bentodesk/{zone_id}/`.
 ///
-/// Returns `(original_path, hidden_path)` on success. On any failure the
-/// original file stays at its desktop location (safe default).
+/// Returns `(original_path, hidden_path)` on success. Recoverable failures put
+/// the original file back; if both manifest commit and rollback fail,
+/// [`StealthError::HiddenWithoutManifest`] carries both recovery paths.
 ///
 /// `events` is an optional broadcast channel — when `Some`, a
 /// [`StealthEvent::Hidden`] payload is pushed on success and a
@@ -335,7 +357,7 @@ pub fn hide_file(
         // desktop drive but possible if the user mounts Desktop on a
         // junction point that crosses volumes. Files can use copy+delete;
         // directories fail closed because recursive copying is not atomic.
-        match std::fs::copy(source, &dest) {
+        match super::copy_file_without_overwrite(source, &dest) {
             Ok(_) => {
                 if let Err(e2) = std::fs::remove_file(source) {
                     tracing::error!(
@@ -395,20 +417,13 @@ pub fn hide_file(
         },
     ) {
         tracing::error!("hide_file: manifest_add failed for {file_path}: {e}; rolling back move");
-        match super::restore::restore_file(file_path, &hidden_path_str) {
-            Ok(()) => {
-                let _ = cleanup_zone_dir(config, zone_id);
-                return Err(e);
-            }
-            Err(rollback) => {
-                return Err(StealthError::Io {
-                    path: source.to_path_buf(),
-                    message: format!(
-                        "manifest write failed ({e}); rollback from {hidden_path_str} also failed ({rollback})"
-                    ),
-                });
-            }
-        }
+        return Err(rollback_after_manifest_failure(
+            config,
+            zone_id,
+            file_path,
+            &hidden_path_str,
+            e,
+        ));
     }
 
     tracing::info!(
@@ -677,6 +692,43 @@ mod tests {
         );
         let zone_dir = global.join("zone-rollback");
         assert!(!zone_dir.exists() || zone_dir.read_dir().expect("zone dir").next().is_none());
+    }
+
+    #[test]
+    fn failed_manifest_and_failed_rollback_report_hidden_path() {
+        let tmp = tempdir();
+        let cfg = config_for(tmp.as_path());
+        let original = tmp.as_path().join("collision.txt");
+        let hidden = zone_hidden_dir_for(&cfg, "zone-recovery")
+            .expect("zone")
+            .join("collision.txt");
+        std::fs::write(&original, b"new desktop file").expect("collision");
+        std::fs::write(&hidden, b"hidden user data").expect("hidden");
+
+        let error = rollback_after_manifest_failure(
+            &cfg,
+            "zone-recovery",
+            &original.to_string_lossy(),
+            &hidden.to_string_lossy(),
+            StealthError::Io {
+                path: tmp.as_path().join("manifest.json"),
+                message: "blocked".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            error,
+            StealthError::HiddenWithoutManifest {
+                original_path,
+                hidden_path,
+                ..
+            } if original_path == original && hidden_path == hidden
+        ));
+        assert_eq!(
+            std::fs::read(original).expect("original"),
+            b"new desktop file"
+        );
+        assert_eq!(std::fs::read(hidden).expect("hidden"), b"hidden user data");
     }
 
     #[test]

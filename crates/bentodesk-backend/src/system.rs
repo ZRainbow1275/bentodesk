@@ -147,10 +147,10 @@ fn norm_key(p: &Path) -> String {
 fn classify_source(path: &Path, custom: Option<&str>) -> SmolStr {
     let key = norm_key(path);
 
-    if let Some(user) = desktop_sources::user_desktop_dir() {
-        if norm_key(&user) == key {
-            return SmolStr::new_static("user");
-        }
+    if let Some(user) = desktop_sources::user_desktop_dir()
+        && norm_key(&user) == key
+    {
+        return SmolStr::new_static("user");
     }
 
     if let Some(pub_var) = std::env::var_os("PUBLIC") {
@@ -176,12 +176,12 @@ fn classify_source(path: &Path, custom: Option<&str>) -> SmolStr {
         return SmolStr::new_static("onedrive");
     }
 
-    if let Some(c) = custom {
-        if !c.trim().is_empty() {
-            let c_path = PathBuf::from(c);
-            if norm_key(&c_path) == key {
-                return SmolStr::new_static("custom");
-            }
+    if let Some(c) = custom
+        && !c.trim().is_empty()
+    {
+        let c_path = PathBuf::from(c);
+        if norm_key(&c_path) == key {
+            return SmolStr::new_static("custom");
         }
     }
 

@@ -149,21 +149,21 @@ impl HoverScheduler {
     /// re-emitted. Expand wins over collapse if both somehow resolve on the
     /// same tick (they target different lifecycle states so this is defensive).
     pub fn poll(&mut self, now_ms: u32) -> HoverAction {
-        if let Some(zone) = self.expand_zone {
-            if reached(now_ms, self.expand_pending_at_ms) {
-                self.expand_zone = None;
-                self.mark_expanded(zone, now_ms);
-                return HoverAction::Expand(zone);
-            }
+        if let Some(zone) = self.expand_zone
+            && reached(now_ms, self.expand_pending_at_ms)
+        {
+            self.expand_zone = None;
+            self.mark_expanded(zone, now_ms);
+            return HoverAction::Expand(zone);
         }
-        if let Some(zone) = self.collapse_zone {
-            if reached(now_ms, self.collapse_pending_at_ms) {
-                self.collapse_zone = None;
-                if self.expanded_zone == Some(zone) {
-                    self.expanded_zone = None;
-                }
-                return HoverAction::Collapse(zone);
+        if let Some(zone) = self.collapse_zone
+            && reached(now_ms, self.collapse_pending_at_ms)
+        {
+            self.collapse_zone = None;
+            if self.expanded_zone == Some(zone) {
+                self.expanded_zone = None;
             }
+            return HoverAction::Collapse(zone);
         }
         HoverAction::None
     }

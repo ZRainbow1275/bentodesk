@@ -524,10 +524,10 @@ pub(super) fn handle_keydown(
     if slot.kind == WindowKind::SnapshotPicker {
         return handle_snapshot_picker_keydown(root, vk, hwnd);
     }
-    if slot.kind == WindowKind::Main {
-        if let Some(result) = handle_inline_zone_search_keydown(root, vk, hwnd) {
-            return result;
-        }
+    if slot.kind == WindowKind::Main
+        && let Some(result) = handle_inline_zone_search_keydown(root, vk, hwnd)
+    {
+        return result;
     }
     // W3 (#7 fix wave 2026-06-01) — the Settings section lives on the focusable
     // Settings AUX HWND (`show_settings_surface` calls `SetForegroundWindow` on
@@ -559,10 +559,10 @@ pub(super) fn handle_keydown(
             return result;
         }
     }
-    if slot.kind == WindowKind::Main {
-        if let Some(result) = handle_stack_tray_keydown(root, vk, hwnd) {
-            return result;
-        }
+    if slot.kind == WindowKind::Main
+        && let Some(result) = handle_stack_tray_keydown(root, vk, hwnd)
+    {
+        return result;
     }
     if let Some(action) = auxiliary_escape_action(slot.kind, vk) {
         match action {

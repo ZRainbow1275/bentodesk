@@ -560,7 +560,7 @@ fn fill_segment(
 
     for index in starting_index..segment_length {
         let curr_offset = (lane * lane_length + slice * segment_length + index) as usize;
-        let prev_offset = if curr_offset % lane_length as usize == 0 {
+        let prev_offset = if curr_offset.is_multiple_of(lane_length as usize) {
             // Wrap to the end of the same lane.
             curr_offset + lane_length as usize - 1
         } else {

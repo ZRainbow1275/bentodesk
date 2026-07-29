@@ -431,18 +431,18 @@ pub(super) fn set_highlight_for_search_hit(
         let app = root.app.borrow();
         match hit.kind {
             SearchItemKind::Zone => {
-                if let Some(zone_id) = parse_search_zone_id(hit.id.as_str()) {
-                    if let Some(zone) = app.zones.get(zone_id) {
-                        targets.push(highlight_overlay::zone_target_rect(zone));
-                    }
+                if let Some(zone_id) = parse_search_zone_id(hit.id.as_str())
+                    && let Some(zone) = app.zones.get(zone_id)
+                {
+                    targets.push(highlight_overlay::zone_target_rect(zone));
                 }
             }
             SearchItemKind::File | SearchItemKind::Folder => {
                 if let Some((zone_id, item_id)) = parse_search_item_id(hit.id.as_str()) {
-                    if let Some(zone) = app.zones.get(zone_id) {
-                        if let Some(item) = zone.item(item_id) {
-                            targets.push(highlight_overlay::item_target_rect(zone, item));
-                        }
+                    if let Some(zone) = app.zones.get(zone_id)
+                        && let Some(item) = zone.item(item_id)
+                    {
+                        targets.push(highlight_overlay::item_target_rect(zone, item));
                     }
                 } else if let Some(zone_id) = parse_search_live_folder_zone_id(hit.id.as_str()) {
                     if let Some(zone) = app.zones.get(zone_id) {

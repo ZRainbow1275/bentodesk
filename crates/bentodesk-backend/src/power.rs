@@ -75,7 +75,7 @@ impl Default for ResumeConfig {
 /// Handle a power resume event delivered by the wndproc subclass.
 ///
 /// Spawns a fixed-stack `std::thread` worker (single resume in flight at a
-/// time, guarded by [`RESUME_IN_PROGRESS`]) which sleeps for
+/// time, guarded by `RESUME_IN_PROGRESS`) which sleeps for
 /// `config.delay_ms` then emits [`PowerEvent::Resumed`] on `event_tx`.
 ///
 /// Returns immediately so the wndproc message pump is never blocked.

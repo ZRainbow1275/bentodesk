@@ -192,12 +192,12 @@ fn zone_drag_mousemove_updates_geometry_but_not_dirty() {
     app.zone_drag.set(Some((ZoneId(1), 5, 7)));
 
     // Mimic handle_mouse_move's drag branch: mutate zone WITHOUT mark_dirty.
-    if let Some((id, dx, dy)) = app.zone_drag.get() {
-        if let Some(z) = app.zones.get_mut(id) {
-            // mouse at (200, 150) → new top-left = (200-5, 150-7) = (195, 143)
-            z.x = 200 - dx;
-            z.y = 150 - dy;
-        }
+    if let Some((id, dx, dy)) = app.zone_drag.get()
+        && let Some(z) = app.zones.get_mut(id)
+    {
+        // mouse at (200, 150) → new top-left = (200-5, 150-7) = (195, 143)
+        z.x = 200 - dx;
+        z.y = 150 - dy;
     }
     let z = match app.zones.get(ZoneId(1)) {
         Some(z) => z,
@@ -227,13 +227,13 @@ fn zone_resize_state_clamps_to_minimum_dims() {
 
     // Simulate mouse pulled inside the zone — would naively shrink to
     // (10, 5) but clamping must protect the floor.
-    if let Some((id, _, _)) = app.zone_resize.get() {
-        if let Some(z) = app.zones.get_mut(id) {
-            let new_w = (110_i32 - z.x).max(80);
-            let new_h = (105_i32 - z.y).max(60);
-            z.w = new_w;
-            z.h = new_h;
-        }
+    if let Some((id, _, _)) = app.zone_resize.get()
+        && let Some(z) = app.zones.get_mut(id)
+    {
+        let new_w = (110_i32 - z.x).max(80);
+        let new_h = (105_i32 - z.y).max(60);
+        z.w = new_w;
+        z.h = new_h;
     }
     let z = match app.zones.get(ZoneId(2)) {
         Some(z) => z,
