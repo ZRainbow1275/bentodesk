@@ -136,9 +136,14 @@ fn roaming_state_dir() -> Result<PathBuf, PlatformError> {
             hr,
         });
     }
+    if raw.is_null() {
+        return Err(PlatformError::Null {
+            ctx: "SHGetKnownFolderPath",
+        });
+    }
 
     // Walk the UTF-16 string to its NUL terminator.
-    // SAFETY: pointer non-null on S_OK; bounded by the OS-supplied NUL.
+    // SAFETY: pointer checked above; bounded by the OS-supplied NUL.
     let len = unsafe {
         let mut p = raw;
         let mut n = 0usize;
