@@ -34,6 +34,8 @@ pub enum DesktopSourcesError {
     /// `SHGetKnownFolderPath` returned a non-`S_OK` HRESULT for the named
     /// folder identifier.
     Hresult { ctx: &'static str, hr: i32 },
+    /// `SHGetKnownFolderPath` reported success without returning a path.
+    Null { ctx: &'static str },
 }
 
 impl core::fmt::Display for DesktopSourcesError {
@@ -41,6 +43,9 @@ impl core::fmt::Display for DesktopSourcesError {
         match self {
             Self::Hresult { ctx, hr } => {
                 write!(f, "{ctx}: SHGetKnownFolderPath failed (hr={hr:#x})")
+            }
+            Self::Null { ctx } => {
+                write!(f, "{ctx}: SHGetKnownFolderPath returned a null path")
             }
         }
     }
@@ -109,8 +114,11 @@ fn known_folder_path(
         }
         return Err(DesktopSourcesError::Hresult { ctx, hr });
     }
+    if raw.is_null() {
+        return Err(DesktopSourcesError::Null { ctx });
+    }
 
-    // SAFETY: `raw` is non-null on S_OK; walk to NUL to determine length.
+    // SAFETY: `raw` was checked above; walk to NUL to determine length.
     let len = unsafe {
         let mut p = raw;
         let mut n = 0usize;
@@ -310,6 +318,15 @@ pub fn is_inside_any_desktop(path: &Path, custom: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn null_known_folder_error_is_explicit() {
+        let error = DesktopSourcesError::Null { ctx: "Desktop" };
+        assert_eq!(
+            error.to_string(),
+            "Desktop: SHGetKnownFolderPath returned a null path"
+        );
+    }
 
     #[test]
     fn empty_custom_desktop_is_ignored() {
