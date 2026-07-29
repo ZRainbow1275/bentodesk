@@ -78,6 +78,8 @@ jobs:
           cargo doc --locked --workspace --no-deps --target $env:TARGET
 
       - name: Supply-chain checks
+        env:
+          RUSTFLAGS: ""
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true

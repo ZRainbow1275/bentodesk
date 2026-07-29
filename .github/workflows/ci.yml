@@ -120,6 +120,8 @@ jobs:
         run: cargo doc --locked --workspace --no-deps --target $env:TARGET
 
       - name: Install supply-chain tools
+        env:
+          RUSTFLAGS: ""
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
