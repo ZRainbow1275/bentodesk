@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="crates/bentodesk-app/assets/app-icon.png" width="112" alt="BentoDesk 图标">
+  <img src="crates/bentodesk-app/assets/app-icon.png" width="104" alt="BentoDesk 图标">
 
   # BentoDesk
 
@@ -7,98 +7,151 @@
 
   [English](README.md) · [简体中文](README.zh-CN.md)
 
-  [![Latest release](https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&label=release)](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-  [![Downloads](https://img.shields.io/github/downloads/ZRainbow1275/bentodesk/total?style=flat-square&label=downloads)](https://github.com/ZRainbow1275/bentodesk/releases)
-  [![Stars](https://img.shields.io/github/stars/ZRainbow1275/bentodesk?style=flat-square)](https://github.com/ZRainbow1275/bentodesk/stargazers)
-  [![CI](https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&style=flat-square&label=build)](https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml)
-  [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&logo=windows11&logoColor=white)](#系统要求)
-  [![Rust](https://img.shields.io/badge/Rust-2024-000000?style=flat-square&logo=rust&logoColor=white)](#技术栈)
-  [![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square)](LICENSE)
+  <p>
+    <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&amp;label=release" alt="Latest release"></a>
+    <a href="https://github.com/ZRainbow1275/bentodesk/releases"><img src="https://img.shields.io/github/downloads/ZRainbow1275/bentodesk/total?style=flat-square&amp;label=downloads" alt="Downloads"></a>
+    <a href="https://github.com/ZRainbow1275/bentodesk/stargazers"><img src="https://img.shields.io/github/stars/ZRainbow1275/bentodesk?style=flat-square" alt="Stars"></a>
+    <a href="https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="CI"></a>
+    <a href="#系统要求"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 与 11"></a>
+    <a href="#技术栈"><img src="https://img.shields.io/badge/Rust-2024-000000?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Rust 2024"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square" alt="AGPL-3.0 许可证"></a>
+  </p>
 
-  [下载](https://github.com/ZRainbow1275/bentodesk/releases/latest) ·
-  [功能](#功能) ·
-  [使用](#快速开始) ·
-  [构建](#从源码构建) ·
-  [贡献](#参与贡献)
+  <p>
+    <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest">下载</a> ·
+    <a href="#安静地待在桌面上">查看动画</a> ·
+    <a href="#bentodesk-能做什么">功能</a> ·
+    <a href="#从源码构建">构建</a> ·
+    <a href="#参与贡献">贡献</a>
+  </p>
 </div>
 
-<!-- MEDIA: docs/media/hero.webp | 16:9 | BentoDesk 2.0 desktop overview and Zone motion. Replace this comment only with current native UI media supplied by the maintainer. -->
+<p align="center">
+  <img src="docs/media/hero.webp" width="960" alt="Windows 桌面上的 BentoDesk Zone 与 Stack">
+</p>
 
 ## 为什么做 BentoDesk
 
-我习惯把正在做的东西都放在桌面上，随手可见。项目一多，桌面也很快堆成了垃圾场。
+我习惯把正在做的东西都放在桌面上，随手可见。项目一多，桌面也很快堆成了
+垃圾场。
 
-BentoDesk 最初就是为了解决这个问题。它用可收起、展开和组合的 Zone 把文件分开放好：不用时是一枚胶囊，需要时再展开。文件仍是普通的 Windows 文件，BentoDesk 只负责整理、呈现和恢复。
+BentoDesk 最初就是为了解决这个问题。它不把文件藏进另一个全屏软件，而是
+给它们一个位置：Zone 平时收成一枚小胶囊，需要时再展开，也可以和其他 Zone
+组成 Stack。文件仍是普通的 Windows 文件。
 
-2.0 用 Rust 和 Windows 原生图形栈重写，在保留 1.x 功能的同时，移除网页运行时，也把长期积累的交互问题重新做好。
+2.0 用 Rust 和 Windows 原生图形栈重写。Tauri 1.x 中实用的部分被保留下来，
+网页运行时则被彻底移除；动画、排版、文件处理、设置与系统集成都按 Windows
+桌面软件重新完成。
 
 ## 四个特点
 
 | | |
 | --- | --- |
-| **极致** | 单进程原生运行时；Release EXE 约 2.40 MiB，严格五 Zone 场景下 Private Bytes 保持在 18 MiB 以内。 |
-| **优雅** | Zone、Stack、主题、文字和动画共用一套几何与状态，不再依靠网页图层拼接桌面界面。 |
-| **便捷** | 拖放、搜索、堆叠、批量排列、快照与时间线都直接作用于真实桌面内容。 |
-| **安全** | 数据默认留在本机；设置可使用 DPAPI 或口令加密，插件安装、启停与卸载经过路径和清单校验。 |
+| **极致** | 单进程原生运行，不携带浏览器内核。当前 Release 候选为 2.41 MiB，严格五 Zone 场景下 t60 Private Bytes 为 16.60 MiB。 |
+| **优雅** | 收起和展开共用几何、命中、排版与动画状态，不再切换两套互相脱节的图层。 |
+| **便捷** | Shell/OLE 拖放、Windows 图标、搜索、Stack、批量排列、快照与时间线都直接作用于真实桌面内容。 |
+| **安全** | 无需账号或云服务；状态原子写入，设置支持 DPAPI 或口令加密，插件包安装前会经过校验。 |
 
-## 与常见方案的差别
+## 如何选择桌面整理器
 
-| 方案 | 桌面上一眼可见 | 运行时 | 本地数据 | 扩展与整理 |
-| --- | --- | --- | --- | --- |
-| Windows 文件夹 | 打开后可见 | Explorer | 本地 | 文件夹与系统搜索 |
-| 桌面围栏类产品 | 可见 | 各产品不同 | 各产品不同 | 以围栏和布局为主 |
-| Electron / WebView 整理工具 | 可见 | 浏览器内核 + 应用层 | 取决于产品 | Web 技术生态 |
-| **BentoDesk 2.0** | 胶囊常驻，按需展开 | Rust + Win32 + DirectComposition | 本地、可加密 | Zone、Stack、插件、规则、快照与时间线 |
+下面这些软件解决的是不同版本的“桌面放满了”。对照内容来自各产品的官方
+说明，只比较工作方式，不拿合成跑分代替真实体验。
 
-BentoDesk 不替代 Explorer，也不承诺适合所有工作流。它专注于一个问题：让需要留在桌面上的内容既能被看见，又不会一直占满屏幕。
+| 可以先看 | 它更适合什么情况 |
+| --- | --- |
+| [Windows 文件夹与桌面图标](https://support.microsoft.com/zh-cn/windows/experience/personalization/customize-the-desktop-icons-in-windows) | 不想安装额外软件。Windows 已经提供熟悉、可缩放、可整体隐藏的图标与快捷方式，文件夹仍由 Explorer 打开。 |
+| [Stardock Fences 6](https://www.stardock.com/products/fences/) | 需要成熟商业方案，尤其看重自动整理或受管电脑。它把围栏和映射文件夹的 Folder Portal 放在一起，并提供完整排序规则、标签页、Peek、外观定制与企业部署。 |
+| [Portals](https://portals-app.com/) | 想要常驻文件夹面板与精确外观控制。Portals 通过面板和标签页映射指定文件夹，并提供逐面板定制、布局保存、随显示器切换与设置档案。 |
+| [Nimi Places](https://mynimi.net/Projects/Nimi-Places/Press-kit/) | 最看重丰富预览。它用按条件显示的容器呈现指定位置，支持图标、缩略图、媒体预览、标签、排序与规则。 |
+| **BentoDesk** | 想要可审查、本地优先，而且静止时尽量少占桌面的整理器。Zone 从胶囊展开为网格，也能组成 Stack，并提供连续原生动画、真实桌面项目、批量布局、快照与时间线恢复。 |
 
-## 功能
+BentoDesk 刻意收窄了范围：只支持 Windows，不替代 Explorer，也不提供云账号
+同步。它专注于胶囊到网格的 Zone、快速动画、Stack 与可恢复的本地状态。如果
+常驻文件夹门户、丰富媒体预览或受管部署才是核心需求，就选择专门为它设计的
+产品。
 
-### Zone：收起时安静，展开时完整
+## BentoDesk 能做什么
 
-Zone 支持不同宽度、胶囊尺寸和边角；标题、图标、项目数徽标与展开内容使用同一套布局。可以选择悬停展开、单击展开或常驻展开。
+### 安静地待在桌面上
 
-<!-- MEDIA: docs/media/zone-motion.webp | 16:9 | One Zone showing collapsed, expand, rapid reversal and settled expanded states. -->
+Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或常驻展开。图标、
+标题、数量徽标、搜索、项目网格与右键菜单都在同一个原生表面上。动画反向或
+快速移动到另一个 Zone 时，会从当前进度继续，不重新跳一遍。
 
-### 拖放、堆叠与桌面融合
+<p align="center">
+  <img src="docs/media/zone-motion.webp" width="736" alt="BentoDesk Zone 的真实展开与搜索动画">
+</p>
+<p align="center">
+  <sub>原生版本真实录制 · <a href="docs/media/zone-motion.mp4">观看 9.7 秒 MP4</a></sub>
+</p>
 
-支持 Windows Shell/OLE 拖放、Zone 间移动与复制、拖出恢复、文件夹绑定和 Stack。桌面空白区域保持点击穿透；普通应用窗口能够正常遮挡 BentoDesk。
+### 拖放、搜索与 Stack
 
-<!-- MEDIA: docs/media/drag-stack.webp | 16:9 | Real file drag into/out of a Zone and two Zones forming a Stack. -->
+- 通过 Windows Shell/OLE 移动或复制文件、文件夹与快捷方式，也可以拖回桌面；
+- 在一个 Zone 内筛选，或跨全部 Zone 搜索；
+- 把多个 Zone 组成 Stack，再展开成员，同时保留各自布局和样式；
+- 桌面空白区域保持点击穿透，普通应用窗口可以正常覆盖 BentoDesk。
 
-### 搜索、编辑与批量管理
+### 编辑一个 Zone，或一次管理全部
 
-Zone 内搜索只过滤当前 Zone；全局搜索用于跨 Zone 查找。区域编辑器可以修改名称、别名、图标、强调色、列数、宽度与边角。批量管理支持选择、显示、隐藏、移动、删除和五种布局。
+名称、别名、图标、强调色、网格列数、宽度与边角都能直接编辑，不会打开
+依赖浏览器内核的窗口。
 
-<!-- MEDIA: docs/media/search-bulk.webp | 16:9 | Local Zone search followed by the native bulk manager. -->
+<p align="center">
+  <img src="docs/images/zone-editor.png" width="640" alt="BentoDesk 原生 Zone 编辑器">
+</p>
 
-### 设置、主题与中英双语
+批量管理可以选择、显示、隐藏、移动或删除 Zone，并应用网格、横排、纵列、
+环绕和自然五种布局；排列结果会留在可用屏幕范围内。
 
-设置窗口是原生、可拖动、可滚动且非置顶的普通窗口。内置明暗主题、强调色、性能参数、启动选项、备份、加密与更新设置。中文和英文都随程序提供；首次启动跟随 Windows 界面语言，也可以随时切换。
+<p align="center">
+  <img src="docs/images/bulk-manager.png" width="900" alt="BentoDesk 原生批量区域管理器">
+</p>
 
-<!-- MEDIA: docs/media/settings-themes.webp | 16:9 | Settings Appearance page switching between verified light and dark themes. -->
+### 设置与主题
 
-### 智能分组、插件与实时文件夹
+设置是普通的原生窗口：首次居中，可拖动、可滚动、可取消，也不会强制盖在
+其他应用上。这里可以调整明暗主题、强调色、展开方式、性能参数、启动选项、
+备份、加密、插件与更新。
 
-智能分组建议根据真实桌面文件生成可审阅方案；插件支持本地包安装、启停、持久化与确认卸载；实时文件夹可把受监视目录的变化同步到对应 Zone。
+<p align="center">
+  <img src="docs/images/theme-settings.png" width="540" alt="BentoDesk 原生主题选择器">
+</p>
 
-<!-- MEDIA: docs/media/smart-group-plugins.webp | 16:9 | Smart grouping review and plugin management using current native surfaces. -->
+中文和 English 随程序一起提供。首次启动跟随 Windows 界面语言，之后可在
+设置中随时切换。
 
-### 快照、时间线与恢复
+### 自动化，但保留决定权
 
-可以保存和载入布局快照，通过时间线恢复结构变化，并从托盘、全局快捷键或原生辅助窗口进入管理工具。恢复包和更新器沿用本地校验边界，不启动浏览器内核或额外应用进程。
+- **智能分组**根据当前桌面文件生成可审阅建议，只有确认后才会整理；
+- **实时文件夹**让绑定目录与对应 Zone 保持同步；
+- **插件**支持从通过校验的本地包安装、启停、持久化与确认卸载；
+- **规则**用于重复的本地整理，不依赖在线服务。
 
-<!-- MEDIA: docs/media/snapshots-timeline.webp | 16:9 | Layout snapshot and timeline recovery flow. -->
+### 恢复与 Windows 集成
+
+可以保存和载入布局快照，从时间线查看结构变化并恢复旧布局。托盘菜单和全局
+快捷键可以打开各项原生管理工具。设置备份、原子持久化、更新包校验与加密
+仓库提供恢复路径，不需要启动浏览器或辅助应用进程。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest) 下载 `BentoDesk-2.0.0-windows-x64-portable.zip`。
-2. 解压到普通可写目录，运行 `BentoDesk.exe`。
+1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
+   下载 `BentoDesk-2.0.0-windows-x64-portable.zip`。
+2. 使用同页 `SHA256SUMS.txt` 校验压缩包，解压到普通可写目录，运行
+   `BentoDesk.exe`。
 3. 从托盘菜单新建或管理 Zone。
 4. 把文件、文件夹或快捷方式拖入 Zone。
-5. 在设置中选择主题、展开模式与语言。
+5. 在设置中选择主题、展开方式与语言。
 
-便携包无需 Node.js、WebView2 或额外浏览器内核。程序状态默认保存在当前用户目录；如需随程序目录携带，可在设置中启用便携模式。
+便携包不需要 Node.js、Tauri、WebView2 或额外浏览器内核。程序状态默认保存
+在当前用户目录；启用便携模式后，也可以随程序目录携带。
+
+### 文件安全
+
+拖放遵循 Windows 的移动与复制语义。删除 Zone、快照等破坏性操作需要确认，
+失败或被拒绝的传输不会被当作已完成。不可替代的文件仍应像使用其他文件工具
+时一样保留备份。
 
 ### 系统要求
 
@@ -106,18 +159,17 @@ Zone 内搜索只过滤当前 Zone；全局搜索用于跨 Zone 查找。区域�
 - x86-64 处理器；
 - 建议使用当前 Windows 更新与显卡驱动。
 
-## 当前候选实测
+## 候选版本实测
 
-一次隔离 Windows x64 运行的实测结果；不同硬件会有差异：
+一次隔离的 Windows x64 运行，场景为五个 Zone、50 个项目与一个 BentoDesk
+进程：
 
 | 指标 | 结果 |
 | --- | ---: |
-| Release EXE | 2,518,016 bytes（2.40 MiB） |
-| 严格场景 | 5 Zones / 50 items / 1 process |
-| Private Bytes t30 | 17.05 MiB |
-| Private Bytes t60 | 16.95 MiB |
-| Zone 完整展开 / 收起 | 234 ms / 234 ms |
-| 帧间隔 median / p95 | 16 ms / 16 ms |
+| Release EXE | 2,523,648 bytes（2.41 MiB） |
+| Private Bytes t10 / t30 / t60 | 16.41 / 16.60 / 16.60 MiB |
+| Zone 完整展开 / 收起 | 234 ms / 235 ms |
+| 动画 tick median / p95 | 16 ms / 16 ms |
 
 ## 技术栈
 
@@ -127,10 +179,15 @@ Zone 内搜索只过滤当前 Zone；全局搜索用于跨 Zone 查找。区域�
 | 窗口与输入 | Win32 / USER32 / DWM |
 | 图形 | Direct2D、DirectWrite、DirectComposition、D3D11 |
 | 图标与图像 | Windows Imaging Component、Windows Shell |
-| 文件交互 | Shell/OLE、ReadDirectoryChangesW |
+| 文件交互 | Shell/OLE、`ReadDirectoryChangesW` |
 | 网络与系统安全 | WinHTTP、DPAPI |
 | 数据 | 本地原子写入、加密设置仓库 |
 | 构建 | MSVC x64、静态 CRT、size optimization、Fat LTO |
+
+BentoDesk 2.0 的运行时不包含 Tauri、WebView2、Chromium、Node.js 或第三方 GUI
+框架。Tauri 1.x 源码仍保留在
+[`v1.3.0`](https://github.com/ZRainbow1275/bentodesk/tree/v1.3.0) 与
+[`archive/tauri-1.x`](https://github.com/ZRainbow1275/bentodesk/tree/archive/tauri-1.x)。
 
 主要 crate：
 
@@ -145,11 +202,8 @@ bentodesk-style      主题、排版与视觉 token
 
 ## 从源码构建
 
-需要：
-
-- Windows 10/11 x64；
-- Rust 1.85 或更高版本；
-- Visual Studio 2022 Build Tools（MSVC 与 Windows SDK）。
+需要 Windows 10/11 x64、Rust 1.85 或更高版本，以及包含 MSVC 与 Windows SDK
+的 Visual Studio 2022 Build Tools。
 
 ```powershell
 git clone https://github.com/ZRainbow1275/bentodesk.git
@@ -179,16 +233,20 @@ cargo audit
 
 ## 参与贡献
 
-欢迎代码、测试、翻译、主题、插件和文档贡献。Issue 与 Pull Request 可以使用中文或 English；提交前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎代码、测试、翻译、主题、插件、文档和边界清楚的 Bug 报告。Issue 与 Pull
+Request 可以使用中文或 English；提交前请阅读
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
-安全漏洞请按 [SECURITY.md](SECURITY.md) 使用 GitHub 私密报告，不要公开提交 Issue。
+安全漏洞请按 [SECURITY.md](SECURITY.md) 使用 GitHub 私密报告，不要公开提交
+Issue。
 
 ## 致谢
 
-感谢 [Tibo](https://x.com/thsottiaux) 带来的产品启发，也感谢 Linux Do 社区的讨论与测试。
+感谢 [Tibo](https://x.com/thsottiaux) 带来的产品启发，也感谢 Linux Do 社区的
+讨论与测试。
 
 BentoDesk 由方寒（[@ZRainbow1275](https://github.com/ZRainbow1275)）维护。
 
 ## 许可证
 
-BentoDesk 以 [GNU AGPL-3.0-or-later](LICENSE) 发布。使用、修改或分发本项目时，请遵守许可证要求。
+BentoDesk 以 [GNU AGPL-3.0-or-later](LICENSE) 发布。
