@@ -347,10 +347,10 @@ pub fn suggestion_id(suggestion: &SuggestedGroup) -> SmolStr {
 pub fn rule_summary(suggestion: &SuggestedGroup) -> SmolStr {
     match suggestion.rule.rule_type {
         bentodesk_backend::layout::GroupRuleType::Extension => {
-            if let Some(extensions) = suggestion.rule.extensions.as_ref() {
-                if !extensions.is_empty() {
-                    return SmolStr::new(extensions.join(", "));
-                }
+            if let Some(extensions) = suggestion.rule.extensions.as_ref()
+                && !extensions.is_empty()
+            {
+                return SmolStr::new(extensions.join(", "));
             }
             SmolStr::new_static("Extension")
         }

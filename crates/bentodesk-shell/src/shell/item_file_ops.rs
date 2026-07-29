@@ -348,40 +348,42 @@ pub(super) fn move_hidden_item_file_between_zones(
                 hidden_path: path,
             })
         }
-        Err(rename_err) if source.is_file() => match std::fs::copy(source, &target) {
-            Ok(_) => match std::fs::remove_file(source) {
-                Ok(()) => {
-                    let path = target.to_string_lossy().to_string();
-                    Some(HiddenMovePaths {
-                        effective_path: path.clone(),
-                        hidden_path: path,
-                    })
-                }
-                Err(remove_err) => {
-                    let _ = std::fs::remove_file(&target);
+        Err(rename_err) if source.is_file() => {
+            match bentodesk_backend::stealth::copy_file_without_overwrite(source, &target) {
+                Ok(_) => match std::fs::remove_file(source) {
+                    Ok(()) => {
+                        let path = target.to_string_lossy().to_string();
+                        Some(HiddenMovePaths {
+                            effective_path: path.clone(),
+                            hidden_path: path,
+                        })
+                    }
+                    Err(remove_err) => {
+                        let _ = std::fs::remove_file(&target);
+                        tracing::warn!(
+                            target: "bentodesk::stealth",
+                            hidden,
+                            target = %target.display(),
+                            rename_error = %rename_err,
+                            remove_error = %remove_err,
+                            "MoveItemToZone: copy succeeded but source removal failed; moving layout only"
+                        );
+                        None
+                    }
+                },
+                Err(copy_err) => {
                     tracing::warn!(
                         target: "bentodesk::stealth",
                         hidden,
                         target = %target.display(),
                         rename_error = %rename_err,
-                        remove_error = %remove_err,
-                        "MoveItemToZone: copy succeeded but source removal failed; moving layout only"
+                        copy_error = %copy_err,
+                        "MoveItemToZone: hidden file move failed; moving layout only"
                     );
                     None
                 }
-            },
-            Err(copy_err) => {
-                tracing::warn!(
-                    target: "bentodesk::stealth",
-                    hidden,
-                    target = %target.display(),
-                    rename_error = %rename_err,
-                    copy_error = %copy_err,
-                    "MoveItemToZone: hidden file move failed; moving layout only"
-                );
-                None
             }
-        },
+        }
         Err(rename_err) => {
             tracing::warn!(
                 target: "bentodesk::stealth",

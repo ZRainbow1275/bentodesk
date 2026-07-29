@@ -81,15 +81,15 @@ pub(super) fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND,
         app.selected_zone.set(clicked_zone);
     }
 
-    if let Some(id) = ui::hit_test(&slot.state, x, y) {
-        if ui::is_icon_button(&app, id) {
-            let event_id = match app.tree.get(id) {
-                Ok(WidgetNode::IconButton(btn)) => btn.on_click_event,
-                _ => return,
-            };
-            push_button_command(root, event_id);
-            return;
-        }
+    if let Some(id) = ui::hit_test(&slot.state, x, y)
+        && ui::is_icon_button(&app, id)
+    {
+        let event_id = match app.tree.get(id) {
+            Ok(WidgetNode::IconButton(btn)) => btn.on_click_event,
+            _ => return,
+        };
+        push_button_command(root, event_id);
+        return;
     }
 
     if let Some(hit) = ui::hit_test_inline_zone_search(&app, x, y) {
@@ -198,50 +198,50 @@ pub(super) fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND,
         }
         return;
     }
-    if let Some(id) = ui::hit_test_zone(&app, x, y) {
-        if let Some(z) = app.zones.get(id) {
-            // M4 locked gate — a locked zone cannot drag, move, or become a
-            // stack member via drag (Tauri parity: BentoZone.tsx:852
-            // `if (zoneLocked()) return;`). Because zone_drag is never armed,
-            // the move handler pushes no MoveZone and the mouse-up F2 stack
-            // search short-circuits (was_drag == false). One gate covers move
-            // AND stack. Selection (set above) is unaffected.
-            if z.locked {
-                return;
-            }
-            // Tauri v8 centers the painted zen/stack capsule under the
-            // pointer once drag latches. Persisted `w/h` are expanded-panel
-            // dimensions and the click position inside that panel must not
-            // become the drag offset.
-            let Some((dx, dy)) = zone_drag_pointer_offset(&app, id) else {
-                return;
-            };
-            app.zone_drag.set(Some((id, dx, dy)));
-            app.zone_drag_body_visible_at_start
-                .set(Some((id, clicked_zone_body_visible_before_select)));
-            app.zone_drag_selected_before_start
-                .set(selected_zone_before_mouse_down);
-            // M4 — capture the mouse-down origin so the move handler can gate
-            // MoveZone behind the 4-DIP drag threshold (moved = false until
-            // the pointer travels past it). Tuple = (start_x, start_y, moved).
-            app.zone_drag_origin.set(Some((x as i32, y as i32, false)));
-            // SAFETY: GetTickCount is total + thread-safe.
-            let now_ms = unsafe { GetTickCount() };
-            // Keep an already-open Bloom alive for a sub-threshold capsule
-            // click so mouse-up can toggle it. A real drag still clears every
-            // hover channel at the threshold latch in `handle_active_pointer_drag`.
-            if !z.is_stack_anchor() {
-                reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
-            }
-            // V-8 — fire press-down animator unless this is a stack anchor
-            // (which paints via its own chrome and doesn't run the V-8 path).
-            if !z.is_stack_anchor() {
-                start_pill_press_animator(&app, id, now_ms);
-            }
-            // SAFETY: SetCapture canonical.
-            unsafe { SetCapture(hwnd) };
-            // Production reader for `monitors` cache.
-            let _ = bentodesk_platform::zone_active_monitor_index(z, &slot.state.monitors);
+    if let Some(id) = ui::hit_test_zone(&app, x, y)
+        && let Some(z) = app.zones.get(id)
+    {
+        // M4 locked gate — a locked zone cannot drag, move, or become a
+        // stack member via drag (Tauri parity: BentoZone.tsx:852
+        // `if (zoneLocked()) return;`). Because zone_drag is never armed,
+        // the move handler pushes no MoveZone and the mouse-up F2 stack
+        // search short-circuits (was_drag == false). One gate covers move
+        // AND stack. Selection (set above) is unaffected.
+        if z.locked {
+            return;
         }
+        // Tauri v8 centers the painted zen/stack capsule under the
+        // pointer once drag latches. Persisted `w/h` are expanded-panel
+        // dimensions and the click position inside that panel must not
+        // become the drag offset.
+        let Some((dx, dy)) = zone_drag_pointer_offset(&app, id) else {
+            return;
+        };
+        app.zone_drag.set(Some((id, dx, dy)));
+        app.zone_drag_body_visible_at_start
+            .set(Some((id, clicked_zone_body_visible_before_select)));
+        app.zone_drag_selected_before_start
+            .set(selected_zone_before_mouse_down);
+        // M4 — capture the mouse-down origin so the move handler can gate
+        // MoveZone behind the 4-DIP drag threshold (moved = false until
+        // the pointer travels past it). Tuple = (start_x, start_y, moved).
+        app.zone_drag_origin.set(Some((x as i32, y as i32, false)));
+        // SAFETY: GetTickCount is total + thread-safe.
+        let now_ms = unsafe { GetTickCount() };
+        // Keep an already-open Bloom alive for a sub-threshold capsule
+        // click so mouse-up can toggle it. A real drag still clears every
+        // hover channel at the threshold latch in `handle_active_pointer_drag`.
+        if !z.is_stack_anchor() {
+            reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
+        }
+        // V-8 — fire press-down animator unless this is a stack anchor
+        // (which paints via its own chrome and doesn't run the V-8 path).
+        if !z.is_stack_anchor() {
+            start_pill_press_animator(&app, id, now_ms);
+        }
+        // SAFETY: SetCapture canonical.
+        unsafe { SetCapture(hwnd) };
+        // Production reader for `monitors` cache.
+        let _ = bentodesk_platform::zone_active_monitor_index(z, &slot.state.monitors);
     }
 }

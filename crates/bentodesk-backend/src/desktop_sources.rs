@@ -92,7 +92,7 @@ fn normalize_key(p: &Path) -> String {
 /// Returns `Ok(Some(path))` when the folder exists on disk, `Ok(None)` when
 /// the call succeeded but the resolved path does not exist (uninstalled
 /// OneDrive, deleted folder, etc.), and `Err` only on hard HRESULT failures.
-fn known_folder_path(
+pub(crate) fn known_folder_path(
     folder_id: &windows_sys::core::GUID,
     ctx: &'static str,
 ) -> Result<Option<PathBuf>, DesktopSourcesError> {
@@ -114,9 +114,7 @@ fn known_folder_path(
         }
         return Err(DesktopSourcesError::Hresult { ctx, hr });
     }
-    if raw.is_null() {
-        return Err(DesktopSourcesError::Null { ctx });
-    }
+    let raw = known_folder_non_null(raw, ctx)?.as_ptr();
 
     // SAFETY: `raw` was checked above; walk to NUL to determine length.
     let len = unsafe {
@@ -140,6 +138,13 @@ fn known_folder_path(
     } else {
         Ok(None)
     }
+}
+
+fn known_folder_non_null(
+    raw: *mut u16,
+    ctx: &'static str,
+) -> Result<core::ptr::NonNull<u16>, DesktopSourcesError> {
+    core::ptr::NonNull::new(raw).ok_or(DesktopSourcesError::Null { ctx })
 }
 
 /// Resolve the current user's Desktop folder via the Shell. Honours OneDrive
@@ -252,7 +257,7 @@ pub enum DesktopSourceKind {
 /// 4. Everything else (an explicit override, a mapped drive, etc.) is Custom.
 ///
 /// Classification is case-insensitive and slash-agnostic (reusing the same
-/// [`normalize_key`] the dedup path uses) so callers can pass either a raw or
+/// `normalize_key` the dedup path uses) so callers can pass either a raw or
 /// canonicalised path.
 pub fn classify_desktop_source(path: &Path) -> DesktopSourceKind {
     let key = normalize_key(path);
@@ -262,10 +267,10 @@ pub fn classify_desktop_source(path: &Path) -> DesktopSourceKind {
     if key.contains("\\users\\public\\") || key.ends_with("\\users\\public\\desktop") {
         return DesktopSourceKind::Public;
     }
-    if let Some(user) = user_desktop_dir() {
-        if normalize_key(&user) == key {
-            return DesktopSourceKind::User;
-        }
+    if let Some(user) = user_desktop_dir()
+        && normalize_key(&user) == key
+    {
+        return DesktopSourceKind::User;
     }
     DesktopSourceKind::Custom
 }
@@ -321,7 +326,8 @@ mod tests {
 
     #[test]
     fn null_known_folder_error_is_explicit() {
-        let error = DesktopSourcesError::Null { ctx: "Desktop" };
+        let error =
+            known_folder_non_null(core::ptr::null_mut(), "Desktop").expect_err("null must fail");
         assert_eq!(
             error.to_string(),
             "Desktop: SHGetKnownFolderPath returned a null path"

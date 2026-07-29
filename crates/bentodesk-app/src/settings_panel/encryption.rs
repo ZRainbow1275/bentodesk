@@ -97,7 +97,7 @@ pub fn settings_encryption_desc_rect(
     }
 }
 
-/// M7 — current-mode row rect (当前模式: <mode label>). Below the description.
+/// M7 — current-mode row rect (`当前模式: mode label`). Below the description.
 /// P13 — separated by the 10px inter-row gap.
 pub fn settings_encryption_current_mode_rect(
     viewport: Size,

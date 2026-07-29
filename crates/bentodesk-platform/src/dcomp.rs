@@ -605,10 +605,10 @@ impl WindowComp {
                 DXGI_SWAP_CHAIN_FLAG(DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0),
             )
         };
-        if let Err(ref e) = res {
-            if classify_present(e.code().0) == PresentOutcome::DeviceLost {
-                return Err(PlatformError::DeviceLost);
-            }
+        if let Err(ref e) = res
+            && classify_present(e.code().0) == PresentOutcome::DeviceLost
+        {
+            return Err(PlatformError::DeviceLost);
         }
         ok("ResizeBuffers", res)
     }

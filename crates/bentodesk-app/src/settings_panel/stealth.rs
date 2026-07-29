@@ -208,7 +208,7 @@ pub fn settings_stealth_error_block_rect(
     }
 }
 
-/// M1e — buttons row rect ([Refresh][Reapply]). Always shown; its Y depends
+/// M1e — buttons row rect (`Refresh`, `Reapply`). Always shown; its Y depends
 /// on the two conditional rows above (`has_retry`, `has_error`).
 pub fn settings_stealth_buttons_row_rect(
     viewport: Size,

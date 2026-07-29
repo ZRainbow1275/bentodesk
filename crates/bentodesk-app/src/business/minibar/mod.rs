@@ -16,7 +16,7 @@
 //! per-instance cost back to ~0 MB resident.
 //!
 //! `MiniBarController` is the trigger logic that wires the user-visible
-//! show/hide actions ([`MiniBar::pin`] / [`MiniBar::unpin`] from the
+//! show/hide actions (`MiniBar::pin` / `MiniBar::unpin` from the
 //! 1.x `pin_zone_as_minibar` / `unpin_minibar` IPC contracts) onto the
 //! [`HibernationGate`] surface. The actual swap-chain release/ensure lives
 //! in `bentodesk-app::Renderer::release_swap_chain` /
@@ -351,10 +351,10 @@ pub fn minibar_hit_test_with_items(
         .min(MINIBAR_SOURCE_MAX_ITEMS)
         .min(minibar_item_capacity(viewport, bar));
     for index in 0..visible_items {
-        if let Some(rect) = minibar_item_rect(viewport, bar, index) {
-            if point_in(rect) {
-                return Some(MiniBarHit::Item(index));
-            }
+        if let Some(rect) = minibar_item_rect(viewport, bar, index)
+            && point_in(rect)
+        {
+            return Some(MiniBarHit::Item(index));
         }
     }
     if point_in(minibar_panel_rect(viewport)) {
@@ -374,7 +374,7 @@ const MINIBAR_UNPIN_PATH: &str = "M2 12L10 4M14 12V20H10V18M22 12L14 4M22 22L2 2
 
 /// Per-MiniBar hibernation controller. Wraps a [`HibernationGate`]
 /// implementation (in production: a `&mut Renderer`; in tests:
-/// [`RecordingGate`]) and exposes the user-facing [`hide`] / [`show`] /
+/// `RecordingGate`) and exposes the user-facing [`hide`] / [`show`] /
 /// [`is_resident`] surface plus the bookkeeping `is_visible` flag.
 ///
 /// Construction-time invariants:

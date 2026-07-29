@@ -88,13 +88,13 @@ impl TimelineBuffer {
         }
         self.auto.push_back(cp);
         while self.auto.len() > self.auto_capacity {
-            if let Some(stale) = self.auto.pop_front() {
-                if let Err(e) = store.delete(&stale.id) {
-                    tracing::warn!(
-                        "Timeline: failed to evict auto checkpoint {}: {e}",
-                        stale.id
-                    );
-                }
+            if let Some(stale) = self.auto.pop_front()
+                && let Err(e) = store.delete(&stale.id)
+            {
+                tracing::warn!(
+                    "Timeline: failed to evict auto checkpoint {}: {e}",
+                    stale.id
+                );
             }
         }
         self.cursor = None;
@@ -138,12 +138,12 @@ impl TimelineBuffer {
                     );
                     return self.auto[pos].clone();
                 }
-                if stale_id != cp.id {
-                    if let Err(e) = store.delete(&stale_id) {
-                        tracing::warn!(
-                            "Timeline: failed to delete replaced coalesced checkpoint {stale_id}: {e}"
-                        );
-                    }
+                if stale_id != cp.id
+                    && let Err(e) = store.delete(&stale_id)
+                {
+                    tracing::warn!(
+                        "Timeline: failed to delete replaced coalesced checkpoint {stale_id}: {e}"
+                    );
                 }
                 self.auto[pos] = cp.clone();
                 self.cursor = None;

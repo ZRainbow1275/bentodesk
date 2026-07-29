@@ -186,7 +186,7 @@ pub fn settings_updater_progress_track_rect(
     }
 }
 
-/// M1f — action buttons row rect ([检查更新][下载/安装并重启][跳过此版本]).
+/// M1f — action buttons row rect (`检查更新`, `下载/安装并重启`, `跳过此版本`).
 /// Always shown (检查更新 is always visible); sits below the middle block.
 pub fn settings_updater_buttons_row_rect(
     viewport: Size,

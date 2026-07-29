@@ -563,10 +563,10 @@ pub(super) fn zone_list_from_bento_zones(
         .filter_map(|zone| zone.stack_parent.map(|parent| (parent, zone.id)))
         .collect();
     for (parent, child) in children {
-        if let Some(parent_zone) = list.get_mut(parent) {
-            if !parent_zone.stack_members.contains(&child) {
-                parent_zone.stack_members.push(child);
-            }
+        if let Some(parent_zone) = list.get_mut(parent)
+            && !parent_zone.stack_members.contains(&child)
+        {
+            parent_zone.stack_members.push(child);
         }
     }
     list
@@ -614,10 +614,10 @@ pub(super) fn parse_zone_id(value: &str) -> Option<ZoneId> {
 ///   runtime.
 pub(super) fn stable_id_from_string(value: &str) -> u64 {
     let trimmed = value.trim();
-    if let Ok(parsed) = trimmed.parse::<u64>() {
-        if parsed != 0 {
-            return parsed;
-        }
+    if let Ok(parsed) = trimmed.parse::<u64>()
+        && parsed != 0
+    {
+        return parsed;
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

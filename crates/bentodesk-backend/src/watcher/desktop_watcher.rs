@@ -116,11 +116,11 @@ pub fn setup_file_watcher(
 
     let debouncer = Debouncer::start(Duration::from_millis(200), move |batch| {
         for ev in batch {
-            if let Some(payload) = map_event_to_payload(&ev) {
-                if out.send(payload).is_err() {
-                    // Receiver gone — caller dropped the channel; nothing to do.
-                    return;
-                }
+            if let Some(payload) = map_event_to_payload(&ev)
+                && out.send(payload).is_err()
+            {
+                // Receiver gone — caller dropped the channel; nothing to do.
+                return;
             }
         }
     })?;

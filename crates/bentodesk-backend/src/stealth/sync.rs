@@ -57,7 +57,7 @@ pub const MANIFEST_SCHEMA_VERSION: &str = "3.1";
 
 /// Migration update payload — `(zone_id, item_id_or_old_hidden_path,
 /// new_hidden_path)`. Used by [`cleanup_legacy_hidden_dir`],
-/// [`migrate_attrib_hidden_files`], and [`migrate_flat_to_zone_dirs`] so
+/// `migrate_attrib_hidden_files`, and [`migrate_flat_to_zone_dirs`] so
 /// the caller can rewrite layout entries with the new on-disk locations.
 pub type MigrationUpdate = (String, String, String);
 

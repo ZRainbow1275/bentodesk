@@ -133,14 +133,13 @@ pub(super) unsafe extern "system" fn wnd_proc(
                         // again, so drop the recovery state back to `Healthy`
                         // and clear the retry window. A later, unrelated device
                         // loss then starts with a fresh attempt budget.
-                        if let Some(root) = app_root() {
-                            if root.recovery_state.get()
+                        if let Some(root) = app_root()
+                            && root.recovery_state.get()
                                 != bentodesk_platform::RecoveryState::Healthy
-                            {
-                                root.recovery_state
-                                    .set(bentodesk_platform::RecoveryState::Healthy);
-                                root.last_recovery_at.set(None);
-                            }
+                        {
+                            root.recovery_state
+                                .set(bentodesk_platform::RecoveryState::Healthy);
+                            root.last_recovery_at.set(None);
                         }
                     }
                     // Mc-2b — a lost device routes to recovery instead of the
@@ -189,10 +188,9 @@ pub(super) unsafe extern "system" fn wnd_proc(
                     // resize errors stay swallowed as before.
                     if let Err(bentodesk_app::RenderError::DeviceLost) =
                         slot.renderer.resize(new_w, new_h)
+                        && let Some(root) = app_root()
                     {
-                        if let Some(root) = app_root() {
-                            handle_device_lost(root, hwnd);
-                        }
+                        handle_device_lost(root, hwnd);
                     }
                 }
             }
@@ -240,10 +238,9 @@ pub(super) unsafe extern "system" fn wnd_proc(
                         // recovery instead of discarding it.
                         if let Err(bentodesk_app::RenderError::DeviceLost) =
                             slot.renderer.resize(new_w, new_h)
+                            && let Some(root) = app_root()
                         {
-                            if let Some(root) = app_root() {
-                                handle_device_lost(root, hwnd);
-                            }
+                            handle_device_lost(root, hwnd);
                         }
                     }
                 }
@@ -290,10 +287,9 @@ pub(super) unsafe extern "system" fn wnd_proc(
                         // recovery instead of discarding it.
                         if let Err(bentodesk_app::RenderError::DeviceLost) =
                             slot.renderer.resize(w.max(1) as u32, h.max(1) as u32)
+                            && let Some(root) = app_root()
                         {
-                            if let Some(root) = app_root() {
-                                handle_device_lost(root, hwnd);
-                            }
+                            handle_device_lost(root, hwnd);
                         }
                     }
                 }
@@ -381,28 +377,28 @@ pub(super) unsafe extern "system" fn wnd_proc(
             0
         }
         m if m == WM_ITEM_DRAG_OUT => {
-            if let Some(root) = app_root() {
-                if let Some(request) = root.pending_item_drag_out.borrow_mut().take() {
-                    log_static(
-                        format!(
-                            "items: drag-out deferred-start zone={} item={} copy={} path={}\n",
-                            request.zone_id.0, request.item_id.0, request.copy_only, request.path
-                        )
-                        .as_str(),
-                    );
-                    // SAFETY: the shell used capture only to detect the
-                    // item-drag threshold. OLE owns mouse capture during
-                    // `DoDragDrop`; keeping BentoDesk's capture here can
-                    // prevent the OLE modal loop from observing pointer
-                    // transitions and calling `IDropSource::QueryContinueDrag`.
-                    unsafe { ReleaseCapture() };
-                    start_item_drag_out(root, hwnd, request);
-                    // SAFETY: defensive cleanup for failed/cancelled OLE
-                    // paths. Normal OLE completion should already have
-                    // released its own capture.
-                    unsafe { ReleaseCapture() };
-                    request_redraw(hwnd);
-                }
+            if let Some(root) = app_root()
+                && let Some(request) = root.pending_item_drag_out.borrow_mut().take()
+            {
+                log_static(
+                    format!(
+                        "items: drag-out deferred-start zone={} item={} copy={} path={}\n",
+                        request.zone_id.0, request.item_id.0, request.copy_only, request.path
+                    )
+                    .as_str(),
+                );
+                // SAFETY: the shell used capture only to detect the
+                // item-drag threshold. OLE owns mouse capture during
+                // `DoDragDrop`; keeping BentoDesk's capture here can
+                // prevent the OLE modal loop from observing pointer
+                // transitions and calling `IDropSource::QueryContinueDrag`.
+                unsafe { ReleaseCapture() };
+                start_item_drag_out(root, hwnd, request);
+                // SAFETY: defensive cleanup for failed/cancelled OLE
+                // paths. Normal OLE completion should already have
+                // released its own capture.
+                unsafe { ReleaseCapture() };
+                request_redraw(hwnd);
             }
             0
         }
@@ -419,12 +415,12 @@ pub(super) unsafe extern "system" fn wnd_proc(
         WM_MOUSELEAVE => {
             unsafe {
                 let p = get_slot_ptr(hwnd);
-                if !p.is_null() {
-                    if let Some(root) = app_root() {
-                        clear_hover(root);
-                        arm_hover_frame_timer(hwnd);
-                        request_redraw(hwnd);
-                    }
+                if !p.is_null()
+                    && let Some(root) = app_root()
+                {
+                    clear_hover(root);
+                    arm_hover_frame_timer(hwnd);
+                    request_redraw(hwnd);
                 }
             }
             0
@@ -592,60 +588,57 @@ pub(super) unsafe extern "system" fn wnd_proc(
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
             let slot = &*p;
-            if slot.kind == WindowKind::ZoneEditor {
-                if let Some(root) = app_root() {
-                    handle_zone_editor_char(root, wparam as u32);
+            if slot.kind == WindowKind::ZoneEditor
+                && let Some(root) = app_root()
+            {
+                handle_zone_editor_char(root, wparam as u32);
+                request_redraw(hwnd);
+                return 0;
+            }
+            if slot.kind == WindowKind::ItemFileRename
+                && let Some(root) = app_root()
+            {
+                handle_item_file_rename_char(root, wparam as u32);
+                request_redraw(hwnd);
+                return 0;
+            }
+            if slot.kind == WindowKind::RulesWizard
+                && let Some(root) = app_root()
+                && handle_rules_wizard_char(root, wparam as u32)
+            {
+                request_redraw(hwnd);
+                return 0;
+            }
+            if slot.kind == WindowKind::BulkManager
+                && let Some(root) = app_root()
+                && handle_bulk_manager_char(root, wparam as u32)
+            {
+                request_redraw(hwnd);
+                return 0;
+            }
+            if slot.kind == WindowKind::Search
+                && let Some(root) = app_root()
+                && handle_search_char(root, wparam as u32, hwnd)
+            {
+                request_redraw(hwnd);
+                return 0;
+            }
+            if slot.kind == WindowKind::Main
+                && let Some(root) = app_root()
+            {
+                if handle_inline_zone_search_char(root, wparam as u32, hwnd) {
                     request_redraw(hwnd);
                     return 0;
                 }
-            }
-            if slot.kind == WindowKind::ItemFileRename {
-                if let Some(root) = app_root() {
-                    handle_item_file_rename_char(root, wparam as u32);
+                // M7 — desktop_path / watch values live edit (focused-field
+                // model) is tried first, then the passphrase capture path.
+                if handle_settings_text_char(root, wparam as u32) {
                     request_redraw(hwnd);
                     return 0;
                 }
-            }
-            if slot.kind == WindowKind::RulesWizard {
-                if let Some(root) = app_root() {
-                    if handle_rules_wizard_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
-            }
-            if slot.kind == WindowKind::BulkManager {
-                if let Some(root) = app_root() {
-                    if handle_bulk_manager_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
-            }
-            if slot.kind == WindowKind::Search {
-                if let Some(root) = app_root() {
-                    if handle_search_char(root, wparam as u32, hwnd) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                }
-            }
-            if slot.kind == WindowKind::Main {
-                if let Some(root) = app_root() {
-                    if handle_inline_zone_search_char(root, wparam as u32, hwnd) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                    // M7 — desktop_path / watch values live edit (focused-field
-                    // model) is tried first, then the passphrase capture path.
-                    if handle_settings_text_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
-                    if handle_settings_passphrase_char(root, wparam as u32) {
-                        request_redraw(hwnd);
-                        return 0;
-                    }
+                if handle_settings_passphrase_char(root, wparam as u32) {
+                    request_redraw(hwnd);
+                    return 0;
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)

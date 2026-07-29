@@ -82,10 +82,10 @@ fn migrate_old_move_dir(config: &StealthConfig, old_dir: &Path) -> Result<u32, S
     for entry in entries.flatten() {
         let file_path = entry.path();
 
-        if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-            if name == "manifest.json" || name == "manifest.json.tmp" {
-                continue;
-            }
+        if let Some(name) = file_path.file_name().and_then(|n| n.to_str())
+            && (name == "manifest.json" || name == "manifest.json.tmp")
+        {
+            continue;
         }
         if file_path.is_dir() {
             continue;
@@ -121,44 +121,46 @@ fn migrate_old_move_dir(config: &StealthConfig, old_dir: &Path) -> Result<u32, S
             continue;
         }
 
-        if let Some(parent) = dest.parent() {
-            if !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        if let Some(parent) = dest.parent()
+            && !parent.exists()
+        {
+            let _ = std::fs::create_dir_all(parent);
         }
 
         let success = match std::fs::rename(&file_path, &dest) {
             Ok(()) => true,
-            Err(rename_err) => match std::fs::copy(&file_path, &dest) {
-                Ok(_) => match std::fs::remove_file(&file_path) {
-                    Ok(()) => true,
-                    Err(rm_err) => {
-                        tracing::error!(
-                            "Legacy migration: copy ok but delete of source failed for {}: {} (rename was: {}). Removing copy to stay safe.",
-                            file_path.display(),
-                            rm_err,
-                            rename_err
-                        );
-                        if let Err(cleanup_err) = std::fs::remove_file(&dest) {
+            Err(rename_err) => {
+                match crate::stealth::copy_file_without_overwrite(&file_path, &dest) {
+                    Ok(_) => match std::fs::remove_file(&file_path) {
+                        Ok(()) => true,
+                        Err(rm_err) => {
                             tracing::error!(
-                                "Legacy migration: failed to clean up orphan copy at {}: {} — manual cleanup required",
-                                dest.display(),
-                                cleanup_err
+                                "Legacy migration: copy ok but delete of source failed for {}: {} (rename was: {}). Removing copy to stay safe.",
+                                file_path.display(),
+                                rm_err,
+                                rename_err
                             );
+                            if let Err(cleanup_err) = std::fs::remove_file(&dest) {
+                                tracing::error!(
+                                    "Legacy migration: failed to clean up orphan copy at {}: {} — manual cleanup required",
+                                    dest.display(),
+                                    cleanup_err
+                                );
+                            }
+                            false
                         }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            "Legacy migration failed: {} -> {}: {}",
+                            file_path.display(),
+                            dest.display(),
+                            e
+                        );
                         false
                     }
-                },
-                Err(e) => {
-                    tracing::error!(
-                        "Legacy migration failed: {} -> {}: {}",
-                        file_path.display(),
-                        dest.display(),
-                        e
-                    );
-                    false
                 }
-            },
+            }
         };
 
         if success {
@@ -229,7 +231,7 @@ fn migrate_attrib_hidden_files(
 
         let success = match std::fs::rename(source, &dest) {
             Ok(()) => true,
-            Err(rename_err) => match std::fs::copy(source, &dest) {
+            Err(rename_err) => match crate::stealth::copy_file_without_overwrite(source, &dest) {
                 Ok(_) => match std::fs::remove_file(source) {
                     Ok(()) => true,
                     Err(rm_err) => {
@@ -363,10 +365,11 @@ fn is_dir_empty_except_manifest(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name != "manifest.json" && name != "manifest.json.tmp" {
-                        return false;
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name != "manifest.json"
+                    && name != "manifest.json.tmp"
+                {
+                    return false;
                 }
             }
             true

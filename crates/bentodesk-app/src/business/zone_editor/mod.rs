@@ -320,7 +320,7 @@ impl DirtyMask {
     }
 }
 
-/// Editor state — seeded from the existing zone via [`load_zone`], mutated
+/// Editor state — seeded from the existing zone via [`ZoneEditorState::load_zone`], mutated
 /// as the user types / clicks, drained per-frame for the action.
 #[derive(Debug)]
 pub struct ZoneEditorState {
@@ -455,7 +455,7 @@ impl ZoneEditorState {
         self.dirty.capsule_size = true;
     }
 
-    /// Whether any field has been touched since the last [`load_zone`].
+    /// Whether any field has been touched since the last [`Self::load_zone`].
     pub fn is_dirty(&self) -> bool {
         self.dirty.any()
     }
@@ -485,7 +485,7 @@ impl ZoneEditorState {
     /// User clicked Cancel / pressed Escape / clicked the scrim. The
     /// editor's local edits stay in place — the shell tears the HWND down
     /// once it drains the action, so the next open re-seeds via
-    /// [`load_zone`] anyway.
+    /// [`Self::load_zone`] anyway.
     pub fn click_cancel(&mut self) {
         self.pending_action = Some(ZoneEditorAction::Cancel);
     }

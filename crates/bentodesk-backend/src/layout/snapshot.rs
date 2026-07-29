@@ -31,7 +31,7 @@ pub struct SnapshotManager {
 
 impl SnapshotManager {
     /// Create a new snapshot manager with the given directory. The directory
-    /// is created lazily on first [`save`] — `new` performs no I/O.
+    /// is created lazily on first [`Self::save`] — `new` performs no I/O.
     pub fn new(snapshots_dir: PathBuf) -> Self {
         Self { snapshots_dir }
     }

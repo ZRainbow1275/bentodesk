@@ -39,7 +39,7 @@
 //!   [`StealthEvent`] over a `crossbeam_channel::Sender` parameter.
 //! - **No `chrono`.** Spec §8 whitelist excludes `chrono` for this crate;
 //!   timestamps use a local RFC-3339 formatter built on
-//!   `std::time::SystemTime` (see [`now_iso8601`]).
+//!   `std::time::SystemTime` (see `now_iso8601`).
 //! - **No `uuid`.** Filename collision suffixes use a 64-bit
 //!   `SystemTime`-derived hash rendered as 8-char base16 — equivalent
 //!   uniqueness for the use case (avoiding collisions inside one zone
@@ -184,6 +184,14 @@ pub enum StealthError {
     RestoreSourceMissing { path: PathBuf },
     /// Refused to hide a file that is not on the desktop / does not exist.
     HideSourceMissing { path: PathBuf },
+    /// The file was hidden, but both the manifest commit and rollback failed.
+    /// Callers must retain these paths in their own recovery model.
+    HiddenWithoutManifest {
+        original_path: PathBuf,
+        hidden_path: PathBuf,
+        manifest_error: String,
+        rollback_error: String,
+    },
 }
 
 impl core::fmt::Display for StealthError {
@@ -210,6 +218,17 @@ impl core::fmt::Display for StealthError {
             Self::HideSourceMissing { path } => {
                 write!(f, "hide source missing: {}", path.display())
             }
+            Self::HiddenWithoutManifest {
+                original_path,
+                hidden_path,
+                manifest_error,
+                rollback_error,
+            } => write!(
+                f,
+                "file remains hidden at {} after manifest failure ({manifest_error}) and rollback failure to {} ({rollback_error})",
+                hidden_path.display(),
+                original_path.display()
+            ),
         }
     }
 }
@@ -364,6 +383,59 @@ pub(crate) fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
+/// Copy one file while atomically refusing to replace an existing destination.
+#[cfg(windows)]
+pub fn copy_file_without_overwrite(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both paths are live, NUL-terminated UTF-16 buffers. TRUE makes
+    // CopyFileW fail atomically when another writer already owns destination.
+    if unsafe {
+        windows_sys::Win32::Storage::FileSystem::CopyFileW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            1,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    std::fs::metadata(destination).map(|metadata| metadata.len())
+}
+
+#[cfg(not(windows))]
+pub fn copy_file_without_overwrite(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<u64> {
+    let mut source = std::fs::File::open(source)?;
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    match std::io::copy(&mut source, &mut destination_file) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            drop(destination_file);
+            let _ = std::fs::remove_file(destination);
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +469,21 @@ mod tests {
         assert!(paths_equal_str(r"C:\Foo\Bar", "c:/foo/bar"));
         assert!(paths_equal_str(r"D:\X", r"d:\x"));
         assert!(!paths_equal_str(r"C:\foo", r"C:\bar"));
+    }
+
+    #[test]
+    fn copy_without_overwrite_preserves_existing_destination() {
+        let dir = std::env::temp_dir().join(format!("bento-copy-{}", unique_suffix()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let source = dir.join("source.txt");
+        let destination = dir.join("destination.txt");
+        std::fs::write(&source, b"source").expect("source");
+        std::fs::write(&destination, b"existing").expect("destination");
+
+        assert!(copy_file_without_overwrite(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).expect("read"), b"existing");
+        assert_eq!(std::fs::read(&source).expect("read"), b"source");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

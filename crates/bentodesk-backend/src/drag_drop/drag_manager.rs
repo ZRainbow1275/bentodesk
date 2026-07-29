@@ -55,6 +55,8 @@ impl core::error::Error for DragDropError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DragOutcome {
+    Copied,
+    Moved,
     Dropped,
     Cancelled,
 }
@@ -62,7 +64,7 @@ pub enum DragOutcome {
 impl DragOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Dropped => "dropped",
+            Self::Copied | Self::Moved | Self::Dropped => "dropped",
             Self::Cancelled => "cancelled",
         }
     }
@@ -85,8 +87,10 @@ fn log_drag_proof(msg: &str) {
 /// Initialises COM (STA), creates the COM data objects, calls `DoDragDrop`,
 /// and uninitialises COM on return. Returns:
 ///
-/// - `Ok(DragOutcome::Dropped)` if the user dropped the payload onto a
-///   target that accepted it.
+/// - `Ok(DragOutcome::Copied)` / `Ok(DragOutcome::Moved)` when the target
+///   reports the corresponding OLE effect.
+/// - `Ok(DragOutcome::Dropped)` when the drop completed without one exact
+///   copy/move effect; callers must keep their source model in this case.
 /// - `Ok(DragOutcome::Cancelled)` if the user pressed Esc / the OS cancelled.
 /// - `Err(DragDropError::NoFiles)` if `file_paths` is empty.
 /// - `Err(DragDropError::Unexpected(hr))` for any other HRESULT.
@@ -167,7 +171,13 @@ fn classify_drag_result(
     source_window_drag: bool,
 ) -> Result<DragOutcome, DragDropError> {
     if hr == DRAGDROP_S_DROP || (source_window_drag && hr == S_OK && effect != DROPEFFECT(0)) {
-        Ok(DragOutcome::Dropped)
+        Ok(if effect == DROPEFFECT_MOVE {
+            DragOutcome::Moved
+        } else if effect == DROPEFFECT_COPY {
+            DragOutcome::Copied
+        } else {
+            DragOutcome::Dropped
+        })
     } else if hr == DRAGDROP_S_CANCEL {
         Ok(DragOutcome::Cancelled)
     } else {
@@ -319,10 +329,10 @@ fn start_drag_operation_inner(
         };
 
         match classify_drag_result(hr, effect, source_window_drag) {
-            Ok(DragOutcome::Dropped) => {
+            Ok(outcome @ (DragOutcome::Copied | DragOutcome::Moved | DragOutcome::Dropped)) => {
                 tracing::info!("drag_drop: completed (effect = {:?})", effect);
                 log_drag_proof(format!("drag_drop: completed (effect = {effect:?})\n").as_str());
-                Ok(DragOutcome::Dropped)
+                Ok(outcome)
             }
             Ok(DragOutcome::Cancelled) => {
                 tracing::info!("drag_drop: cancelled by user");
@@ -349,7 +359,12 @@ mod tests {
 
     #[test]
     fn drag_outcome_serde_round_trip() {
-        for variant in [DragOutcome::Dropped, DragOutcome::Cancelled] {
+        for variant in [
+            DragOutcome::Copied,
+            DragOutcome::Moved,
+            DragOutcome::Dropped,
+            DragOutcome::Cancelled,
+        ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             let parsed: DragOutcome = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(variant, parsed);
@@ -358,6 +373,8 @@ mod tests {
 
     #[test]
     fn drag_outcome_as_str_matches_1x_strings() {
+        assert_eq!(DragOutcome::Copied.as_str(), "dropped");
+        assert_eq!(DragOutcome::Moved.as_str(), "dropped");
         assert_eq!(DragOutcome::Dropped.as_str(), "dropped");
         assert_eq!(DragOutcome::Cancelled.as_str(), "cancelled");
     }
@@ -389,7 +406,11 @@ mod tests {
     fn source_shell_s_ok_requires_an_accepted_effect() {
         assert!(matches!(
             classify_drag_result(S_OK, DROPEFFECT_COPY, true),
-            Ok(DragOutcome::Dropped)
+            Ok(DragOutcome::Copied)
+        ));
+        assert!(matches!(
+            classify_drag_result(S_OK, DROPEFFECT_MOVE, true),
+            Ok(DragOutcome::Moved)
         ));
         assert!(matches!(
             classify_drag_result(S_OK, DROPEFFECT(0), true),

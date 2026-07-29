@@ -178,47 +178,43 @@ pub fn main_nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) ->
 
 fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
     let stack_surface = app.stack_tray.borrow().clone();
-    if let Some(state) = stack_surface.as_ref() {
-        if let Some(anchor) = app.zones.get(state.anchor_zone_id) {
-            if let Some(members) = app.zones.stack_member_ids(anchor.id) {
-                let member_count = members.len();
-                if state.is_management() {
-                    if stack_tray::stack_tray_hit_test(app.viewport, anchor, member_count, x, y)
-                        .is_some()
-                    {
-                        return true;
-                    }
-                    let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
-                    let selected_id = if members.contains(&state.selected_member_id) {
-                        state.selected_member_id
-                    } else {
-                        members[0]
-                    };
-                    if stack_tray::focused_preview_visible(anchor.id, selected_id)
-                        && rect_contains(stack_tray::focused_preview_rect(app.viewport, tray), x, y)
-                    {
-                        return true;
-                    }
-                } else if let Some(member_index) = members
-                    .iter()
-                    .position(|member_id| *member_id == state.selected_member_id)
-                    && let Some(member) = app.zones.get(state.selected_member_id)
-                {
-                    let petals =
-                        stack_tray::stack_bloom_petal_rects(app.viewport, anchor, member_count);
-                    if let Some(petal) = petals.get(member_index).copied()
-                        && stack_tray::focused_bloom_preview_contains(
-                            app.viewport,
-                            petal,
-                            &petals,
-                            member,
-                            x,
-                            y,
-                        )
-                    {
-                        return true;
-                    }
-                }
+    if let Some(state) = stack_surface.as_ref()
+        && let Some(anchor) = app.zones.get(state.anchor_zone_id)
+        && let Some(members) = app.zones.stack_member_ids(anchor.id)
+    {
+        let member_count = members.len();
+        if state.is_management() {
+            if stack_tray::stack_tray_hit_test(app.viewport, anchor, member_count, x, y).is_some() {
+                return true;
+            }
+            let tray = stack_tray::stack_tray_rect(app.viewport, anchor, member_count);
+            let selected_id = if members.contains(&state.selected_member_id) {
+                state.selected_member_id
+            } else {
+                members[0]
+            };
+            if stack_tray::focused_preview_visible(anchor.id, selected_id)
+                && rect_contains(stack_tray::focused_preview_rect(app.viewport, tray), x, y)
+            {
+                return true;
+            }
+        } else if let Some(member_index) = members
+            .iter()
+            .position(|member_id| *member_id == state.selected_member_id)
+            && let Some(member) = app.zones.get(state.selected_member_id)
+        {
+            let petals = stack_tray::stack_bloom_petal_rects(app.viewport, anchor, member_count);
+            if let Some(petal) = petals.get(member_index).copied()
+                && stack_tray::focused_bloom_preview_contains(
+                    app.viewport,
+                    petal,
+                    &petals,
+                    member,
+                    x,
+                    y,
+                )
+            {
+                return true;
             }
         }
     }

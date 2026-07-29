@@ -226,19 +226,17 @@ pub(super) fn handle_mouse_move(root: &AppRoot, slot: &WindowSlot, x: f32, y: f3
     let hit = ui::hit_test(&slot.state, x, y);
     let mut prev = root.hovered.borrow_mut();
     if *prev != hit {
-        if let Some(old) = *prev {
-            if ui::is_icon_button(&app, old) {
-                if let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(old) {
-                    btn.set_hovered(false);
-                }
-            }
+        if let Some(old) = *prev
+            && ui::is_icon_button(&app, old)
+            && let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(old)
+        {
+            btn.set_hovered(false);
         }
-        if let Some(new) = hit {
-            if ui::is_icon_button(&app, new) {
-                if let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(new) {
-                    btn.set_hovered(true);
-                }
-            }
+        if let Some(new) = hit
+            && ui::is_icon_button(&app, new)
+            && let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(new)
+        {
+            btn.set_hovered(true);
         }
         *prev = hit;
     }
@@ -408,12 +406,11 @@ pub(super) fn clear_hover(root: &AppRoot) {
     // fires the actual collapse morph once the grace elapses (HOVER mode).
     drive_hover_scheduler(&app, None, now_ms);
     let mut prev = root.hovered.borrow_mut();
-    if let Some(old) = *prev {
-        if ui::is_icon_button(&app, old) {
-            if let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(old) {
-                btn.set_hovered(false);
-            }
-        }
+    if let Some(old) = *prev
+        && ui::is_icon_button(&app, old)
+        && let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(old)
+    {
+        btn.set_hovered(false);
     }
     *prev = None;
     drop(prev);

@@ -133,7 +133,7 @@ pub(super) fn settings_encryption_mode_button_fill_color(
 /// `GetCaretBlinkTime`): ON for one 530ms half-period, OFF for the next. Pure
 /// (no state, no allocation) so it's unit-testable and §10-safe.
 pub fn settings_caret_on(now_ms: u32) -> bool {
-    (now_ms / 530) % 2 == 0
+    (now_ms / 530).is_multiple_of(2)
 }
 
 /// P2 (#7 fix wave 2026-06-01) — the user-visible mode label that MATCHES the

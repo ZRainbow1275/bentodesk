@@ -9,7 +9,7 @@
 //! - `updater_card.snap.md` (check / download / install + frequency dropdown)
 //!
 //! Runtime status: selected-stack complete. The visible Settings surface is
-//! rendered by `Renderer::draw_settings_panel` from live [`AppState`] values:
+//! rendered by `Renderer::draw_settings_panel` from live `AppState` values:
 //! updater lifecycle, plugin/theme management, vault backup/recovery,
 //! encryption, keybindings, locale, stealth storage, and display-mode actions
 //! are all routed through shell commands. This module remains the lightweight

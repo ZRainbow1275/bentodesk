@@ -88,9 +88,8 @@ pub(super) use windows_sys::Win32::Foundation::{
     BOOL, COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HWND,
     LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-// #19-B (2026-05-31) — OS UI-language default. kernel32 Vista+; static import
-// safe on our Win7+ target.
-pub(super) use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+// #19-B (2026-05-31) — OS UI-language default.
+pub(super) use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 pub(super) use windows_sys::Win32::Graphics::Dwm::DwmFlush;
 pub(super) use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, InvalidateRect, ScreenToClient, UpdateWindow,

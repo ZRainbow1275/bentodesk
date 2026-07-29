@@ -100,10 +100,10 @@ pub fn enumerate_monitors() -> SmallVec<[MonitorInfo; 4]> {
     // synchronous so the borrow lives for the duration of the FFI call.
     let _ok = unsafe { EnumDisplayMonitors(0 as HDC, core::ptr::null(), Some(enum_proc), lparam) };
     // Sort primary first so callers can index 0 for a "best guess" monitor.
-    if let Some(idx) = sink.iter().position(|m| m.is_primary) {
-        if idx != 0 {
-            sink.swap(0, idx);
-        }
+    if let Some(idx) = sink.iter().position(|m| m.is_primary)
+        && idx != 0
+    {
+        sink.swap(0, idx);
     }
     sink
 }

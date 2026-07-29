@@ -497,15 +497,14 @@ fn safe_prefix_len(value: &str, max: usize) -> usize {
 /// parent directory if missing. Existing file is replaced as one operation
 /// so a crash leaves either the old or new copy, never a half-written one.
 pub fn write_zones_atomic(path: &Path, zones: &ZoneList) -> Result<(), PlatformError> {
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                return Err(PlatformError::StorageIo {
-                    ctx: "create_dir_all parent",
-                    kind: e.kind(),
-                });
-            }
-        }
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        return Err(PlatformError::StorageIo {
+            ctx: "create_dir_all parent",
+            kind: e.kind(),
+        });
     }
 
     let mut tmp = path.as_os_str().to_owned();

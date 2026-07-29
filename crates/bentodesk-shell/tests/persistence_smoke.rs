@@ -119,14 +119,15 @@ fn corrupt_file_quarantines_and_first_paint_recovers_to_empty() {
     assert!(after.unwrap_or_default().is_empty());
 
     // Cleanup the quarantined sibling — whatever it got renamed to.
-    if let Some(parent) = path.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for e in entries.flatten() {
-                if let Some(name) = e.file_name().to_str() {
-                    if name.contains(".corrupt-") && name.contains("bentodesk-persist-corrupt") {
-                        let _ = std::fs::remove_file(e.path());
-                    }
-                }
+    if let Some(parent) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(parent)
+    {
+        for e in entries.flatten() {
+            if let Some(name) = e.file_name().to_str()
+                && name.contains(".corrupt-")
+                && name.contains("bentodesk-persist-corrupt")
+            {
+                let _ = std::fs::remove_file(e.path());
             }
         }
     }

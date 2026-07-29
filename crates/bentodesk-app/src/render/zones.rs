@@ -533,29 +533,29 @@ impl Renderer {
                             },
                         )?;
                     }
-                    if Some(zone.id) == drag_target_id {
-                        if let Some(preview) = drop_preview_rect_for_zone(
+                    if Some(zone.id) == drag_target_id
+                        && let Some(preview) = drop_preview_rect_for_zone(
                             zone,
                             item_drag,
                             dragged_item_wide,
                             item_scroll,
                             item_top_offset,
-                        ) {
-                            // Drag preview is a target affordance, not card chrome. Paint it
-                            // after resident cards so occupied cells cannot cover the target core,
-                            // but before the floating ghost so the dragged item remains topmost.
-                            self.fill_rounded_rect(
-                                preview,
-                                drop_preview_fill,
-                                item_chrome.card_radius,
-                            )?;
-                            let core = inset_rect(preview, 4.0);
-                            self.fill_rounded_rect(
-                                core,
-                                drop_preview_core,
-                                zone_chrome.drop_preview_core_radius,
-                            )?;
-                        }
+                        )
+                    {
+                        // Drag preview is a target affordance, not card chrome. Paint it
+                        // after resident cards so occupied cells cannot cover the target core,
+                        // but before the floating ghost so the dragged item remains topmost.
+                        self.fill_rounded_rect(
+                            preview,
+                            drop_preview_fill,
+                            item_chrome.card_radius,
+                        )?;
+                        let core = inset_rect(preview, 4.0);
+                        self.fill_rounded_rect(
+                            core,
+                            drop_preview_core,
+                            zone_chrome.drop_preview_core_radius,
+                        )?;
                     }
                     Ok(())
                 })();
@@ -616,44 +616,44 @@ impl Renderer {
         // `pill_body_visible` anchor rule above), so the collapsed pill + bloom
         // are the only surfaces shown while hovering.
         self.draw_stack_bloom_overlay(app, anim_now_ms)?;
-        if let Some(drag) = item_drag {
-            if let Some((zone, item)) = source_drag_item(app, drag) {
-                let source_rect = item_card_rect_for_item(zone, item);
-                let ghost_rect = drag_ghost_rect(app, drag, source_rect);
-                let shadow_rect = bentodesk_style::Rect {
-                    x: ghost_rect.x + 4.0,
-                    y: ghost_rect.y + 6.0,
-                    width: ghost_rect.width,
-                    height: ghost_rect.height,
-                };
-                self.fill_rounded_rect(
-                    shadow_rect,
-                    item_chrome.ghost_shadow,
-                    item_chrome.card_radius,
-                )?;
-                self.draw_item_card(
-                    item,
-                    ghost_rect,
-                    if item.file_missing {
-                        item_chrome.missing_background
-                    } else {
-                        item_chrome.ghost_background
-                    },
-                    &item_chrome,
-                    // M3-A2/A3 — the floating drag ghost is not a hover target;
-                    // it keeps identity scale + zero hover_t (no lift / bg-border
-                    // -shadow lerp; the ghost has its own lift/shadow treatment)
-                    // so hover/press chrome stays on the live grid.
-                    0.0,
-                    false,
-                    1.0,
-                    item_label_font_size_for_width(
-                        item_label_visible_name(item.name.as_ref()),
-                        (ghost_rect.width - 8.0).max(0.0),
-                    ),
-                    1.0,
-                )?;
-            }
+        if let Some(drag) = item_drag
+            && let Some((zone, item)) = source_drag_item(app, drag)
+        {
+            let source_rect = item_card_rect_for_item(zone, item);
+            let ghost_rect = drag_ghost_rect(app, drag, source_rect);
+            let shadow_rect = bentodesk_style::Rect {
+                x: ghost_rect.x + 4.0,
+                y: ghost_rect.y + 6.0,
+                width: ghost_rect.width,
+                height: ghost_rect.height,
+            };
+            self.fill_rounded_rect(
+                shadow_rect,
+                item_chrome.ghost_shadow,
+                item_chrome.card_radius,
+            )?;
+            self.draw_item_card(
+                item,
+                ghost_rect,
+                if item.file_missing {
+                    item_chrome.missing_background
+                } else {
+                    item_chrome.ghost_background
+                },
+                &item_chrome,
+                // M3-A2/A3 — the floating drag ghost is not a hover target;
+                // it keeps identity scale + zero hover_t (no lift / bg-border
+                // -shadow lerp; the ghost has its own lift/shadow treatment)
+                // so hover/press chrome stays on the live grid.
+                0.0,
+                false,
+                1.0,
+                item_label_font_size_for_width(
+                    item_label_visible_name(item.name.as_ref()),
+                    (ghost_rect.width - 8.0).max(0.0),
+                ),
+                1.0,
+            )?;
         }
         // V-11 (2026-05-21): bottom-left `item_operation_status` chip removed.
         // Tauri 1.2.4 baseline never painted a status pill on item open/copy/etc;

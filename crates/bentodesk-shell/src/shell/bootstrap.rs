@@ -220,92 +220,92 @@ pub(super) fn run() {
     // share the storage helper's directory-creation path. Failure here is
     // best-effort — the dispatcher's SetSetting handler tolerates a
     // missing global by logging instead of blocking the pump.
-    if let Ok(zones_path) = storage::appdata_path() {
-        if let Some(dir) = zones_path.parent() {
-            if let Some(root) = app_root() {
-                root.app.borrow_mut().zones_path = zones_path.clone();
-            }
-            let vault_path = dir.join("vault.bin");
-            if startup_diag_skip("vault") {
-                tracing::info!(
-                    target: "bentodesk::startup_diag",
-                    "BENTODESK_DIAG_SKIP=vault; config vault startup skipped"
-                );
-            } else if let Err(e) = bentodesk_backend::config_vault::init_global(&vault_path) {
-                tracing::warn!(
-                    target: "bentodesk::vault",
-                    error = %e,
-                    "Vault init_global failed — SetSetting will log-and-drop"
-                );
-            } else if let Some(root) = app_root() {
-                migrate_legacy_tauri_settings_to_vault(dir);
-                apply_persisted_settings_from_vault(root);
-                maybe_start_background_update_check(root);
-            }
+    if let Ok(zones_path) = storage::appdata_path()
+        && let Some(dir) = zones_path.parent()
+    {
+        if let Some(root) = app_root() {
+            root.app.borrow_mut().zones_path = zones_path.clone();
+        }
+        let vault_path = dir.join("vault.bin");
+        if startup_diag_skip("vault") {
+            tracing::info!(
+                target: "bentodesk::startup_diag",
+                "BENTODESK_DIAG_SKIP=vault; config vault startup skipped"
+            );
+        } else if let Err(e) = bentodesk_backend::config_vault::init_global(&vault_path) {
+            tracing::warn!(
+                target: "bentodesk::vault",
+                error = %e,
+                "Vault init_global failed — SetSetting will log-and-drop"
+            );
+        } else if let Some(root) = app_root() {
+            migrate_legacy_tauri_settings_to_vault(dir);
+            apply_persisted_settings_from_vault(root);
+            maybe_start_background_update_check(root);
+        }
 
-            let icon_config = bentodesk_backend::icon::IconConfig {
-                app_data_dir: smol_str::SmolStr::new(dir.to_string_lossy().as_ref()),
-            };
-            if !startup_diag_skip("icon") {
-                let icon_cache = bentodesk_backend::icon::init(&icon_config);
-                if let Some(root) = app_root() {
-                    icon_cache.resize(root.app.borrow().icon_cache_size.get().max(1) as usize);
-                }
-            }
+        let icon_config = bentodesk_backend::icon::IconConfig {
+            app_data_dir: smol_str::SmolStr::new(dir.to_string_lossy().as_ref()),
+        };
+        if !startup_diag_skip("icon") {
+            let icon_cache = bentodesk_backend::icon::init(&icon_config);
             if let Some(root) = app_root() {
-                // The marker chooses the storage root before vault.bin can be
-                // opened, so it is the runtime truth for the toggle.
-                root.app
-                    .borrow()
-                    .setting_portable_mode
-                    .set(storage::portable_mode_enabled());
-                let startup_settings = root.app.borrow().snapshot_settings();
-                if let Err(error) = apply_process_priority(startup_settings.startup_high_priority) {
-                    tracing::warn!(
-                        target: "bentodesk::settings",
-                        %error,
-                        "startup process-priority restore failed"
-                    );
-                }
-                if let Err(error) = configure_application_restart(&startup_settings) {
-                    tracing::warn!(
-                        target: "bentodesk::settings",
-                        %error,
-                        "startup crash-restart restore failed"
-                    );
-                }
-                match validate_settings_sources(&startup_settings) {
-                    Ok(sources) => {
-                        if let Err(error) = rebuild_desktop_watcher(root, &sources) {
-                            tracing::warn!(
-                                target: "bentodesk::watcher",
-                                %error,
-                                "startup Settings-path watcher restore failed; initial watcher retained"
-                            );
-                        }
-                    }
-                    Err(error) => tracing::warn!(
-                        target: "bentodesk::watcher",
-                        %error,
-                        "startup Settings paths invalid; initial watcher retained"
-                    ),
-                }
+                icon_cache.resize(root.app.borrow().icon_cache_size.get().max(1) as usize);
             }
-            if !startup_diag_skip("recovery")
-                && let Some(root) = app_root()
-            {
-                run_startup_recovery_bundle_heal(root, &zones_path);
-            }
-            if let Some(root) = app_root() {
-                run_startup_layout_load_or_migrate(root, &zones_path);
-            }
-            if !startup_diag_skip("rules") {
-                bentodesk_backend::rules::scheduler::spawn(
-                    dir.to_path_buf(),
-                    rules_scheduler_event_tx,
-                    Duration::from_secs(60),
+        }
+        if let Some(root) = app_root() {
+            // The marker chooses the storage root before vault.bin can be
+            // opened, so it is the runtime truth for the toggle.
+            root.app
+                .borrow()
+                .setting_portable_mode
+                .set(storage::portable_mode_enabled());
+            let startup_settings = root.app.borrow().snapshot_settings();
+            if let Err(error) = apply_process_priority(startup_settings.startup_high_priority) {
+                tracing::warn!(
+                    target: "bentodesk::settings",
+                    %error,
+                    "startup process-priority restore failed"
                 );
             }
+            if let Err(error) = configure_application_restart(&startup_settings) {
+                tracing::warn!(
+                    target: "bentodesk::settings",
+                    %error,
+                    "startup crash-restart restore failed"
+                );
+            }
+            match validate_settings_sources(&startup_settings) {
+                Ok(sources) => {
+                    if let Err(error) = rebuild_desktop_watcher(root, &sources) {
+                        tracing::warn!(
+                            target: "bentodesk::watcher",
+                            %error,
+                            "startup Settings-path watcher restore failed; initial watcher retained"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    target: "bentodesk::watcher",
+                    %error,
+                    "startup Settings paths invalid; initial watcher retained"
+                ),
+            }
+        }
+        if !startup_diag_skip("recovery")
+            && let Some(root) = app_root()
+        {
+            run_startup_recovery_bundle_heal(root, &zones_path);
+        }
+        if let Some(root) = app_root() {
+            run_startup_layout_load_or_migrate(root, &zones_path);
+        }
+        if !startup_diag_skip("rules") {
+            bentodesk_backend::rules::scheduler::spawn(
+                dir.to_path_buf(),
+                rules_scheduler_event_tx,
+                Duration::from_secs(60),
+            );
         }
     }
 
@@ -373,18 +373,18 @@ pub(super) fn run() {
     // RegisterDragDrop is the primary OLE parity path; WM_DROPFILES remains a
     // compatibility fallback that reaches the same item model and persistence.
     unsafe { DragAcceptFiles(hwnd, 1) };
-    if ole_drop_ready {
-        if let Err(e) = bentodesk_backend::drag_drop::register_drop_target(
+    if ole_drop_ready
+        && let Err(e) = bentodesk_backend::drag_drop::register_drop_target(
             hwnd,
             ole_drop_can_accept,
             ole_drop_commit,
-        ) {
-            tracing::warn!(
-                target: "bentodesk::drag_drop",
-                error = %e,
-                "RegisterDragDrop failed; WM_DROPFILES remains the active fallback"
-            );
-        }
+        )
+    {
+        tracing::warn!(
+            target: "bentodesk::drag_drop",
+            error = %e,
+            "RegisterDragDrop failed; WM_DROPFILES remains the active fallback"
+        );
     }
 
     if let Some(root) = app_root() {

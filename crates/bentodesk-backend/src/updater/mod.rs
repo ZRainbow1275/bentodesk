@@ -172,7 +172,7 @@ impl Updater {
 
     /// Construct an updater with an explicit manifest source. Tests and
     /// controlled deployments use this to avoid hidden global environment
-    /// state; production `new()` reads [`MANIFEST_ENV`].
+    /// state; production `new()` reads `MANIFEST_ENV`.
     pub fn with_manifest_source(
         event_tx: Sender<UpdateEvent>,
         manifest_source: Option<SmolStr>,
@@ -328,7 +328,7 @@ impl Updater {
             .map_err(|_| UpdaterError::EventChannelClosed)
     }
 
-    /// Persist `version` as "skipped" — subsequent [`check`] calls return
+    /// Persist `version` as "skipped" — subsequent [`Self::check`] calls return
     /// `Ok(None)` for that exact build.
     ///
     /// This entry IS implemented today (no I/O surface required — the slot

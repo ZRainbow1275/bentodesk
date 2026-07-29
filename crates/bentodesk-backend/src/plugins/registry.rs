@@ -6,7 +6,7 @@
 //! ## What changed vs 1.x
 //!
 //! - **Spec §8.1**: hand-rolled [`PluginError`] (in `super`) replaces
-//!   `BentoDeskError`. Storage failures wrap [`StorageError`] via
+//!   `BentoDeskError`. Storage failures wrap `StorageError` via
 //!   [`PluginError::Storage`].
 //! - **Tauri removal**: all paths take `state_dir: &Path` instead of
 //!   `app_data: &Path` resolved from `AppHandle::path()`.
@@ -102,10 +102,10 @@ impl PluginRegistry {
     /// Atomically persist the registry to disk.
     pub fn save(&self, state_dir: &Path) -> Result<(), PluginError> {
         let path = Self::registry_path(state_dir);
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(PluginError::Io)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(PluginError::Io)?;
         }
         storage::write_json_atomic(&path, self).map_err(PluginError::Storage)
     }

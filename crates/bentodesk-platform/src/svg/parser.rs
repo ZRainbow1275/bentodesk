@@ -65,14 +65,16 @@ impl<'a> Parser<'a> {
         for (k, v) in &attrs {
             if k == b"viewBox" {
                 out.viewbox = parse_viewbox(v)?;
-            } else if k == b"width" && out.viewbox == ViewBox::default() {
-                if let Some(w) = parse_dimension(v) {
-                    out.viewbox.width = w;
-                }
-            } else if k == b"height" && out.viewbox == ViewBox::default() {
-                if let Some(h) = parse_dimension(v) {
-                    out.viewbox.height = h;
-                }
+            } else if k == b"width"
+                && out.viewbox == ViewBox::default()
+                && let Some(w) = parse_dimension(v)
+            {
+                out.viewbox.width = w;
+            } else if k == b"height"
+                && out.viewbox == ViewBox::default()
+                && let Some(h) = parse_dimension(v)
+            {
+                out.viewbox.height = h;
             }
         }
         if self.consume_byte(b'/') {

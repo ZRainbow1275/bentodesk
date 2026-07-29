@@ -122,10 +122,10 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
     if let Some(result) = slot.state.layout.last_result() {
         let ids: smallvec::SmallVec<[NodeId; 16]> = result.iter().map(|(id, _)| *id).collect();
         for id in ids {
-            if let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(id) {
-                if btn.tick(dt) {
-                    any_active = true;
-                }
+            if let Ok(WidgetNode::IconButton(btn)) = app.tree.get_mut(id)
+                && btn.tick(dt)
+            {
+                any_active = true;
             }
         }
     }
@@ -447,16 +447,15 @@ pub(super) fn drain_power_events(root: &AppRoot) -> bool {
             bentodesk_backend::power::PowerEvent::Resumed => {
                 let snapshot = root.app.borrow().snapshot_settings();
                 if snapshot.ghost_layer_enabled {
-                    if let Some(hwnd) = find_main_hwnd(root) {
-                        if let Err(error) =
+                    if let Some(hwnd) = find_main_hwnd(root)
+                        && let Err(error) =
                             bentodesk_backend::ghost_layer::attach_selected_stack(hwnd)
-                        {
-                            tracing::warn!(
-                                target: "bentodesk::ghost_layer",
-                                %error,
-                                "PowerResume ghost-layer reattach failed"
-                            );
-                        }
+                    {
+                        tracing::warn!(
+                            target: "bentodesk::ghost_layer",
+                            %error,
+                            "PowerResume ghost-layer reattach failed"
+                        );
                     }
                     bentodesk_backend::ghost_layer::reposition_to_work_area();
                 }

@@ -96,10 +96,10 @@ pub fn stack_target_for_drop(zones: &ZoneList, dragged: ZoneId) -> Option<ZoneId
             continue;
         }
         // Guard 2 — already share a stack anchor → skip (no self-restack).
-        if let Some(anchor) = self_anchor {
-            if zones.stack_anchor_for(candidate.id) == Some(anchor) {
-                continue;
-            }
+        if let Some(anchor) = self_anchor
+            && zones.stack_anchor_for(candidate.id) == Some(anchor)
+        {
+            continue;
         }
 
         let other_rect = zone_drag_capsule_rect(zones, candidate);

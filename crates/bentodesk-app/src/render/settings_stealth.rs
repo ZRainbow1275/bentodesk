@@ -221,14 +221,10 @@ impl Renderer {
                     width: err_block.width,
                     height: err_block.height - 18.0,
                 };
-                if let Some(s) = stealth_snapshot.as_ref() {
-                    if let Some(err) = s.last_error.as_deref() {
-                        self.draw_settings_text(
-                            err,
-                            err_rect,
-                            with_alpha(palette.accent_red, 0.9),
-                        )?;
-                    }
+                if let Some(s) = stealth_snapshot.as_ref()
+                    && let Some(err) = s.last_error.as_deref()
+                {
+                    self.draw_settings_text(err, err_rect, with_alpha(palette.accent_red, 0.9))?;
                 }
             }
         }

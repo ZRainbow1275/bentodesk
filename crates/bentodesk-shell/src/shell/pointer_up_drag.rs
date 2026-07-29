@@ -527,7 +527,7 @@ pub(super) fn finalize_item_drag_out(
     outcome: bentodesk_backend::drag_drop::DragOutcome,
 ) {
     match outcome {
-        bentodesk_backend::drag_drop::DragOutcome::Dropped if request.copy_only => {
+        bentodesk_backend::drag_drop::DragOutcome::Copied => {
             set_item_operation_status(
                 root,
                 localized_current(
@@ -536,7 +536,7 @@ pub(super) fn finalize_item_drag_out(
                 ),
             );
         }
-        bentodesk_backend::drag_drop::DragOutcome::Dropped => {
+        bentodesk_backend::drag_drop::DragOutcome::Moved => {
             // The Shell has already completed the MOVE represented by
             // `DROPEFFECT_MOVE`. For stealth-backed items that means the hidden
             // source path no longer exists: routing through ordinary RemoveItem
@@ -572,6 +572,17 @@ pub(super) fn finalize_item_drag_out(
                     .as_str(),
                 );
             }
+        }
+        bentodesk_backend::drag_drop::DragOutcome::Dropped => {
+            // A completed drop without one exact COPY/MOVE effect is not
+            // evidence that the source left disk. Keep the Zone model.
+            set_item_operation_status(
+                root,
+                localized_current(
+                    format!("已拖出：{leaf}"),
+                    item_drag_out_status_for_outcome(leaf, outcome),
+                ),
+            );
         }
         bentodesk_backend::drag_drop::DragOutcome::Cancelled => {
             set_item_operation_status(
@@ -690,6 +701,12 @@ pub(super) fn item_drag_out_status_for_outcome(
     outcome: bentodesk_backend::drag_drop::DragOutcome,
 ) -> String {
     match outcome {
+        bentodesk_backend::drag_drop::DragOutcome::Copied => {
+            format!("Copied out: {leaf}")
+        }
+        bentodesk_backend::drag_drop::DragOutcome::Moved => {
+            format!("Moved out: {leaf}")
+        }
         bentodesk_backend::drag_drop::DragOutcome::Dropped => {
             format!("Dragged out: {leaf}")
         }

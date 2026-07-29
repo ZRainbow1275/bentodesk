@@ -158,21 +158,21 @@ pub(super) fn item_grid_position_for_drag_point(
     x: f32,
     y: f32,
 ) -> Option<(i32, i32)> {
-    if let Some((_, member, preview)) = stack_bloom_preview_hit_for_point(app, x, y) {
-        if member == zone_id {
-            let zone = app.zones.get(member)?;
-            return highlight_overlay::item_grid_position_for_panel(
-                preview,
-                zone.grid_columns,
-                x,
-                y,
-                if app.zone_search_target.get() == Some(member) {
-                    search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
-                } else {
-                    0.0
-                },
-            );
-        }
+    if let Some((_, member, preview)) = stack_bloom_preview_hit_for_point(app, x, y)
+        && member == zone_id
+    {
+        let zone = app.zones.get(member)?;
+        return highlight_overlay::item_grid_position_for_panel(
+            preview,
+            zone.grid_columns,
+            x,
+            y,
+            if app.zone_search_target.get() == Some(member) {
+                search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            } else {
+                0.0
+            },
+        );
     }
     ui::item_grid_position_for_point(app, zone_id, x, y)
 }

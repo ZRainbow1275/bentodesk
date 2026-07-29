@@ -34,7 +34,7 @@ const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Two eviction limits apply to the hot tier:
 /// 1. Entry count — classic LRU capacity.
 /// 2. Total bytes — sum of all `Arc<Vec<u8>>` payloads must not
-///    exceed [`MAX_TOTAL_BYTES`]. When an insert would push the total
+///    exceed `MAX_TOTAL_BYTES`. When an insert would push the total
 ///    over, LRU evictions run until the budget is met.
 pub struct IconCache {
     inner: Mutex<HotLru>,
@@ -79,13 +79,13 @@ impl IconCache {
                 return Some(arc);
             }
         }
-        if let Some(warm) = &self.warm {
-            if let Some(bytes) = warm.read(key) {
-                self.stats.record_warm_hit();
-                let arc = Arc::new(bytes);
-                self.put_hot_only(key.to_string(), Arc::clone(&arc));
-                return Some(arc);
-            }
+        if let Some(warm) = &self.warm
+            && let Some(bytes) = warm.read(key)
+        {
+            self.stats.record_warm_hit();
+            let arc = Arc::new(bytes);
+            self.put_hot_only(key.to_string(), Arc::clone(&arc));
+            return Some(arc);
         }
         self.stats.record_miss();
         None
@@ -121,7 +121,7 @@ impl IconCache {
     }
 
     /// Insert an icon into the cache (both tiers). If the new entry
-    /// would exceed [`MAX_TOTAL_BYTES`], LRU evictions run until the
+    /// would exceed `MAX_TOTAL_BYTES`, LRU evictions run until the
     /// budget is met. Warm-tier copies of evicted entries are
     /// preserved.
     pub fn put(&self, key: String, data: Vec<u8>) {
@@ -171,10 +171,10 @@ impl IconCache {
         cache.clear();
         let mut total = self.total_bytes.lock().unwrap_or_else(|e| e.into_inner());
         *total = 0;
-        if let Some(warm) = &self.warm {
-            if let Err(e) = warm.clear() {
-                tracing::warn!("failed to clear warm icon tier: {e}");
-            }
+        if let Some(warm) = &self.warm
+            && let Err(e) = warm.clear()
+        {
+            tracing::warn!("failed to clear warm icon tier: {e}");
         }
         self.stats.reset();
     }

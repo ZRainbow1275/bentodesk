@@ -159,10 +159,10 @@ impl Drop for Debouncer {
         if let Ok(mut guard) = self.inner.lock() {
             *guard = None;
         }
-        if let Ok(mut wg) = self.worker.lock() {
-            if let Some(jh) = wg.take() {
-                let _ = jh.join();
-            }
+        if let Ok(mut wg) = self.worker.lock()
+            && let Some(jh) = wg.take()
+        {
+            let _ = jh.join();
         }
     }
 }

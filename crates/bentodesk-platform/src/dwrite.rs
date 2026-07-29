@@ -144,7 +144,7 @@ pub fn family_is_available(family: &str) -> bool {
 ///
 /// The result is cached per role in a [`OnceLock`], so the
 /// GetSystemFontCollection / FindFamilyName probe runs at most once per role
-/// for the entire process lifetime (§10). On a normal Windows the preferred[0]
+/// for the entire process lifetime (§10). On a normal Windows the preferred `[0]`
 /// family is installed, so the returned `&'static str` equals the caller's
 /// first literal — zero visual change (Q2 pixel-1:1).
 pub fn resolve_default_family(role: FontRole, preferred: &[&'static str]) -> &'static str {

@@ -77,10 +77,10 @@ pub(super) fn dispatch(
             let normalized_icon = normalize_icon_slug(icon.as_str());
             if let Some(z) = app.zones.get_mut(id) {
                 z.set_icon(std::borrow::Cow::Owned(normalized_icon.to_string()));
-                if let Some(session) = app.zone_editor.borrow_mut().as_mut() {
-                    if session.zone_id == id {
-                        session.draft_icon = normalized_icon;
-                    }
+                if let Some(session) = app.zone_editor.borrow_mut().as_mut()
+                    && session.zone_id == id
+                {
+                    session.draft_icon = normalized_icon;
                 }
                 app.mark_dirty();
                 effects.needs_redraw = true;
