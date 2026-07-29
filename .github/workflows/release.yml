@@ -9,14 +9,14 @@ on:
       tag:
         description: Existing immutable tag to publish
         required: true
-        default: v2.0.0
+        default: v2.0.1
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: native-release-${{ github.ref }}
+  group: native-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref_name }}
@@ -52,20 +52,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $shell = $metadata.packages | Where-Object name -eq "bentodesk-shell"
           $expectedTag = "v$($shell.version)"
           if ($env:RELEASE_TAG -ne $expectedTag) {
             throw "Tag $env:RELEASE_TAG does not match workspace version $($shell.version)"
           }
-          if ($shell.version -ne "2.0.0") {
-            throw "This workflow currently publishes BentoDesk 2.0.0 only"
-          }
 
           cargo fmt --all -- --check
-          cargo test --workspace --all-targets --target $env:TARGET
-          cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
-          cargo doc --workspace --no-deps --target $env:TARGET
+          cargo test --locked --workspace --all-targets --target $env:TARGET
+          cargo clippy --locked --workspace --all-targets --target $env:TARGET -- -D warnings
+          cargo doc --locked --workspace --no-deps --target $env:TARGET
 
       - name: Supply-chain checks
         shell: pwsh
@@ -82,24 +79,44 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $version = "2.0.0"
+          $version = $env:RELEASE_TAG.TrimStart("v")
           $packageName = "BentoDesk-$version-windows-x64-portable"
           $dist = Join-Path $PWD "dist"
           $stage = Join-Path $dist $packageName
           $zip = Join-Path $dist "$packageName.zip"
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
 
-          cargo build --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
+          cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
+          $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
+          if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
+            throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
+          }
 
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item "target/$env:TARGET/release/BentoDesk.exe" (Join-Path $stage "BentoDesk.exe")
-          Copy-Item "README.md" (Join-Path $stage "README.md")
-          Copy-Item "README.zh-CN.md" (Join-Path $stage "README.zh-CN.md")
-          Copy-Item "LICENSE" (Join-Path $stage "LICENSE")
+          $payload = @(
+            @{ Source = "target/$env:TARGET/release/BentoDesk.exe"; Target = "BentoDesk.exe" },
+            @{ Source = "README.md"; Target = "README.md" },
+            @{ Source = "README.zh-CN.md"; Target = "README.zh-CN.md" },
+            @{ Source = "CONTRIBUTING.md"; Target = "CONTRIBUTING.md" },
+            @{ Source = "SECURITY.md"; Target = "SECURITY.md" },
+            @{ Source = "LICENSE"; Target = "LICENSE" },
+            @{ Source = "crates/bentodesk-app/assets/app-icon.png"; Target = "crates/bentodesk-app/assets/app-icon.png" },
+            @{ Source = "docs/media/hero.webp"; Target = "docs/media/hero.webp" },
+            @{ Source = "docs/media/zone-motion.webp"; Target = "docs/media/zone-motion.webp" },
+            @{ Source = "docs/media/zone-motion.mp4"; Target = "docs/media/zone-motion.mp4" },
+            @{ Source = "docs/images/zone-editor.png"; Target = "docs/images/zone-editor.png" },
+            @{ Source = "docs/images/bulk-manager.png"; Target = "docs/images/bulk-manager.png" },
+            @{ Source = "docs/images/theme-settings.png"; Target = "docs/images/theme-settings.png" }
+          )
+          foreach ($entry in $payload) {
+            $target = Join-Path $stage $entry.Target
+            New-Item -ItemType Directory -Path (Split-Path $target) -Force | Out-Null
+            Copy-Item $entry.Source $target
+          }
 
-          $payload = @("BentoDesk.exe", "README.md", "README.zh-CN.md", "LICENSE")
-          $innerLines = foreach ($name in $payload) {
-            $hash = (Get-FileHash (Join-Path $stage $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          $innerLines = foreach ($file in Get-ChildItem $stage -Recurse -File | Sort-Object FullName) {
+            $name = [IO.Path]::GetRelativePath($stage, $file.FullName).Replace("\", "/")
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
           }
           [IO.File]::WriteAllLines(
@@ -108,10 +125,7 @@ jobs:
             [Text.UTF8Encoding]::new($false)
           )
 
-          $files = @(
-            "BentoDesk.exe", "README.md", "README.zh-CN.md", "LICENSE", "SHA256SUMS.txt"
-          ) | ForEach-Object { Join-Path $stage $_ }
-          Compress-Archive -LiteralPath $files -DestinationPath $zip -CompressionLevel Optimal
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllLines(
@@ -131,15 +145,31 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
 
           $zip = "${{ steps.package.outputs.zip }}"
-          $expected = @("BentoDesk.exe", "LICENSE", "README.md", "README.zh-CN.md", "SHA256SUMS.txt")
+          $required = @(
+            "BentoDesk.exe",
+            "CONTRIBUTING.md",
+            "LICENSE",
+            "README.md",
+            "README.zh-CN.md",
+            "SECURITY.md",
+            "SHA256SUMS.txt",
+            "crates/bentodesk-app/assets/app-icon.png",
+            "docs/images/bulk-manager.png",
+            "docs/images/theme-settings.png",
+            "docs/images/zone-editor.png",
+            "docs/media/hero.webp",
+            "docs/media/zone-motion.mp4",
+            "docs/media/zone-motion.webp"
+          )
           $archive = [IO.Compression.ZipFile]::OpenRead($zip)
           try {
-            $actual = @($archive.Entries | ForEach-Object FullName | Sort-Object)
+            $actual = @($archive.Entries | ForEach-Object { $_.FullName.Replace("\", "/") })
           } finally {
             $archive.Dispose()
           }
-          if (Compare-Object $expected $actual) {
-            throw "Unexpected package entries: $($actual -join ', ')"
+          $missing = @($required | Where-Object { $_ -notin $actual })
+          if ($missing.Count -ne 0) {
+            throw "Package is missing required entries: $($missing -join ', ')"
           }
 
           $extract = Join-Path $env:RUNNER_TEMP "bentodesk-release-extracted"
@@ -198,22 +228,25 @@ jobs:
           $tag = $env:RELEASE_TAG
           $zip = "${{ steps.package.outputs.zip }}"
           $checksums = "${{ steps.package.outputs.checksums }}"
-          $notes = "docs/release-notes-v2.0.0.md"
+          $version = $tag.TrimStart("v")
+          $notes = "docs/release-notes-$tag.md"
+          if (-not (Test-Path $notes -PathType Leaf)) {
+            throw "Missing release notes: $notes"
+          }
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           $viewExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
           if ($viewExit -eq 0) {
-            gh release upload $tag $zip $checksums --clobber --repo $env:GITHUB_REPOSITORY
-            gh release edit $tag `
-              --title "BentoDesk 2.0.0" `
-              --notes-file $notes `
-              --repo $env:GITHUB_REPOSITORY
+            throw "Release $tag already exists; published assets are never overwritten"
           } elseif ($viewExit -eq 1) {
-            gh release create $tag $zip $checksums `
+            gh release create $tag `
+              --draft `
               --verify-tag `
-              --title "BentoDesk 2.0.0" `
+              --title "BentoDesk $version" `
               --notes-file $notes `
               --repo $env:GITHUB_REPOSITORY
+            gh release upload $tag $zip $checksums --repo $env:GITHUB_REPOSITORY
+            gh release edit $tag --draft=false --repo $env:GITHUB_REPOSITORY
           } else {
             throw "Could not query release $tag"
           }

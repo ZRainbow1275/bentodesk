@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Prepare Rust
         shell: pwsh
@@ -98,13 +98,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Test
-        run: cargo test --workspace --all-targets --target $env:TARGET
+        run: cargo test --locked --workspace --all-targets --target $env:TARGET
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --target $env:TARGET -- -D warnings
 
       - name: Documentation
-        run: cargo doc --workspace --no-deps --target $env:TARGET
+        run: cargo doc --locked --workspace --no-deps --target $env:TARGET
 
       - name: Install supply-chain tools
         shell: pwsh
@@ -137,14 +137,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = $metadata.packages | Where-Object name -eq "bentodesk-shell"
-          if ($shell.version -ne "2.0.0") {
-            throw "Expected BentoDesk 2.0.0, found $($shell.version)"
-          }
 
-          cargo build --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
+          cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq "bentodesk-shell").version.ToString()
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
+          if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
+            throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
+          }
           $limit = [int64](2.5 * 1MB)
           if ($exe.Length -gt $limit) {
             throw "BentoDesk.exe is $($exe.Length) bytes; limit is $limit"
