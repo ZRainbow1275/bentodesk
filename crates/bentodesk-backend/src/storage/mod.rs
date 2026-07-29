@@ -53,8 +53,6 @@ pub enum StorageError {
     Recovery { path: PathBuf, message: String },
     /// `SHGetKnownFolderPath` did not return `S_OK`.
     KnownFolder { ctx: &'static str, hr: i32 },
-    /// `SHGetKnownFolderPath` reported success without returning a path.
-    NullKnownFolder { ctx: &'static str },
 }
 
 impl core::fmt::Display for StorageError {
@@ -88,9 +86,6 @@ impl core::fmt::Display for StorageError {
             ),
             Self::KnownFolder { ctx, hr } => {
                 write!(f, "{ctx}: SHGetKnownFolderPath failed (hr={hr:#x})")
-            }
-            Self::NullKnownFolder { ctx } => {
-                write!(f, "{ctx}: SHGetKnownFolderPath returned a null path")
             }
         }
     }
@@ -182,11 +177,11 @@ fn known_folder_roaming_appdata() -> Result<PathBuf, StorageError> {
         }
     };
     if pwstr.as_ptr().is_null() {
-        return Err(StorageError::NullKnownFolder {
-            ctx: "FOLDERID_RoamingAppData",
+        return Err(StorageError::KnownFolder {
+            ctx: "FOLDERID_RoamingAppData null",
+            hr: 0,
         });
     }
-
     // SAFETY: pwstr is a COM-allocated null-terminated UTF-16 string; convert
     // to a Rust String, then free via CoTaskMemFree to balance the COM alloc.
     let path_str = unsafe { pwstr.to_string() };
@@ -608,15 +603,6 @@ mod tests {
     struct TestData {
         name: String,
         count: u32,
-    }
-
-    #[test]
-    fn null_known_folder_error_is_explicit() {
-        let error = StorageError::NullKnownFolder { ctx: "AppData" };
-        assert_eq!(
-            error.to_string(),
-            "AppData: SHGetKnownFolderPath returned a null path"
-        );
     }
 
     #[test]
