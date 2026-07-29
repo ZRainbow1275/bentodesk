@@ -41,7 +41,7 @@ Windows itself.
 
 | | |
 | --- | --- |
-| **Lean** | One native process, no bundled browser runtime. Release builds are about 2.5 MB; the isolated five-Zone reference run used 16.60 MiB of Private Bytes at t60. |
+| **Lean** | One native process, no bundled browser runtime. Release builds are about 2.5 MB; the isolated five-Zone reference run used 17.34 MiB of Private Bytes at t60. |
 | **Coherent** | Collapsed and expanded Zones use the same geometry, hit testing, typography, and animation state instead of swapping between separate visual layers. |
 | **Direct** | Shell/OLE drag and drop, Windows icons, search, Stacks, batch layouts, snapshots, and the timeline work with real desktop content. |
 | **Local** | No account or cloud is required. State is written atomically; settings support DPAPI or passphrase encryption, and plugin packages are checked before installation. |
@@ -143,7 +143,7 @@ browser process.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.1-windows-x64-portable.zip` from
+1. Download `BentoDesk-2.0.2-windows-x64-portable.zip` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest).
 2. Check the archive against `SHA256SUMS.txt`, extract it to a writable
    directory, and run `BentoDesk.exe`.
@@ -170,13 +170,13 @@ file tool.
 
 ## Reference measurement
 
-One isolated Windows x64 run with five Zones, 50 items, and one BentoDesk
-process:
+One isolated BentoDesk 2.0.2 Windows x64 run at 2560×1368 / 144 DPI, with
+five Zones, 50 items, and one BentoDesk process:
 
 | Metric | Result |
 | --- | ---: |
-| Release EXE | about 2.5 MB |
-| Private Bytes at t10 / t30 / t60 | 16.41 / 16.60 / 16.60 MiB |
+| Release EXE | 2,513,920 bytes (2.40 MiB) |
+| Private Bytes at t10 / t30 / t60 | 17.80 / 17.38 / 17.34 MiB |
 | Full Zone expand / collapse | 234 ms / 235 ms |
 | Animation tick median / p95 | 16 ms / 16 ms |
 

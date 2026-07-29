@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing immutable tag to publish
         required: true
-        default: v2.0.1
+        default: v2.0.2
         type: string
 
 permissions:
@@ -47,6 +47,19 @@ jobs:
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy --target $env:TARGET
           rustup show active-toolchain
 
+      - name: Remap build-machine paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $config = python -c "import json,tomllib; print(json.dumps(tomllib.load(open('.cargo/config.toml','rb'))['target']['x86_64-pc-windows-msvc']['rustflags']))"
+          $rustflags = @()
+          foreach ($flag in (ConvertFrom-Json -InputObject $config)) {
+            $rustflags += [string]$flag
+          }
+          $rustflags += "--remap-path-prefix=$env:USERPROFILE=/_build/user"
+          $rustflags += "--remap-path-prefix=$env:GITHUB_WORKSPACE=/_build/workspace"
+          "RUSTFLAGS=$($rustflags -join ' ')" >> $env:GITHUB_ENV
+
       - name: Verify tag and source
         shell: pwsh
         run: |
@@ -65,6 +78,8 @@ jobs:
           cargo doc --locked --workspace --no-deps --target $env:TARGET
 
       - name: Supply-chain checks
+        env:
+          RUSTFLAGS: ""
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -90,6 +105,20 @@ jobs:
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
           if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
             throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
+          }
+          $manifest = Get-Content "crates/bentodesk-shell/app.manifest" -Raw
+          $expectedManifestVersion = [regex]::Escape("$version.0")
+          if ($manifest -notmatch "version=`"$expectedManifestVersion`"") {
+            throw "app.manifest does not contain assembly version $version.0"
+          }
+          $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe.FullName))
+          if ($binaryText.IndexOf("version=`"$version.0`"", [StringComparison]::Ordinal) -lt 0) {
+            throw "BentoDesk.exe does not contain embedded assembly version $version.0"
+          }
+          foreach ($privatePath in @($env:USERPROFILE, $env:GITHUB_WORKSPACE)) {
+            if ($binaryText.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+              throw "BentoDesk.exe contains a private build-machine path"
+            }
           }
 
           New-Item -ItemType Directory -Path $stage -Force | Out-Null

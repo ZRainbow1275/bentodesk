@@ -39,7 +39,7 @@ BentoDesk 最初就是为了解决这个问题。它不把文件藏进另一个�
 
 | | |
 | --- | --- |
-| **极致** | 单进程原生运行，不携带浏览器内核。Release 构建约 2.5 MB；隔离五 Zone 参考场景下 t60 Private Bytes 为 16.60 MiB。 |
+| **极致** | 单进程原生运行，不携带浏览器内核。Release 构建约 2.5 MB；隔离五 Zone 参考场景下 t60 Private Bytes 为 17.34 MiB。 |
 | **优雅** | 收起和展开共用几何、命中、排版与动画状态，不再切换两套互相脱节的图层。 |
 | **便捷** | Shell/OLE 拖放、Windows 图标、搜索、Stack、批量排列、快照与时间线都直接作用于真实桌面内容。 |
 | **安全** | 无需账号或云服务；状态原子写入，设置支持 DPAPI 或口令加密，插件包安装前会经过校验。 |
@@ -129,7 +129,7 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 ## 快速开始
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-   下载 `BentoDesk-2.0.1-windows-x64-portable.zip`。
+   下载 `BentoDesk-2.0.2-windows-x64-portable.zip`。
 2. 使用同页 `SHA256SUMS.txt` 校验压缩包，解压到普通可写目录，运行
    `BentoDesk.exe`。
 3. 从托盘菜单新建或管理 Zone。
@@ -153,13 +153,13 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 
 ## 参考实测
 
-一次隔离的 Windows x64 运行，场景为五个 Zone、50 个项目与一个 BentoDesk
-进程：
+一次隔离的 BentoDesk 2.0.2 Windows x64 运行，分辨率 2560×1368、
+144 DPI，场景为五个 Zone、50 个项目与一个 BentoDesk 进程：
 
 | 指标 | 结果 |
 | --- | ---: |
-| Release EXE | 约 2.5 MB |
-| Private Bytes t10 / t30 / t60 | 16.41 / 16.60 / 16.60 MiB |
+| Release EXE | 2,513,920 bytes（2.40 MiB） |
+| Private Bytes t10 / t30 / t60 | 17.80 / 17.38 / 17.34 MiB |
 | Zone 完整展开 / 收起 | 234 ms / 235 ms |
 | 动画 tick median / p95 | 16 ms / 16 ms |
 
