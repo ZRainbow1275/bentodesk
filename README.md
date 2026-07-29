@@ -7,15 +7,7 @@
 
   [English](README.md) · [简体中文](README.zh-CN.md)
 
-  <p>
-    <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&amp;label=release" alt="Latest release"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/releases"><img src="https://img.shields.io/github/downloads/ZRainbow1275/bentodesk/total?style=flat-square&amp;label=downloads" alt="Downloads"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/stargazers"><img src="https://img.shields.io/github/stars/ZRainbow1275/bentodesk?style=flat-square" alt="Stars"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="CI"></a>
-    <a href="#requirements"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 and 11"></a>
-    <a href="#technology"><img src="https://img.shields.io/badge/Rust-2024-000000?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Rust 2024"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square" alt="AGPL-3.0 license"></a>
-  </p>
+  <p><a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&amp;label=release" alt="Latest release"></a> <a href="https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="CI"></a> <a href="#requirements"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 and 11"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square" alt="AGPL-3.0 license"></a></p>
 
   <p>
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest">Download</a> ·
@@ -49,7 +41,7 @@ Windows itself.
 
 | | |
 | --- | --- |
-| **Lean** | One native process, no bundled browser runtime. The current release candidate is 2.41 MiB and used 16.60 MiB of Private Bytes at t60 in the strict five-Zone run. |
+| **Lean** | One native process, no bundled browser runtime. Release builds are about 2.5 MB; the isolated five-Zone reference run used 16.60 MiB of Private Bytes at t60. |
 | **Coherent** | Collapsed and expanded Zones use the same geometry, hit testing, typography, and animation state instead of swapping between separate visual layers. |
 | **Direct** | Shell/OLE drag and drop, Windows icons, search, Stacks, batch layouts, snapshots, and the timeline work with real desktop content. |
 | **Local** | No account or cloud is required. State is written atomically; settings support DPAPI or passphrase encryption, and plugin packages are checked before installation. |
@@ -63,9 +55,9 @@ synthetic benchmark.
 | Start with | When it is the better fit |
 | --- | --- |
 | [Windows folders and desktop icons](https://support.microsoft.com/en-us/windows/experience/personalization/customize-the-desktop-icons-in-windows) | You want no extra software. Windows gives you familiar, resizable icons and shortcuts that can be shown or hidden; folders still open in Explorer. |
-| [Stardock Fences 6](https://www.stardock.com/products/fences/) | You need the mature commercial choice for automation or managed PCs. It combines Fence groups and mirrored Folder Portals with extensive sorting rules, tabs, Peek, customization, and business deployment. |
+| [Stardock Fences 6](https://www.stardock.com/products/fences/) | You need extensive automation or managed-PC deployment. It combines Fence groups and mirrored Folder Portals with sorting rules, tabs, Peek, customization, and business deployment. |
 | [Portals](https://portals-app.com/) | You want persistent folder panels and precise visual control. Portals mirrors selected folders through panels and tabs, with per-portal styling, saved layouts, display-aware switching, and settings profiles. |
-| [Nimi Places](https://mynimi.net/Projects/Nimi-Places/Press-kit/) | Rich previews matter most. Its conditional containers show chosen locations with icons or thumbnails and add media preview, labels, sorting, and rules. |
+| [Nimi Places](https://mynimi.net/Projects/Nimi-Places/Features/) | Rich previews matter most. Its conditional containers show chosen locations with icons or thumbnails and add media preview, labels, sorting, and rules. |
 | **BentoDesk** | You want an inspectable, local-first organizer whose resting state stays small. Zones expand from capsules into grids, combine as Stacks, and add continuous native motion, direct desktop-item handling, batch layouts, snapshots, and timeline recovery. |
 
 BentoDesk is deliberately narrower: it is Windows-only, does not replace
@@ -87,7 +79,7 @@ Zones continue the current motion instead of restarting it.
   <img src="docs/media/zone-motion.webp" width="736" alt="A real BentoDesk Zone expanding and opening search">
 </p>
 <p align="center">
-  <sub>Authentic native capture · <a href="docs/media/zone-motion.mp4">watch the 9.7-second MP4</a></sub>
+  <sub>Native Windows build · <a href="docs/media/zone-motion.mp4">watch the MP4</a></sub>
 </p>
 
 ### Drag, search, and Stack
@@ -151,7 +143,7 @@ browser process.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.0-windows-x64-portable.zip` from
+1. Download `BentoDesk-2.0.1-windows-x64-portable.zip` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest).
 2. Check the archive against `SHA256SUMS.txt`, extract it to a writable
    directory, and run `BentoDesk.exe`.
@@ -176,14 +168,14 @@ file tool.
 - x86-64 processor;
 - current Windows updates and graphics drivers are recommended.
 
-## Measured candidate
+## Reference measurement
 
 One isolated Windows x64 run with five Zones, 50 items, and one BentoDesk
 process:
 
 | Metric | Result |
 | --- | ---: |
-| Release EXE | 2,523,648 bytes (2.41 MiB) |
+| Release EXE | about 2.5 MB |
 | Private Bytes at t10 / t30 / t60 | 16.41 / 16.60 / 16.60 MiB |
 | Full Zone expand / collapse | 234 ms / 235 ms |
 | Animation tick median / p95 | 16 ms / 16 ms |
@@ -219,7 +211,7 @@ bentodesk-style      Themes, typography, and visual tokens
 
 ## Building from source
 
-You need Windows 10/11 x64, Rust 1.85 or newer, and Visual Studio 2022 Build
+You need Windows 10/11 x64, Rust 1.89 or newer, and Visual Studio 2022 Build
 Tools with MSVC and the Windows SDK.
 
 ```powershell
@@ -228,7 +220,7 @@ cd bentodesk
 
 $env:CARGO_BUILD_JOBS = "1"
 $env:CARGO_INCREMENTAL = "0"
-cargo build --release --target x86_64-pc-windows-msvc -p bentodesk-shell --bin BentoDesk
+cargo build --locked --release --target x86_64-pc-windows-msvc -p bentodesk-shell --bin BentoDesk
 ```
 
 Output:
@@ -241,9 +233,9 @@ Full local checks:
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo doc --workspace --no-deps
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo doc --locked --workspace --no-deps
 cargo deny check
 cargo audit
 ```

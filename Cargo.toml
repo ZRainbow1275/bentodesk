@@ -25,9 +25,9 @@ members = [
 ]
 
 [workspace.package]
-version      = "2.0.0"
+version      = "2.0.1"
 edition      = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license      = "AGPL-3.0-or-later"
 publish      = false
 authors      = ["方寒"]

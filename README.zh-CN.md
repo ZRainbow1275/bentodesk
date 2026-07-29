@@ -7,15 +7,7 @@
 
   [English](README.md) · [简体中文](README.zh-CN.md)
 
-  <p>
-    <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&amp;label=release" alt="Latest release"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/releases"><img src="https://img.shields.io/github/downloads/ZRainbow1275/bentodesk/total?style=flat-square&amp;label=downloads" alt="Downloads"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/stargazers"><img src="https://img.shields.io/github/stars/ZRainbow1275/bentodesk?style=flat-square" alt="Stars"></a>
-    <a href="https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="CI"></a>
-    <a href="#系统要求"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 与 11"></a>
-    <a href="#技术栈"><img src="https://img.shields.io/badge/Rust-2024-000000?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Rust 2024"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square" alt="AGPL-3.0 许可证"></a>
-  </p>
+  <p><a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><img src="https://img.shields.io/github/v/release/ZRainbow1275/bentodesk?style=flat-square&amp;label=release" alt="Latest release"></a> <a href="https://github.com/ZRainbow1275/bentodesk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZRainbow1275/bentodesk/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="CI"></a> <a href="#系统要求"><img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 与 11"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square" alt="AGPL-3.0 许可证"></a></p>
 
   <p>
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest">下载</a> ·
@@ -47,7 +39,7 @@ BentoDesk 最初就是为了解决这个问题。它不把文件藏进另一个�
 
 | | |
 | --- | --- |
-| **极致** | 单进程原生运行，不携带浏览器内核。当前 Release 候选为 2.41 MiB，严格五 Zone 场景下 t60 Private Bytes 为 16.60 MiB。 |
+| **极致** | 单进程原生运行，不携带浏览器内核。Release 构建约 2.5 MB；隔离五 Zone 参考场景下 t60 Private Bytes 为 16.60 MiB。 |
 | **优雅** | 收起和展开共用几何、命中、排版与动画状态，不再切换两套互相脱节的图层。 |
 | **便捷** | Shell/OLE 拖放、Windows 图标、搜索、Stack、批量排列、快照与时间线都直接作用于真实桌面内容。 |
 | **安全** | 无需账号或云服务；状态原子写入，设置支持 DPAPI 或口令加密，插件包安装前会经过校验。 |
@@ -60,9 +52,9 @@ BentoDesk 最初就是为了解决这个问题。它不把文件藏进另一个�
 | 可以先看 | 它更适合什么情况 |
 | --- | --- |
 | [Windows 文件夹与桌面图标](https://support.microsoft.com/zh-cn/windows/experience/personalization/customize-the-desktop-icons-in-windows) | 不想安装额外软件。Windows 已经提供熟悉、可缩放、可整体隐藏的图标与快捷方式，文件夹仍由 Explorer 打开。 |
-| [Stardock Fences 6](https://www.stardock.com/products/fences/) | 需要成熟商业方案，尤其看重自动整理或受管电脑。它把围栏和映射文件夹的 Folder Portal 放在一起，并提供完整排序规则、标签页、Peek、外观定制与企业部署。 |
+| [Stardock Fences 6](https://www.stardock.com/products/fences/) | 看重丰富自动整理或受管电脑部署。它把围栏和映射文件夹的 Folder Portal 放在一起，并提供排序规则、标签页、Peek、外观定制与企业部署。 |
 | [Portals](https://portals-app.com/) | 想要常驻文件夹面板与精确外观控制。Portals 通过面板和标签页映射指定文件夹，并提供逐面板定制、布局保存、随显示器切换与设置档案。 |
-| [Nimi Places](https://mynimi.net/Projects/Nimi-Places/Press-kit/) | 最看重丰富预览。它用按条件显示的容器呈现指定位置，支持图标、缩略图、媒体预览、标签、排序与规则。 |
+| [Nimi Places](https://mynimi.net/Projects/Nimi-Places/Features/) | 最看重丰富预览。它用按条件显示的容器呈现指定位置，支持图标、缩略图、媒体预览、标签、排序与规则。 |
 | **BentoDesk** | 想要可审查、本地优先，而且静止时尽量少占桌面的整理器。Zone 从胶囊展开为网格，也能组成 Stack，并提供连续原生动画、真实桌面项目、批量布局、快照与时间线恢复。 |
 
 BentoDesk 刻意收窄了范围：只支持 Windows，不替代 Explorer，也不提供云账号
@@ -82,7 +74,7 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
   <img src="docs/media/zone-motion.webp" width="736" alt="BentoDesk Zone 的真实展开与搜索动画">
 </p>
 <p align="center">
-  <sub>原生版本真实录制 · <a href="docs/media/zone-motion.mp4">观看 9.7 秒 MP4</a></sub>
+  <sub>Windows 原生版本 · <a href="docs/media/zone-motion.mp4">观看 MP4</a></sub>
 </p>
 
 ### 拖放、搜索与 Stack
@@ -137,7 +129,7 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 ## 快速开始
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-   下载 `BentoDesk-2.0.0-windows-x64-portable.zip`。
+   下载 `BentoDesk-2.0.1-windows-x64-portable.zip`。
 2. 使用同页 `SHA256SUMS.txt` 校验压缩包，解压到普通可写目录，运行
    `BentoDesk.exe`。
 3. 从托盘菜单新建或管理 Zone。
@@ -159,14 +151,14 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 - x86-64 处理器；
 - 建议使用当前 Windows 更新与显卡驱动。
 
-## 候选版本实测
+## 参考实测
 
 一次隔离的 Windows x64 运行，场景为五个 Zone、50 个项目与一个 BentoDesk
 进程：
 
 | 指标 | 结果 |
 | --- | ---: |
-| Release EXE | 2,523,648 bytes（2.41 MiB） |
+| Release EXE | 约 2.5 MB |
 | Private Bytes t10 / t30 / t60 | 16.41 / 16.60 / 16.60 MiB |
 | Zone 完整展开 / 收起 | 234 ms / 235 ms |
 | 动画 tick median / p95 | 16 ms / 16 ms |
@@ -202,7 +194,7 @@ bentodesk-style      主题、排版与视觉 token
 
 ## 从源码构建
 
-需要 Windows 10/11 x64、Rust 1.85 或更高版本，以及包含 MSVC 与 Windows SDK
+需要 Windows 10/11 x64、Rust 1.89 或更高版本，以及包含 MSVC 与 Windows SDK
 的 Visual Studio 2022 Build Tools。
 
 ```powershell
@@ -211,7 +203,7 @@ cd bentodesk
 
 $env:CARGO_BUILD_JOBS = "1"
 $env:CARGO_INCREMENTAL = "0"
-cargo build --release --target x86_64-pc-windows-msvc -p bentodesk-shell --bin BentoDesk
+cargo build --locked --release --target x86_64-pc-windows-msvc -p bentodesk-shell --bin BentoDesk
 ```
 
 输出：
@@ -224,9 +216,9 @@ target\x86_64-pc-windows-msvc\release\BentoDesk.exe
 
 ```powershell
 cargo fmt --all -- --check
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo doc --workspace --no-deps
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo doc --locked --workspace --no-deps
 cargo deny check
 cargo audit
 ```
