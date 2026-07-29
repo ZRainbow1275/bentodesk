@@ -136,11 +136,7 @@ fn roaming_state_dir() -> Result<PathBuf, PlatformError> {
             hr,
         });
     }
-    if raw.is_null() {
-        return Err(PlatformError::Null {
-            ctx: "SHGetKnownFolderPath",
-        });
-    }
+    let raw = known_folder_non_null(raw)?.as_ptr();
 
     // Walk the UTF-16 string to its NUL terminator.
     // SAFETY: pointer checked above; bounded by the OS-supplied NUL.
@@ -163,6 +159,12 @@ fn roaming_state_dir() -> Result<PathBuf, PlatformError> {
     let mut path = PathBuf::from(s);
     path.push("BentoDesk");
     Ok(path)
+}
+
+fn known_folder_non_null(raw: *mut u16) -> Result<core::ptr::NonNull<u16>, PlatformError> {
+    core::ptr::NonNull::new(raw).ok_or(PlatformError::Null {
+        ctx: "SHGetKnownFolderPath",
+    })
 }
 
 fn state_dir_override_path() -> Option<PathBuf> {
@@ -217,5 +219,20 @@ pub fn quarantine_corrupt(path: &Path) -> Result<(), PlatformError> {
             ctx: "rename to quarantine",
             kind: e.kind(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_known_folder_path_is_rejected_before_dereference() {
+        assert!(matches!(
+            known_folder_non_null(core::ptr::null_mut()),
+            Err(PlatformError::Null {
+                ctx: "SHGetKnownFolderPath"
+            })
+        ));
     }
 }
