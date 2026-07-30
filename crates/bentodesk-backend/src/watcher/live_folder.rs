@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 
 use bentodesk_zone::ZoneId;
@@ -150,20 +150,18 @@ pub fn ensure_initialised(out: Sender<ZoneRefreshEvent>) -> Result<(), LiveFolde
         // Race: lost the set; tolerate (Sender already present).
     }
 
-    let debouncer = Debouncer::start(Duration::from_millis(300), |batch| {
-        dispatch_events(batch);
-    })?;
+    let debouncer = Debouncer::start(Duration::from_millis(300), dispatch_events)?;
 
     *guard = Some(LiveFolderState { debouncer });
     Ok(())
 }
 
-fn dispatch_events(events: Vec<DebouncedEvent>) {
+fn dispatch_events(events: Vec<DebouncedEvent>) -> bool {
     let bindings = match BINDINGS.read() {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("live_folder: bindings poisoned: {e}");
-            return;
+            return true;
         }
     };
 
@@ -183,14 +181,26 @@ fn dispatch_events(events: Vec<DebouncedEvent>) {
     }
 
     let Some(sender) = EMITTER.get() else {
-        return;
+        return true;
     };
     for zone_id in zones_to_refresh {
-        if sender.send(ZoneRefreshEvent { zone_id }).is_err() {
-            // Receiver dropped — silently abort further sends this batch.
-            return;
+        match sender.try_send(ZoneRefreshEvent { zone_id }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return false,
+            Err(TrySendError::Disconnected(_)) => return true,
         }
     }
+    true
+}
+
+/// Return and clear the raw watcher-overflow flag. The shell responds by
+/// refreshing every bound zone from its authoritative folder contents.
+pub fn take_live_folder_overflowed() -> bool {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|state| state.debouncer.take_overflowed())
 }
 
 /// Bind a zone to a folder. Subsequent events under the folder push a
@@ -245,7 +255,7 @@ pub fn unbind(zone_id: ZoneId) -> Result<(), LiveFolderError> {
     }
 
     if let Some(sender) = EMITTER.get() {
-        let _ = sender.send(ZoneRefreshEvent { zone_id });
+        let _ = sender.try_send(ZoneRefreshEvent { zone_id });
     }
 
     Ok(())

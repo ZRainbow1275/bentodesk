@@ -22,14 +22,13 @@
 //!   `skip_version()` / `current_skipped()` entry points so callers compile
 //!   against the final v2.x surface.
 //! - Manifest check through `BENTODESK_UPDATE_MANIFEST_URL`, supporting
-//!   `http://`, `https://`, `file://`, and plain filesystem paths. The parser
-//!   accepts both selected-stack flat artifact fields and Tauri v2 static
-//!   `platforms.windows-x86_64` artifact entries.
-//! - Local/file and remote HTTP(S) `.exe` artifact staging plus optional
-//!   manifest-supplied SHA-256 artifact verification before the staged artifact
-//!   becomes installable. If the manifest also carries a signature, the staged
-//!   artifact is streamed through minisign verification using the embedded
-//!   BentoDesk updater public key.
+//!   `https://`, loopback-only `http://`, `file://`, and plain filesystem
+//!   paths. The parser accepts both selected-stack flat artifact fields and
+//!   Tauri v2 static `platforms.windows-x86_64` artifact entries.
+//! - Local/file and remote HTTP(S) `.exe` artifact staging requires a manifest
+//!   SHA-256 digest or minisign signature before the staged artifact becomes
+//!   installable. Signatures are streamed through minisign verification using
+//!   the embedded BentoDesk updater public key.
 //! - NSIS `/S` launch for the install step. The shell quits after a successful
 //!   launch so the installer can replace files.
 //! - Background one-shot and recurring automatic checks, using the same
@@ -63,6 +62,7 @@ pub use event::{UpdateEvent, UpdateProgress};
 
 const MANIFEST_ENV: &str = "BENTODESK_UPDATE_MANIFEST_URL";
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_UPDATE_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
 const DOWNLOAD_BUFFER_BYTES: usize = 64 * 1024;
 const SHA256_DIGEST_BYTES: usize = 32;
 const SHA256_HEX_CHARS: usize = SHA256_DIGEST_BYTES * 2;
@@ -205,22 +205,34 @@ impl Updater {
     /// manifest version is not newer than the current build, or when the user
     /// has skipped the manifest version.
     ///
-    /// Network checks use WinHTTP for `http://` / `https://` sources. Local
-    /// `file://` and plain path sources exist for internal channels and tests.
+    /// Network checks use WinHTTP for `https://` and loopback-only `http://`
+    /// sources. Local `file://` and plain path sources exist for internal
+    /// channels and tests.
     pub fn check(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
-        let Some(manifest_text) = self.load_manifest_text()? else {
-            tracing::info!(
-                "updater::check: no {MANIFEST_ENV} configured; treating update channel as absent"
-            );
-            return Ok(None);
+        let manifest_text = match self.load_manifest_text() {
+            Ok(Some(manifest_text)) => manifest_text,
+            Ok(None) => {
+                self.replace_pending_update(None);
+                tracing::info!(
+                    "updater::check: no {MANIFEST_ENV} configured; treating update channel as absent"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                self.replace_pending_update(None);
+                return Err(error);
+            }
         };
         let current_version = pkg_version();
-        let info = parse_update_manifest(&manifest_text, current_version.clone())?;
+        let info = match parse_update_manifest(&manifest_text, current_version.clone()) {
+            Ok(info) => info,
+            Err(error) => {
+                self.replace_pending_update(None);
+                return Err(error);
+            }
+        };
         if !version_is_newer(info.version.as_str(), current_version.as_str()) {
-            *self
-                .pending_update
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+            self.replace_pending_update(None);
             return Ok(None);
         }
         if self.current_skipped().as_deref() == Some(info.version.as_str()) {
@@ -228,16 +240,10 @@ impl Updater {
                 "Update {} available but user asked to skip it",
                 info.version
             );
-            *self
-                .pending_update
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
+            self.replace_pending_update(None);
             return Ok(None);
         }
-        *self
-            .pending_update
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(info.clone());
+        self.replace_pending_update(Some(info.clone()));
         Ok(Some(info))
     }
 
@@ -249,6 +255,7 @@ impl Updater {
                 .clone()
         }
         .ok_or_else(|| UpdaterError::InvalidManifest("no pending update to download".to_owned()))?;
+        self.clear_staged_artifact();
         let Some(source) = info.artifact_url.as_deref() else {
             let error =
                 UpdaterError::InvalidManifest("manifest is missing artifact_url/url".to_owned());
@@ -266,11 +273,10 @@ impl Updater {
             return Err(error);
         }
         let stage_path = staged_artifact_path(&info.version, source)?;
-        *self
-            .staged_artifact
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        copy_artifact_to_stage(source, &stage_path, &self.event_tx)?;
+        if let Err(error) = copy_artifact_to_stage(source, &stage_path, &self.event_tx) {
+            let _ = std::fs::remove_file(&stage_path);
+            return Err(error);
+        }
         if let Err(error) =
             verify_staged_artifact(&info, &stage_path, self.minisign_public_key.as_str())
         {
@@ -322,6 +328,7 @@ impl Updater {
                 UpdaterError::InvalidManifest("no staged artifact to install".to_owned())
             })?;
         validate_staged_installer(&staged_path)?;
+        verify_staged_artifact(&info, &staged_path, self.minisign_public_key.as_str())?;
         launch(&staged_path)?;
         self.event_tx
             .send(UpdateEvent::Installing { info })
@@ -350,6 +357,32 @@ impl Updater {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn replace_pending_update(&self, next: Option<UpdateInfo>) {
+        let changed = {
+            let mut pending = self
+                .pending_update
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let changed = pending.as_ref() != next.as_ref();
+            *pending = next;
+            changed
+        };
+        if changed {
+            self.clear_staged_artifact();
+        }
+    }
+
+    fn clear_staged_artifact(&self) {
+        let old_path = self
+            .staged_artifact
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(old_path) = old_path {
+            let _ = std::fs::remove_file(old_path);
+        }
     }
 
     /// Fire-and-forget background check.
@@ -457,7 +490,11 @@ impl Updater {
         } else {
             PathBuf::from(source)
         };
-        let text = std::fs::read_to_string(&path)
+        let mut text = String::new();
+        File::open(&path)
+            .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", path.display())))?
+            .take((MAX_MANIFEST_BYTES + 1) as u64)
+            .read_to_string(&mut text)
             .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", path.display())))?;
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(UpdaterError::FetchFailed(format!(

@@ -19,10 +19,14 @@
 //!    path.
 
 use std::collections::hash_map::DefaultHasher;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 
 use super::IconError;
 use super::wic;
+
+const MAX_INTERNET_SHORTCUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InternetShortcutIconLocation {
@@ -119,7 +123,15 @@ pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
 /// file-type icon on some systems, so parsing the resource is required to
 /// match the icon that the desktop actually paints.
 fn read_internet_shortcut_icon(path: &str) -> Option<InternetShortcutIconLocation> {
-    let bytes = std::fs::read(path).ok()?;
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take((MAX_INTERNET_SHORTCUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_INTERNET_SHORTCUT_BYTES {
+        return None;
+    }
     let text = decode_internet_shortcut_text(&bytes)?;
     parse_internet_shortcut_icon(&text)
 }
@@ -592,5 +604,18 @@ mod tests {
                 .path,
             "C:\\Icons\\fox.ico"
         );
+    }
+
+    #[test]
+    fn internet_shortcut_file_read_is_bounded() {
+        let path =
+            std::env::temp_dir().join(format!("bentodesk-url-limit-{}.url", std::process::id()));
+        let mut content = b"[InternetShortcut]\nIconFile=C:\\Icons\\fox.ico\n".to_vec();
+        content.resize(MAX_INTERNET_SHORTCUT_BYTES + 1, b' ');
+        std::fs::write(&path, content).expect("write shortcut");
+
+        assert!(read_internet_shortcut_icon(&path.to_string_lossy()).is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 }

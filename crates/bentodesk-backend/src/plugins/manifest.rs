@@ -12,10 +12,16 @@
 //! - **ΔB ruling**: `#[derive(Serialize, Deserialize)]` retained on every
 //!   public DTO so v2.x scripting hooks can re-introduce serialization.
 
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use super::PluginError;
+
+const MAX_PLUGIN_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// Parsed contents of a plugin's `manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +87,23 @@ impl PluginManifest {
 
         Ok(())
     }
+}
+
+pub(crate) fn read_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
+    let mut content = String::new();
+    File::open(path)
+        .map_err(PluginError::Io)?
+        .take((MAX_PLUGIN_MANIFEST_BYTES + 1) as u64)
+        .read_to_string(&mut content)
+        .map_err(PluginError::Io)?;
+    if content.len() > MAX_PLUGIN_MANIFEST_BYTES {
+        return Err(PluginError::ManifestInvalid(SmolStr::from(format!(
+            "manifest.json exceeds {MAX_PLUGIN_MANIFEST_BYTES} bytes"
+        ))));
+    }
+    let manifest: PluginManifest = serde_json::from_str(&content).map_err(PluginError::Json)?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 /// Validate the ID anywhere it crosses a filesystem boundary.
@@ -243,5 +266,21 @@ mod tests {
         let m = valid_manifest();
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"type\":\"theme\""));
+    }
+
+    #[test]
+    fn manifest_file_read_is_bounded() {
+        let path = std::env::temp_dir().join(format!(
+            "bentodesk-plugin-manifest-limit-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![b' '; MAX_PLUGIN_MANIFEST_BYTES + 1]).expect("write");
+
+        assert!(matches!(
+            read_plugin_manifest(&path),
+            Err(PluginError::ManifestInvalid(message)) if message.contains("exceeds")
+        ));
+
+        let _ = std::fs::remove_file(path);
     }
 }

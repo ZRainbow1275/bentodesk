@@ -160,6 +160,9 @@ pub(super) fn copy_artifact_to_stage(
         UpdaterError::FetchFailed(format!("{}: {error}", source_path.display()))
     })?;
     let total_bytes = input.metadata().ok().map(|metadata| metadata.len());
+    if let Some(total_bytes) = total_bytes {
+        validate_artifact_size(total_bytes)?;
+    }
     let mut output = File::create(stage_path)
         .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", stage_path.display())))?;
     let mut buffer = [0u8; DOWNLOAD_BUFFER_BYTES];
@@ -171,10 +174,12 @@ pub(super) fn copy_artifact_to_stage(
         if count == 0 {
             break;
         }
+        let next_written = written.saturating_add(count as u64);
+        validate_artifact_size(next_written)?;
         output
             .write_all(&buffer[..count])
             .map_err(|error| UpdaterError::FetchFailed(error.to_string()))?;
-        written += count as u64;
+        written = next_written;
         emit_download_progress(event_tx, written, total_bytes)?;
     }
     output
@@ -202,12 +207,18 @@ pub(super) fn validate_manifest_integrity_policy(info: &UpdateInfo) -> Result<()
     if info.artifact_sha256.is_some() || info.signature.is_some() {
         return Ok(());
     }
-    tracing::warn!(
-        target: "bentodesk::updater",
-        version = %info.version,
-        "updater manifest has no sha256/artifact_sha256 integrity field; allowing legacy/internal unsigned artifact"
-    );
-    Ok(())
+    Err(UpdaterError::VerificationFailed(
+        "update manifest must include sha256/artifact_sha256 or a minisign signature".to_owned(),
+    ))
+}
+
+pub(super) fn validate_artifact_size(bytes: u64) -> Result<(), UpdaterError> {
+    if bytes <= MAX_UPDATE_ARTIFACT_BYTES {
+        return Ok(());
+    }
+    Err(UpdaterError::FetchFailed(format!(
+        "update artifact exceeds {MAX_UPDATE_ARTIFACT_BYTES} bytes"
+    )))
 }
 
 pub(super) fn verify_staged_artifact(

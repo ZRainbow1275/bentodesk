@@ -10,8 +10,10 @@
 //! fallible op now returns `std::io::Result` or `Option`, and the public
 //! surface logs + degrades on failure rather than panicking.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+use super::cache::MAX_TOTAL_BYTES;
 
 /// Warm-tier directory handle. Cheap to construct; clones share the same
 /// backing path. Directory creation is lazy — warm reads tolerate a
@@ -53,8 +55,14 @@ impl WarmTier {
     /// to fall through to the cold-extract path.
     pub fn read(&self, hash: &str) -> Option<Vec<u8>> {
         let path = self.path_for(hash)?;
-        match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take((MAX_TOTAL_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                (bytes.len() <= MAX_TOTAL_BYTES).then_some(bytes)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 tracing::debug!("warm-tier read failed for {}: {}", path.display(), e);
@@ -167,6 +175,20 @@ mod tests {
         let dir = temp_dir("missing");
         let tier = WarmTier::new(dir.clone());
         assert!(tier.read("doesnotexist1234").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_warm_entry_is_rejected_before_allocation() {
+        let dir = temp_dir("oversized");
+        let tier = WarmTier::new(dir.clone());
+        let path = tier.path_for("abcdef1234567890").expect("path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        let file = std::fs::File::create(&path).expect("create");
+        file.set_len((MAX_TOTAL_BYTES + 1) as u64)
+            .expect("set length");
+
+        assert!(tier.read("abcdef1234567890").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

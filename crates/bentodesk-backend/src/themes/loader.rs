@@ -10,6 +10,8 @@
 //! the same `PluginRegistry` lifecycle as 1.x. Persisted absolute paths are
 //! metadata only and are never trusted for filesystem access.
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use bentodesk_style::Color;
@@ -20,6 +22,8 @@ use smol_str::SmolStr;
 use crate::plugins::{PluginRegistry, PluginType, install_path_for};
 
 use super::{Theme, ThemeAnimation, ThemeCapsule, ThemeColors, ThemeGlassmorphism};
+
+const MAX_THEME_BYTES: usize = 1024 * 1024;
 
 // ─── Error type (spec §8.1 — hand-rolled, no thiserror) ─────────────
 
@@ -240,7 +244,8 @@ pub fn load_all_themes(themes_dir: &Path) -> Result<Vec<Theme>, ThemeError> {
 /// This is the backend half of the native Settings import UX. It deliberately
 /// does not accept raw JSON strings or sample payloads: the caller must pass a
 /// real filesystem path returned by a native picker or an equivalent test
-/// fixture, and the function copies bytes into `{app_data}/themes/<id>.json`.
+/// fixture, and the function normalises it into
+/// `{app_data}/themes/<id>.json` through the shared atomic writer.
 pub fn import_theme_file(source_path: &Path, themes_dir: &Path) -> Result<Theme, ThemeError> {
     if !source_path.is_file() {
         return Err(ThemeError::Import {
@@ -284,28 +289,11 @@ pub fn import_theme_file(source_path: &Path, themes_dir: &Path) -> Result<Theme,
         source_canonical.is_some() && source_canonical == destination_canonical;
 
     if !source_is_destination {
-        let bytes = std::fs::read(source_path).map_err(|e| ThemeError::Io {
-            path: source_path.to_path_buf(),
-            message: e.to_string(),
-        })?;
-        let temp_destination = destination.with_extension("json.importing");
-        std::fs::write(&temp_destination, bytes).map_err(|e| ThemeError::Io {
-            path: temp_destination.clone(),
-            message: e.to_string(),
-        })?;
-        if destination.exists() {
-            std::fs::remove_file(&destination).map_err(|e| ThemeError::Io {
+        crate::storage::write_json_atomic_with_limit(&destination, &theme, MAX_THEME_BYTES as u64)
+            .map_err(|e| ThemeError::Io {
                 path: destination.clone(),
                 message: e.to_string(),
             })?;
-        }
-        if let Err(e) = std::fs::rename(&temp_destination, &destination) {
-            let _ = std::fs::remove_file(&temp_destination);
-            return Err(ThemeError::Io {
-                path: destination,
-                message: e.to_string(),
-            });
-        }
     }
 
     let mut imported = load_theme_file(&destination)?;
@@ -385,10 +373,24 @@ fn load_plugin_themes(state_dir: &Path, themes: &mut Vec<Theme>) {
 
 /// Load and deserialize a single theme JSON file.
 pub fn load_theme_file(path: &Path) -> Result<Theme, ThemeError> {
-    let content = std::fs::read_to_string(path).map_err(|e| ThemeError::Io {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    let mut content = String::new();
+    File::open(path)
+        .map_err(|e| ThemeError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?
+        .take((MAX_THEME_BYTES + 1) as u64)
+        .read_to_string(&mut content)
+        .map_err(|e| ThemeError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    if content.len() > MAX_THEME_BYTES {
+        return Err(ThemeError::Parse {
+            path: path.to_path_buf(),
+            message: format!("theme file exceeds {MAX_THEME_BYTES} bytes"),
+        });
+    }
     serde_json::from_str(&content).map_err(|e| ThemeError::Parse {
         path: path.to_path_buf(),
         message: e.to_string(),

@@ -27,12 +27,16 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+const NOTIFY_QUEUE_CAPACITY: usize = 1_024;
+const MAX_PENDING_PATHS: usize = 2_048;
 
 /// Errors surfaced by the debouncer.
 #[derive(Debug)]
@@ -75,6 +79,7 @@ pub struct Debouncer {
     inner: Mutex<Option<RecommendedWatcher>>,
     /// Worker join handle. Some until drop.
     worker: Mutex<Option<JoinHandle<()>>>,
+    overflowed: Arc<AtomicBool>,
 }
 
 impl Debouncer {
@@ -85,34 +90,43 @@ impl Debouncer {
     /// for the live-folder watcher.
     ///
     /// `on_emit` is invoked from the worker thread for every batch of
-    /// debounced events. Keep it cheap — it should typically forward to a
-    /// `crossbeam_channel::Sender` and return.
+    /// debounced events. Return `false` when a bounded downstream queue is full;
+    /// the overflow flag then asks the caller to reconcile from disk.
     pub fn start<F>(flush_window: Duration, mut on_emit: F) -> Result<Self, DebouncerError>
     where
-        F: FnMut(Vec<DebouncedEvent>) + Send + 'static,
+        F: FnMut(Vec<DebouncedEvent>) -> bool + Send + 'static,
     {
-        let (tx, rx): (Sender<NotifyMsg>, Receiver<NotifyMsg>) = channel();
+        let (tx, rx): (SyncSender<NotifyMsg>, Receiver<NotifyMsg>) =
+            sync_channel(NOTIFY_QUEUE_CAPACITY);
+        let overflowed = Arc::new(AtomicBool::new(false));
 
         let watcher_tx = tx.clone();
+        let watcher_overflowed = Arc::clone(&overflowed);
         // notify v8 returns `Result<RecommendedWatcher, notify::Error>`.
         let watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let msg = match res {
                 Ok(ev) => NotifyMsg::Event(ev),
                 Err(e) => NotifyMsg::Error(e.to_string()),
             };
-            // Drop on closed channel — debouncer is shutting down.
-            let _ = watcher_tx.send(msg);
+            // Directory storms must not grow process memory without bound.
+            // Dropping an overflow notification is safe for user data: this
+            // channel only refreshes the in-memory desktop view.
+            if matches!(watcher_tx.try_send(msg), Err(TrySendError::Full(_))) {
+                watcher_overflowed.store(true, Ordering::Release);
+            }
         })
         .map_err(|e| DebouncerError::NotifyInit(e.to_string()))?;
 
+        let worker_overflowed = Arc::clone(&overflowed);
         let worker = std::thread::Builder::new()
             .name("bento-watcher-debouncer".into())
-            .spawn(move || worker_loop(rx, flush_window, &mut on_emit))
+            .spawn(move || worker_loop(rx, flush_window, &worker_overflowed, &mut on_emit))
             .map_err(|e| DebouncerError::NotifyInit(format!("thread spawn: {e}")))?;
 
         Ok(Self {
             inner: Mutex::new(Some(watcher)),
             worker: Mutex::new(Some(worker)),
+            overflowed,
         })
     }
 
@@ -149,6 +163,12 @@ impl Debouncer {
             path: path.to_path_buf(),
             message: e.to_string(),
         })
+    }
+
+    /// Return and clear the overflow flag. Callers use it to trigger one
+    /// authoritative rescan after a burst exceeds the bounded event queues.
+    pub fn take_overflowed(&self) -> bool {
+        self.overflowed.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -188,14 +208,27 @@ enum NotifyMsg {
 /// for tests and for downstream callers that hash batches for diffing.
 type PendingMap = BTreeMap<PathBuf, DebouncedEvent>;
 
-fn worker_loop<F>(rx: Receiver<NotifyMsg>, flush_window: Duration, on_emit: &mut F)
-where
-    F: FnMut(Vec<DebouncedEvent>),
+fn worker_loop<F>(
+    rx: Receiver<NotifyMsg>,
+    flush_window: Duration,
+    overflowed: &AtomicBool,
+    on_emit: &mut F,
+) where
+    F: FnMut(Vec<DebouncedEvent>) -> bool,
 {
     let mut pending: PendingMap = PendingMap::new();
     let mut window_end: Option<Instant> = None;
 
     loop {
+        // `recv_timeout(Duration::ZERO)` still consumes already-queued messages.
+        // Flush before the receive so a continuously busy watcher cannot keep
+        // extending the pending map beyond its intended time window.
+        if window_end.is_some_and(|end| Instant::now() >= end) {
+            flush_pending(&mut pending, overflowed, on_emit);
+            window_end = None;
+            continue;
+        }
+
         let timeout = match window_end {
             Some(end) => end.saturating_duration_since(Instant::now()),
             None => Duration::from_secs(60),
@@ -206,35 +239,46 @@ where
                 if window_end.is_none() {
                     window_end = Some(Instant::now() + flush_window);
                 }
-                merge_event(&mut pending, ev);
+                if !merge_event(&mut pending, ev) {
+                    overflowed.store(true, Ordering::Release);
+                }
             }
             Ok(NotifyMsg::Error(msg)) => {
                 tracing::warn!("watcher: notify error: {msg}");
             }
             Err(RecvTimeoutError::Timeout) => {
-                if !pending.is_empty() {
-                    let batch: Vec<DebouncedEvent> = pending.values().cloned().collect();
-                    pending.clear();
-                    window_end = None;
-                    on_emit(batch);
-                }
+                flush_pending(&mut pending, overflowed, on_emit);
+                window_end = None;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                if !pending.is_empty() {
-                    let batch: Vec<DebouncedEvent> = pending.values().cloned().collect();
-                    on_emit(batch);
-                }
+                flush_pending(&mut pending, overflowed, on_emit);
                 return;
             }
         }
     }
 }
 
-fn merge_event(pending: &mut PendingMap, ev: Event) {
+fn flush_pending<F>(pending: &mut PendingMap, overflowed: &AtomicBool, on_emit: &mut F)
+where
+    F: FnMut(Vec<DebouncedEvent>) -> bool,
+{
+    if pending.is_empty() {
+        return;
+    }
+    let batch = std::mem::take(pending).into_values().collect();
+    if !on_emit(batch) {
+        overflowed.store(true, Ordering::Release);
+    }
+}
+
+fn merge_event(pending: &mut PendingMap, ev: Event) -> bool {
     let key = match ev.paths.first() {
         Some(p) => p.clone(),
-        None => return,
+        None => return true,
     };
+    if pending.len() >= MAX_PENDING_PATHS && !pending.contains_key(&key) {
+        return false;
+    }
     pending.insert(
         key,
         DebouncedEvent {
@@ -242,6 +286,7 @@ fn merge_event(pending: &mut PendingMap, ev: Event) {
             paths: ev.paths,
         },
     );
+    true
 }
 
 #[cfg(test)]
@@ -260,6 +305,7 @@ mod tests {
 
         let deb = Debouncer::start(Duration::from_millis(150), move |batch| {
             counter_in.fetch_add(batch.len(), Ordering::SeqCst);
+            true
         })
         .expect("start");
 
@@ -281,5 +327,64 @@ mod tests {
         drop(deb);
         let _ = std::fs::remove_file(&f);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn expired_window_flushes_while_receiver_remains_busy() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for index in 0..3 {
+            tx.send(NotifyMsg::Event(
+                Event::new(EventKind::Any).add_path(PathBuf::from(format!("queued-{index}.txt"))),
+            ))
+            .expect("queue event");
+        }
+        drop(tx);
+
+        let mut batch_sizes = Vec::new();
+        let overflowed = AtomicBool::new(false);
+        worker_loop(rx, Duration::ZERO, &overflowed, &mut |batch| {
+            batch_sizes.push(batch.len());
+            true
+        });
+
+        assert_eq!(batch_sizes, vec![1, 1, 1]);
+        assert!(!overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pending_paths_are_bounded_and_signal_overflow() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for index in 0..=MAX_PENDING_PATHS {
+            tx.send(NotifyMsg::Event(
+                Event::new(EventKind::Any).add_path(PathBuf::from(format!("distinct-{index}.txt"))),
+            ))
+            .expect("queue event");
+        }
+        drop(tx);
+
+        let overflowed = AtomicBool::new(false);
+        let mut emitted = 0usize;
+        worker_loop(rx, Duration::from_secs(10), &overflowed, &mut |batch| {
+            emitted += batch.len();
+            true
+        });
+
+        assert_eq!(emitted, MAX_PENDING_PATHS);
+        assert!(overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn rejected_output_batch_signals_overflow() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(NotifyMsg::Event(
+            Event::new(EventKind::Any).add_path(PathBuf::from("queued.txt")),
+        ))
+        .expect("queue event");
+        drop(tx);
+
+        let overflowed = AtomicBool::new(false);
+        worker_loop(rx, Duration::ZERO, &overflowed, &mut |_| false);
+
+        assert!(overflowed.load(Ordering::Acquire));
     }
 }

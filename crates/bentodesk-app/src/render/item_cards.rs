@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 
 impl Renderer {
     // Geometric draw helper: the params are independent paint primitives
@@ -165,6 +166,11 @@ impl Renderer {
             };
             match d2d::bitmap_from_png_bytes(&surface.ctx, bytes.as_ref()) {
                 Ok(bitmap) => {
+                    if self.icon_bitmaps.len() >= ICON_BITMAP_CACHE_CAPACITY
+                        && let Some(oldest) = self.icon_bitmaps.keys().next().cloned()
+                    {
+                        self.icon_bitmaps.remove(&oldest);
+                    }
                     let _ = self.icon_bitmaps.insert(icon_hash.to_owned(), bitmap);
                 }
                 Err(e) => {
@@ -210,7 +216,12 @@ impl Renderer {
         }
 
         if !self.image_file_bitmaps.contains_key(path) {
-            let bytes = match std::fs::read(path) {
+            let bytes = match std::fs::File::open(path).and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take((IMAGE_WIDGET_MAX_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)?;
+                Ok(bytes)
+            }) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::warn!(
@@ -238,6 +249,11 @@ impl Renderer {
             };
             match d2d::bitmap_from_image_bytes(&surface.ctx, &bytes) {
                 Ok(bitmap) => {
+                    if self.image_file_bitmaps.len() >= IMAGE_FILE_BITMAP_CACHE_CAPACITY
+                        && let Some(oldest) = self.image_file_bitmaps.keys().next().cloned()
+                    {
+                        self.image_file_bitmaps.remove(&oldest);
+                    }
                     let _ = self.image_file_bitmaps.insert(path.to_owned(), bitmap);
                 }
                 Err(error) => {

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -104,8 +104,8 @@ pub struct DesktopWatcher {
 /// pulled this list from `desktop_sources::all_desktop_dirs(custom_ref)`).
 ///
 /// `out` receives one [`FileChangedEvent`] per debounced create / modify /
-/// delete. If `out` is dropped the watcher worker exits silently on its next
-/// emit.
+/// delete. A full output queue marks the watcher overflowed so the caller can
+/// reconcile from disk without blocking shutdown.
 pub fn setup_file_watcher(
     sources: &[PathBuf],
     out: Sender<FileChangedEvent>,
@@ -116,13 +116,15 @@ pub fn setup_file_watcher(
 
     let debouncer = Debouncer::start(Duration::from_millis(200), move |batch| {
         for ev in batch {
-            if let Some(payload) = map_event_to_payload(&ev)
-                && out.send(payload).is_err()
-            {
-                // Receiver gone — caller dropped the channel; nothing to do.
-                return;
+            if let Some(payload) = map_event_to_payload(&ev) {
+                match out.try_send(payload) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => return false,
+                    Err(TrySendError::Disconnected(_)) => return true,
+                }
             }
         }
+        true
     })?;
 
     let mut attached = 0usize;
@@ -160,6 +162,10 @@ impl DesktopWatcher {
     pub fn unwatch(&self, path: &Path) -> Result<(), WatcherError> {
         self.debouncer.unwatch(path)?;
         Ok(())
+    }
+
+    pub fn take_overflowed(&self) -> bool {
+        self.debouncer.take_overflowed()
     }
 }
 

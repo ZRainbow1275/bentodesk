@@ -1,6 +1,7 @@
 //! Bounded WinHTTP transport used by updater manifest and artifact downloads.
 
 use super::*;
+use std::net::IpAddr;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ParsedHttpUrl {
@@ -42,6 +43,23 @@ pub(super) fn parse_http_url(source: &str) -> Result<ParsedHttpUrl, UpdaterError
     })
 }
 
+pub(super) fn validate_http_transport(
+    parsed: &ParsedHttpUrl,
+    source: &str,
+) -> Result<(), UpdaterError> {
+    let loopback = parsed.host.eq_ignore_ascii_case("localhost")
+        || parsed
+            .host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if parsed.secure || loopback {
+        return Ok(());
+    }
+    Err(UpdaterError::UnsupportedManifestSource(format!(
+        "{source} (remote plaintext HTTP is not allowed)"
+    )))
+}
+
 pub(super) fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(core::iter::once(0)).collect()
 }
@@ -80,12 +98,14 @@ pub(super) fn open_winhttp_get(source: &str) -> Result<WinHttpRequest, UpdaterEr
     use windows_sys::Win32::Networking::WinHttp::{
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
         WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+        WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
         WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
         WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
         WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
     };
 
     let parsed = parse_http_url(source)?;
+    validate_http_transport(&parsed, source)?;
     let agent = wide_null("BentoDesk Updater");
     let session = unsafe {
         WinHttpOpen(
@@ -157,6 +177,20 @@ pub(super) fn open_winhttp_get(source: &str) -> Result<WinHttpRequest, UpdaterEr
         return Err(winhttp_last_error("WinHttpOpenRequest"));
     }
     let request = WinHttpHandle(request);
+    let redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    if unsafe {
+        WinHttpSetOption(
+            request.0,
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            &redirect_policy as *const u32 as *const core::ffi::c_void,
+            core::mem::size_of::<u32>() as u32,
+        )
+    } == 0
+    {
+        return Err(winhttp_last_error(
+            "WinHttpSetOption(REDIRECT_POLICY_NEVER)",
+        ));
+    }
 
     if unsafe { WinHttpSendRequest(request.0, ptr::null(), 0, ptr::null(), 0, 0, 0) } == 0 {
         return Err(winhttp_last_error("WinHttpSendRequest"));
@@ -277,6 +311,9 @@ pub(super) fn copy_http_artifact_to_stage_winhttp(
 
     let request = open_winhttp_get(source)?;
     let total_bytes = winhttp_content_length(&request);
+    if let Some(total_bytes) = total_bytes {
+        validate_artifact_size(total_bytes)?;
+    }
     let mut output = File::create(stage_path)
         .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", stage_path.display())))?;
     let mut buffer = [0u8; DOWNLOAD_BUFFER_BYTES];
@@ -298,10 +335,12 @@ pub(super) fn copy_http_artifact_to_stage_winhttp(
         if read == 0 {
             break;
         }
+        let next_written = written.saturating_add(u64::from(read));
+        validate_artifact_size(next_written)?;
         output
             .write_all(&buffer[..read as usize])
             .map_err(|error| UpdaterError::FetchFailed(error.to_string()))?;
-        written = written.saturating_add(u64::from(read));
+        written = next_written;
         emit_download_progress(event_tx, written, total_bytes)?;
     }
     output

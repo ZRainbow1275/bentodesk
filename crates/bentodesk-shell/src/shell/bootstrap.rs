@@ -2,6 +2,10 @@
 
 use super::*;
 
+const DESKTOP_EVENT_QUEUE_CAPACITY: usize = 2_048;
+const LIVE_FOLDER_EVENT_QUEUE_CAPACITY: usize = 256;
+const RULES_SCHEDULER_EVENT_QUEUE_CAPACITY: usize = 256;
+
 pub(super) fn run() {
     // Mc-1b(a) — DELIBERATE behavioural change from the previous "minimal /
     // silent" hook. With `windows_subsystem="windows"` (no console) and
@@ -126,12 +130,15 @@ pub(super) fn run() {
         }
     };
 
-    let (desktop_event_tx, desktop_event_rx) = crossbeam_channel::unbounded();
-    let (live_folder_event_tx, live_folder_event_rx) = crossbeam_channel::unbounded();
+    let (desktop_event_tx, desktop_event_rx) =
+        crossbeam_channel::bounded(DESKTOP_EVENT_QUEUE_CAPACITY);
+    let (live_folder_event_tx, live_folder_event_rx) =
+        crossbeam_channel::bounded(LIVE_FOLDER_EVENT_QUEUE_CAPACITY);
     let (ghost_event_tx, ghost_event_rx) = crossbeam_channel::unbounded();
     let (power_event_tx, power_event_rx) = crossbeam_channel::unbounded();
     let (updater_event_tx, updater_event_rx) = crossbeam_channel::unbounded();
-    let (rules_scheduler_event_tx, rules_scheduler_event_rx) = crossbeam_channel::unbounded();
+    let (rules_scheduler_event_tx, rules_scheduler_event_rx) =
+        crossbeam_channel::bounded(RULES_SCHEDULER_EVENT_QUEUE_CAPACITY);
     bentodesk_backend::ghost_layer::set_event_sender(ghost_event_tx);
     let desktop_sources = bentodesk_backend::desktop_sources::all_desktop_dirs(None);
     let desktop_watcher = if startup_diag_skip("desktop_watcher") {
