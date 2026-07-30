@@ -25,7 +25,7 @@ use smol_str::SmolStr;
 use zip::read::ZipArchive;
 
 use super::PluginError;
-use super::manifest::{PluginManifest, validate_plugin_id};
+use super::manifest::{PluginManifest, read_plugin_manifest, validate_plugin_id};
 use super::registry::{InstalledPlugin, PluginRegistry};
 use crate::themes::{load_theme_file, to_theme_tokens};
 use crate::time;
@@ -254,10 +254,7 @@ fn read_and_validate_manifest(path: &Path) -> Result<PluginManifest, PluginError
             "Plugin archive must contain a manifest.json at its root",
         )));
     }
-    let content = std::fs::read_to_string(path).map_err(PluginError::Io)?;
-    let manifest: PluginManifest = serde_json::from_str(&content).map_err(PluginError::Json)?;
-    manifest.validate()?;
-    Ok(manifest)
+    read_plugin_manifest(path)
 }
 
 fn validate_payload(_manifest: &PluginManifest, plugin_dir: &Path) -> Result<(), PluginError> {

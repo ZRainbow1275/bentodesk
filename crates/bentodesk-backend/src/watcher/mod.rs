@@ -39,6 +39,6 @@ pub use desktop_watcher::{
     ChangeKind, DesktopWatcher, FileChangedEvent, WatcherError, setup_file_watcher,
 };
 pub use live_folder::{
-    BLACKLISTED_PREFIXES, LiveFolderError, ZoneRefreshEvent, bind, ensure_initialised, unbind,
-    validate_folder,
+    BLACKLISTED_PREFIXES, LiveFolderError, ZoneRefreshEvent, bind, ensure_initialised,
+    take_live_folder_overflowed, unbind, validate_folder,
 };

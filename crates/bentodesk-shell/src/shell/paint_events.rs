@@ -295,7 +295,50 @@ pub(super) fn drain_desktop_events(root: &AppRoot) -> bool {
     if smart_group_requested && auto_organize_desktop(root) {
         changed = true;
     }
+    if root.desktop_events.is_empty()
+        && root
+            .desktop_watcher
+            .borrow()
+            .as_ref()
+            .is_some_and(|watcher| watcher.take_overflowed())
+    {
+        tracing::warn!(
+            target: "bentodesk::watcher",
+            "desktop watcher overflowed; reconciling zone item presence from disk"
+        );
+        changed |= reconcile_desktop_item_presence(root);
+        if root.app.borrow().setting_smart_layout.get() && auto_organize_desktop(root) {
+            changed = true;
+        }
+    }
     changed || drained > 0
+}
+
+fn reconcile_desktop_item_presence(root: &AppRoot) -> bool {
+    let paths = {
+        let app = root.app.borrow();
+        app.zones
+            .iter()
+            .flat_map(|zone| zone.items.iter())
+            .map(|item| item.path.to_string())
+            .collect::<Vec<_>>()
+    };
+    let states = paths
+        .into_iter()
+        .map(|path| {
+            let missing = !Path::new(&path).exists();
+            (path, missing)
+        })
+        .collect::<Vec<_>>();
+    let mut app = root.app.borrow_mut();
+    let mut changed = false;
+    for (path, missing) in states {
+        changed |= app.zones.mark_item_missing(&path, missing);
+    }
+    if changed {
+        app.mark_dirty();
+    }
+    changed
 }
 
 pub(super) fn drain_live_folder_events(root: &AppRoot) -> bool {
@@ -338,6 +381,35 @@ pub(super) fn drain_live_folder_events(root: &AppRoot) -> bool {
         }
         if drained >= 16 {
             break;
+        }
+    }
+    if root.live_folder_events.is_empty()
+        && bentodesk_backend::watcher::take_live_folder_overflowed()
+    {
+        tracing::warn!(
+            target: "bentodesk::live_folder",
+            "live-folder watcher overflowed; refreshing every bound zone"
+        );
+        let zone_ids = {
+            let app = root.app.borrow();
+            app.zones
+                .iter()
+                .filter(|zone| zone.live_folder_path.is_some())
+                .map(|zone| zone.id)
+                .collect::<Vec<_>>()
+        };
+        for zone_id in zone_ids {
+            match refresh_live_folder_zone(root, zone_id) {
+                Ok(zone_changed) => changed |= zone_changed,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bentodesk::live_folder",
+                        zone_id = zone_id.0,
+                        %error,
+                        "live folder overflow reconciliation failed"
+                    );
+                }
+            }
         }
     }
     changed || drained > 0

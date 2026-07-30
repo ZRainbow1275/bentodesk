@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::PluginError;
-use super::manifest::{PluginManifest, PluginType};
+use super::manifest::{PluginManifest, PluginType, read_plugin_manifest};
 use crate::{storage, time};
 
 /// On-disk registry of all installed plugins.
@@ -202,11 +202,7 @@ impl PluginRegistry {
 }
 
 fn read_preextracted_manifest(plugin_dir: &Path) -> Result<PluginManifest, PluginError> {
-    let manifest_path = plugin_dir.join("manifest.json");
-    let content = std::fs::read_to_string(&manifest_path).map_err(PluginError::Io)?;
-    let manifest: PluginManifest = serde_json::from_str(&content).map_err(PluginError::Json)?;
-    manifest.validate()?;
-    Ok(manifest)
+    read_plugin_manifest(&plugin_dir.join("manifest.json"))
 }
 
 #[cfg(test)]

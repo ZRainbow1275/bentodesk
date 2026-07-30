@@ -2,6 +2,8 @@ use super::*;
 
 pub(super) const TEXT_FORMAT_CACHE_CAPACITY: usize = 8;
 pub(super) const IMAGE_WIDGET_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const ICON_BITMAP_CACHE_CAPACITY: usize = 128;
+pub(super) const IMAGE_FILE_BITMAP_CACHE_CAPACITY: usize = 4;
 /// Tauri `.stack-wrapper--bloomed .stack-capsule { transform: scale(0.92) }`.
 pub(super) const STACK_CAPSULE_BLOOMED_SCALE: f32 = 0.92;
 /// Tauri `.stack-wrapper--bloomed .stack-capsule { opacity: 0.55 }`.

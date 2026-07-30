@@ -23,6 +23,10 @@ pub mod drag_manager;
 pub mod drop_source;
 pub mod drop_target;
 
+pub const MAX_DROPPED_FILES: u32 = 1_024;
+pub const MAX_DROPPED_PATH_CHARS: u32 = 32_767;
+pub const MAX_DROPPED_TOTAL_PATH_CHARS: usize = 1024 * 1024;
+
 pub use data_object::BentoDataObject;
 pub use drag_manager::{
     DragDropError, DragOutcome, start_drag_operation, start_drag_operation_from_hwnd,

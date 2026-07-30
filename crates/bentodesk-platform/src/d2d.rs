@@ -45,6 +45,9 @@ use windows::core::Interface;
 use crate::d3d::{D3dDevice, device as d3d_device};
 use crate::errors::{PlatformError, ok};
 
+const MAX_BITMAP_DIMENSION: u32 = 4_096;
+const MAX_BITMAP_PIXELS: u64 = 3_840 * 2_160;
+
 /// Process-wide D2D factory + device pair. Created once, never freed.
 pub struct D2dFactory {
     pub factory: ID2D1Factory1,
@@ -276,11 +279,10 @@ pub fn bitmap_from_image_bytes(
     })?;
     // SAFETY: CreateStream allocates an IWICStream owned by WIC.
     let stream: IWICStream = ok("WIC/CreateStream", unsafe { factory.CreateStream() })?;
-    let buffer = bytes.to_vec();
-    // SAFETY: InitializeFromMemory borrows `buffer`; it is kept alive until
-    // after decoder + converter creation completes.
+    // SAFETY: InitializeFromMemory borrows `bytes`, which remains live until
+    // every WIC object created from the stream has been consumed below.
     ok("WIC/InitializeFromMemory", unsafe {
-        stream.InitializeFromMemory(&buffer)
+        stream.InitializeFromMemory(bytes)
     })?;
     // SAFETY: Decoder creation auto-detects the container from the stream.
     let decoder = ok("WIC/CreateDecoderFromStream", unsafe {
@@ -289,6 +291,11 @@ pub fn bitmap_from_image_bytes(
     // SAFETY: Use the first frame for static image widgets and icon payloads.
     let frame = ok("WIC/GetFrame(0)", unsafe { decoder.GetFrame(0) })?;
     let frame_src: IWICBitmapSource = ok("WIC/frame.cast<IWICBitmapSource>", frame.cast())?;
+    let (mut width, mut height) = (0u32, 0u32);
+    ok("WIC/GetSize", unsafe {
+        frame_src.GetSize(&mut width, &mut height)
+    })?;
+    validate_bitmap_dimensions(width, height)?;
     // SAFETY: Converter is a standard WIC object. Target format is D2D's
     // preferred premultiplied BGRA layout for alpha-correct DrawBitmap.
     let converter: IWICFormatConverter = ok("WIC/CreateFormatConverter", unsafe {
@@ -320,6 +327,21 @@ pub fn bitmap_from_image_bytes(
     ok("D2D/CreateBitmapFromWicBitmap(image)", unsafe {
         ctx.CreateBitmapFromWicBitmap(&converter, Some(&bitmap_props))
     })
+}
+
+fn validate_bitmap_dimensions(width: u32, height: u32) -> Result<(), PlatformError> {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0
+        || height == 0
+        || width > MAX_BITMAP_DIMENSION
+        || height > MAX_BITMAP_DIMENSION
+        || pixels > MAX_BITMAP_PIXELS
+    {
+        return Err(PlatformError::Storage(
+            "bitmap dimensions exceed the decode budget",
+        ));
+    }
+    Ok(())
 }
 
 /// Compatibility wrapper for the icon-cache path. The implementation is the
@@ -377,7 +399,7 @@ pub fn shadow_effect(ctx: &ID2D1DeviceContext, blur: f32) -> Result<ID2D1Effect,
 
 #[cfg(test)]
 mod tests {
-    use super::straight_alpha_color;
+    use super::{straight_alpha_color, validate_bitmap_dimensions};
 
     #[test]
     fn d2d_brush_color_keeps_rgb_unpremultiplied() {
@@ -387,5 +409,14 @@ mod tests {
         assert!((color.g - 0.5).abs() < f32::EPSILON);
         assert!((color.b - 0.75).abs() < f32::EPSILON);
         assert!((color.a - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bitmap_dimensions_are_bounded_before_wic_decode() {
+        assert!(validate_bitmap_dimensions(3_840, 2_160).is_ok());
+        assert!(validate_bitmap_dimensions(0, 1).is_err());
+        assert!(validate_bitmap_dimensions(4_097, 1).is_err());
+        assert!(validate_bitmap_dimensions(4_096, 4_096).is_err());
+        assert!(validate_bitmap_dimensions(4_096, 4_097).is_err());
     }
 }

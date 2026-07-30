@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -103,9 +103,18 @@ fn scan_due_and_emit(
         if !executor::should_run_now(rule, now_secs) {
             continue;
         }
-        event_tx.send(SchedulerEvent::RuleDue {
+        let event = SchedulerEvent::RuleDue {
             rule_id: rule.id.clone(),
-        })?;
+        };
+        match event_tx.try_send(event) {
+            Ok(()) => {}
+            // The UI will drain the bounded queue and this still-due rule will
+            // be retried on the next scheduler tick.
+            Err(TrySendError::Full(_)) => return Ok(()),
+            Err(TrySendError::Disconnected(event)) => {
+                return Err(crossbeam_channel::SendError(event));
+            }
+        }
     }
     Ok(())
 }
@@ -192,6 +201,19 @@ mod tests {
         drop(rx);
         let res = scan_due_and_emit(&dir, &tx);
         assert!(res.is_err(), "closed channel must surface SendError");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_due_does_not_block_on_a_full_bounded_channel() {
+        let dir = scratch_dir();
+        upsert(&dir, mk_rule("a", RunMode::Interval { minutes: 60 })).expect("seed a");
+        upsert(&dir, mk_rule("b", RunMode::Interval { minutes: 60 })).expect("seed b");
+        let (tx, rx) = crossbeam_channel::bounded::<SchedulerEvent>(1);
+
+        scan_due_and_emit(&dir, &tx).expect("full queue is retried next tick");
+
+        assert_eq!(rx.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -210,7 +210,7 @@ pub(super) fn collect_drop_files(hdrop: HDROP) -> DropFilesPayload {
     }
 
     let count = unsafe { DragQueryFileW(hdrop, u32::MAX, core::ptr::null_mut(), 0) };
-    if count == 0 {
+    if count == 0 || count > bentodesk_backend::drag_drop::MAX_DROPPED_FILES {
         return DropFilesPayload {
             files: Vec::new(),
             client_point: None,
@@ -218,10 +218,21 @@ pub(super) fn collect_drop_files(hdrop: HDROP) -> DropFilesPayload {
         };
     }
     let mut files = Vec::with_capacity(count as usize);
+    let mut total_path_chars = 0usize;
     for idx in 0..count {
         let len = unsafe { DragQueryFileW(hdrop, idx, core::ptr::null_mut(), 0) };
         if len == 0 {
             continue;
+        }
+        total_path_chars = total_path_chars.saturating_add(len as usize);
+        if len > bentodesk_backend::drag_drop::MAX_DROPPED_PATH_CHARS
+            || total_path_chars > bentodesk_backend::drag_drop::MAX_DROPPED_TOTAL_PATH_CHARS
+        {
+            return DropFilesPayload {
+                files: Vec::new(),
+                client_point: None,
+                raw_payload: false,
+            };
         }
         let mut buf = vec![0u16; len as usize + 1];
         let written = unsafe { DragQueryFileW(hdrop, idx, buf.as_mut_ptr(), buf.len() as u32) };

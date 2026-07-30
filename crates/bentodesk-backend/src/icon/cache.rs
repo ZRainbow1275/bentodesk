@@ -18,7 +18,7 @@ use super::stats::{IconCacheStats, IconCacheStatsSnapshot};
 
 /// 32 MB total byte budget for the in-memory (hot) tier. Identical to
 /// the 1.x ceiling so cache behaviour matches under benchmark replay.
-const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
 /// Two-tier memory/disk cache for extracted icon PNGs.
 ///
@@ -102,6 +102,9 @@ impl IconCache {
     /// disk.
     fn put_hot_only(&self, key: String, arc: Arc<Vec<u8>>) {
         let incoming_len = arc.len();
+        if incoming_len > MAX_TOTAL_BYTES {
+            return;
+        }
         let mut cache = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut total = self.total_bytes.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -125,6 +128,9 @@ impl IconCache {
     /// budget is met. Warm-tier copies of evicted entries are
     /// preserved.
     pub fn put(&self, key: String, data: Vec<u8>) {
+        if data.len() > MAX_TOTAL_BYTES {
+            return;
+        }
         let arc = Arc::new(data);
         if let Some(warm) = &self.warm {
             match warm.write(&key, arc.as_ref()) {
@@ -333,6 +339,14 @@ mod tests {
         cache.put("c".to_string(), big.clone());
         assert!(cache.total_bytes() <= MAX_TOTAL_BYTES);
         assert!(cache.get("a").is_none());
+    }
+
+    #[test]
+    fn oversized_entry_is_not_cached() {
+        let cache = IconCache::new(1);
+        cache.put("oversized".to_owned(), vec![0; MAX_TOTAL_BYTES + 1]);
+        assert!(cache.is_empty());
+        assert_eq!(cache.total_bytes(), 0);
     }
 
     #[test]

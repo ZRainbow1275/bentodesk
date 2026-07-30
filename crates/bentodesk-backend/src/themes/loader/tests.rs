@@ -182,6 +182,20 @@ fn import_theme_file_rejects_builtin_id_collision() {
 }
 
 #[test]
+fn theme_file_read_is_bounded() {
+    let state_dir = scratch_state_dir("size-limit");
+    let source_path = state_dir.join("oversized.json");
+    std::fs::write(&source_path, vec![b' '; MAX_THEME_BYTES + 1]).expect("write oversized theme");
+
+    assert!(matches!(
+        load_theme_file(&source_path),
+        Err(ThemeError::Parse { message, .. }) if message.contains("exceeds")
+    ));
+
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+#[test]
 fn enabled_registry_theme_plugin_loads_without_themes_dir() {
     let state_dir = scratch_state_dir("registry-enabled");
     let theme = plugin_theme("plugin-purple", "Plugin Purple");

@@ -33,3 +33,65 @@ fn updater_with_test_minisign_key(
 
 include!("tests/01_decode_tauri_minisign_signature_accepts_raw_and_base64.rs");
 include!("tests/02_recurring_background_check_repeats_until_test_run_limit.rs");
+
+#[test]
+fn local_manifest_read_is_bounded() {
+    let manifest_path = std::env::temp_dir().join(format!(
+        "bentodesk-update-manifest-limit-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&manifest_path, vec![b' '; MAX_MANIFEST_BYTES + 1]).expect("write manifest");
+    let (tx, _rx) = unbounded::<UpdateEvent>();
+    let updater =
+        Updater::with_manifest_source(tx, Some(SmolStr::new(manifest_path.to_string_lossy())));
+
+    assert!(matches!(
+        updater.load_manifest_text(),
+        Err(UpdaterError::FetchFailed(message)) if message.contains("exceeds")
+    ));
+
+    let _ = std::fs::remove_file(manifest_path);
+}
+
+#[test]
+fn unsigned_update_artifacts_are_rejected() {
+    let info = UpdateInfo {
+        version: SmolStr::new_static("9.9.9"),
+        current_version: SmolStr::new_static("0.0.1"),
+        date: None,
+        body: None,
+        artifact_url: Some("https://example.invalid/BentoDesk.exe".to_owned()),
+        artifact_sha256: None,
+        signature: None,
+    };
+
+    assert!(matches!(
+        validate_manifest_integrity_policy(&info),
+        Err(UpdaterError::VerificationFailed(message)) if message.contains("must include")
+    ));
+}
+
+#[test]
+fn update_artifact_size_is_bounded() {
+    assert!(validate_artifact_size(MAX_UPDATE_ARTIFACT_BYTES).is_ok());
+    assert!(matches!(
+        validate_artifact_size(MAX_UPDATE_ARTIFACT_BYTES + 1),
+        Err(UpdaterError::FetchFailed(message)) if message.contains("exceeds")
+    ));
+}
+
+#[test]
+fn updater_http_transport_rejects_remote_plaintext() {
+    let remote = parse_http_url("http://example.com/update.json").expect("parse");
+    assert!(matches!(
+        validate_http_transport(&remote, "http://example.com/update.json"),
+        Err(UpdaterError::UnsupportedManifestSource(message))
+            if message.contains("plaintext HTTP")
+    ));
+
+    let loopback = parse_http_url("http://127.0.0.1:8080/update.json").expect("parse");
+    assert!(validate_http_transport(&loopback, "http://127.0.0.1:8080/update.json").is_ok());
+
+    let secure = parse_http_url("https://example.com/update.json").expect("parse");
+    assert!(validate_http_transport(&secure, "https://example.com/update.json").is_ok());
+}

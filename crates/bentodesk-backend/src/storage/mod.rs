@@ -213,7 +213,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Sto
     write_json_atomic_with_limit(path, value, MAX_JSON_STATE_BYTES)
 }
 
-fn write_json_atomic_with_limit<T: Serialize>(
+pub(crate) fn write_json_atomic_with_limit<T: Serialize>(
     path: &Path,
     value: &T,
     max_bytes: u64,

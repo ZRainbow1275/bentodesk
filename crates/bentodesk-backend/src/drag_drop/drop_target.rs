@@ -34,6 +34,8 @@ use windows::{
     core::{Error as WinError, HRESULT, implement},
 };
 
+use super::{MAX_DROPPED_FILES, MAX_DROPPED_PATH_CHARS, MAX_DROPPED_TOTAL_PATH_CHARS};
+
 /// Screen-space point forwarded from OLE drag/drop callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DropPoint {
@@ -292,16 +294,21 @@ fn extract_file_paths(pdataobj: Option<&IDataObject>) -> Result<Vec<String>, Dro
 fn collect_hdrop_files(hdrop: HDROP) -> Vec<String> {
     // SAFETY: `hdrop` comes from a CF_HDROP STGMEDIUM returned by OLE.
     let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
-    if count == 0 {
+    if count == 0 || count > MAX_DROPPED_FILES {
         return Vec::new();
     }
 
     let mut files = Vec::with_capacity(count as usize);
+    let mut total_path_chars = 0usize;
     for idx in 0..count {
         // SAFETY: length query with `None` buffer is the documented pattern.
         let len = unsafe { DragQueryFileW(hdrop, idx, None) };
         if len == 0 {
             continue;
+        }
+        total_path_chars = total_path_chars.saturating_add(len as usize);
+        if len > MAX_DROPPED_PATH_CHARS || total_path_chars > MAX_DROPPED_TOTAL_PATH_CHARS {
+            return Vec::new();
         }
         let mut buf = vec![0u16; len as usize + 1];
         // SAFETY: `buf` is writable and sized for the full NUL-terminated path.
@@ -348,5 +355,15 @@ mod tests {
             target.effect_for(DropPoint { x: 10, y: 20 }),
             DROPEFFECT_COPY
         );
+    }
+
+    #[test]
+    fn oversized_hdrop_file_count_is_rejected_before_path_allocations() {
+        let source = (0..=MAX_DROPPED_FILES)
+            .map(|index| format!(r"C:\Users\BentoDeskTest\Desktop\{index}.txt"))
+            .collect();
+        let object: IDataObject = BentoDataObject::new(source).into();
+
+        assert!(extract_file_paths(Some(&object)).is_err());
     }
 }

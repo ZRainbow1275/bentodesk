@@ -42,6 +42,8 @@
 pub mod executor;
 pub mod scheduler;
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -214,6 +216,7 @@ pub struct ExecutionReport {
 // ─── Persistence ─────────────────────────────────────────────────────
 
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
+const MAX_RULES_BYTES: usize = 4 * 1024 * 1024;
 
 fn rules_path(state_dir: &Path) -> PathBuf {
     state_dir.join("rules.json")
@@ -228,10 +231,19 @@ fn rules_backup_path(state_dir: &Path) -> PathBuf {
 /// recovery — a broken `rules.json` should not brick the engine).
 pub fn load_all(state_dir: &Path) -> Vec<Rule> {
     let path = rules_path(state_dir);
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+    read_rules_bytes(&path)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn read_rules_bytes(path: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take((MAX_RULES_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_RULES_BYTES).then_some(bytes)
 }
 
 /// Persist the rule list with `tmp` rename + `.bak` sibling. On failure
@@ -400,6 +412,18 @@ mod tests {
     fn load_returns_empty_for_missing_file() {
         let dir = scratch_dir().join("nope");
         assert!(load_all(&dir).is_empty());
+    }
+
+    #[test]
+    fn rules_file_read_is_bounded() {
+        let dir = scratch_dir();
+        let path = rules_path(&dir);
+        let file = File::create(&path).expect("create");
+        file.set_len((MAX_RULES_BYTES + 1) as u64)
+            .expect("set length");
+
+        assert!(read_rules_bytes(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

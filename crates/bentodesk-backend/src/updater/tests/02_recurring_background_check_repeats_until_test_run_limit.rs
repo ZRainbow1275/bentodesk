@@ -1,4 +1,3 @@
-
 #[test]
 fn recurring_background_check_repeats_until_test_run_limit() {
     let manifest_path = std::env::temp_dir().join(format!(
@@ -53,7 +52,9 @@ fn download_streams_http_artifact_and_emits_progress_ready() {
     let artifact_url = format!("http://{addr}/BentoDeskSetup.exe");
     std::fs::write(
         &manifest_path,
-        format!(r#"{{"version":"9.9.4","artifact_url":"{artifact_url}"}}"#),
+        format!(
+            r#"{{"version":"9.9.4","artifact_url":"{artifact_url}","artifact_sha256":"8a4afa450da6f852f01aafa1f9af741ec902acd96ef19f8cab1ada89dfb278f2"}}"#
+        ),
     )
     .expect("write manifest");
     let (tx, rx) = unbounded::<UpdateEvent>();
@@ -88,6 +89,59 @@ fn download_streams_http_artifact_and_emits_progress_ready() {
     let _ = std::fs::remove_file(&staged);
 }
 
+#[cfg(windows)]
+#[test]
+fn updater_does_not_follow_http_redirects() {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let target = TcpListener::bind(("127.0.0.1", 0)).expect("bind target");
+    let target_addr = target.local_addr().expect("target addr");
+    let target_server = thread::spawn(move || {
+        target.set_nonblocking(true).expect("nonblocking");
+        for _ in 0..100 {
+            match target.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .expect("target response");
+                    return true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("target accept: {error}"),
+            }
+        }
+        false
+    });
+
+    let redirect = TcpListener::bind(("127.0.0.1", 0)).expect("bind redirect");
+    let redirect_addr = redirect.local_addr().expect("redirect addr");
+    let redirect_server = thread::spawn(move || {
+        let (mut stream, _) = redirect.accept().expect("redirect accept");
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).expect("redirect request");
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/update.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("redirect response");
+    });
+
+    let error = fetch_manifest_winhttp(&format!("http://{redirect_addr}/manifest.json"))
+        .expect_err("redirect must not be followed");
+    assert!(error.to_string().contains("HTTP 302"));
+    redirect_server.join().expect("redirect server");
+    assert!(!target_server.join().expect("target server"));
+}
+
 #[test]
 fn install_requires_a_staged_artifact() {
     let (tx, _rx) = unbounded::<UpdateEvent>();
@@ -112,7 +166,9 @@ fn install_launches_staged_nsis_artifact_and_emits_installing() {
     let artifact_source = artifact_path.to_string_lossy().replace('\\', "/");
     std::fs::write(
         &manifest_path,
-        format!(r#"{{"version":"9.9.5","artifact_url":"{artifact_source}"}}"#),
+        format!(
+            r#"{{"version":"9.9.5","artifact_url":"{artifact_source}","artifact_sha256":"e4d694994b0f50da53c20fbd386937836b3a772929c458f07f7d8a387c257c29"}}"#
+        ),
     )
     .expect("write manifest");
     let (tx, rx) = unbounded::<UpdateEvent>();
@@ -142,6 +198,87 @@ fn install_launches_staged_nsis_artifact_and_emits_installing() {
     let _ = std::fs::remove_file(&manifest_path);
     let _ = std::fs::remove_file(&artifact_path);
     let _ = std::fs::remove_file(&staged);
+}
+
+#[test]
+fn install_rejects_a_staged_artifact_tampered_after_download() {
+    let manifest_path = std::env::temp_dir().join(format!(
+        "bentodesk-update-tamper-manifest-{}.json",
+        std::process::id()
+    ));
+    let artifact_path = std::env::temp_dir().join(format!(
+        "bentodesk-update-tamper-artifact-{}.exe",
+        std::process::id()
+    ));
+    std::fs::write(&artifact_path, b"fake-nsis").expect("write artifact");
+    let artifact_source = artifact_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"{{"version":"9.9.6","artifact_url":"{artifact_source}","artifact_sha256":"e4d694994b0f50da53c20fbd386937836b3a772929c458f07f7d8a387c257c29"}}"#
+        ),
+    )
+    .expect("write manifest");
+    let (tx, _rx) = unbounded::<UpdateEvent>();
+    let updater =
+        Updater::with_manifest_source(tx, Some(SmolStr::new(manifest_path.to_string_lossy())));
+    assert!(updater.check().expect("check").is_some());
+    updater.download().expect("download");
+    let staged = updater.staged_artifact().expect("staged artifact");
+    std::fs::write(&staged, b"tampered").expect("tamper staged artifact");
+
+    let launched = std::cell::Cell::new(false);
+    let error = updater
+        .install_with_launcher(|_| {
+            launched.set(true);
+            Ok(())
+        })
+        .expect_err("tampered artifact must not launch");
+    assert!(matches!(error, UpdaterError::VerificationFailed(_)));
+    assert!(!launched.get());
+
+    let _ = std::fs::remove_file(&manifest_path);
+    let _ = std::fs::remove_file(&artifact_path);
+    let _ = std::fs::remove_file(&staged);
+}
+
+#[test]
+fn a_new_manifest_invalidates_the_previous_staged_artifact() {
+    let manifest_path = std::env::temp_dir().join(format!(
+        "bentodesk-update-generation-manifest-{}.json",
+        std::process::id()
+    ));
+    let artifact_path = std::env::temp_dir().join(format!(
+        "bentodesk-update-generation-artifact-{}.exe",
+        std::process::id()
+    ));
+    std::fs::write(&artifact_path, b"fake-nsis").expect("write artifact");
+    let artifact_source = artifact_path.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"{{"version":"9.9.7","artifact_url":"{artifact_source}","artifact_sha256":"e4d694994b0f50da53c20fbd386937836b3a772929c458f07f7d8a387c257c29"}}"#
+        ),
+    )
+    .expect("write manifest");
+    let (tx, _rx) = unbounded::<UpdateEvent>();
+    let updater =
+        Updater::with_manifest_source(tx, Some(SmolStr::new(manifest_path.to_string_lossy())));
+    assert!(updater.check().expect("first check").is_some());
+    updater.download().expect("download");
+    let old_staged = updater.staged_artifact().expect("old staged");
+
+    std::fs::write(&manifest_path, r#"{"version":"9.9.8"}"#).expect("replace manifest");
+    assert!(updater.check().expect("second check").is_some());
+    assert!(updater.staged_artifact().is_none());
+    assert!(!old_staged.exists());
+    assert!(matches!(
+        updater.install(),
+        Err(UpdaterError::InvalidManifest(message)) if message.contains("no staged artifact")
+    ));
+
+    let _ = std::fs::remove_file(&manifest_path);
+    let _ = std::fs::remove_file(&artifact_path);
 }
 
 #[test]
