@@ -19,6 +19,7 @@ env:
   CARGO_BUILD_JOBS: "1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  MSRV_TOOLCHAIN: "1.89.0"
   RUSTUP_TOOLCHAIN: "1.94.0"
   RUST_BACKTRACE: "1"
   TARGET: x86_64-pc-windows-msvc
@@ -38,9 +39,15 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy --target $env:TARGET
+          rustup toolchain install $env:MSRV_TOOLCHAIN --profile minimal --target $env:TARGET
           rustup show active-toolchain
           rustc --version
           cargo --version
+
+      - name: Minimum supported Rust
+        env:
+          RUSTFLAGS: ""
+        run: cargo +$env:MSRV_TOOLCHAIN check --locked --workspace --all-targets --target $env:TARGET
 
       - name: Remap build-machine paths
         shell: pwsh
