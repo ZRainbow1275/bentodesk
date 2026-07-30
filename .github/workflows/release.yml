@@ -137,7 +137,9 @@ jobs:
             @{ Source = "SECURITY.md"; Target = "SECURITY.md" },
             @{ Source = "LICENSE"; Target = "LICENSE" },
             @{ Source = "crates/bentodesk-app/assets/app-icon.png"; Target = "crates/bentodesk-app/assets/app-icon.png" },
-            @{ Source = "docs/media/hero.webp"; Target = "docs/media/hero.webp" },
+            @{ Source = "docs/media/desktop-tour.mp4"; Target = "docs/media/desktop-tour.mp4" },
+            @{ Source = "docs/media/desktop-tour.webp"; Target = "docs/media/desktop-tour.webp" },
+            @{ Source = "docs/media/tibo-reset.webp"; Target = "docs/media/tibo-reset.webp" },
             @{ Source = "docs/media/zone-motion.webp"; Target = "docs/media/zone-motion.webp" },
             @{ Source = "docs/media/zone-motion.mp4"; Target = "docs/media/zone-motion.mp4" },
             @{ Source = "docs/images/zone-editor.png"; Target = "docs/images/zone-editor.png" },
@@ -193,7 +195,9 @@ jobs:
             "docs/images/bulk-manager.png",
             "docs/images/theme-settings.png",
             "docs/images/zone-editor.png",
-            "docs/media/hero.webp",
+            "docs/media/desktop-tour.mp4",
+            "docs/media/desktop-tour.webp",
+            "docs/media/tibo-reset.webp",
             "docs/media/zone-motion.mp4",
             "docs/media/zone-motion.webp"
           )

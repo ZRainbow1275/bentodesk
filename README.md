@@ -11,7 +11,7 @@
 
   <p>
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest">Download</a> ·
-    <a href="#zones-that-stay-out-of-the-way">See it in motion</a> ·
+    <a href="docs/media/desktop-tour.mp4">Watch the tour</a> ·
     <a href="#what-bentodesk-does">Features</a> ·
     <a href="#building-from-source">Build</a> ·
     <a href="#contributing">Contributing</a>
@@ -19,7 +19,10 @@
 </div>
 
 <p align="center">
-  <img src="docs/media/hero.webp" width="960" alt="BentoDesk Zones and a Stack on the Windows desktop">
+  <a href="docs/media/desktop-tour.mp4"><img src="docs/media/desktop-tour.webp" width="760" alt="A real BentoDesk desktop tour showing Zones, Stacks, menus, themes, and settings"></a>
+</p>
+<p align="center">
+  <sub>Thirty-three seconds. One native process. Your desktop, folded. · <a href="docs/media/desktop-tour.mp4">play the MP4</a></sub>
 </p>
 
 ## Why BentoDesk
@@ -41,7 +44,7 @@ Windows itself.
 
 | | |
 | --- | --- |
-| **Lean** | One native process, no bundled browser runtime. Release builds are about 2.5 MB; the isolated five-Zone reference run used 17.34 MiB of Private Bytes at t60. |
+| **Lean** | One native process, no bundled browser runtime. Release builds are about 2.5 MB; the isolated five-Zone reference run used 21.57 MiB of Private Bytes at t60. |
 | **Coherent** | Collapsed and expanded Zones use the same geometry, hit testing, typography, and animation state instead of swapping between separate visual layers. |
 | **Direct** | Shell/OLE drag and drop, Windows icons, search, Stacks, batch layouts, snapshots, and the timeline work with real desktop content. |
 | **Local** | No account or cloud is required. State is written atomically; settings support DPAPI or passphrase encryption, and plugin packages are checked before installation. |
@@ -76,10 +79,10 @@ menu all belong to one native surface. Rapid reversal and movement between
 Zones continue the current motion instead of restarting it.
 
 <p align="center">
-  <img src="docs/media/zone-motion.webp" width="736" alt="A real BentoDesk Zone expanding and opening search">
+  <a href="docs/media/zone-motion.mp4"><img src="docs/media/zone-motion.webp" width="620" alt="A real BentoDesk Zone expanding, opening search, and showing its native context menu"></a>
 </p>
 <p align="center">
-  <sub>Native Windows build · <a href="docs/media/zone-motion.mp4">watch the MP4</a></sub>
+  <sub>Capsule, grid, search, and context menu on one native surface · <a href="docs/media/zone-motion.mp4">play the MP4</a></sub>
 </p>
 
 ### Drag, search, and Stack
@@ -175,8 +178,8 @@ five Zones, 50 items, and one BentoDesk process:
 
 | Metric | Result |
 | --- | ---: |
-| Release EXE | 2,513,920 bytes (2.40 MiB) |
-| Private Bytes at t10 / t30 / t60 | 17.80 / 17.38 / 17.34 MiB |
+| Release EXE | 2,523,648 bytes (2.41 MiB) |
+| Private Bytes at t10 / t30 / t60 | 21.02 / 21.60 / 21.57 MiB |
 | Full Zone expand / collapse | 234 ms / 235 ms |
 | Animation tick median / p95 | 16 ms / 16 ms |
 
@@ -251,8 +254,13 @@ Report security issues through GitHub's private channel described in
 
 ## Thanks
 
-Thanks to [Tibo](https://x.com/thsottiaux) for the product inspiration, and to
-the Linux Do community for discussion and testing.
+Thanks to GPT 5.6 SOL for the help, and to
+[Tibo](https://x.com/thsottiaux) for the relentless resets that got BentoDesk
+out the door—and into shape—much faster.
+
+<p align="center">
+  <img src="docs/media/tibo-reset.webp" width="180" alt="Tibo reset meme">
+</p>
 
 BentoDesk is maintained by 方寒
 ([@ZRainbow1275](https://github.com/ZRainbow1275)).

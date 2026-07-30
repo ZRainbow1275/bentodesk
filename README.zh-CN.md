@@ -11,7 +11,7 @@
 
   <p>
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest">下载</a> ·
-    <a href="#安静地待在桌面上">查看动画</a> ·
+    <a href="docs/media/desktop-tour.mp4">观看演示</a> ·
     <a href="#bentodesk-能做什么">功能</a> ·
     <a href="#从源码构建">构建</a> ·
     <a href="#参与贡献">贡献</a>
@@ -19,7 +19,10 @@
 </div>
 
 <p align="center">
-  <img src="docs/media/hero.webp" width="960" alt="Windows 桌面上的 BentoDesk Zone 与 Stack">
+  <a href="docs/media/desktop-tour.mp4"><img src="docs/media/desktop-tour.webp" width="760" alt="BentoDesk 原生桌面演示：Zone、Stack、菜单、主题与设置"></a>
+</p>
+<p align="center">
+  <sub>三十三秒，一个原生进程，把桌面折叠起来。 · <a href="docs/media/desktop-tour.mp4">播放 MP4</a></sub>
 </p>
 
 ## 为什么做 BentoDesk
@@ -39,7 +42,7 @@ BentoDesk 最初就是为了解决这个问题。它不把文件藏进另一个�
 
 | | |
 | --- | --- |
-| **极致** | 单进程原生运行，不携带浏览器内核。Release 构建约 2.5 MB；隔离五 Zone 参考场景下 t60 Private Bytes 为 17.34 MiB。 |
+| **极致** | 单进程原生运行，不携带浏览器内核。Release 构建约 2.5 MB；隔离五 Zone 参考场景下 t60 Private Bytes 为 21.57 MiB。 |
 | **优雅** | 收起和展开共用几何、命中、排版与动画状态，不再切换两套互相脱节的图层。 |
 | **便捷** | Shell/OLE 拖放、Windows 图标、搜索、Stack、批量排列、快照与时间线都直接作用于真实桌面内容。 |
 | **安全** | 无需账号或云服务；状态原子写入，设置支持 DPAPI 或口令加密，插件包安装前会经过校验。 |
@@ -71,10 +74,10 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 快速移动到另一个 Zone 时，会从当前进度继续，不重新跳一遍。
 
 <p align="center">
-  <img src="docs/media/zone-motion.webp" width="736" alt="BentoDesk Zone 的真实展开与搜索动画">
+  <a href="docs/media/zone-motion.mp4"><img src="docs/media/zone-motion.webp" width="620" alt="BentoDesk Zone 的真实展开、搜索与原生右键菜单动画"></a>
 </p>
 <p align="center">
-  <sub>Windows 原生版本 · <a href="docs/media/zone-motion.mp4">观看 MP4</a></sub>
+  <sub>胶囊、网格、搜索与右键菜单，共用一个原生表面。 · <a href="docs/media/zone-motion.mp4">播放 MP4</a></sub>
 </p>
 
 ### 拖放、搜索与 Stack
@@ -158,8 +161,8 @@ Zone 可以选择宽度与五种边角，也可以悬停展开、单击展开或
 
 | 指标 | 结果 |
 | --- | ---: |
-| Release EXE | 2,513,920 bytes（2.40 MiB） |
-| Private Bytes t10 / t30 / t60 | 17.80 / 17.38 / 17.34 MiB |
+| Release EXE | 2,523,648 bytes（2.41 MiB） |
+| Private Bytes t10 / t30 / t60 | 21.02 / 21.60 / 21.57 MiB |
 | Zone 完整展开 / 收起 | 234 ms / 235 ms |
 | 动画 tick median / p95 | 16 ms / 16 ms |
 
@@ -234,8 +237,11 @@ Issue。
 
 ## 致谢
 
-感谢 [Tibo](https://x.com/thsottiaux) 带来的产品启发，也感谢 Linux Do 社区的
-讨论与测试。
+感谢GPT 5.6 SOL的帮助，以及[Tibo](https://x.com/thsottiaux)多次频繁的reset，大大加快了本项目的面世和完善。
+
+<p align="center">
+  <img src="docs/media/tibo-reset.webp" width="180" alt="Tibo reset 搞怪图">
+</p>
 
 BentoDesk 由方寒（[@ZRainbow1275](https://github.com/ZRainbow1275)）维护。
 
