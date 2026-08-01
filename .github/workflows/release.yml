@@ -4,6 +4,8 @@ on:
   workflow_run:
     workflows:
       - Native CI
+    branches:
+      - main
     types:
       - completed
   workflow_dispatch:
@@ -19,8 +21,7 @@ on:
         type: string
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 concurrency:
   group: native-release-${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
@@ -35,8 +36,8 @@ env:
   TARGET: x86_64-pc-windows-msvc
 
 jobs:
-  release:
-    name: Build and publish portable package
+  build:
+    name: Build and verify portable package
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -44,6 +45,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main')
     runs-on: windows-latest
     timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: read
 
     steps:
       - name: Check out release source
@@ -121,7 +125,7 @@ jobs:
               throw "Could not inspect tag $tag"
             }
           } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $tag = $env:DISPATCH_TAG.Trim()
+            $tag = $env:DISPATCH_TAG
             $dispatchSha = $env:DISPATCH_SHA
             if (-not $tag) {
               throw "workflow_dispatch requires an existing immutable tag"
@@ -171,6 +175,7 @@ jobs:
             throw "Missing release notes: $notes"
           }
           "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$head" >> $env:GITHUB_ENV
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Release identity: $tag at $head"
@@ -225,6 +230,7 @@ jobs:
           $stage = Join-Path $dist $packageName
           $zip = Join-Path $dist "$packageName.zip"
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
+          $handoff = Join-Path $dist "release-handoff"
 
           cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
@@ -295,9 +301,39 @@ jobs:
             [Text.UTF8Encoding]::new($false)
           )
 
+          if (Test-Path $handoff) {
+            throw "Release handoff directory already exists: $handoff"
+          }
+          New-Item -ItemType Directory -Path $handoff | Out-Null
+          $notes = "docs/release-notes-$env:RELEASE_TAG.md"
+          $zipName = [IO.Path]::GetFileName($zip)
+          $checksumsName = [IO.Path]::GetFileName($releaseSums)
+          Copy-Item $zip (Join-Path $handoff $zipName)
+          Copy-Item $releaseSums (Join-Path $handoff $checksumsName)
+          Copy-Item $notes (Join-Path $handoff "release-notes.md")
+
+          $handoffMetadata = [ordered]@{
+            schema = 1
+            source_sha = $env:RELEASE_SHA
+            tag = $env:RELEASE_TAG
+            version = $version
+            package_name = $packageName
+            zip_name = $zipName
+            zip_sha256 = $zipHash
+            checksums_name = $checksumsName
+            checksums_sha256 = (Get-FileHash $releaseSums -Algorithm SHA256).Hash.ToLowerInvariant()
+            notes_name = "release-notes.md"
+          } | ConvertTo-Json
+          [IO.File]::WriteAllText(
+            (Join-Path $handoff "release-metadata.json"),
+            $handoffMetadata,
+            [Text.UTF8Encoding]::new($false)
+          )
+
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "checksums=$releaseSums" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
+          "handoff=$handoff" >> $env:GITHUB_OUTPUT
 
       - name: Verify package and extracted runtime
         shell: pwsh
@@ -387,52 +423,209 @@ jobs:
             }
           }
 
-      - name: Create immutable release tag
-        if: github.event_name == 'workflow_run'
+      - name: Verify release handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $handoff = "${{ steps.package.outputs.handoff }}"
+          $required = @(
+            "${{ steps.package.outputs.package_name }}.zip",
+            "release-metadata.json",
+            "release-notes.md",
+            "SHA256SUMS.txt"
+          )
+          $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
+          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+            throw "Release handoff contains missing or unexpected files"
+          }
+          $metadata = Get-Content (Join-Path $handoff "release-metadata.json") -Raw |
+            ConvertFrom-Json
+          if (
+            $metadata.schema -ne 1 -or
+            $metadata.source_sha -ne $env:RELEASE_SHA -or
+            $metadata.tag -ne $env:RELEASE_TAG -or
+            $metadata.zip_name -ne "${{ steps.package.outputs.package_name }}.zip"
+          ) {
+            throw "Release handoff metadata identity mismatch"
+          }
+
+      - name: Upload verified release handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bentodesk-release-${{ github.run_id }}
+          path: ${{ steps.package.outputs.handoff }}/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish immutable release
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download verified release handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bentodesk-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/bentodesk-release-handoff
+
+      - name: Validate handoff and release identity
         env:
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          AUTOMATIC_EVENT: ${{ github.event.workflow_run.event }}
           AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          DISPATCH_TAG: ${{ inputs.tag }}
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          $head = (git rev-parse HEAD).Trim()
-          if ($head -ne $env:AUTOMATIC_SHA) {
-            throw "Checkout commit $head does not match successful CI commit $env:AUTOMATIC_SHA"
+          $handoff = Join-Path $env:RUNNER_TEMP "bentodesk-release-handoff"
+          $metadataPath = Join-Path $handoff "release-metadata.json"
+          $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
+
+          $sourceSha = [string]$metadata.source_sha
+          $tag = [string]$metadata.tag
+          $version = [string]$metadata.version
+          $packageName = [string]$metadata.package_name
+          $zipName = [string]$metadata.zip_name
+          $checksumsName = [string]$metadata.checksums_name
+          $notesName = [string]$metadata.notes_name
+          $zipHash = [string]$metadata.zip_sha256
+          $checksumsHash = [string]$metadata.checksums_sha256
+
+          if ($metadata.schema -ne 1) {
+            throw "Unsupported release handoff schema"
+          }
+          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Invalid release source SHA"
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $tag -ne "v$version") {
+            throw "Invalid release tag or version"
+          }
+          if ($packageName -ne "BentoDesk-$version-windows-x64-portable") {
+            throw "Invalid release package name"
+          }
+          if (
+            $zipName -ne "$packageName.zip" -or
+            $checksumsName -ne "SHA256SUMS.txt" -or
+            $notesName -ne "release-notes.md" -or
+            $zipHash -notmatch '^[0-9a-f]{64}$' -or
+            $checksumsHash -notmatch '^[0-9a-f]{64}$'
+          ) {
+            throw "Invalid release handoff filenames or digests"
           }
 
-          $version = $env:RELEASE_TAG.TrimStart("v")
-          gh auth setup-git --hostname github.com
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag --annotate $env:RELEASE_TAG $head --message "BentoDesk $version"
-          git push origin "refs/tags/$env:RELEASE_TAG"
-
-          $remote = @(git ls-remote origin "refs/tags/$env:RELEASE_TAG^{}")
-          if ($remote.Count -ne 1) {
-            throw "Could not read back annotated tag $env:RELEASE_TAG"
+          $required = @($zipName, $checksumsName, $notesName, "release-metadata.json")
+          $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
+          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+            throw "Downloaded release handoff contains missing or unexpected files"
           }
-          $remoteCommit = ($remote[0] -split '\s+')[0]
-          if ($remoteCommit -ne $head) {
-            throw "Remote tag $env:RELEASE_TAG points to $remoteCommit instead of $head"
-          }
-          Write-Host "Created immutable annotated tag $env:RELEASE_TAG at $head"
 
-      - name: Publish GitHub Release
-        shell: pwsh
+          $zip = Join-Path $handoff $zipName
+          $checksums = Join-Path $handoff $checksumsName
+          $notes = Join-Path $handoff $notesName
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipHash) {
+            throw "Release ZIP digest does not match handoff metadata"
+          }
+          if ((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant() -ne $checksumsHash) {
+            throw "External checksum digest does not match handoff metadata"
+          }
+          $sumLines = @(Get-Content $checksums)
+          if ($sumLines.Count -ne 1 -or $sumLines[0] -ne "$zipHash  $zipName") {
+            throw "External checksum file does not describe the release ZIP exactly"
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            if (
+              $env:AUTOMATIC_EVENT -ne "push" -or
+              $env:AUTOMATIC_BRANCH -ne "main" -or
+              $env:AUTOMATIC_CONCLUSION -ne "success" -or
+              $sourceSha -ne $env:AUTOMATIC_SHA
+            ) {
+              throw "Automatic publication requires the exact successful Native CI main push"
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            if ($env:DISPATCH_SHA -ne $sourceSha -or $env:DISPATCH_TAG -ne $tag) {
+              throw "Recovery inputs do not match the verified release handoff"
+            }
+            $runs = gh api `
+              "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sourceSha&branch=main&event=push&status=success&per_page=100" |
+              ConvertFrom-Json
+            $matchingRuns = @($runs.workflow_runs | Where-Object {
+              $_.name -eq "Native CI" -and
+              $_.event -eq "push" -and
+              $_.head_branch -eq "main" -and
+              $_.head_sha -eq $sourceSha -and
+              $_.conclusion -eq "success"
+            })
+            if ($matchingRuns.Count -eq 0) {
+              throw "Recovery commit $sourceSha has no successful Native CI push run on main"
+            }
+          } else {
+            throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
+          }
+
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$sourceSha" >> $env:GITHUB_ENV
+          "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
+          "RELEASE_CHECKSUMS=$checksums" >> $env:GITHUB_ENV
+          "RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
+
+      - name: Create or verify annotated release tag
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tagApi = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            $tagObject = gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/git/tags" `
+              -f tag="$env:RELEASE_TAG" `
+              -f message="BentoDesk $env:RELEASE_VERSION" `
+              -f object="$env:RELEASE_SHA" `
+              -f type="commit" |
+              ConvertFrom-Json
+            gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/git/refs" `
+              -f ref="refs/tags/$env:RELEASE_TAG" `
+              -f sha="$($tagObject.sha)" |
+              Out-Null
+          }
+
+          $tagRef = gh api $tagApi | ConvertFrom-Json
+          if ($tagRef.object.type -ne "tag") {
+            throw "Release tag $env:RELEASE_TAG is not annotated"
+          }
+          $annotated = gh api `
+            "repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" |
+            ConvertFrom-Json
+          if ($annotated.object.type -ne "commit" -or $annotated.object.sha -ne $env:RELEASE_SHA) {
+            throw "Release tag $env:RELEASE_TAG does not point to $env:RELEASE_SHA"
+          }
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:RELEASE_TAG
-          $zip = "${{ steps.package.outputs.zip }}"
-          $checksums = "${{ steps.package.outputs.checksums }}"
-          $version = $tag.TrimStart("v")
-          $notes = "docs/release-notes-$tag.md"
-          if (-not (Test-Path $notes -PathType Leaf)) {
-            throw "Missing release notes: $notes"
-          }
+          $zip = $env:RELEASE_ZIP
+          $checksums = $env:RELEASE_CHECKSUMS
+          $notes = $env:RELEASE_NOTES
           $api = "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
           $headers = @(
             "Accept: application/vnd.github+json",
@@ -453,7 +646,7 @@ jobs:
             gh release create $tag `
               --draft `
               --verify-tag `
-              --title "BentoDesk $version" `
+              --title "BentoDesk $env:RELEASE_VERSION" `
               --notes-file $notes `
               --repo $env:GITHUB_REPOSITORY
           } else {
