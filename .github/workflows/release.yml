@@ -1,22 +1,30 @@
 name: Native Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - Native CI
+    branches:
+      - main
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing immutable tag to publish
+        description: Existing annotated tag whose draft publication must be recovered
         required: true
-        default: v2.0.2
+        default: v2.0.3
+        type: string
+      sha:
+        description: Exact main commit SHA already validated by Native CI
+        required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: native-release-${{ inputs.tag || github.ref_name }}
+  group: native-release-${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 env:
@@ -24,22 +32,93 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   MSRV_TOOLCHAIN: "1.89.0"
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
   RUSTUP_TOOLCHAIN: "1.94.0"
   TARGET: x86_64-pc-windows-msvc
 
 jobs:
-  release:
-    name: Build and publish portable package
+  build:
+    name: Build and verify portable package
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: windows-latest
     timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: read
 
     steps:
-      - name: Check out tagged source
+      - name: Check out release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+          ref: main
+
+      - name: Select exact release source
+        env:
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          AUTOMATIC_EVENT: ${{ github.event.workflow_run.event }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            if (
+              $env:AUTOMATIC_EVENT -ne "push" -or
+              $env:AUTOMATIC_BRANCH -ne "main" -or
+              $env:AUTOMATIC_CONCLUSION -ne "success"
+            ) {
+              throw "Automatic releases require a successful Native CI push on main"
+            }
+            $sourceSha = $env:AUTOMATIC_SHA
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $sourceSha = $env:DISPATCH_SHA
+            if ($env:DISPATCH_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+              throw "Recovery tag must be an exact v<major>.<minor>.<patch> tag"
+            }
+            $PSNativeCommandUseErrorActionPreference = $false
+            git show-ref --verify --quiet "refs/tags/$env:DISPATCH_TAG"
+            $tagExit = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            $global:LASTEXITCODE = 0
+            if ($tagExit -ne 0) {
+              throw "Recovery tag $env:DISPATCH_TAG does not exist"
+            }
+            if ((git cat-file -t "refs/tags/$env:DISPATCH_TAG").Trim() -ne "tag") {
+              throw "Recovery tag $env:DISPATCH_TAG must be annotated"
+            }
+            $tagCommit = (git rev-list -n 1 "refs/tags/$env:DISPATCH_TAG").Trim()
+            if ($tagCommit -ne $sourceSha) {
+              throw "Recovery tag $env:DISPATCH_TAG does not point to $sourceSha"
+            }
+          } else {
+            throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
+          }
+
+          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Release source must be an exact lowercase commit SHA"
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          git merge-base --is-ancestor $sourceSha origin/main
+          $ancestorExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          $global:LASTEXITCODE = 0
+          if ($ancestorExit -ne 0) {
+            throw "Release source $sourceSha is not reachable from main"
+          }
+          git checkout --detach $sourceSha
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $sourceSha) {
+            throw "Checked out $head instead of release source $sourceSha"
+          }
 
       - name: Prepare Rust
         shell: pwsh
@@ -48,6 +127,121 @@ jobs:
           rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rustfmt,clippy --target $env:TARGET
           rustup toolchain install $env:MSRV_TOOLCHAIN --profile minimal --target $env:TARGET
           rustup show active-toolchain
+
+      - name: Resolve release identity
+        id: identity
+        env:
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          AUTOMATIC_EVENT: ${{ github.event.workflow_run.event }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $shell = @($metadata.packages | Where-Object name -eq "bentodesk-shell")
+          if ($shell.Count -ne 1) {
+            throw "Expected exactly one bentodesk-shell package"
+          }
+          $version = $shell[0].version.ToString()
+          $expectedTag = "v$version"
+          $head = (git rev-parse HEAD).Trim()
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            if (
+              $env:AUTOMATIC_EVENT -ne "push" -or
+              $env:AUTOMATIC_BRANCH -ne "main" -or
+              $env:AUTOMATIC_CONCLUSION -ne "success"
+            ) {
+              throw "Automatic releases require a successful Native CI run on main"
+            }
+            if ($head -ne $env:AUTOMATIC_SHA) {
+              throw "Checkout commit $head does not match successful CI commit $env:AUTOMATIC_SHA"
+            }
+            $currentVersion = [version]$version
+            $parentCargo = (git show "${head}^:Cargo.toml") -join "`n"
+            $parentMatch = [regex]::Match(
+              $parentCargo,
+              '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
+            )
+            if (-not $parentMatch.Success) {
+              throw "Could not read the workspace version from the parent commit"
+            }
+            $parentVersion = [version]$parentMatch.Groups[1].Value
+            if ($currentVersion -le $parentVersion) {
+              throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
+            }
+            $tag = $expectedTag
+            $PSNativeCommandUseErrorActionPreference = $false
+            git show-ref --verify --quiet "refs/tags/$tag"
+            $tagExit = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            $global:LASTEXITCODE = 0
+            if ($tagExit -eq 0) {
+              throw "Release tag $tag already exists; every main commit must declare a new workspace version"
+            } elseif ($tagExit -ne 1) {
+              throw "Could not inspect tag $tag"
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $tag = $env:DISPATCH_TAG
+            $dispatchSha = $env:DISPATCH_SHA
+            if (-not $tag) {
+              throw "workflow_dispatch requires an existing immutable tag"
+            }
+            if ($dispatchSha -notmatch '^[0-9a-f]{40}$' -or $dispatchSha -ne $head) {
+              throw "Recovery SHA $dispatchSha does not match checkout commit $head"
+            }
+            if ($tag -ne $expectedTag) {
+              throw "Tag $tag does not match workspace version $version"
+            }
+
+            $PSNativeCommandUseErrorActionPreference = $false
+            git show-ref --verify --quiet "refs/tags/$tag"
+            $tagExit = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            $global:LASTEXITCODE = 0
+            if ($tagExit -ne 0) {
+              throw "Recovery tag $tag does not exist in the checked-out repository"
+            }
+            if ((git cat-file -t "refs/tags/$tag").Trim() -ne "tag") {
+              throw "Recovery tag $tag must be annotated"
+            }
+            $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
+            if ($tagCommit -ne $head) {
+              throw "Recovery tag $tag points to $tagCommit instead of checkout commit $head"
+            }
+
+            $runs = gh api `
+              "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&branch=main&event=push&status=success&per_page=100" |
+              ConvertFrom-Json
+            $matchingRuns = @($runs.workflow_runs | Where-Object {
+              $_.name -eq "Native CI" -and
+              $_.event -eq "push" -and
+              $_.head_branch -eq "main" -and
+              $_.head_sha -eq $head -and
+              $_.conclusion -eq "success"
+            })
+            if ($matchingRuns.Count -eq 0) {
+              throw "Recovery commit $head has no successful Native CI push run on main"
+            }
+          } else {
+            throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
+          }
+
+          $notes = "docs/release-notes-$tag.md"
+          if (-not (Test-Path $notes -PathType Leaf)) {
+            throw "Missing release notes: $notes"
+          }
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$head" >> $env:GITHUB_ENV
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Release identity: $tag at $head"
 
       - name: Minimum supported Rust
         env:
@@ -67,18 +261,10 @@ jobs:
           $rustflags += "--remap-path-prefix=$env:GITHUB_WORKSPACE=/_build/workspace"
           "RUSTFLAGS=$($rustflags -join ' ')" >> $env:GITHUB_ENV
 
-      - name: Verify tag and source
+      - name: Verify source
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
-          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = $metadata.packages | Where-Object name -eq "bentodesk-shell"
-          $expectedTag = "v$($shell.version)"
-          if ($env:RELEASE_TAG -ne $expectedTag) {
-            throw "Tag $env:RELEASE_TAG does not match workspace version $($shell.version)"
-          }
-
           cargo fmt --all -- --check
           cargo test --locked --workspace --all-targets --target $env:TARGET
           cargo clippy --locked --workspace --all-targets --target $env:TARGET -- -D warnings
@@ -107,6 +293,7 @@ jobs:
           $stage = Join-Path $dist $packageName
           $zip = Join-Path $dist "$packageName.zip"
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
+          $handoff = Join-Path $dist "release-handoff"
 
           cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
@@ -114,18 +301,34 @@ jobs:
             throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
           }
           $manifest = Get-Content "crates/bentodesk-shell/app.manifest" -Raw
+          $resource = Get-Content "crates/bentodesk-shell/app.rc" -Raw
           $expectedManifestVersion = [regex]::Escape("$version.0")
           if ($manifest -notmatch "version=`"$expectedManifestVersion`"") {
             throw "app.manifest does not contain assembly version $version.0"
+          }
+          $resourceVersion = $version.Replace(".", ",")
+          foreach ($expected in @(
+            "FILEVERSION $resourceVersion,0",
+            "PRODUCTVERSION $resourceVersion,0",
+            "VALUE `"FileVersion`", `"$version.0\0`"",
+            "VALUE `"ProductVersion`", `"$version\0`""
+          )) {
+            if ($resource.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
+              throw "app.rc does not contain expected version identity: $expected"
+            }
           }
           $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe.FullName))
           if ($binaryText.IndexOf("version=`"$version.0`"", [StringComparison]::Ordinal) -lt 0) {
             throw "BentoDesk.exe does not contain embedded assembly version $version.0"
           }
           foreach ($privatePath in @($env:USERPROFILE, $env:GITHUB_WORKSPACE)) {
-            if ($binaryText.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($privatePath -and $binaryText.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
               throw "BentoDesk.exe contains a private build-machine path"
             }
+          }
+          $limit = [int64](2.5 * 1MB)
+          if ($exe.Length -gt $limit) {
+            throw "BentoDesk.exe is $($exe.Length) bytes; limit is $limit"
           }
 
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
@@ -133,18 +336,7 @@ jobs:
             @{ Source = "target/$env:TARGET/release/BentoDesk.exe"; Target = "BentoDesk.exe" },
             @{ Source = "README.md"; Target = "README.md" },
             @{ Source = "README.zh-CN.md"; Target = "README.zh-CN.md" },
-            @{ Source = "CONTRIBUTING.md"; Target = "CONTRIBUTING.md" },
-            @{ Source = "SECURITY.md"; Target = "SECURITY.md" },
-            @{ Source = "LICENSE"; Target = "LICENSE" },
-            @{ Source = "crates/bentodesk-app/assets/app-icon.png"; Target = "crates/bentodesk-app/assets/app-icon.png" },
-            @{ Source = "docs/media/desktop-tour.mp4"; Target = "docs/media/desktop-tour.mp4" },
-            @{ Source = "docs/media/desktop-tour.webp"; Target = "docs/media/desktop-tour.webp" },
-            @{ Source = "docs/media/tibo-reset.webp"; Target = "docs/media/tibo-reset.webp" },
-            @{ Source = "docs/media/zone-motion.webp"; Target = "docs/media/zone-motion.webp" },
-            @{ Source = "docs/media/zone-motion.mp4"; Target = "docs/media/zone-motion.mp4" },
-            @{ Source = "docs/images/zone-editor.png"; Target = "docs/images/zone-editor.png" },
-            @{ Source = "docs/images/bulk-manager.png"; Target = "docs/images/bulk-manager.png" },
-            @{ Source = "docs/images/theme-settings.png"; Target = "docs/images/theme-settings.png" }
+            @{ Source = "LICENSE"; Target = "LICENSE" }
           )
           foreach ($entry in $payload) {
             $target = Join-Path $stage $entry.Target
@@ -152,8 +344,8 @@ jobs:
             Copy-Item $entry.Source $target
           }
 
-          $innerLines = foreach ($file in Get-ChildItem $stage -Recurse -File | Sort-Object FullName) {
-            $name = [IO.Path]::GetRelativePath($stage, $file.FullName).Replace("\", "/")
+          $innerLines = foreach ($file in Get-ChildItem $stage -File | Sort-Object Name) {
+            $name = $file.Name
             $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
           }
@@ -172,9 +364,39 @@ jobs:
             [Text.UTF8Encoding]::new($false)
           )
 
+          if (Test-Path $handoff) {
+            throw "Release handoff directory already exists: $handoff"
+          }
+          New-Item -ItemType Directory -Path $handoff | Out-Null
+          $notes = "docs/release-notes-$env:RELEASE_TAG.md"
+          $zipName = [IO.Path]::GetFileName($zip)
+          $checksumsName = [IO.Path]::GetFileName($releaseSums)
+          Copy-Item $zip (Join-Path $handoff $zipName)
+          Copy-Item $releaseSums (Join-Path $handoff $checksumsName)
+          Copy-Item $notes (Join-Path $handoff "release-notes.md")
+
+          $handoffMetadata = [ordered]@{
+            schema = 1
+            source_sha = $env:RELEASE_SHA
+            tag = $env:RELEASE_TAG
+            version = $version
+            package_name = $packageName
+            zip_name = $zipName
+            zip_sha256 = $zipHash
+            checksums_name = $checksumsName
+            checksums_sha256 = (Get-FileHash $releaseSums -Algorithm SHA256).Hash.ToLowerInvariant()
+            notes_name = "release-notes.md"
+          } | ConvertTo-Json
+          [IO.File]::WriteAllText(
+            (Join-Path $handoff "release-metadata.json"),
+            $handoffMetadata,
+            [Text.UTF8Encoding]::new($false)
+          )
+
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "checksums=$releaseSums" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
+          "handoff=$handoff" >> $env:GITHUB_OUTPUT
 
       - name: Verify package and extracted runtime
         shell: pwsh
@@ -185,21 +407,10 @@ jobs:
           $zip = "${{ steps.package.outputs.zip }}"
           $required = @(
             "BentoDesk.exe",
-            "CONTRIBUTING.md",
             "LICENSE",
             "README.md",
             "README.zh-CN.md",
-            "SECURITY.md",
-            "SHA256SUMS.txt",
-            "crates/bentodesk-app/assets/app-icon.png",
-            "docs/images/bulk-manager.png",
-            "docs/images/theme-settings.png",
-            "docs/images/zone-editor.png",
-            "docs/media/desktop-tour.mp4",
-            "docs/media/desktop-tour.webp",
-            "docs/media/tibo-reset.webp",
-            "docs/media/zone-motion.mp4",
-            "docs/media/zone-motion.webp"
+            "SHA256SUMS.txt"
           )
           $archive = [IO.Compression.ZipFile]::OpenRead($zip)
           try {
@@ -211,6 +422,10 @@ jobs:
           if ($missing.Count -ne 0) {
             throw "Package is missing required entries: $($missing -join ', ')"
           }
+          $unexpected = @($actual | Where-Object { $_ -notin $required })
+          if ($unexpected.Count -ne 0) {
+            throw "Package contains unexpected entries: $($unexpected -join ', ')"
+          }
 
           $extract = Join-Path $env:RUNNER_TEMP "bentodesk-release-extracted"
           $state = Join-Path $env:RUNNER_TEMP "bentodesk-release-state"
@@ -219,14 +434,27 @@ jobs:
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 
           $sumLines = Get-Content (Join-Path $extract "SHA256SUMS.txt")
+          $checksummed = @()
           foreach ($line in $sumLines) {
             if ($line -notmatch '^([0-9a-f]{64})  (.+)$') {
               throw "Malformed checksum line: $line"
             }
-            $actualHash = (Get-FileHash (Join-Path $extract $Matches[2]) -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actualHash -ne $Matches[1]) {
-              throw "Checksum mismatch for $($Matches[2])"
+            $name = $Matches[2].Replace("\", "/")
+            if ($name -eq "SHA256SUMS.txt" -or $name -notin $required) {
+              throw "Unexpected checksummed entry: $name"
             }
+            if ($name -in $checksummed) {
+              throw "Duplicate checksum entry: $name"
+            }
+            $checksummed += $name
+            $actualHash = (Get-FileHash (Join-Path $extract $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $Matches[1]) {
+              throw "Checksum mismatch for $name"
+            }
+          }
+          $expectedChecksummed = @($required | Where-Object { $_ -ne "SHA256SUMS.txt" })
+          if (@(Compare-Object ($expectedChecksummed | Sort-Object) ($checksummed | Sort-Object)).Count -ne 0) {
+            throw "SHA256SUMS.txt does not cover the complete package payload"
           }
 
           Import-Module (Join-Path $PWD "tools/proof/ProofTools.psm1") -Force
@@ -258,35 +486,272 @@ jobs:
             }
           }
 
-      - name: Publish GitHub Release
+      - name: Verify release handoff
         shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $handoff = "${{ steps.package.outputs.handoff }}"
+          $required = @(
+            "${{ steps.package.outputs.package_name }}.zip",
+            "release-metadata.json",
+            "release-notes.md",
+            "SHA256SUMS.txt"
+          )
+          $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
+          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+            throw "Release handoff contains missing or unexpected files"
+          }
+          $metadata = Get-Content (Join-Path $handoff "release-metadata.json") -Raw |
+            ConvertFrom-Json
+          if (
+            $metadata.schema -ne 1 -or
+            $metadata.source_sha -ne $env:RELEASE_SHA -or
+            $metadata.tag -ne $env:RELEASE_TAG -or
+            $metadata.zip_name -ne "${{ steps.package.outputs.package_name }}.zip"
+          ) {
+            throw "Release handoff metadata identity mismatch"
+          }
+
+      - name: Upload verified release handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bentodesk-release-${{ github.run_id }}
+          path: ${{ steps.package.outputs.handoff }}/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish immutable release
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download verified release handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bentodesk-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/bentodesk-release-handoff
+
+      - name: Validate handoff and release identity
+        env:
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          AUTOMATIC_EVENT: ${{ github.event.workflow_run.event }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $handoff = Join-Path $env:RUNNER_TEMP "bentodesk-release-handoff"
+          $metadataPath = Join-Path $handoff "release-metadata.json"
+          $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
+
+          $sourceSha = [string]$metadata.source_sha
+          $tag = [string]$metadata.tag
+          $version = [string]$metadata.version
+          $packageName = [string]$metadata.package_name
+          $zipName = [string]$metadata.zip_name
+          $checksumsName = [string]$metadata.checksums_name
+          $notesName = [string]$metadata.notes_name
+          $zipHash = [string]$metadata.zip_sha256
+          $checksumsHash = [string]$metadata.checksums_sha256
+
+          if ($metadata.schema -ne 1) {
+            throw "Unsupported release handoff schema"
+          }
+          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Invalid release source SHA"
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $tag -ne "v$version") {
+            throw "Invalid release tag or version"
+          }
+          if ($packageName -ne "BentoDesk-$version-windows-x64-portable") {
+            throw "Invalid release package name"
+          }
+          if (
+            $zipName -ne "$packageName.zip" -or
+            $checksumsName -ne "SHA256SUMS.txt" -or
+            $notesName -ne "release-notes.md" -or
+            $zipHash -notmatch '^[0-9a-f]{64}$' -or
+            $checksumsHash -notmatch '^[0-9a-f]{64}$'
+          ) {
+            throw "Invalid release handoff filenames or digests"
+          }
+
+          $required = @($zipName, $checksumsName, $notesName, "release-metadata.json")
+          $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
+          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+            throw "Downloaded release handoff contains missing or unexpected files"
+          }
+
+          $zip = Join-Path $handoff $zipName
+          $checksums = Join-Path $handoff $checksumsName
+          $notes = Join-Path $handoff $notesName
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipHash) {
+            throw "Release ZIP digest does not match handoff metadata"
+          }
+          if ((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant() -ne $checksumsHash) {
+            throw "External checksum digest does not match handoff metadata"
+          }
+          $sumLines = @(Get-Content $checksums)
+          if ($sumLines.Count -ne 1 -or $sumLines[0] -ne "$zipHash  $zipName") {
+            throw "External checksum file does not describe the release ZIP exactly"
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            if (
+              $env:AUTOMATIC_EVENT -ne "push" -or
+              $env:AUTOMATIC_BRANCH -ne "main" -or
+              $env:AUTOMATIC_CONCLUSION -ne "success" -or
+              $sourceSha -ne $env:AUTOMATIC_SHA
+            ) {
+              throw "Automatic publication requires the exact successful Native CI main push"
+            }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            if ($env:DISPATCH_SHA -ne $sourceSha -or $env:DISPATCH_TAG -ne $tag) {
+              throw "Recovery inputs do not match the verified release handoff"
+            }
+            $runs = gh api `
+              "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sourceSha&branch=main&event=push&status=success&per_page=100" |
+              ConvertFrom-Json
+            $matchingRuns = @($runs.workflow_runs | Where-Object {
+              $_.name -eq "Native CI" -and
+              $_.event -eq "push" -and
+              $_.head_branch -eq "main" -and
+              $_.head_sha -eq $sourceSha -and
+              $_.conclusion -eq "success"
+            })
+            if ($matchingRuns.Count -eq 0) {
+              throw "Recovery commit $sourceSha has no successful Native CI push run on main"
+            }
+          } else {
+            throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
+          }
+
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          "RELEASE_SHA=$sourceSha" >> $env:GITHUB_ENV
+          "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
+          "RELEASE_CHECKSUMS=$checksums" >> $env:GITHUB_ENV
+          "RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
+
+      - name: Create or verify annotated release tag
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tagApi = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            $tagObject = gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/git/tags" `
+              -f tag="$env:RELEASE_TAG" `
+              -f message="BentoDesk $env:RELEASE_VERSION" `
+              -f object="$env:RELEASE_SHA" `
+              -f type="commit" |
+              ConvertFrom-Json
+            gh api `
+              --method POST `
+              "repos/$env:GITHUB_REPOSITORY/git/refs" `
+              -f ref="refs/tags/$env:RELEASE_TAG" `
+              -f sha="$($tagObject.sha)" |
+              Out-Null
+          }
+
+          $tagRef = gh api $tagApi | ConvertFrom-Json
+          if ($tagRef.object.type -ne "tag") {
+            throw "Release tag $env:RELEASE_TAG is not annotated"
+          }
+          $annotated = gh api `
+            "repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" |
+            ConvertFrom-Json
+          if ($annotated.object.type -ne "commit" -or $annotated.object.sha -ne $env:RELEASE_SHA) {
+            throw "Release tag $env:RELEASE_TAG does not point to $env:RELEASE_SHA"
+          }
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:RELEASE_TAG
-          $zip = "${{ steps.package.outputs.zip }}"
-          $checksums = "${{ steps.package.outputs.checksums }}"
-          $version = $tag.TrimStart("v")
-          $notes = "docs/release-notes-$tag.md"
-          if (-not (Test-Path $notes -PathType Leaf)) {
-            throw "Missing release notes: $notes"
-          }
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          $zip = $env:RELEASE_ZIP
+          $checksums = $env:RELEASE_CHECKSUMS
+          $notes = $env:RELEASE_NOTES
+          $api = "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $headers = @(
+            "Accept: application/vnd.github+json",
+            "X-GitHub-Api-Version: 2026-03-10"
+          )
+          $releaseJson = gh api $api -H $headers[0] -H $headers[1] 2>$null
           $viewExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
           if ($viewExit -eq 0) {
-            throw "Release $tag already exists; published assets are never overwritten"
+            $release = $releaseJson | ConvertFrom-Json
+            if (-not $release.draft) {
+              throw "Release $tag is already published; immutable assets are never overwritten"
+            }
+            if ($release.tag_name -ne $tag) {
+              throw "Draft Release tag mismatch: $($release.tag_name)"
+            }
           } elseif ($viewExit -eq 1) {
             gh release create $tag `
               --draft `
               --verify-tag `
-              --title "BentoDesk $version" `
+              --title "BentoDesk $env:RELEASE_VERSION" `
               --notes-file $notes `
               --repo $env:GITHUB_REPOSITORY
-            gh release upload $tag $zip $checksums --repo $env:GITHUB_REPOSITORY
-            gh release edit $tag --draft=false --repo $env:GITHUB_REPOSITORY
           } else {
             throw "Could not query release $tag"
+          }
+
+          gh release upload $tag $zip $checksums --clobber --repo $env:GITHUB_REPOSITORY
+
+          $expectedAssets = @{}
+          $expectedAssets[[IO.Path]::GetFileName($zip)] =
+            "sha256:$((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant())"
+          $expectedAssets[[IO.Path]::GetFileName($checksums)] =
+            "sha256:$((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant())"
+          $draft = gh api $api -H $headers[0] -H $headers[1] | ConvertFrom-Json
+          if (-not $draft.draft) {
+            throw "Release $tag must remain a draft until asset verification finishes"
+          }
+          $draftAssetNames = @($draft.assets | ForEach-Object name | Sort-Object)
+          $expectedAssetNames = @($expectedAssets.Keys | Sort-Object)
+          if (@(Compare-Object $expectedAssetNames $draftAssetNames).Count -ne 0) {
+            throw "Draft Release $tag contains missing or unexpected assets"
+          }
+          foreach ($entry in $expectedAssets.GetEnumerator()) {
+            $assets = @($draft.assets | Where-Object name -eq $entry.Key)
+            if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
+              throw "Draft asset digest mismatch for $($entry.Key)"
+            }
+          }
+
+          gh release edit $tag --draft=false --repo $env:GITHUB_REPOSITORY
+
+          $published = gh api $api -H $headers[0] -H $headers[1] | ConvertFrom-Json
+          if ($published.draft -or -not $published.immutable -or $published.tag_name -ne $tag) {
+            throw "Published Release $tag is not immutable or has the wrong identity"
+          }
+          $publishedAssetNames = @($published.assets | ForEach-Object name | Sort-Object)
+          if (@(Compare-Object $expectedAssetNames $publishedAssetNames).Count -ne 0) {
+            throw "Published Release $tag contains missing or unexpected assets"
+          }
+          foreach ($entry in $expectedAssets.GetEnumerator()) {
+            $assets = @($published.assets | Where-Object name -eq $entry.Key)
+            if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
+              throw "Published asset digest mismatch for $($entry.Key)"
+            }
           }

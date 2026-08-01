@@ -3,7 +3,7 @@
   <assemblyIdentity
       type="win32"
       name="BentoDesk.Shell"
-      version="2.0.2.0"/>
+      version="2.0.3.0"/>
 
   <!-- DPI awareness + long-path support (Mc-1a). Declared BEFORE the first
        instruction so the pre-main window inherits per-monitor scaling even on
