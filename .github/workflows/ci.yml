@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: native-ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_BUILD_JOBS: "1"
@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Prepare Rust
         shell: pwsh
@@ -43,6 +45,73 @@ jobs:
           rustup show active-toolchain
           rustc --version
           cargo --version
+
+      - name: Verify release version availability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $shell = @($metadata.packages | Where-Object name -eq "bentodesk-shell")
+          if ($shell.Count -ne 1) {
+            throw "Expected exactly one bentodesk-shell package"
+          }
+          $tag = "v$($shell[0].version)"
+          $head = (git rev-parse HEAD).Trim()
+          $currentVersion = [version]$shell[0].version.ToString()
+
+          $PSNativeCommandUseErrorActionPreference = $false
+          git show-ref --verify --quiet "refs/tags/$tag"
+          $tagExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          $global:LASTEXITCODE = 0
+          if ($tagExit -notin @(0, 1)) {
+            throw "Could not inspect tag $tag"
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            if ($tagExit -eq 0) {
+              throw "Workspace version $($shell[0].version) is already published as $tag; pull requests must declare an unused version"
+            }
+            $baseCargo = (git show "origin/$($env:GITHUB_BASE_REF):Cargo.toml") -join "`n"
+            $baseMatch = [regex]::Match(
+              $baseCargo,
+              '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
+            )
+            if (-not $baseMatch.Success) {
+              throw "Could not read the workspace version from the pull-request base"
+            }
+            $baseVersion = [version]$baseMatch.Groups[1].Value
+            if ($currentVersion -le $baseVersion) {
+              throw "Workspace version $currentVersion must be newer than base version $baseVersion"
+            }
+            Write-Host "Unused pull-request release tag: $tag"
+          } elseif ($env:GITHUB_EVENT_NAME -eq "push") {
+            $parentCargo = (git show "${head}^:Cargo.toml") -join "`n"
+            $parentMatch = [regex]::Match(
+              $parentCargo,
+              '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
+            )
+            if (-not $parentMatch.Success) {
+              throw "Could not read the workspace version from the parent commit"
+            }
+            $parentVersion = [version]$parentMatch.Groups[1].Value
+            if ($currentVersion -le $parentVersion) {
+              throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
+            }
+            if ($tagExit -eq 1) {
+              Write-Host "Release tag $tag is available for this main commit"
+            } else {
+              $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
+              if ($tagCommit -ne $head) {
+                throw "Release tag $tag points to $tagCommit instead of current main commit $head"
+              }
+              Write-Host "Release tag $tag already points to this main commit"
+            }
+          } else {
+            throw "Unsupported CI event: $env:GITHUB_EVENT_NAME"
+          }
 
       - name: Minimum supported Rust
         env:
@@ -164,9 +233,21 @@ jobs:
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object name -eq "bentodesk-shell").version.ToString()
           $manifest = Get-Content "crates/bentodesk-shell/app.manifest" -Raw
+          $resource = Get-Content "crates/bentodesk-shell/app.rc" -Raw
           $expectedManifestVersion = [regex]::Escape("$version.0")
           if ($manifest -notmatch "version=`"$expectedManifestVersion`"") {
             throw "app.manifest does not contain assembly version $version.0"
+          }
+          $resourceVersion = $version.Replace(".", ",")
+          foreach ($expected in @(
+            "FILEVERSION $resourceVersion,0",
+            "PRODUCTVERSION $resourceVersion,0",
+            "VALUE `"FileVersion`", `"$version.0\0`"",
+            "VALUE `"ProductVersion`", `"$version\0`""
+          )) {
+            if ($resource.IndexOf($expected, [StringComparison]::Ordinal) -lt 0) {
+              throw "app.rc does not contain expected version identity: $expected"
+            }
           }
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
           if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
@@ -177,7 +258,7 @@ jobs:
             throw "BentoDesk.exe does not contain embedded assembly version $version.0"
           }
           foreach ($privatePath in @($env:USERPROFILE, $env:GITHUB_WORKSPACE)) {
-            if ($binaryText.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($privatePath -and $binaryText.IndexOf($privatePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
               throw "BentoDesk.exe contains a private build-machine path"
             }
           }
