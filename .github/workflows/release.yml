@@ -55,7 +55,70 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
+          ref: main
+
+      - name: Select exact release source
+        env:
+          AUTOMATIC_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTOMATIC_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          AUTOMATIC_EVENT: ${{ github.event.workflow_run.event }}
+          AUTOMATIC_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+            if (
+              $env:AUTOMATIC_EVENT -ne "push" -or
+              $env:AUTOMATIC_BRANCH -ne "main" -or
+              $env:AUTOMATIC_CONCLUSION -ne "success"
+            ) {
+              throw "Automatic releases require a successful Native CI push on main"
+            }
+            $sourceSha = $env:AUTOMATIC_SHA
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $sourceSha = $env:DISPATCH_SHA
+            if ($env:DISPATCH_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+              throw "Recovery tag must be an exact v<major>.<minor>.<patch> tag"
+            }
+            $PSNativeCommandUseErrorActionPreference = $false
+            git show-ref --verify --quiet "refs/tags/$env:DISPATCH_TAG"
+            $tagExit = $LASTEXITCODE
+            $PSNativeCommandUseErrorActionPreference = $true
+            $global:LASTEXITCODE = 0
+            if ($tagExit -ne 0) {
+              throw "Recovery tag $env:DISPATCH_TAG does not exist"
+            }
+            if ((git cat-file -t "refs/tags/$env:DISPATCH_TAG").Trim() -ne "tag") {
+              throw "Recovery tag $env:DISPATCH_TAG must be annotated"
+            }
+            $tagCommit = (git rev-list -n 1 "refs/tags/$env:DISPATCH_TAG").Trim()
+            if ($tagCommit -ne $sourceSha) {
+              throw "Recovery tag $env:DISPATCH_TAG does not point to $sourceSha"
+            }
+          } else {
+            throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
+          }
+
+          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Release source must be an exact lowercase commit SHA"
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          git merge-base --is-ancestor $sourceSha origin/main
+          $ancestorExit = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          $global:LASTEXITCODE = 0
+          if ($ancestorExit -ne 0) {
+            throw "Release source $sourceSha is not reachable from main"
+          }
+          git checkout --detach $sourceSha
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $sourceSha) {
+            throw "Checked out $head instead of release source $sourceSha"
+          }
 
       - name: Prepare Rust
         shell: pwsh
