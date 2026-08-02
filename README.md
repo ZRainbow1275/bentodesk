@@ -167,7 +167,7 @@ around that job.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.3-windows-x64-portable.zip` from
+1. Download `BentoDesk-2.0.4-windows-x64-portable.zip` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest).
 2. Check the archive against `SHA256SUMS.txt`, extract it to a writable
    directory, and run `BentoDesk.exe`.
