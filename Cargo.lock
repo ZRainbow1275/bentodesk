@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "bentodesk-app"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-backend",
  "bentodesk-layout",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-backend"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-style",
  "bentodesk-theme",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-layout"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-style",
  "bentodesk-tree",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-platform"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-zone",
  "crossbeam-channel",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-shell"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-app",
  "bentodesk-backend",
@@ -101,11 +101,11 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-style"
-version = "2.0.4"
+version = "2.0.5"
 
 [[package]]
 name = "bentodesk-theme"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-style",
  "bentodesk-tree",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-tree"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-style",
  "serde",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-widget"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-layout",
  "bentodesk-style",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "bentodesk-zone"
-version = "2.0.4"
+version = "2.0.5"
 dependencies = [
  "bentodesk-style",
  "serde",
