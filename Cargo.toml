@@ -216,7 +216,7 @@ notify = "8.2"
 # source Tauri `install_plugin(path)` command. Default features stay off; only
 # ZIP read/write plus deflate support is enabled so `.bdplugin` archives can be
 # safely extracted without reintroducing Tauri/WebView or async networking.
-zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # Updater authenticity parity (0505) — verifies Tauri/minisign signature
 # strings against the embedded BentoDesk public key without pulling an async
