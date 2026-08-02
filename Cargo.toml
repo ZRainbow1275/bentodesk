@@ -171,7 +171,7 @@ windows = { version = "0.58", default-features = false, features = [
 # `windows_core` reachable only as `windows::core`, so the macro emit fails to
 # resolve. This is the same exception §8.1 already grants `windows-implement`
 # / `windows-interface` — both ship as transitive deps of `windows`.
-windows-core = { version = "0.58", default-features = false }
+windows-core = { version = "0.62", default-features = false }
 
 # Allocator (spec §6) — only enabled in the shell binary crate.
 mimalloc = { version = "0.1", default-features = false }
