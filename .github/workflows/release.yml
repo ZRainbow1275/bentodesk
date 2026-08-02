@@ -69,18 +69,18 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
 
-          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+          if ($env:GITHUB_EVENT_NAME -ceq "workflow_run") {
             if (
-              $env:AUTOMATIC_EVENT -ne "push" -or
-              $env:AUTOMATIC_BRANCH -ne "main" -or
-              $env:AUTOMATIC_CONCLUSION -ne "success"
+              $env:AUTOMATIC_EVENT -cne "push" -or
+              $env:AUTOMATIC_BRANCH -cne "main" -or
+              $env:AUTOMATIC_CONCLUSION -cne "success"
             ) {
               throw "Automatic releases require a successful Native CI push on main"
             }
             $sourceSha = $env:AUTOMATIC_SHA
-          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+          } elseif ($env:GITHUB_EVENT_NAME -ceq "workflow_dispatch") {
             $sourceSha = $env:DISPATCH_SHA
-            if ($env:DISPATCH_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            if ($env:DISPATCH_TAG -cnotmatch '\Av(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') {
               throw "Recovery tag must be an exact v<major>.<minor>.<patch> tag"
             }
             $PSNativeCommandUseErrorActionPreference = $false
@@ -88,21 +88,21 @@ jobs:
             $tagExit = $LASTEXITCODE
             $PSNativeCommandUseErrorActionPreference = $true
             $global:LASTEXITCODE = 0
-            if ($tagExit -ne 0) {
+            if ($tagExit -cne 0) {
               throw "Recovery tag $env:DISPATCH_TAG does not exist"
             }
-            if ((git cat-file -t "refs/tags/$env:DISPATCH_TAG").Trim() -ne "tag") {
+            if ((git cat-file -t "refs/tags/$env:DISPATCH_TAG").Trim() -cne "tag") {
               throw "Recovery tag $env:DISPATCH_TAG must be annotated"
             }
             $tagCommit = (git rev-list -n 1 "refs/tags/$env:DISPATCH_TAG").Trim()
-            if ($tagCommit -ne $sourceSha) {
+            if ($tagCommit -cne $sourceSha) {
               throw "Recovery tag $env:DISPATCH_TAG does not point to $sourceSha"
             }
           } else {
             throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
           }
 
-          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+          if ($sourceSha -cnotmatch '\A[0-9a-f]{40}\z') {
             throw "Release source must be an exact lowercase commit SHA"
           }
           $PSNativeCommandUseErrorActionPreference = $false
@@ -110,12 +110,12 @@ jobs:
           $ancestorExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
           $global:LASTEXITCODE = 0
-          if ($ancestorExit -ne 0) {
+          if ($ancestorExit -cne 0) {
             throw "Release source $sourceSha is not reachable from main"
           }
           git checkout --detach $sourceSha
           $head = (git rev-parse HEAD).Trim()
-          if ($head -ne $sourceSha) {
+          if ($head -cne $sourceSha) {
             throw "Checked out $head instead of release source $sourceSha"
           }
 
@@ -142,27 +142,46 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
 
+          function Compare-StableSemver([string]$Left, [string]$Right) {
+            $pattern = '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z'
+            if ($Left -cnotmatch $pattern -or $Right -cnotmatch $pattern) {
+              throw "Invalid stable semantic version comparison: $Left / $Right"
+            }
+            $leftParts = $Left.Split(".")
+            $rightParts = $Right.Split(".")
+            foreach ($index in 0..2) {
+              $comparison = $leftParts[$index].Length.CompareTo($rightParts[$index].Length)
+              if ($comparison -ceq 0) {
+                $comparison = [string]::CompareOrdinal($leftParts[$index], $rightParts[$index])
+              }
+              if ($comparison -cne 0) {
+                return $comparison
+              }
+            }
+            return 0
+          }
+
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = @($metadata.packages | Where-Object name -eq "bentodesk-shell")
-          if ($shell.Count -ne 1) {
+          $shell = @($metadata.packages | Where-Object name -ceq "bentodesk-shell")
+          if ($shell.Count -cne 1) {
             throw "Expected exactly one bentodesk-shell package"
           }
           $version = $shell[0].version.ToString()
           $expectedTag = "v$version"
           $head = (git rev-parse HEAD).Trim()
 
-          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+          if ($env:GITHUB_EVENT_NAME -ceq "workflow_run") {
             if (
-              $env:AUTOMATIC_EVENT -ne "push" -or
-              $env:AUTOMATIC_BRANCH -ne "main" -or
-              $env:AUTOMATIC_CONCLUSION -ne "success"
+              $env:AUTOMATIC_EVENT -cne "push" -or
+              $env:AUTOMATIC_BRANCH -cne "main" -or
+              $env:AUTOMATIC_CONCLUSION -cne "success"
             ) {
               throw "Automatic releases require a successful Native CI run on main"
             }
-            if ($head -ne $env:AUTOMATIC_SHA) {
+            if ($head -cne $env:AUTOMATIC_SHA) {
               throw "Checkout commit $head does not match successful CI commit $env:AUTOMATIC_SHA"
             }
-            $currentVersion = [version]$version
+            $currentVersion = $version
             $parentCargo = (git show "${head}^:Cargo.toml") -join "`n"
             $parentMatch = [regex]::Match(
               $parentCargo,
@@ -171,8 +190,8 @@ jobs:
             if (-not $parentMatch.Success) {
               throw "Could not read the workspace version from the parent commit"
             }
-            $parentVersion = [version]$parentMatch.Groups[1].Value
-            if ($currentVersion -le $parentVersion) {
+            $parentVersion = $parentMatch.Groups[1].Value
+            if ((Compare-StableSemver $currentVersion $parentVersion) -le 0) {
               throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
             }
             $tag = $expectedTag
@@ -181,21 +200,21 @@ jobs:
             $tagExit = $LASTEXITCODE
             $PSNativeCommandUseErrorActionPreference = $true
             $global:LASTEXITCODE = 0
-            if ($tagExit -eq 0) {
+            if ($tagExit -ceq 0) {
               throw "Release tag $tag already exists; every main commit must declare a new workspace version"
-            } elseif ($tagExit -ne 1) {
+            } elseif ($tagExit -cne 1) {
               throw "Could not inspect tag $tag"
             }
-          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+          } elseif ($env:GITHUB_EVENT_NAME -ceq "workflow_dispatch") {
             $tag = $env:DISPATCH_TAG
             $dispatchSha = $env:DISPATCH_SHA
             if (-not $tag) {
               throw "workflow_dispatch requires an existing immutable tag"
             }
-            if ($dispatchSha -notmatch '^[0-9a-f]{40}$' -or $dispatchSha -ne $head) {
+            if ($dispatchSha -cnotmatch '\A[0-9a-f]{40}\z' -or $dispatchSha -cne $head) {
               throw "Recovery SHA $dispatchSha does not match checkout commit $head"
             }
-            if ($tag -ne $expectedTag) {
+            if ($tag -cne $expectedTag) {
               throw "Tag $tag does not match workspace version $version"
             }
 
@@ -204,14 +223,14 @@ jobs:
             $tagExit = $LASTEXITCODE
             $PSNativeCommandUseErrorActionPreference = $true
             $global:LASTEXITCODE = 0
-            if ($tagExit -ne 0) {
+            if ($tagExit -cne 0) {
               throw "Recovery tag $tag does not exist in the checked-out repository"
             }
-            if ((git cat-file -t "refs/tags/$tag").Trim() -ne "tag") {
+            if ((git cat-file -t "refs/tags/$tag").Trim() -cne "tag") {
               throw "Recovery tag $tag must be annotated"
             }
             $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
-            if ($tagCommit -ne $head) {
+            if ($tagCommit -cne $head) {
               throw "Recovery tag $tag points to $tagCommit instead of checkout commit $head"
             }
 
@@ -219,13 +238,13 @@ jobs:
               "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$head&branch=main&event=push&status=success&per_page=100" |
               ConvertFrom-Json
             $matchingRuns = @($runs.workflow_runs | Where-Object {
-              $_.name -eq "Native CI" -and
-              $_.event -eq "push" -and
-              $_.head_branch -eq "main" -and
-              $_.head_sha -eq $head -and
-              $_.conclusion -eq "success"
+              $_.name -ceq "Native CI" -and
+              $_.event -ceq "push" -and
+              $_.head_branch -ceq "main" -and
+              $_.head_sha -ceq $head -and
+              $_.conclusion -ceq "success"
             })
-            if ($matchingRuns.Count -eq 0) {
+            if ($matchingRuns.Count -ceq 0) {
               throw "Recovery commit $head has no successful Native CI push run on main"
             }
           } else {
@@ -293,16 +312,17 @@ jobs:
           $zip = Join-Path $dist "$packageName.zip"
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
           $handoff = Join-Path $dist "release-handoff"
+          $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
           cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
-          if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
+          if ($exe.VersionInfo.FileVersion -cne "$version.0" -or $exe.VersionInfo.ProductVersion -cne $version) {
             throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
           }
           $manifest = Get-Content "crates/bentodesk-shell/app.manifest" -Raw
           $resource = Get-Content "crates/bentodesk-shell/app.rc" -Raw
           $expectedManifestVersion = [regex]::Escape("$version.0")
-          if ($manifest -notmatch "version=`"$expectedManifestVersion`"") {
+          if ($manifest -cnotmatch "version=`"$expectedManifestVersion`"") {
             throw "app.manifest does not contain assembly version $version.0"
           }
           $resourceVersion = $version.Replace(".", ",")
@@ -348,19 +368,19 @@ jobs:
             $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $name"
           }
-          [IO.File]::WriteAllLines(
+          [IO.File]::WriteAllText(
             (Join-Path $stage "SHA256SUMS.txt"),
-            $innerLines,
-            [Text.UTF8Encoding]::new($false)
+            ($innerLines -join "`n") + "`n",
+            $utf8NoBom
           )
 
           Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          [IO.File]::WriteAllLines(
+          [IO.File]::WriteAllText(
             $releaseSums,
-            @("$zipHash  $packageName.zip"),
-            [Text.UTF8Encoding]::new($false)
+            "$zipHash  $packageName.zip`n",
+            $utf8NoBom
           )
 
           if (Test-Path $handoff) {
@@ -401,6 +421,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
+          function Test-OrdinalStringSetEqual([string[]]$Left, [string[]]$Right) {
+            if ($Left.Count -cne $Right.Count) { return $false }
+            $leftSet = [Collections.Generic.HashSet[string]]::new($Left, [StringComparer]::Ordinal)
+            return $leftSet.Count -ceq $Left.Count -and $leftSet.SetEquals($Right)
+          }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
 
           $zip = "${{ steps.package.outputs.zip }}"
@@ -411,19 +439,18 @@ jobs:
             "README.zh-CN.md",
             "SHA256SUMS.txt"
           )
+          $requiredSet = [Collections.Generic.HashSet[string]]::new(
+            [string[]]$required,
+            [StringComparer]::Ordinal
+          )
           $archive = [IO.Compression.ZipFile]::OpenRead($zip)
           try {
             $actual = @($archive.Entries | ForEach-Object { $_.FullName.Replace("\", "/") })
           } finally {
             $archive.Dispose()
           }
-          $missing = @($required | Where-Object { $_ -notin $actual })
-          if ($missing.Count -ne 0) {
-            throw "Package is missing required entries: $($missing -join ', ')"
-          }
-          $unexpected = @($actual | Where-Object { $_ -notin $required })
-          if ($unexpected.Count -ne 0) {
-            throw "Package contains unexpected entries: $($unexpected -join ', ')"
+          if (-not (Test-OrdinalStringSetEqual $required $actual)) {
+            throw "Package contains missing or unexpected entries"
           }
 
           $extract = Join-Path $env:RUNNER_TEMP "bentodesk-release-extracted"
@@ -432,27 +459,36 @@ jobs:
           $stderr = Join-Path $env:RUNNER_TEMP "bentodesk-release.stderr.log"
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 
-          $sumLines = Get-Content (Join-Path $extract "SHA256SUMS.txt")
+          $sumPath = Join-Path $extract "SHA256SUMS.txt"
+          $sumBytes = [IO.File]::ReadAllBytes($sumPath)
+          if ($sumBytes.Length -ceq 0 -or $sumBytes[-1] -cne 10 -or 13 -cin $sumBytes) {
+            throw "SHA256SUMS.txt must use UTF-8 LF line endings"
+          }
+          $sumLines = Get-Content $sumPath
           $checksummed = @()
+          $checksummedSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
           foreach ($line in $sumLines) {
-            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') {
+            if ($line -cnotmatch '\A([0-9a-f]{64})  (.+)\z') {
               throw "Malformed checksum line: $line"
             }
             $name = $Matches[2].Replace("\", "/")
-            if ($name -eq "SHA256SUMS.txt" -or $name -notin $required) {
+            if (
+              (Test-OrdinalEqual $name "SHA256SUMS.txt") -or
+              -not $requiredSet.Contains($name)
+            ) {
               throw "Unexpected checksummed entry: $name"
             }
-            if ($name -in $checksummed) {
+            if (-not $checksummedSet.Add($name)) {
               throw "Duplicate checksum entry: $name"
             }
             $checksummed += $name
             $actualHash = (Get-FileHash (Join-Path $extract $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actualHash -ne $Matches[1]) {
+            if (-not (Test-OrdinalEqual $actualHash $Matches[1])) {
               throw "Checksum mismatch for $name"
             }
           }
-          $expectedChecksummed = @($required | Where-Object { $_ -ne "SHA256SUMS.txt" })
-          if (@(Compare-Object ($expectedChecksummed | Sort-Object) ($checksummed | Sort-Object)).Count -ne 0) {
+          $expectedChecksummed = @($required | Where-Object { $_ -cne "SHA256SUMS.txt" })
+          if (-not (Test-OrdinalStringSetEqual $expectedChecksummed $checksummed)) {
             throw "SHA256SUMS.txt does not cover the complete package payload"
           }
 
@@ -485,10 +521,26 @@ jobs:
             }
           }
 
+      - name: Verify GNU-compatible checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          extract="$(cygpath -u "$RUNNER_TEMP")/bentodesk-release-extracted"
+          (cd "$extract" && sha256sum -c SHA256SUMS.txt)
+
       - name: Verify release handoff
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
+          function Test-OrdinalStringSetEqual([string[]]$Left, [string[]]$Right) {
+            if ($Left.Count -cne $Right.Count) { return $false }
+            $leftSet = [Collections.Generic.HashSet[string]]::new($Left, [StringComparer]::Ordinal)
+            return $leftSet.Count -ceq $Left.Count -and $leftSet.SetEquals($Right)
+          }
           $handoff = "${{ steps.package.outputs.handoff }}"
           $required = @(
             "${{ steps.package.outputs.package_name }}.zip",
@@ -497,16 +549,16 @@ jobs:
             "SHA256SUMS.txt"
           )
           $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
-          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+          if (-not (Test-OrdinalStringSetEqual $required $actual)) {
             throw "Release handoff contains missing or unexpected files"
           }
           $metadata = Get-Content (Join-Path $handoff "release-metadata.json") -Raw |
             ConvertFrom-Json
           if (
-            $metadata.schema -ne 1 -or
-            $metadata.source_sha -ne $env:RELEASE_SHA -or
-            $metadata.tag -ne $env:RELEASE_TAG -or
-            $metadata.zip_name -ne "${{ steps.package.outputs.package_name }}.zip"
+            $metadata.schema -cne 1 -or
+            -not (Test-OrdinalEqual $metadata.source_sha $env:RELEASE_SHA) -or
+            -not (Test-OrdinalEqual $metadata.tag $env:RELEASE_TAG) -or
+            -not (Test-OrdinalEqual $metadata.zip_name "${{ steps.package.outputs.package_name }}.zip")
           ) {
             throw "Release handoff metadata identity mismatch"
           }
@@ -526,6 +578,9 @@ jobs:
     if: needs.build.result == 'success'
     runs-on: windows-latest
     timeout-minutes: 20
+    concurrency:
+      group: bentodesk-native-release-publish
+      queue: max
     permissions:
       actions: read
       contents: write
@@ -549,6 +604,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
+          function Test-OrdinalStringSetEqual([string[]]$Left, [string[]]$Right) {
+            if ($Left.Count -cne $Right.Count) { return $false }
+            $leftSet = [Collections.Generic.HashSet[string]]::new($Left, [StringComparer]::Ordinal)
+            return $leftSet.Count -ceq $Left.Count -and $leftSet.SetEquals($Right)
+          }
           $handoff = Join-Path $env:RUNNER_TEMP "bentodesk-release-handoff"
           $metadataPath = Join-Path $handoff "release-metadata.json"
           $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
@@ -563,72 +626,81 @@ jobs:
           $zipHash = [string]$metadata.zip_sha256
           $checksumsHash = [string]$metadata.checksums_sha256
 
-          if ($metadata.schema -ne 1) {
+          if ($metadata.schema -cne 1) {
             throw "Unsupported release handoff schema"
           }
-          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+          if ($sourceSha -cnotmatch '\A[0-9a-f]{40}\z') {
             throw "Invalid release source SHA"
           }
-          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $tag -ne "v$version") {
+          if (
+            $version -cnotmatch '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z' -or
+            -not (Test-OrdinalEqual $tag "v$version")
+          ) {
             throw "Invalid release tag or version"
           }
-          if ($packageName -ne "BentoDesk-$version-windows-x64-portable") {
+          if (-not (Test-OrdinalEqual $packageName "BentoDesk-$version-windows-x64-portable")) {
             throw "Invalid release package name"
           }
           if (
-            $zipName -ne "$packageName.zip" -or
-            $checksumsName -ne "SHA256SUMS.txt" -or
-            $notesName -ne "release-notes.md" -or
-            $zipHash -notmatch '^[0-9a-f]{64}$' -or
-            $checksumsHash -notmatch '^[0-9a-f]{64}$'
+            -not (Test-OrdinalEqual $zipName "$packageName.zip") -or
+            -not (Test-OrdinalEqual $checksumsName "SHA256SUMS.txt") -or
+            -not (Test-OrdinalEqual $notesName "release-notes.md") -or
+            $zipHash -cnotmatch '\A[0-9a-f]{64}\z' -or
+            $checksumsHash -cnotmatch '\A[0-9a-f]{64}\z'
           ) {
             throw "Invalid release handoff filenames or digests"
           }
 
           $required = @($zipName, $checksumsName, $notesName, "release-metadata.json")
           $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
-          if (@(Compare-Object ($required | Sort-Object) $actual).Count -ne 0) {
+          if (-not (Test-OrdinalStringSetEqual $required $actual)) {
             throw "Downloaded release handoff contains missing or unexpected files"
           }
 
           $zip = Join-Path $handoff $zipName
           $checksums = Join-Path $handoff $checksumsName
           $notes = Join-Path $handoff $notesName
-          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipHash) {
+          if (-not (Test-OrdinalEqual $((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()) $zipHash)) {
             throw "Release ZIP digest does not match handoff metadata"
           }
-          if ((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant() -ne $checksumsHash) {
+          if (-not (Test-OrdinalEqual $((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant()) $checksumsHash)) {
             throw "External checksum digest does not match handoff metadata"
           }
           $sumLines = @(Get-Content $checksums)
-          if ($sumLines.Count -ne 1 -or $sumLines[0] -ne "$zipHash  $zipName") {
+          if (
+            $sumLines.Count -cne 1 -or
+            -not (Test-OrdinalEqual $sumLines[0] "$zipHash  $zipName")
+          ) {
             throw "External checksum file does not describe the release ZIP exactly"
           }
 
-          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+          if (Test-OrdinalEqual $env:GITHUB_EVENT_NAME "workflow_run") {
             if (
-              $env:AUTOMATIC_EVENT -ne "push" -or
-              $env:AUTOMATIC_BRANCH -ne "main" -or
-              $env:AUTOMATIC_CONCLUSION -ne "success" -or
-              $sourceSha -ne $env:AUTOMATIC_SHA
+              -not (Test-OrdinalEqual $env:AUTOMATIC_EVENT "push") -or
+              -not (Test-OrdinalEqual $env:AUTOMATIC_BRANCH "main") -or
+              -not (Test-OrdinalEqual $env:AUTOMATIC_CONCLUSION "success") -or
+              -not (Test-OrdinalEqual $sourceSha $env:AUTOMATIC_SHA)
             ) {
               throw "Automatic publication requires the exact successful Native CI main push"
             }
-          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            if ($env:DISPATCH_SHA -ne $sourceSha -or $env:DISPATCH_TAG -ne $tag) {
+          } elseif (Test-OrdinalEqual $env:GITHUB_EVENT_NAME "workflow_dispatch") {
+            if (
+              -not (Test-OrdinalEqual $env:DISPATCH_SHA $sourceSha) -or
+              -not (Test-OrdinalEqual $env:DISPATCH_TAG $tag)
+            ) {
               throw "Recovery inputs do not match the verified release handoff"
             }
             $runs = gh api `
               "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sourceSha&branch=main&event=push&status=success&per_page=100" |
               ConvertFrom-Json
             $matchingRuns = @($runs.workflow_runs | Where-Object {
-              $_.name -eq "Native CI" -and
-              $_.event -eq "push" -and
-              $_.head_branch -eq "main" -and
-              $_.head_sha -eq $sourceSha -and
-              $_.conclusion -eq "success"
+              (Test-OrdinalEqual $_.name "Native CI") -and
+              (Test-OrdinalEqual $_.event "push") -and
+              (Test-OrdinalEqual $_.head_branch "main") -and
+              (Test-OrdinalEqual $_.head_sha $sourceSha) -and
+              (Test-OrdinalEqual $_.conclusion "success")
             })
-            if ($matchingRuns.Count -eq 0) {
+            if ($matchingRuns.Count -ceq 0) {
               throw "Recovery commit $sourceSha has no successful Native CI push run on main"
             }
           } else {
@@ -648,8 +720,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
           $tagApi = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
-          if ($env:GITHUB_EVENT_NAME -eq "workflow_run") {
+          if ($env:GITHUB_EVENT_NAME -ceq "workflow_run") {
             $tagObject = gh api `
               --method POST `
               "repos/$env:GITHUB_REPOSITORY/git/tags" `
@@ -667,13 +742,16 @@ jobs:
           }
 
           $tagRef = gh api $tagApi | ConvertFrom-Json
-          if ($tagRef.object.type -ne "tag") {
+          if (-not (Test-OrdinalEqual $tagRef.object.type "tag")) {
             throw "Release tag $env:RELEASE_TAG is not annotated"
           }
           $annotated = gh api `
             "repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" |
             ConvertFrom-Json
-          if ($annotated.object.type -ne "commit" -or $annotated.object.sha -ne $env:RELEASE_SHA) {
+          if (
+            -not (Test-OrdinalEqual $annotated.object.type "commit") -or
+            -not (Test-OrdinalEqual $annotated.object.sha $env:RELEASE_SHA)
+          ) {
             throw "Release tag $env:RELEASE_TAG does not point to $env:RELEASE_SHA"
           }
 
@@ -684,6 +762,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
+          function Test-OrdinalStringSetEqual([string[]]$Left, [string[]]$Right) {
+            if ($Left.Count -cne $Right.Count) { return $false }
+            $leftSet = [Collections.Generic.HashSet[string]]::new($Left, [StringComparer]::Ordinal)
+            return $leftSet.Count -ceq $Left.Count -and $leftSet.SetEquals($Right)
+          }
           $tag = $env:RELEASE_TAG
           $zip = $env:RELEASE_ZIP
           $checksums = $env:RELEASE_CHECKSUMS
@@ -700,6 +786,10 @@ jobs:
               "sha256:$((Get-FileHash $assetPath -Algorithm SHA256).Hash.ToLowerInvariant())"
           }
           $expectedAssetNames = @($expectedAssets.Keys | Sort-Object)
+          $expectedAssetNameSet = [Collections.Generic.HashSet[string]]::new(
+            [string[]]$expectedAssetNames,
+            [StringComparer]::Ordinal
+          )
 
           function Assert-ReleaseTag {
             $tagRef = gh api `
@@ -707,7 +797,7 @@ jobs:
               -H $headers[0] `
               -H $headers[1] |
               ConvertFrom-Json
-            if ($tagRef.object.type -ne "tag") {
+            if (-not (Test-OrdinalEqual $tagRef.object.type "tag")) {
               throw "Release tag $tag is not annotated"
             }
             $annotated = gh api `
@@ -715,8 +805,84 @@ jobs:
               -H $headers[0] `
               -H $headers[1] |
               ConvertFrom-Json
-            if ($annotated.object.type -ne "commit" -or $annotated.object.sha -ne $env:RELEASE_SHA) {
+            if (
+              -not (Test-OrdinalEqual $annotated.object.type "commit") -or
+              -not (Test-OrdinalEqual $annotated.object.sha $env:RELEASE_SHA)
+            ) {
               throw "Release tag $tag does not point to $env:RELEASE_SHA"
+            }
+          }
+
+          function Compare-StableSemver([string]$Left, [string]$Right) {
+            $pattern = '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z'
+            if ($Left -cnotmatch $pattern -or $Right -cnotmatch $pattern) {
+              throw "Invalid stable semantic version comparison: $Left / $Right"
+            }
+            $leftParts = $Left.Split(".")
+            $rightParts = $Right.Split(".")
+            foreach ($index in 0..2) {
+              $comparison = $leftParts[$index].Length.CompareTo($rightParts[$index].Length)
+              if ($comparison -ceq 0) {
+                $comparison = [string]::CompareOrdinal($leftParts[$index], $rightParts[$index])
+              }
+              if ($comparison -cne 0) {
+                return $comparison
+              }
+            }
+            return 0
+          }
+
+          function Get-HighestPublishedSemverRelease {
+            $highest = $null
+            $rows = @(gh api `
+              --paginate `
+              "repos/$repo/releases?per_page=100" `
+              -H $headers[0] `
+              -H $headers[1] `
+              --jq '.[] | select(.draft == false and .prerelease == false) | [.id, .tag_name] | @tsv')
+            foreach ($row in $rows) {
+              $fields = $row -split "`t", 2
+              if ($fields.Count -cne 2) {
+                throw "Malformed published Release listing row"
+              }
+              if (
+                $fields[1] -cnotmatch '\Av((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\z'
+              ) {
+                continue
+              }
+              $candidate = [pscustomobject]@{
+                id = [int64]$fields[0]
+                tag_name = $fields[1]
+                version = $Matches[1]
+              }
+              if (
+                $null -ceq $highest -or
+                (Compare-StableSemver $candidate.version $highest.version) -gt 0
+              ) {
+                $highest = $candidate
+              }
+            }
+            return $highest
+          }
+
+          foreach ($case in @(
+            @("2.0.10", "2.0.9"),
+            @("10.0.0", "9.999.999"),
+            @("2147483648.0.0", "2147483647.999.999")
+          )) {
+            if ((Compare-StableSemver $case[0] $case[1]) -le 0) {
+              throw "Stable semantic version comparison self-check failed"
+            }
+          }
+          foreach ($invalidVersion in @("02.0.11", "2.0.11`n", "2.0.11`r`n")) {
+            $invalidAccepted = $true
+            try {
+              Compare-StableSemver $invalidVersion "2.0.10" | Out-Null
+            } catch {
+              $invalidAccepted = $false
+            }
+            if ($invalidAccepted) {
+              throw "Stable semantic version comparison accepted a noncanonical version"
             }
           }
 
@@ -729,10 +895,10 @@ jobs:
           $matching = @(
             foreach ($row in $releaseRows) {
               $fields = $row -split "`t", 3
-              if ($fields.Count -ne 3) {
+              if ($fields.Count -cne 3) {
                 throw "Malformed Release listing row"
               }
-              if ($fields[1] -eq $tag) {
+              if (Test-OrdinalEqual $fields[1] $tag) {
                 [pscustomobject]@{
                   id = [int64]$fields[0]
                   tag_name = $fields[1]
@@ -742,7 +908,7 @@ jobs:
             }
           )
           $publishedMatches = @($matching | Where-Object { -not $_.draft })
-          if ($publishedMatches.Count -ne 0) {
+          if ($publishedMatches.Count -cne 0) {
             throw "Release $tag is already published; immutable assets are never overwritten"
           }
           $draftMatches = @($matching | Where-Object draft)
@@ -750,7 +916,7 @@ jobs:
             throw "Found multiple draft Releases for $tag"
           }
 
-          if ($draftMatches.Count -eq 1) {
+          if ($draftMatches.Count -ceq 1) {
             $release = $draftMatches[0]
           } else {
             $createPayload = [ordered]@{
@@ -777,7 +943,7 @@ jobs:
               ConvertFrom-Json
           }
 
-          if (-not $release.draft -or $release.tag_name -ne $tag) {
+          if (-not $release.draft -or -not (Test-OrdinalEqual $release.tag_name $tag)) {
             throw "Draft Release identity mismatch for $tag"
           }
           $releaseId = [int64]$release.id
@@ -807,25 +973,37 @@ jobs:
             -H $headers[0] `
             -H $headers[1] |
             ConvertFrom-Json
-          if (-not $release.draft -or $release.tag_name -ne $tag -or $release.id -ne $releaseId) {
+          if (
+            -not $release.draft -or
+            -not (Test-OrdinalEqual $release.tag_name $tag) -or
+            $release.id -cne $releaseId
+          ) {
             throw "Could not normalize draft Release $tag"
           }
 
           $draft = gh api $releaseApi -H $headers[0] -H $headers[1] | ConvertFrom-Json
-          if (-not $draft.draft -or $draft.id -ne $releaseId -or $draft.tag_name -ne $tag) {
+          if (
+            -not $draft.draft -or
+            $draft.id -cne $releaseId -or
+            -not (Test-OrdinalEqual $draft.tag_name $tag)
+          ) {
             throw "Release $tag must remain the same draft until asset upload finishes"
           }
-          $unexpectedAssets = @($draft.assets | Where-Object name -notin $expectedAssetNames)
-          if ($unexpectedAssets.Count -ne 0) {
+          $unexpectedAssets = @($draft.assets | Where-Object {
+            -not $expectedAssetNameSet.Contains([string]$_.name)
+          })
+          if ($unexpectedAssets.Count -cne 0) {
             throw "Draft Release $tag contains unexpected assets"
           }
           Assert-ReleaseTag
           foreach ($assetName in $expectedAssetNames) {
-            $existing = @($draft.assets | Where-Object name -eq $assetName)
+            $existing = @($draft.assets | Where-Object {
+              Test-OrdinalEqual $_.name $assetName
+            })
             if ($existing.Count -gt 1) {
               throw "Draft Release $tag contains duplicate assets named $assetName"
             }
-            if ($existing.Count -eq 1) {
+            if ($existing.Count -ceq 1) {
               gh api `
                 --method DELETE `
                 "repos/$repo/releases/assets/$($existing[0].id)" `
@@ -837,7 +1015,7 @@ jobs:
 
           $uploadBase = ([string]$draft.upload_url).Replace("{?name,label}", "")
           $expectedUploadBase = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets"
-          if ($uploadBase -ne $expectedUploadBase) {
+          if (-not (Test-OrdinalEqual $uploadBase $expectedUploadBase)) {
             throw "Draft Release $tag has an unexpected asset upload URL"
           }
           $uploadHeaders = @{
@@ -856,29 +1034,45 @@ jobs:
               -InFile $assetPath
             if (
               $uploaded.id -le 0 -or
-              $uploaded.name -ne $assetName -or
-              $uploaded.state -ne "uploaded" -or
-              $uploaded.digest -ne $expectedAssets[$assetName]
+              -not (Test-OrdinalEqual $uploaded.name $assetName) -or
+              -not (Test-OrdinalEqual $uploaded.state "uploaded") -or
+              -not (Test-OrdinalEqual $uploaded.digest $expectedAssets[$assetName])
             ) {
               throw "Uploaded asset identity mismatch for $assetName"
             }
           }
 
           $draft = gh api $releaseApi -H $headers[0] -H $headers[1] | ConvertFrom-Json
-          if (-not $draft.draft -or $draft.id -ne $releaseId -or $draft.tag_name -ne $tag) {
+          if (
+            -not $draft.draft -or
+            $draft.id -cne $releaseId -or
+            -not (Test-OrdinalEqual $draft.tag_name $tag)
+          ) {
             throw "Release $tag must remain the same draft until asset verification finishes"
           }
           $draftAssetNames = @($draft.assets | ForEach-Object name | Sort-Object)
-          if (@(Compare-Object $expectedAssetNames $draftAssetNames).Count -ne 0) {
+          if (-not (Test-OrdinalStringSetEqual $expectedAssetNames $draftAssetNames)) {
             throw "Draft Release $tag contains missing or unexpected assets"
           }
           foreach ($entry in $expectedAssets.GetEnumerator()) {
-            $assets = @($draft.assets | Where-Object name -eq $entry.Key)
-            if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
+            $assets = @($draft.assets | Where-Object {
+              Test-OrdinalEqual $_.name $entry.Key
+            })
+            if (
+              $assets.Count -cne 1 -or
+              -not (Test-OrdinalEqual $assets[0].digest $entry.Value)
+            ) {
               throw "Draft asset digest mismatch for $($entry.Key)"
             }
           }
           Assert-ReleaseTag
+
+          $currentVersion = $env:RELEASE_VERSION
+          $highestBefore = Get-HighestPublishedSemverRelease
+          $makeLatest = if (
+            $null -ceq $highestBefore -or
+            (Compare-StableSemver $currentVersion $highestBefore.version) -ge 0
+          ) { "true" } else { "false" }
 
           $publishPayload = [ordered]@{
             tag_name = $tag
@@ -887,7 +1081,7 @@ jobs:
             body = [IO.File]::ReadAllText($notes)
             draft = $false
             prerelease = $false
-            make_latest = "true"
+            make_latest = $makeLatest
           } | ConvertTo-Json
           $publishPayloadPath = Join-Path $env:RUNNER_TEMP "publish-release.json"
           [IO.File]::WriteAllText(
@@ -905,8 +1099,8 @@ jobs:
           if (
             $published.draft -or
             -not $published.immutable -or
-            $published.id -ne $releaseId -or
-            $published.tag_name -ne $tag
+            $published.id -cne $releaseId -or
+            -not (Test-OrdinalEqual $published.tag_name $tag)
           ) {
             throw "Published Release $tag is not immutable or has the wrong identity"
           }
@@ -921,24 +1115,45 @@ jobs:
           $expectedBody = [IO.File]::ReadAllText($notes)
           foreach ($readback in @($publishedById, $publishedByTag)) {
             if (
-              $readback.id -ne $releaseId -or
+              $readback.id -cne $releaseId -or
               $readback.draft -or
               -not $readback.immutable -or
-              $readback.tag_name -ne $tag -or
-              $readback.name -ne "BentoDesk $env:RELEASE_VERSION" -or
-              $readback.body -ne $expectedBody -or
+              -not (Test-OrdinalEqual $readback.tag_name $tag) -or
+              -not (Test-OrdinalEqual $readback.name "BentoDesk $env:RELEASE_VERSION") -or
+              -not (Test-OrdinalEqual $readback.body $expectedBody) -or
               $readback.prerelease
             ) {
               throw "Published Release $tag failed numeric-ID or tag readback"
             }
             $assetNames = @($readback.assets | ForEach-Object name | Sort-Object)
-            if (@(Compare-Object $expectedAssetNames $assetNames).Count -ne 0) {
+            if (-not (Test-OrdinalStringSetEqual $expectedAssetNames $assetNames)) {
               throw "Published Release $tag contains missing or unexpected assets"
             }
             foreach ($entry in $expectedAssets.GetEnumerator()) {
-              $assets = @($readback.assets | Where-Object name -eq $entry.Key)
-              if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
+              $assets = @($readback.assets | Where-Object {
+                Test-OrdinalEqual $_.name $entry.Key
+              })
+              if (
+                $assets.Count -cne 1 -or
+                -not (Test-OrdinalEqual $assets[0].digest $entry.Value)
+              ) {
                 throw "Published asset digest mismatch for $($entry.Key)"
               }
             }
+          }
+
+          $expectedLatest = Get-HighestPublishedSemverRelease
+          if ($null -ceq $expectedLatest) {
+            throw "No stable semantic Release exists after publishing $tag"
+          }
+          $latest = gh api `
+            "repos/$repo/releases/latest" `
+            -H $headers[0] `
+            -H $headers[1] |
+            ConvertFrom-Json
+          if (
+            $latest.id -cne $expectedLatest.id -or
+            -not (Test-OrdinalEqual $latest.tag_name $expectedLatest.tag_name)
+          ) {
+            throw "Latest Release is not the highest published semantic version"
           }
