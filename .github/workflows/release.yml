@@ -13,7 +13,6 @@ on:
       tag:
         description: Existing annotated tag whose draft publication must be recovered
         required: true
-        default: v2.0.3
         type: string
       sha:
         description: Exact main commit SHA already validated by Native CI
@@ -684,51 +683,189 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $false
+          $PSNativeCommandUseErrorActionPreference = $true
           $tag = $env:RELEASE_TAG
           $zip = $env:RELEASE_ZIP
           $checksums = $env:RELEASE_CHECKSUMS
           $notes = $env:RELEASE_NOTES
-          $api = "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $repo = $env:GITHUB_REPOSITORY
           $headers = @(
             "Accept: application/vnd.github+json",
             "X-GitHub-Api-Version: 2026-03-10"
           )
-          $releaseJson = gh api $api -H $headers[0] -H $headers[1] 2>$null
-          $viewExit = $LASTEXITCODE
-          $PSNativeCommandUseErrorActionPreference = $true
-          if ($viewExit -eq 0) {
-            $release = $releaseJson | ConvertFrom-Json
-            if (-not $release.draft) {
-              throw "Release $tag is already published; immutable assets are never overwritten"
+          $assetsToUpload = @($zip, $checksums)
+          $expectedAssets = @{}
+          foreach ($assetPath in $assetsToUpload) {
+            $expectedAssets[[IO.Path]::GetFileName($assetPath)] =
+              "sha256:$((Get-FileHash $assetPath -Algorithm SHA256).Hash.ToLowerInvariant())"
+          }
+          $expectedAssetNames = @($expectedAssets.Keys | Sort-Object)
+
+          function Assert-ReleaseTag {
+            $tagRef = gh api `
+              "repos/$repo/git/ref/tags/$tag" `
+              -H $headers[0] `
+              -H $headers[1] |
+              ConvertFrom-Json
+            if ($tagRef.object.type -ne "tag") {
+              throw "Release tag $tag is not annotated"
             }
-            if ($release.tag_name -ne $tag) {
-              throw "Draft Release tag mismatch: $($release.tag_name)"
+            $annotated = gh api `
+              "repos/$repo/git/tags/$($tagRef.object.sha)" `
+              -H $headers[0] `
+              -H $headers[1] |
+              ConvertFrom-Json
+            if ($annotated.object.type -ne "commit" -or $annotated.object.sha -ne $env:RELEASE_SHA) {
+              throw "Release tag $tag does not point to $env:RELEASE_SHA"
             }
-          } elseif ($viewExit -eq 1) {
-            gh release create $tag `
-              --draft `
-              --verify-tag `
-              --title "BentoDesk $env:RELEASE_VERSION" `
-              --notes-file $notes `
-              --repo $env:GITHUB_REPOSITORY
-          } else {
-            throw "Could not query release $tag"
           }
 
-          gh release upload $tag $zip $checksums --clobber --repo $env:GITHUB_REPOSITORY
+          $releaseRows = @(gh api `
+            --paginate `
+            "repos/$repo/releases?per_page=100" `
+            -H $headers[0] `
+            -H $headers[1] `
+            --jq '.[] | [.id, .tag_name, .draft] | @tsv')
+          $matching = @(
+            foreach ($row in $releaseRows) {
+              $fields = $row -split "`t", 3
+              if ($fields.Count -ne 3) {
+                throw "Malformed Release listing row"
+              }
+              if ($fields[1] -eq $tag) {
+                [pscustomobject]@{
+                  id = [int64]$fields[0]
+                  tag_name = $fields[1]
+                  draft = [bool]::Parse($fields[2])
+                }
+              }
+            }
+          )
+          $publishedMatches = @($matching | Where-Object { -not $_.draft })
+          if ($publishedMatches.Count -ne 0) {
+            throw "Release $tag is already published; immutable assets are never overwritten"
+          }
+          $draftMatches = @($matching | Where-Object draft)
+          if ($draftMatches.Count -gt 1) {
+            throw "Found multiple draft Releases for $tag"
+          }
 
-          $expectedAssets = @{}
-          $expectedAssets[[IO.Path]::GetFileName($zip)] =
-            "sha256:$((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant())"
-          $expectedAssets[[IO.Path]::GetFileName($checksums)] =
-            "sha256:$((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant())"
-          $draft = gh api $api -H $headers[0] -H $headers[1] | ConvertFrom-Json
-          if (-not $draft.draft) {
-            throw "Release $tag must remain a draft until asset verification finishes"
+          if ($draftMatches.Count -eq 1) {
+            $release = $draftMatches[0]
+          } else {
+            $createPayload = [ordered]@{
+              tag_name = $tag
+              name = "BentoDesk $env:RELEASE_VERSION"
+              body = [IO.File]::ReadAllText($notes)
+              draft = $true
+              prerelease = $false
+              generate_release_notes = $false
+            } | ConvertTo-Json
+            $createPayloadPath = Join-Path $env:RUNNER_TEMP "create-release.json"
+            [IO.File]::WriteAllText(
+              $createPayloadPath,
+              $createPayload,
+              [Text.UTF8Encoding]::new($false)
+            )
+            $release = gh api `
+              --method POST `
+              "repos/$repo/releases" `
+              --input $createPayloadPath `
+              -H $headers[0] `
+              -H $headers[1] |
+              ConvertFrom-Json
+          }
+
+          if (-not $release.draft -or $release.tag_name -ne $tag) {
+            throw "Draft Release identity mismatch for $tag"
+          }
+          $releaseId = [int64]$release.id
+          if ($releaseId -le 0) {
+            throw "Draft Release $tag does not have a valid numeric ID"
+          }
+          $releaseApi = "repos/$repo/releases/$releaseId"
+
+          $draftPayload = [ordered]@{
+            name = "BentoDesk $env:RELEASE_VERSION"
+            body = [IO.File]::ReadAllText($notes)
+            draft = $true
+            prerelease = $false
+          } | ConvertTo-Json
+          $draftPayloadPath = Join-Path $env:RUNNER_TEMP "update-draft-release.json"
+          [IO.File]::WriteAllText(
+            $draftPayloadPath,
+            $draftPayload,
+            [Text.UTF8Encoding]::new($false)
+          )
+          $release = gh api `
+            --method PATCH `
+            $releaseApi `
+            --input $draftPayloadPath `
+            -H $headers[0] `
+            -H $headers[1] |
+            ConvertFrom-Json
+          if (-not $release.draft -or $release.tag_name -ne $tag -or $release.id -ne $releaseId) {
+            throw "Could not normalize draft Release $tag"
+          }
+
+          $draft = gh api $releaseApi -H $headers[0] -H $headers[1] | ConvertFrom-Json
+          if (-not $draft.draft -or $draft.id -ne $releaseId -or $draft.tag_name -ne $tag) {
+            throw "Release $tag must remain the same draft until asset upload finishes"
+          }
+          $unexpectedAssets = @($draft.assets | Where-Object name -notin $expectedAssetNames)
+          if ($unexpectedAssets.Count -ne 0) {
+            throw "Draft Release $tag contains unexpected assets"
+          }
+          Assert-ReleaseTag
+          foreach ($assetName in $expectedAssetNames) {
+            $existing = @($draft.assets | Where-Object name -eq $assetName)
+            if ($existing.Count -gt 1) {
+              throw "Draft Release $tag contains duplicate assets named $assetName"
+            }
+            if ($existing.Count -eq 1) {
+              gh api `
+                --method DELETE `
+                "repos/$repo/releases/assets/$($existing[0].id)" `
+                -H $headers[0] `
+                -H $headers[1] `
+                --silent
+            }
+          }
+
+          $uploadBase = ([string]$draft.upload_url).Replace("{?name,label}", "")
+          $expectedUploadBase = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets"
+          if ($uploadBase -ne $expectedUploadBase) {
+            throw "Draft Release $tag has an unexpected asset upload URL"
+          }
+          $uploadHeaders = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $env:GH_TOKEN"
+            "X-GitHub-Api-Version" = "2026-03-10"
+          }
+          foreach ($assetPath in $assetsToUpload) {
+            $assetName = [IO.Path]::GetFileName($assetPath)
+            $encodedName = [uri]::EscapeDataString($assetName)
+            $uploaded = Invoke-RestMethod `
+              -Method Post `
+              -Uri "${uploadBase}?name=$encodedName" `
+              -Headers $uploadHeaders `
+              -ContentType "application/octet-stream" `
+              -InFile $assetPath
+            if (
+              $uploaded.id -le 0 -or
+              $uploaded.name -ne $assetName -or
+              $uploaded.state -ne "uploaded" -or
+              $uploaded.digest -ne $expectedAssets[$assetName]
+            ) {
+              throw "Uploaded asset identity mismatch for $assetName"
+            }
+          }
+
+          $draft = gh api $releaseApi -H $headers[0] -H $headers[1] | ConvertFrom-Json
+          if (-not $draft.draft -or $draft.id -ne $releaseId -or $draft.tag_name -ne $tag) {
+            throw "Release $tag must remain the same draft until asset verification finishes"
           }
           $draftAssetNames = @($draft.assets | ForEach-Object name | Sort-Object)
-          $expectedAssetNames = @($expectedAssets.Keys | Sort-Object)
           if (@(Compare-Object $expectedAssetNames $draftAssetNames).Count -ne 0) {
             throw "Draft Release $tag contains missing or unexpected assets"
           }
@@ -738,13 +875,38 @@ jobs:
               throw "Draft asset digest mismatch for $($entry.Key)"
             }
           }
+          Assert-ReleaseTag
 
-          gh release edit $tag --draft=false --repo $env:GITHUB_REPOSITORY
-
-          $published = gh api $api -H $headers[0] -H $headers[1] | ConvertFrom-Json
-          if ($published.draft -or -not $published.immutable -or $published.tag_name -ne $tag) {
+          $publishPayloadPath = Join-Path $env:RUNNER_TEMP "publish-release.json"
+          [IO.File]::WriteAllText(
+            $publishPayloadPath,
+            '{"draft":false,"make_latest":"true"}',
+            [Text.UTF8Encoding]::new($false)
+          )
+          $published = gh api `
+            --method PATCH `
+            $releaseApi `
+            --input $publishPayloadPath `
+            -H $headers[0] `
+            -H $headers[1] |
+            ConvertFrom-Json
+          if (
+            $published.draft -or
+            -not $published.immutable -or
+            $published.id -ne $releaseId -or
+            $published.tag_name -ne $tag
+          ) {
             throw "Published Release $tag is not immutable or has the wrong identity"
           }
+          $publishedByTag = gh api `
+            "repos/$repo/releases/tags/$tag" `
+            -H $headers[0] `
+            -H $headers[1] |
+            ConvertFrom-Json
+          if ($publishedByTag.id -ne $releaseId -or $publishedByTag.draft) {
+            throw "Published Release $tag cannot be read back by tag"
+          }
+          Assert-ReleaseTag
           $publishedAssetNames = @($published.assets | ForEach-Object name | Sort-Object)
           if (@(Compare-Object $expectedAssetNames $publishedAssetNames).Count -ne 0) {
             throw "Published Release $tag contains missing or unexpected assets"
