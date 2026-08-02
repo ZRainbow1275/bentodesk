@@ -755,6 +755,7 @@ jobs:
           } else {
             $createPayload = [ordered]@{
               tag_name = $tag
+              target_commitish = $env:RELEASE_SHA
               name = "BentoDesk $env:RELEASE_VERSION"
               body = [IO.File]::ReadAllText($notes)
               draft = $true
@@ -786,6 +787,8 @@ jobs:
           $releaseApi = "repos/$repo/releases/$releaseId"
 
           $draftPayload = [ordered]@{
+            tag_name = $tag
+            target_commitish = $env:RELEASE_SHA
             name = "BentoDesk $env:RELEASE_VERSION"
             body = [IO.File]::ReadAllText($notes)
             draft = $true
@@ -877,10 +880,19 @@ jobs:
           }
           Assert-ReleaseTag
 
+          $publishPayload = [ordered]@{
+            tag_name = $tag
+            target_commitish = $env:RELEASE_SHA
+            name = "BentoDesk $env:RELEASE_VERSION"
+            body = [IO.File]::ReadAllText($notes)
+            draft = $false
+            prerelease = $false
+            make_latest = "true"
+          } | ConvertTo-Json
           $publishPayloadPath = Join-Path $env:RUNNER_TEMP "publish-release.json"
           [IO.File]::WriteAllText(
             $publishPayloadPath,
-            '{"draft":false,"make_latest":"true"}',
+            $publishPayload,
             [Text.UTF8Encoding]::new($false)
           )
           $published = gh api `
@@ -898,22 +910,35 @@ jobs:
           ) {
             throw "Published Release $tag is not immutable or has the wrong identity"
           }
+          $publishedById = gh api $releaseApi -H $headers[0] -H $headers[1] |
+            ConvertFrom-Json
           $publishedByTag = gh api `
             "repos/$repo/releases/tags/$tag" `
             -H $headers[0] `
             -H $headers[1] |
             ConvertFrom-Json
-          if ($publishedByTag.id -ne $releaseId -or $publishedByTag.draft) {
-            throw "Published Release $tag cannot be read back by tag"
-          }
           Assert-ReleaseTag
-          $publishedAssetNames = @($published.assets | ForEach-Object name | Sort-Object)
-          if (@(Compare-Object $expectedAssetNames $publishedAssetNames).Count -ne 0) {
-            throw "Published Release $tag contains missing or unexpected assets"
-          }
-          foreach ($entry in $expectedAssets.GetEnumerator()) {
-            $assets = @($published.assets | Where-Object name -eq $entry.Key)
-            if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
-              throw "Published asset digest mismatch for $($entry.Key)"
+          $expectedBody = [IO.File]::ReadAllText($notes)
+          foreach ($readback in @($publishedById, $publishedByTag)) {
+            if (
+              $readback.id -ne $releaseId -or
+              $readback.draft -or
+              -not $readback.immutable -or
+              $readback.tag_name -ne $tag -or
+              $readback.name -ne "BentoDesk $env:RELEASE_VERSION" -or
+              $readback.body -ne $expectedBody -or
+              $readback.prerelease
+            ) {
+              throw "Published Release $tag failed numeric-ID or tag readback"
+            }
+            $assetNames = @($readback.assets | ForEach-Object name | Sort-Object)
+            if (@(Compare-Object $expectedAssetNames $assetNames).Count -ne 0) {
+              throw "Published Release $tag contains missing or unexpected assets"
+            }
+            foreach ($entry in $expectedAssets.GetEnumerator()) {
+              $assets = @($readback.assets | Where-Object name -eq $entry.Key)
+              if ($assets.Count -ne 1 -or $assets[0].digest -ne $entry.Value) {
+                throw "Published asset digest mismatch for $($entry.Key)"
+              }
             }
           }
