@@ -52,26 +52,45 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $true
 
+          function Compare-StableSemver([string]$Left, [string]$Right) {
+            $pattern = '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z'
+            if ($Left -cnotmatch $pattern -or $Right -cnotmatch $pattern) {
+              throw "Invalid stable semantic version comparison: $Left / $Right"
+            }
+            $leftParts = $Left.Split(".")
+            $rightParts = $Right.Split(".")
+            foreach ($index in 0..2) {
+              $comparison = $leftParts[$index].Length.CompareTo($rightParts[$index].Length)
+              if ($comparison -ceq 0) {
+                $comparison = [string]::CompareOrdinal($leftParts[$index], $rightParts[$index])
+              }
+              if ($comparison -cne 0) {
+                return $comparison
+              }
+            }
+            return 0
+          }
+
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          $shell = @($metadata.packages | Where-Object name -eq "bentodesk-shell")
-          if ($shell.Count -ne 1) {
+          $shell = @($metadata.packages | Where-Object name -ceq "bentodesk-shell")
+          if ($shell.Count -cne 1) {
             throw "Expected exactly one bentodesk-shell package"
           }
           $tag = "v$($shell[0].version)"
           $head = (git rev-parse HEAD).Trim()
-          $currentVersion = [version]$shell[0].version.ToString()
+          $currentVersion = $shell[0].version.ToString()
 
           $PSNativeCommandUseErrorActionPreference = $false
           git show-ref --verify --quiet "refs/tags/$tag"
           $tagExit = $LASTEXITCODE
           $PSNativeCommandUseErrorActionPreference = $true
           $global:LASTEXITCODE = 0
-          if ($tagExit -notin @(0, 1)) {
+          if ($tagExit -cnotin @(0, 1)) {
             throw "Could not inspect tag $tag"
           }
 
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            if ($tagExit -eq 0) {
+          if ($env:GITHUB_EVENT_NAME -ceq "pull_request") {
+            if ($tagExit -ceq 0) {
               throw "Workspace version $($shell[0].version) is already published as $tag; pull requests must declare an unused version"
             }
             $baseCargo = (git show "origin/$($env:GITHUB_BASE_REF):Cargo.toml") -join "`n"
@@ -82,12 +101,12 @@ jobs:
             if (-not $baseMatch.Success) {
               throw "Could not read the workspace version from the pull-request base"
             }
-            $baseVersion = [version]$baseMatch.Groups[1].Value
-            if ($currentVersion -le $baseVersion) {
+            $baseVersion = $baseMatch.Groups[1].Value
+            if ((Compare-StableSemver $currentVersion $baseVersion) -le 0) {
               throw "Workspace version $currentVersion must be newer than base version $baseVersion"
             }
             Write-Host "Unused pull-request release tag: $tag"
-          } elseif ($env:GITHUB_EVENT_NAME -eq "push") {
+          } elseif ($env:GITHUB_EVENT_NAME -ceq "push") {
             $parentCargo = (git show "${head}^:Cargo.toml") -join "`n"
             $parentMatch = [regex]::Match(
               $parentCargo,
@@ -96,15 +115,15 @@ jobs:
             if (-not $parentMatch.Success) {
               throw "Could not read the workspace version from the parent commit"
             }
-            $parentVersion = [version]$parentMatch.Groups[1].Value
-            if ($currentVersion -le $parentVersion) {
+            $parentVersion = $parentMatch.Groups[1].Value
+            if ((Compare-StableSemver $currentVersion $parentVersion) -le 0) {
               throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
             }
-            if ($tagExit -eq 1) {
+            if ($tagExit -ceq 1) {
               Write-Host "Release tag $tag is available for this main commit"
             } else {
               $tagCommit = (git rev-list -n 1 "refs/tags/$tag").Trim()
-              if ($tagCommit -ne $head) {
+              if ($tagCommit -cne $head) {
                 throw "Release tag $tag points to $tagCommit instead of current main commit $head"
               }
               Write-Host "Release tag $tag already points to this main commit"
@@ -142,7 +161,7 @@ jobs:
             $_ -match '^runtime-proof-' -or
             $_ -match '(^|/)(handtest|manual-test|runtime-(diagnostic|reference|screen))-'
           })
-          if ($generated.Count -ne 0) {
+          if ($generated.Count -cne 0) {
             throw "Generated runtime files are tracked:`n$($generated -join "`n")"
           }
 
@@ -155,10 +174,10 @@ jobs:
             $_ -notmatch $fixtureUserPath -and
             $_ -notmatch 'C:[/\\]Desktop[/\\]'
           })
-          if ($localPathHits.Count -ne 0) {
+          if ($localPathHits.Count -cne 0) {
             throw "Machine-local paths are tracked:`n$($localPathHits -join "`n")"
           }
-          if ($grepExit -notin @(0, 1)) {
+          if ($grepExit -cnotin @(0, 1)) {
             throw "git grep failed with exit code $grepExit"
           }
           $global:LASTEXITCODE = 0
@@ -172,7 +191,7 @@ jobs:
                 }
               }
           )
-          if ($oversized.Count -ne 0) {
+          if ($oversized.Count -cne 0) {
             throw "Rust modules over 800 lines:`n$($oversized | Format-Table | Out-String)"
           }
 
@@ -231,11 +250,11 @@ jobs:
 
           cargo build --locked --release --target $env:TARGET -p bentodesk-shell --bin BentoDesk
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          $version = ($metadata.packages | Where-Object name -eq "bentodesk-shell").version.ToString()
+          $version = ($metadata.packages | Where-Object name -ceq "bentodesk-shell").version.ToString()
           $manifest = Get-Content "crates/bentodesk-shell/app.manifest" -Raw
           $resource = Get-Content "crates/bentodesk-shell/app.rc" -Raw
           $expectedManifestVersion = [regex]::Escape("$version.0")
-          if ($manifest -notmatch "version=`"$expectedManifestVersion`"") {
+          if ($manifest -cnotmatch "version=`"$expectedManifestVersion`"") {
             throw "app.manifest does not contain assembly version $version.0"
           }
           $resourceVersion = $version.Replace(".", ",")
@@ -250,7 +269,7 @@ jobs:
             }
           }
           $exe = Get-Item "target/$env:TARGET/release/BentoDesk.exe"
-          if ($exe.VersionInfo.FileVersion -ne "$version.0" -or $exe.VersionInfo.ProductVersion -ne $version) {
+          if ($exe.VersionInfo.FileVersion -cne "$version.0" -or $exe.VersionInfo.ProductVersion -cne $version) {
             throw "BentoDesk.exe metadata is $($exe.VersionInfo.FileVersion) / $($exe.VersionInfo.ProductVersion); expected $version.0 / $version"
           }
           $binaryText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe.FullName))
