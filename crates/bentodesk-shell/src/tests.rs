@@ -265,6 +265,7 @@ use super::{
     show_tooltip_payload,
     smart_group_zone_dimensions,
     snapshot_dir_for_zones_path,
+    source_missing_from_metadata,
     stack_aware_hover_zone_for_point,
     stack_bloom_cursor_watch_active,
     stack_bloom_hit_for_point,
@@ -403,3 +404,4 @@ include!("tests/18_pill_hover_skips_stack_anchors.rs");
 include!("tests/19_stack_tray_row_drag_dispatches_reorder_command.rs");
 include!("tests/20_active_theme_applies_preextracted_plugin_provider_theme.rs");
 include!("tests/21_settings_backup_list_and_restore_latest_round_trips_real.rs");
+include!("tests/22_reported_move_keeps_card_when_source_still_exists.rs");

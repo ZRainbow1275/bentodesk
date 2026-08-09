@@ -58,7 +58,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1BitmapBrush,
-    ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1Effect, ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
@@ -133,6 +134,19 @@ impl core::fmt::Display for RenderError {
 }
 
 impl std::error::Error for RenderError {}
+
+#[derive(Clone)]
+struct CachedInvertMask {
+    effect: ID2D1Effect,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone)]
+struct CachedIconBitmap {
+    bitmap: ID2D1Bitmap1,
+    invert_mask: Option<CachedInvertMask>,
+}
 
 /// Per-window renderer owning the D2D surface + DComp tree + brush cache.
 ///
@@ -213,7 +227,7 @@ pub struct Renderer {
     /// D2D bitmap cache keyed by backend icon hash. This is the runtime bridge
     /// that makes `LoadIcon` visible in the selected-stack executable instead
     /// of falling back to emoji placeholders forever.
-    icon_bitmaps: HashMap<String, ID2D1Bitmap1>,
+    icon_bitmaps: HashMap<String, CachedIconBitmap>,
     /// Hashes that failed cache lookup or WIC decode. Avoids retrying disk/WIC
     /// work every frame while preserving fallback rendering.
     icon_bitmap_failures: HashSet<String>,

@@ -20,7 +20,8 @@ use windows::{
             DataExchange::RegisterClipboardFormatW, Memory::*, Ole::*,
         },
         UI::Shell::{
-            CFSTR_DROPDESCRIPTION, CFSTR_INDRAGLOOP, CFSTR_PREFERREDDROPEFFECT, CFSTR_SHELLIDLIST,
+            CFSTR_DROPDESCRIPTION, CFSTR_INDRAGLOOP, CFSTR_LOGICALPERFORMEDDROPEFFECT,
+            CFSTR_PERFORMEDDROPEFFECT, CFSTR_PREFERREDDROPEFFECT, CFSTR_SHELLIDLIST,
             CFSTR_SHELLIDLISTOFFSET, CIDLData_CreateFromIDArray, Common::ITEMIDLIST,
             DROPDESCRIPTION, ILCreateFromPathW, ILFindLastID, ILFree, ILGetSize,
         },
@@ -42,8 +43,11 @@ fn log_drag_proof(msg: &str) {
     }
 }
 
+mod drop_effect;
 mod formats;
 
+pub(crate) use drop_effect::reported_drop_effects;
+use drop_effect::{drop_effect_from_medium, set_preferred_drop_effect};
 use formats::*;
 
 fn checked_push_bytes(target: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
@@ -143,14 +147,20 @@ impl Drop for OwnedPidl {
     }
 }
 
-pub fn create_drag_data_object(file_paths: &[String]) -> Result<IDataObject> {
-    if let Some(shell_object) = try_create_shell_data_object(file_paths)? {
+pub fn create_drag_data_object(
+    file_paths: &[String],
+    preferred_effect: DROPEFFECT,
+) -> Result<IDataObject> {
+    if let Some(shell_object) = try_create_shell_data_object(file_paths, preferred_effect)? {
         return Ok(shell_object);
     }
-    Ok(BentoDataObject::new(file_paths.to_vec()).into())
+    Ok(BentoDataObject::with_preferred_effect(file_paths.to_vec(), preferred_effect).into())
 }
 
-fn try_create_shell_data_object(file_paths: &[String]) -> Result<Option<IDataObject>> {
+fn try_create_shell_data_object(
+    file_paths: &[String],
+    preferred_effect: DROPEFFECT,
+) -> Result<Option<IDataObject>> {
     if file_paths.is_empty() {
         return Ok(None);
     }
@@ -191,6 +201,14 @@ fn try_create_shell_data_object(file_paths: &[String]) -> Result<Option<IDataObj
     };
     drop(file_pidls);
     drop(parent_pidl);
+    if let Err(error) = set_preferred_drop_effect(&data_object, preferred_effect) {
+        tracing::debug!(
+            target: "bentodesk::drag_drop",
+            %error,
+            "Shell IDataObject rejected preferred effect; using BentoDesk data object"
+        );
+        return Ok(None);
+    }
     Ok(Some(data_object))
 }
 
@@ -289,12 +307,26 @@ impl IEnumFORMATETC_Impl for BentoFormatEnumerator_Impl {
 #[implement(IDataObject)]
 pub struct BentoDataObject {
     file_paths: Vec<String>,
+    preferred_effect: DROPEFFECT,
+    performed_effect: Cell<Option<u32>>,
+    logical_performed_effect: Cell<Option<u32>>,
 }
 
 impl BentoDataObject {
-    /// Create a new data object containing the given file paths.
+    /// Create a new data object containing the given file paths with the
+    /// ordinary non-Ctrl MOVE preference.
     pub fn new(paths: Vec<String>) -> Self {
-        Self { file_paths: paths }
+        Self::with_preferred_effect(paths, DROPEFFECT_MOVE)
+    }
+
+    /// Create a data object with an explicit Explorer MOVE/COPY preference.
+    pub fn with_preferred_effect(paths: Vec<String>, preferred_effect: DROPEFFECT) -> Self {
+        Self {
+            file_paths: paths,
+            preferred_effect,
+            performed_effect: Cell::new(None),
+            logical_performed_effect: Cell::new(None),
+        }
     }
 
     unsafe fn build_hglobal_from_bytes(bytes: &[u8]) -> Result<HGLOBAL> {
@@ -413,7 +445,7 @@ impl BentoDataObject {
         Ok(hglobal)
     }
 
-    unsafe fn build_drop_effect(&self, effect: DROPEFFECT) -> Result<HGLOBAL> {
+    unsafe fn build_drop_effect(effect: DROPEFFECT) -> Result<HGLOBAL> {
         let hglobal =
             unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, core::mem::size_of::<u32>()) }?;
         let raw_ptr = unsafe { GlobalLock(hglobal) };
@@ -494,6 +526,8 @@ impl IDataObject_Impl for BentoDataObject_Impl {
         unsafe {
             let fmt = &*pformatetcin;
             let preferred_drop_effect = preferred_drop_effect_format();
+            let performed_drop_effect = performed_drop_effect_format();
+            let logical_performed_drop_effect = logical_performed_drop_effect_format();
             let shell_id_list_array = shell_id_list_array_format();
             let shell_object_offsets = shell_object_offsets_format();
             let drag_context = drag_context_format();
@@ -543,11 +577,39 @@ impl IDataObject_Impl for BentoDataObject_Impl {
                     u: STGMEDIUM_0 { hGlobal: hglobal },
                     pUnkForRelease: std::mem::ManuallyDrop::new(None),
                 })
+            } else if fmt.cfFormat == performed_drop_effect
+                && fmt.dwAspect == DVASPECT_CONTENT.0
+                && fmt.tymed & TYMED_HGLOBAL.0 as u32 != 0
+            {
+                let effect = self
+                    .performed_effect
+                    .get()
+                    .ok_or_else(|| Error::from(DV_E_FORMATETC))?;
+                let hglobal = BentoDataObject::build_drop_effect(DROPEFFECT(effect))?;
+                Ok(STGMEDIUM {
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                    u: STGMEDIUM_0 { hGlobal: hglobal },
+                    pUnkForRelease: std::mem::ManuallyDrop::new(None),
+                })
+            } else if fmt.cfFormat == logical_performed_drop_effect
+                && fmt.dwAspect == DVASPECT_CONTENT.0
+                && fmt.tymed & TYMED_HGLOBAL.0 as u32 != 0
+            {
+                let effect = self
+                    .logical_performed_effect
+                    .get()
+                    .ok_or_else(|| Error::from(DV_E_FORMATETC))?;
+                let hglobal = BentoDataObject::build_drop_effect(DROPEFFECT(effect))?;
+                Ok(STGMEDIUM {
+                    tymed: TYMED_HGLOBAL.0 as u32,
+                    u: STGMEDIUM_0 { hGlobal: hglobal },
+                    pUnkForRelease: std::mem::ManuallyDrop::new(None),
+                })
             } else if fmt.cfFormat == preferred_drop_effect
                 && fmt.dwAspect == DVASPECT_CONTENT.0
                 && fmt.tymed & TYMED_HGLOBAL.0 as u32 != 0
             {
-                let hglobal = self.build_drop_effect(DROPEFFECT_COPY)?;
+                let hglobal = BentoDataObject::build_drop_effect(self.preferred_effect)?;
                 Ok(STGMEDIUM {
                     tymed: TYMED_HGLOBAL.0 as u32,
                     u: STGMEDIUM_0 { hGlobal: hglobal },
@@ -609,7 +671,14 @@ impl IDataObject_Impl for BentoDataObject_Impl {
                 )
                 .as_str(),
             );
-            if format_is_supported(fmt) {
+            let stored_feedback = if fmt.cfFormat == performed_drop_effect_format() {
+                self.performed_effect.get().is_some()
+            } else if fmt.cfFormat == logical_performed_drop_effect_format() {
+                self.logical_performed_effect.get().is_some()
+            } else {
+                false
+            };
+            if format_is_supported(fmt) || stored_feedback {
                 S_OK
             } else {
                 DV_E_FORMATETC
@@ -643,10 +712,26 @@ impl IDataObject_Impl for BentoDataObject_Impl {
                 )
                 .as_str(),
             );
-            if !format_is_supported(fmt) {
+            if pmedium.is_null() {
+                return Err(Error::from(E_POINTER));
+            }
+            let feedback_slot = if fmt.cfFormat == performed_drop_effect_format() {
+                Some(&self.performed_effect)
+            } else if fmt.cfFormat == logical_performed_drop_effect_format() {
+                Some(&self.logical_performed_effect)
+            } else {
+                None
+            };
+            if let Some(slot) = feedback_slot {
+                let medium = &*pmedium;
+                let Some(effect) = drop_effect_from_medium(medium) else {
+                    return Err(Error::from(DV_E_TYMED));
+                };
+                slot.set(Some(effect.0));
+            } else if !format_is_supported(fmt) {
                 return Err(Error::from(DV_E_FORMATETC));
             }
-            if frelease.as_bool() && !pmedium.is_null() {
+            if frelease.as_bool() {
                 let medium = &*pmedium;
                 if medium.tymed != TYMED_NULL.0 as u32 {
                     // SAFETY: `ReleaseStgMedium` only needs a valid pointer to

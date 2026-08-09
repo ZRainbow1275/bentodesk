@@ -476,6 +476,7 @@ pub(super) fn start_item_drag_out(root: &AppRoot, source_hwnd: HWND, request: Pe
         bentodesk_backend::drag_drop::start_drag_operation_from_hwnd(
             std::slice::from_ref(&path),
             hwnd_bits,
+            request.copy_only,
         )
     });
     match result {
@@ -537,6 +538,49 @@ pub(super) fn finalize_item_drag_out(
             );
         }
         bentodesk_backend::drag_drop::DragOutcome::Moved => {
+            let source_missing = match source_missing_after_shell_move(Path::new(
+                request.path.as_str(),
+            )) {
+                Ok(missing) => missing,
+                Err(error) => {
+                    set_item_operation_status(
+                        root,
+                        localized_current(
+                            format!("无法确认移出结果，已保留：{leaf}"),
+                            format!("Move could not be verified; kept: {leaf}"),
+                        ),
+                    );
+                    log_static(
+                        format!(
+                            "items: drag-out model-kept source-metadata-error zone={} item={} path={} error={}\n",
+                            request.zone_id.0, request.item_id.0, request.path, error
+                        )
+                        .as_str(),
+                    );
+                    return;
+                }
+            };
+            if !source_missing {
+                // A target can report MOVE while expecting the source to delete
+                // the original (an unoptimised move). BentoDesk never deletes
+                // user bytes during drag-out, so keep the model whenever the
+                // source still exists instead of manufacturing data loss.
+                set_item_operation_status(
+                    root,
+                    localized_current(
+                        format!("已复制到外部：{leaf}"),
+                        format!("Copied out: {leaf}"),
+                    ),
+                );
+                log_static(
+                    format!(
+                        "items: drag-out model-kept source-still-exists zone={} item={} path={}\n",
+                        request.zone_id.0, request.item_id.0, request.path
+                    )
+                    .as_str(),
+                );
+                return;
+            }
             // The Shell has already completed the MOVE represented by
             // `DROPEFFECT_MOVE`. For stealth-backed items that means the hidden
             // source path no longer exists: routing through ordinary RemoveItem
@@ -593,6 +637,20 @@ pub(super) fn finalize_item_drag_out(
                 ),
             );
         }
+    }
+}
+
+pub(super) fn source_missing_after_shell_move(path: &Path) -> std::io::Result<bool> {
+    source_missing_from_metadata(std::fs::symlink_metadata(path))
+}
+
+pub(super) fn source_missing_from_metadata(
+    metadata: std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<bool> {
+    match metadata {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
     }
 }
 

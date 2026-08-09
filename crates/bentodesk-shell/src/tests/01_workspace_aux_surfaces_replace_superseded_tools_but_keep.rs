@@ -61,20 +61,23 @@ fn r13_04_startup_icon_rehydrate_skips_builtin_and_repairs_missing_cache() {
     let current_shortcut_hash = bentodesk_backend::icon::protocol::icon_cache_key(shortcut);
     let current_internet_shortcut_hash =
         bentodesk_backend::icon::protocol::icon_cache_key(internet_shortcut);
+    let file = "C:\\Desktop\\file.txt";
+    let current_file_hash = bentodesk_backend::icon::protocol::icon_cache_key(file);
     assert_eq!(
         item_icon_startup_rehydrate_force(shortcut, "builtin:folder", false),
         None
     );
     assert_eq!(
-        item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "0123456789abcdef", true),
+        item_icon_startup_rehydrate_force(file, &current_file_hash, true),
         None
     );
     assert_eq!(
-        item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "0123456789abcdef", false),
-        Some(false)
+        item_icon_startup_rehydrate_force(file, "0123456789abcdef", true),
+        Some(true),
+        "cached pre-revision native icons require one forced migration"
     );
     assert_eq!(
-        item_icon_startup_rehydrate_force("C:\\Desktop\\file.txt", "", false),
+        item_icon_startup_rehydrate_force(file, "", false),
         Some(false)
     );
     assert_eq!(

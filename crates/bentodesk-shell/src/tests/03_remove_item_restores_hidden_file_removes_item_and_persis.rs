@@ -348,34 +348,77 @@ fn item_drag_out_reports_visible_outcomes() {
 }
 
 #[test]
-fn successful_drag_out_uses_the_actual_ole_effect() {
+fn only_confirmed_move_removes_and_persists_the_zone_item() {
     let root = test_app_root();
+    let zones_path = scratch_zones_path("item-drag-out-effects");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    std::fs::create_dir_all(state_dir).expect("scratch dir");
     let zone_id = ZoneId(83);
-    let (move_item_id, copy_item_id) = {
+    let paths = [
+        "move-out.txt",
+        "copy-out.txt",
+        "unknown-out.txt",
+        "cancel-out.txt",
+        "error-out.txt",
+    ]
+    .map(|name| state_dir.join(name));
+    for path in &paths {
+        std::fs::write(path, format!("bytes:{}", path.display())).expect("source bytes");
+    }
+    let (move_item_id, copy_item_id, unknown_item_id, cancel_item_id, error_item_id) = {
         let mut app = root.app.borrow_mut();
+        app.zones_path = zones_path.clone();
         let mut zone = Zone::new(zone_id, "Drag Out", 0, 0, 280, 180);
         let move_item_id = zone
             .add_item(
-                Cow::Borrowed("C:/Users/BentoDeskTest/Desktop/move-out.txt"),
+                Cow::Owned(paths[0].to_string_lossy().into_owned()),
                 Cow::Borrowed("move-hash"),
             )
             .expect("move item");
         let copy_item_id = zone
             .add_item(
-                Cow::Borrowed("C:/Users/BentoDeskTest/Desktop/copy-out.txt"),
+                Cow::Owned(paths[1].to_string_lossy().into_owned()),
                 Cow::Borrowed("copy-hash"),
             )
             .expect("copy item");
+        let unknown_item_id = zone
+            .add_item(
+                Cow::Owned(paths[2].to_string_lossy().into_owned()),
+                Cow::Borrowed("unknown-hash"),
+            )
+            .expect("unknown item");
+        let cancel_item_id = zone
+            .add_item(
+                Cow::Owned(paths[3].to_string_lossy().into_owned()),
+                Cow::Borrowed("cancel-hash"),
+            )
+            .expect("cancel item");
+        let error_item_id = zone
+            .add_item(
+                Cow::Owned(paths[4].to_string_lossy().into_owned()),
+                Cow::Borrowed("error-hash"),
+            )
+            .expect("error item");
         app.zones.add(zone);
-        (move_item_id, copy_item_id)
+        (
+            move_item_id,
+            copy_item_id,
+            unknown_item_id,
+            cancel_item_id,
+            error_item_id,
+        )
     };
 
     let move_request = PendingItemDragOut {
         zone_id,
         item_id: move_item_id,
-        path: SmolStr::new("C:/Users/BentoDeskTest/Desktop/move-out.txt"),
+        path: SmolStr::new(paths[0].to_string_lossy()),
         copy_only: false,
     };
+    let external_move = state_dir.join("external").join("move-out.txt");
+    std::fs::create_dir_all(external_move.parent().expect("external parent"))
+        .expect("external dir");
+    std::fs::rename(&paths[0], &external_move).expect("Shell moved source bytes");
     finalize_item_drag_out(
         &root,
         &move_request,
@@ -396,12 +439,17 @@ fn successful_drag_out_uses_the_actual_ole_effect() {
             Some("Moved out: move-out.txt")
         );
     }
+    assert!(
+        !paths[0].exists(),
+        "Shell-owned source path must stay moved"
+    );
+    assert!(external_move.exists(), "moved bytes must survive at target");
 
     let copy_request = PendingItemDragOut {
         zone_id,
         item_id: copy_item_id,
-        path: SmolStr::new("C:/Users/BentoDeskTest/Desktop/copy-out.txt"),
-        copy_only: false,
+        path: SmolStr::new(paths[1].to_string_lossy()),
+        copy_only: true,
     };
     finalize_item_drag_out(
         &root,
@@ -409,18 +457,58 @@ fn successful_drag_out_uses_the_actual_ole_effect() {
         "copy-out.txt",
         bentodesk_backend::drag_drop::DragOutcome::Copied,
     );
+    finalize_item_drag_out(
+        &root,
+        &PendingItemDragOut {
+            zone_id,
+            item_id: unknown_item_id,
+            path: SmolStr::new(paths[2].to_string_lossy()),
+            copy_only: false,
+        },
+        "unknown-out.txt",
+        bentodesk_backend::drag_drop::DragOutcome::Dropped,
+    );
+    finalize_item_drag_out(
+        &root,
+        &PendingItemDragOut {
+            zone_id,
+            item_id: cancel_item_id,
+            path: SmolStr::new(paths[3].to_string_lossy()),
+            copy_only: false,
+        },
+        "cancel-out.txt",
+        bentodesk_backend::drag_drop::DragOutcome::Cancelled,
+    );
+    assert!(start_item_drag_out_with(
+        &root,
+        paths[4].to_string_lossy().into_owned(),
+        |_files| Err(bentodesk_backend::drag_drop::DragDropError::NoFiles),
+    ));
+
     let app = root.app.borrow();
+    assert!(app.zones.item(zone_id, move_item_id).is_none());
+    for item_id in [copy_item_id, unknown_item_id, cancel_item_id, error_item_id] {
+        assert!(
+            app.zones.item(zone_id, item_id).is_some(),
+            "COPY, unknown, cancelled and failed effects must keep their source cards"
+        );
+    }
+    assert!(!app.dirty.get(), "confirmed MOVE must flush zones.bin");
+    drop(app);
+    let reloaded = storage::read_zones(&zones_path).expect("persisted zones");
+    assert!(reloaded.item(zone_id, move_item_id).is_none());
+    for item_id in [copy_item_id, unknown_item_id, cancel_item_id, error_item_id] {
+        assert!(reloaded.item(zone_id, item_id).is_some());
+    }
+    for path in &paths[1..] {
+        assert!(path.exists(), "finalizer must never remove source bytes");
+    }
     assert!(
-        app.zones.item(zone_id, copy_item_id).is_some(),
-        "a COPY effect from any target must keep the source item"
+        external_move.exists(),
+        "finalizer must never remove target bytes"
     );
-    assert_eq!(
-        app.item_operation_status
-            .borrow()
-            .as_ref()
-            .map(SmolStr::as_str),
-        Some("Copied out: copy-out.txt")
-    );
+
+    let _ = std::fs::remove_dir_all(state_dir);
 }
 
 #[test]

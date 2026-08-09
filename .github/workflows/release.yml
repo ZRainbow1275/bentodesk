@@ -36,7 +36,7 @@ env:
 
 jobs:
   build:
-    name: Build and verify portable package
+    name: Build and verify Windows packages
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
@@ -127,6 +127,10 @@ jobs:
           rustup toolchain install $env:MSRV_TOOLCHAIN --profile minimal --target $env:TARGET
           rustup show active-toolchain
 
+      - name: Prepare NSIS
+        shell: pwsh
+        run: choco install nsis --version=3.12.0 -y --no-progress
+
       - name: Resolve release identity
         id: identity
         env:
@@ -169,6 +173,7 @@ jobs:
           $version = $shell[0].version.ToString()
           $expectedTag = "v$version"
           $head = (git rev-parse HEAD).Trim()
+          $parentVersion = $null
 
           if ($env:GITHUB_EVENT_NAME -ceq "workflow_run") {
             if (
@@ -250,6 +255,17 @@ jobs:
           } else {
             throw "Unsupported release event: $env:GITHUB_EVENT_NAME"
           }
+          if (-not $parentVersion) {
+            $parentCargo = (git show "$($head)^:Cargo.toml") -join [Environment]::NewLine
+            $parentMatch = [regex]::Match(
+              $parentCargo,
+              '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$'
+            )
+            if (-not $parentMatch.Success) {
+              throw "Could not read the workspace version from the parent commit"
+            }
+            $parentVersion = $parentMatch.Groups[1].Value
+          }
 
           $notes = "docs/release-notes-$tag.md"
           if (-not (Test-Path $notes -PathType Leaf)) {
@@ -257,6 +273,7 @@ jobs:
           }
           "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
           "RELEASE_SHA=$head" >> $env:GITHUB_ENV
+          "PREVIOUS_VERSION=$parentVersion" >> $env:GITHUB_ENV
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           Write-Host "Release identity: $tag at $head"
@@ -307,9 +324,11 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $version = $env:RELEASE_TAG.TrimStart("v")
           $packageName = "BentoDesk-$version-windows-x64-portable"
+          $setupName = "BentoDesk-$version-windows-x64-setup.exe"
           $dist = Join-Path $PWD "dist"
           $stage = Join-Path $dist $packageName
           $zip = Join-Path $dist "$packageName.zip"
+          $setup = Join-Path $dist $setupName
           $releaseSums = Join-Path $dist "SHA256SUMS.txt"
           $handoff = Join-Path $dist "release-handoff"
           $utf8NoBom = [Text.UTF8Encoding]::new($false)
@@ -350,6 +369,11 @@ jobs:
             throw "BentoDesk.exe is $($exe.Length) bytes; limit is $limit"
           }
 
+          & "tools/release/Build-Installer.ps1" `
+            -Version $version `
+            -AppExe $exe.FullName `
+            -OutputPath $setup
+
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           $payload = @(
             @{ Source = "target/$env:TARGET/release/BentoDesk.exe"; Target = "BentoDesk.exe" },
@@ -377,9 +401,10 @@ jobs:
           Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -CompressionLevel Optimal
 
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText(
             $releaseSums,
-            "$zipHash  $packageName.zip`n",
+            "$zipHash  $packageName.zip`n$setupHash  $setupName`n",
             $utf8NoBom
           )
 
@@ -391,17 +416,20 @@ jobs:
           $zipName = [IO.Path]::GetFileName($zip)
           $checksumsName = [IO.Path]::GetFileName($releaseSums)
           Copy-Item $zip (Join-Path $handoff $zipName)
+          Copy-Item $setup (Join-Path $handoff $setupName)
           Copy-Item $releaseSums (Join-Path $handoff $checksumsName)
           Copy-Item $notes (Join-Path $handoff "release-notes.md")
 
           $handoffMetadata = [ordered]@{
-            schema = 1
+            schema = 2
             source_sha = $env:RELEASE_SHA
             tag = $env:RELEASE_TAG
             version = $version
             package_name = $packageName
             zip_name = $zipName
             zip_sha256 = $zipHash
+            setup_name = $setupName
+            setup_sha256 = $setupHash
             checksums_name = $checksumsName
             checksums_sha256 = (Get-FileHash $releaseSums -Algorithm SHA256).Hash.ToLowerInvariant()
             notes_name = "release-notes.md"
@@ -413,6 +441,8 @@ jobs:
           )
 
           "zip=$zip" >> $env:GITHUB_OUTPUT
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+          "setup_name=$setupName" >> $env:GITHUB_OUTPUT
           "checksums=$releaseSums" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
           "handoff=$handoff" >> $env:GITHUB_OUTPUT
@@ -449,6 +479,7 @@ jobs:
           } finally {
             $archive.Dispose()
           }
+
           if (-not (Test-OrdinalStringSetEqual $required $actual)) {
             throw "Package contains missing or unexpected entries"
           }
@@ -521,6 +552,22 @@ jobs:
             }
           }
 
+      - name: Verify Setup install and uninstall lifecycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $previousSetup = Join-Path $env:RUNNER_TEMP "BentoDesk-$env:PREVIOUS_VERSION-upgrade-fixture-setup.exe"
+          & "tools/release/Get-PreviousSetup.ps1" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -PreviousVersion $env:PREVIOUS_VERSION `
+            -OutputPath $previousSetup
+          & "tools/release/Test-InstallerLifecycle.ps1" `
+            -SetupPath "${{ steps.package.outputs.setup }}" `
+            -ExpectedVersion "${{ steps.identity.outputs.version }}" `
+            -PreviousSetupPath $previousSetup
+
       - name: Verify GNU-compatible checksums
         shell: bash
         run: |
@@ -544,6 +591,7 @@ jobs:
           $handoff = "${{ steps.package.outputs.handoff }}"
           $required = @(
             "${{ steps.package.outputs.package_name }}.zip",
+            "${{ steps.package.outputs.setup_name }}",
             "release-metadata.json",
             "release-notes.md",
             "SHA256SUMS.txt"
@@ -555,12 +603,28 @@ jobs:
           $metadata = Get-Content (Join-Path $handoff "release-metadata.json") -Raw |
             ConvertFrom-Json
           if (
-            $metadata.schema -cne 1 -or
+            $metadata.schema -cne 2 -or
             -not (Test-OrdinalEqual $metadata.source_sha $env:RELEASE_SHA) -or
             -not (Test-OrdinalEqual $metadata.tag $env:RELEASE_TAG) -or
-            -not (Test-OrdinalEqual $metadata.zip_name "${{ steps.package.outputs.package_name }}.zip")
+            -not (Test-OrdinalEqual $metadata.zip_name "${{ steps.package.outputs.package_name }}.zip") -or
+            -not (Test-OrdinalEqual $metadata.setup_name "${{ steps.package.outputs.setup_name }}")
           ) {
             throw "Release handoff metadata identity mismatch"
+          }
+
+          foreach ($entry in @(
+            @($metadata.zip_name, $metadata.zip_sha256),
+            @($metadata.setup_name, $metadata.setup_sha256),
+            @($metadata.checksums_name, $metadata.checksums_sha256)
+          )) {
+            $path = Join-Path $handoff ([string]$entry[0])
+            $digest = [string]$entry[1]
+            if (
+              $digest -cnotmatch '\A[0-9a-f]{64}\z' -or
+              -not (Test-OrdinalEqual $((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()) $digest)
+            ) {
+              throw "Release handoff digest mismatch for $($entry[0])"
+            }
           }
 
       - name: Upload verified release handoff
@@ -621,12 +685,14 @@ jobs:
           $version = [string]$metadata.version
           $packageName = [string]$metadata.package_name
           $zipName = [string]$metadata.zip_name
+          $setupName = [string]$metadata.setup_name
           $checksumsName = [string]$metadata.checksums_name
           $notesName = [string]$metadata.notes_name
           $zipHash = [string]$metadata.zip_sha256
+          $setupHash = [string]$metadata.setup_sha256
           $checksumsHash = [string]$metadata.checksums_sha256
 
-          if ($metadata.schema -cne 1) {
+          if ($metadata.schema -cne 2) {
             throw "Unsupported release handoff schema"
           }
           if ($sourceSha -cnotmatch '\A[0-9a-f]{40}\z') {
@@ -643,35 +709,42 @@ jobs:
           }
           if (
             -not (Test-OrdinalEqual $zipName "$packageName.zip") -or
+            -not (Test-OrdinalEqual $setupName "BentoDesk-$version-windows-x64-setup.exe") -or
             -not (Test-OrdinalEqual $checksumsName "SHA256SUMS.txt") -or
             -not (Test-OrdinalEqual $notesName "release-notes.md") -or
             $zipHash -cnotmatch '\A[0-9a-f]{64}\z' -or
+            $setupHash -cnotmatch '\A[0-9a-f]{64}\z' -or
             $checksumsHash -cnotmatch '\A[0-9a-f]{64}\z'
           ) {
             throw "Invalid release handoff filenames or digests"
           }
 
-          $required = @($zipName, $checksumsName, $notesName, "release-metadata.json")
+          $required = @($zipName, $setupName, $checksumsName, $notesName, "release-metadata.json")
           $actual = @(Get-ChildItem $handoff | ForEach-Object Name | Sort-Object)
           if (-not (Test-OrdinalStringSetEqual $required $actual)) {
             throw "Downloaded release handoff contains missing or unexpected files"
           }
 
           $zip = Join-Path $handoff $zipName
+          $setup = Join-Path $handoff $setupName
           $checksums = Join-Path $handoff $checksumsName
           $notes = Join-Path $handoff $notesName
           if (-not (Test-OrdinalEqual $((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()) $zipHash)) {
             throw "Release ZIP digest does not match handoff metadata"
+          }
+          if (-not (Test-OrdinalEqual $((Get-FileHash $setup -Algorithm SHA256).Hash.ToLowerInvariant()) $setupHash)) {
+            throw "Release Setup digest does not match handoff metadata"
           }
           if (-not (Test-OrdinalEqual $((Get-FileHash $checksums -Algorithm SHA256).Hash.ToLowerInvariant()) $checksumsHash)) {
             throw "External checksum digest does not match handoff metadata"
           }
           $sumLines = @(Get-Content $checksums)
           if (
-            $sumLines.Count -cne 1 -or
-            -not (Test-OrdinalEqual $sumLines[0] "$zipHash  $zipName")
+            $sumLines.Count -cne 2 -or
+            -not (Test-OrdinalEqual $sumLines[0] "$zipHash  $zipName") -or
+            -not (Test-OrdinalEqual $sumLines[1] "$setupHash  $setupName")
           ) {
-            throw "External checksum file does not describe the release ZIP exactly"
+            throw "External checksum file does not describe both release packages exactly"
           }
 
           if (Test-OrdinalEqual $env:GITHUB_EVENT_NAME "workflow_run") {
@@ -711,6 +784,7 @@ jobs:
           "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
           "RELEASE_SHA=$sourceSha" >> $env:GITHUB_ENV
           "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
+          "RELEASE_SETUP=$setup" >> $env:GITHUB_ENV
           "RELEASE_CHECKSUMS=$checksums" >> $env:GITHUB_ENV
           "RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
 
@@ -772,6 +846,7 @@ jobs:
           }
           $tag = $env:RELEASE_TAG
           $zip = $env:RELEASE_ZIP
+          $setup = $env:RELEASE_SETUP
           $checksums = $env:RELEASE_CHECKSUMS
           $notes = $env:RELEASE_NOTES
           $repo = $env:GITHUB_REPOSITORY
@@ -779,7 +854,7 @@ jobs:
             "Accept: application/vnd.github+json",
             "X-GitHub-Api-Version: 2026-03-10"
           )
-          $assetsToUpload = @($zip, $checksums)
+          $assetsToUpload = @($setup, $zip, $checksums)
           $expectedAssets = @{}
           foreach ($assetPath in $assetsToUpload) {
             $expectedAssets[[IO.Path]::GetFileName($assetPath)] =
@@ -1139,6 +1214,37 @@ jobs:
               ) {
                 throw "Published asset digest mismatch for $($entry.Key)"
               }
+            }
+          }
+
+          $freshDownloadRoot = Join-Path $env:RUNNER_TEMP "bentodesk-release-fresh-download"
+          if (Test-Path -LiteralPath $freshDownloadRoot) {
+            Remove-Item -LiteralPath $freshDownloadRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $freshDownloadRoot | Out-Null
+          foreach ($assetName in $expectedAssetNames) {
+            $assets = @($publishedById.assets | Where-Object {
+              Test-OrdinalEqual $_.name $assetName
+            })
+            if (
+              $assets.Count -cne 1 -or
+              [string]::IsNullOrWhiteSpace([string]$assets[0].browser_download_url)
+            ) {
+              throw "Published asset $assetName has no unique download URL"
+            }
+            $freshPath = Join-Path $freshDownloadRoot $assetName
+            Invoke-WebRequest `
+              -Uri ([string]$assets[0].browser_download_url) `
+              -Headers @{
+                Accept = "application/octet-stream"
+                Authorization = "Bearer $env:GH_TOKEN"
+                "X-GitHub-Api-Version" = "2026-03-10"
+                "User-Agent" = "bentodesk-native-release"
+              } `
+              -OutFile $freshPath
+            $freshDigest = "sha256:$((Get-FileHash $freshPath -Algorithm SHA256).Hash.ToLowerInvariant())"
+            if (-not (Test-OrdinalEqual $freshDigest $expectedAssets[$assetName])) {
+              throw "Fresh downloaded asset digest mismatch for $assetName"
             }
           }
 

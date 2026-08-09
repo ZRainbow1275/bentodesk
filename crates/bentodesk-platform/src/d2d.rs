@@ -15,23 +15,26 @@
 
 use std::sync::{Arc, RwLock};
 
+use windows::Foundation::Numerics::Matrix3x2;
+use windows::Win32::Foundation::TRUE;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_COMPOSITE_MODE_MASK_INVERT, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    CLSID_D2D1Opacity, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_OPACITY_PROP_OPACITY, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap,
+    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory1, ID2D1Image,
+    ID2D1RenderTarget, ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
 };
 #[cfg(feature = "shadow")]
 use windows::Win32::Graphics::Direct2D::{
-    CLSID_D2D1Shadow, D2D1_PROPERTY_TYPE_FLOAT, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
-    ID2D1Effect,
-};
-use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap,
-    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1RenderTarget,
-    ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
+    CLSID_D2D1Shadow, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface, IDXGISwapChain1};
@@ -375,6 +378,140 @@ pub fn draw_bitmap(
     Ok(())
 }
 
+/// Build a cached opacity effect for the destination-dependent invert pixels
+/// of a legacy monochrome HICON. One bit describes one source pixel, LSB first.
+pub fn invert_mask_effect(
+    ctx: &ID2D1DeviceContext,
+    width: u32,
+    height: u32,
+    bits: &[u8],
+) -> Result<ID2D1Effect, PlatformError> {
+    validate_bitmap_dimensions(width, height)?;
+    let pixels = invert_mask_pbgra(width, height, bits)?;
+    let pitch = width
+        .checked_mul(4)
+        .ok_or(PlatformError::Storage("invert-mask pitch overflow"))?;
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        colorContext: std::mem::ManuallyDrop::new(None),
+    };
+    // SAFETY: the source buffer is exactly `pitch * height` bytes and D2D
+    // copies it into the returned device bitmap during the call.
+    let bitmap = ok("D2D/CreateBitmap(legacy invert mask)", unsafe {
+        ctx.CreateBitmap(
+            D2D_SIZE_U { width, height },
+            Some(pixels.as_ptr().cast()),
+            pitch,
+            &properties,
+        )
+    })?;
+    let image: ID2D1Image = ok("D2D/invert mask bitmap cast", bitmap.cast())?;
+    // SAFETY: CLSID_D2D1Opacity is a built-in Direct2D effect.
+    let effect = ok("D2D/CreateEffect(opacity)", unsafe {
+        ctx.CreateEffect(&CLSID_D2D1Opacity)
+    })?;
+    // SAFETY: the effect retains the input image; TRUE invalidates its graph.
+    unsafe {
+        effect.SetInput(0, &image, TRUE);
+    }
+    Ok(effect)
+}
+
+/// Scale and composite a legacy HICON mask with Direct2D's native destination
+/// inversion mode. The opacity effect keeps panel fades continuous.
+pub fn draw_invert_mask(
+    ctx: &ID2D1DeviceContext,
+    effect: &ID2D1Effect,
+    width: u32,
+    height: u32,
+    rect: D2D_RECT_F,
+    opacity: f32,
+) -> Result<(), PlatformError> {
+    if width == 0 || height == 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+        return Ok(());
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return Ok(());
+    }
+    let bytes = opacity.to_ne_bytes();
+    // SAFETY: the property index/type is the documented f32 opacity value.
+    ok("D2D/OpacityEffect::SetValue", unsafe {
+        effect.SetValue(
+            D2D1_OPACITY_PROP_OPACITY.0 as u32,
+            D2D1_PROPERTY_TYPE_FLOAT,
+            &bytes,
+        )
+    })?;
+    // SAFETY: the effect owns a live input and returns its current output.
+    let output = ok("D2D/OpacityEffect::GetOutput", unsafe {
+        effect.GetOutput()
+    })?;
+    let target: ID2D1RenderTarget = ok("D2D/invert target cast", ctx.cast())?;
+    let mut previous = Matrix3x2 {
+        M11: 1.0,
+        M12: 0.0,
+        M21: 0.0,
+        M22: 1.0,
+        M31: 0.0,
+        M32: 0.0,
+    };
+    // SAFETY: D2D writes the current world transform into the stack value.
+    unsafe {
+        target.GetTransform(&mut previous);
+    }
+    let mapped = map_bitmap_to_rect(previous, width, height, rect);
+    // SAFETY: both transforms are stack-owned. Restore happens before the
+    // queued draw result is propagated so later primitives keep their space.
+    unsafe {
+        target.SetTransform(&mapped);
+        ctx.DrawImage(
+            &output,
+            None,
+            None,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_COMPOSITE_MODE_MASK_INVERT,
+        );
+        target.SetTransform(&previous);
+    }
+    Ok(())
+}
+
+fn invert_mask_pbgra(width: u32, height: u32, bits: &[u8]) -> Result<Vec<u8>, PlatformError> {
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(PlatformError::Storage("invert-mask dimensions overflow"))?;
+    if bits.len() != pixel_count.div_ceil(8) {
+        return Err(PlatformError::Storage("invert-mask bitset length mismatch"));
+    }
+    let mut pixels = vec![0u8; pixel_count * 4];
+    for index in 0..pixel_count {
+        if bits[index / 8] & (1 << (index % 8)) != 0 {
+            pixels[index * 4..index * 4 + 4].fill(u8::MAX);
+        }
+    }
+    Ok(pixels)
+}
+
+fn map_bitmap_to_rect(current: Matrix3x2, width: u32, height: u32, rect: D2D_RECT_F) -> Matrix3x2 {
+    let sx = (rect.right - rect.left) / width as f32;
+    let sy = (rect.bottom - rect.top) / height as f32;
+    Matrix3x2 {
+        M11: sx * current.M11,
+        M12: sx * current.M12,
+        M21: sy * current.M21,
+        M22: sy * current.M22,
+        M31: rect.left * current.M11 + rect.top * current.M21 + current.M31,
+        M32: rect.left * current.M12 + rect.top * current.M22 + current.M32,
+    }
+}
+
 /// Optional D2D shadow effect (gated by `shadow` feature).
 #[cfg(feature = "shadow")]
 pub fn shadow_effect(ctx: &ID2D1DeviceContext, blur: f32) -> Result<ID2D1Effect, PlatformError> {
@@ -399,7 +536,12 @@ pub fn shadow_effect(ctx: &ID2D1DeviceContext, blur: f32) -> Result<ID2D1Effect,
 
 #[cfg(test)]
 mod tests {
-    use super::{straight_alpha_color, validate_bitmap_dimensions};
+    use super::{
+        draw_invert_mask, factory, invert_mask_effect, invert_mask_pbgra, map_bitmap_to_rect,
+        straight_alpha_color, validate_bitmap_dimensions,
+    };
+    use windows::Foundation::Numerics::Matrix3x2;
+    use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
     #[test]
     fn d2d_brush_color_keeps_rgb_unpremultiplied() {
@@ -418,5 +560,149 @@ mod tests {
         assert!(validate_bitmap_dimensions(4_097, 1).is_err());
         assert!(validate_bitmap_dimensions(4_096, 4_096).is_err());
         assert!(validate_bitmap_dimensions(4_096, 4_097).is_err());
+    }
+
+    #[test]
+    fn legacy_invert_mask_pixels_and_transform_are_exact() {
+        assert_eq!(
+            invert_mask_pbgra(3, 1, &[0b0000_0101]).expect("mask"),
+            [
+                255, 255, 255, 255, // invert
+                0, 0, 0, 0, // unchanged
+                255, 255, 255, 255, // invert
+            ]
+        );
+        let mapped = map_bitmap_to_rect(
+            Matrix3x2 {
+                M11: 1.5,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.5,
+                M31: 3.0,
+                M32: 6.0,
+            },
+            32,
+            16,
+            D2D_RECT_F {
+                left: 10.0,
+                top: 20.0,
+                right: 26.0,
+                bottom: 28.0,
+            },
+        );
+        assert_eq!(mapped.M11, 0.75);
+        assert_eq!(mapped.M22, 0.75);
+        assert_eq!(mapped.M31, 18.0);
+        assert_eq!(mapped.M32, 36.0);
+    }
+
+    #[test]
+    fn legacy_invert_mask_changes_real_d2d_target_pixels() {
+        use windows::Win32::Graphics::Direct2D::Common::{
+            D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+        };
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ,
+            D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+            D2D1_MAP_OPTIONS_READ, ID2D1Bitmap, ID2D1RenderTarget,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        use windows::core::Interface;
+
+        // SAFETY: balance only the apartment initialized by this test thread.
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        let d2d = factory().expect("D2D factory");
+        let ctx = unsafe {
+            d2d.device
+                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+        }
+        .expect("D2D device context");
+        let pixel_format = D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        };
+        let target = unsafe {
+            ctx.CreateBitmap(
+                D2D_SIZE_U {
+                    width: 1,
+                    height: 1,
+                },
+                None,
+                0,
+                &D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: pixel_format,
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                    colorContext: std::mem::ManuallyDrop::new(None),
+                },
+            )
+        }
+        .expect("target bitmap");
+        unsafe { ctx.SetTarget(&target) };
+        let render_target: ID2D1RenderTarget = ctx.cast().expect("render target");
+        let background = D2D1_COLOR_F {
+            r: 0.2,
+            g: 0.4,
+            b: 0.6,
+            a: 1.0,
+        };
+        let effect = invert_mask_effect(&ctx, 1, 1, &[1]).expect("invert effect");
+        unsafe {
+            render_target.BeginDraw();
+            render_target.Clear(Some(&background));
+        }
+        draw_invert_mask(
+            &ctx,
+            &effect,
+            1,
+            1,
+            D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+            },
+            1.0,
+        )
+        .expect("draw invert mask");
+        unsafe { render_target.EndDraw(None, None) }.expect("finish D2D draw");
+
+        let readable = unsafe {
+            ctx.CreateBitmap(
+                D2D_SIZE_U {
+                    width: 1,
+                    height: 1,
+                },
+                None,
+                0,
+                &D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: pixel_format,
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    colorContext: std::mem::ManuallyDrop::new(None),
+                },
+            )
+        }
+        .expect("readback bitmap");
+        let readable_base: ID2D1Bitmap = readable.cast().expect("readable bitmap cast");
+        let target_base: ID2D1Bitmap = target.cast().expect("target bitmap cast");
+        unsafe { readable_base.CopyFromBitmap(None, &target_base, None) }
+            .expect("copy target for readback");
+        let mapped = unsafe { readable.Map(D2D1_MAP_OPTIONS_READ) }.expect("map readback");
+        let bgra = unsafe { std::slice::from_raw_parts(mapped.bits, 4) };
+        assert!(bgra[0].abs_diff(102) <= 2, "blue={}", bgra[0]);
+        assert!(bgra[1].abs_diff(153) <= 2, "green={}", bgra[1]);
+        assert!(bgra[2].abs_diff(204) <= 2, "red={}", bgra[2]);
+        assert_eq!(bgra[3], 255);
+        unsafe { readable.Unmap() }.expect("unmap readback");
+        if initialized {
+            // SAFETY: balances this thread's successful CoInitializeEx.
+            unsafe { CoUninitialize() };
+        }
     }
 }

@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "2.0.6"
+version      = "2.0.7"
 edition      = "2024"
 rust-version = "1.89"
 license      = "AGPL-3.0-or-later"
@@ -102,9 +102,6 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # F1.1 config_vault — `LocalFree` for the LocalAlloc'd output buffers
     # that DPAPI returns from `CryptProtectData` / `CryptUnprotectData`.
     "Win32_System_Memory",
-    # 0505 updater manifest slice — WinHTTP is the mandated Windows HTTP
-    # surface for selected-stack update checks; no reqwest/hyper/tokio.
-    "Win32_Networking_WinHttp",
     # #19-B (2026-05-31) — `GetUserDefaultLocaleName` (kernel32, Vista+) for the
     # OS-locale UI-language default (non-Chinese OS → English). Feature on the
     # already-present windows-sys crate; no new external dependency (§8).

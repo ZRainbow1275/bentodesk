@@ -45,6 +45,13 @@ pub(super) fn validate_settings_directory(
         ));
     }
     let path = Path::new(raw);
+    if bentodesk_backend::path_may_access_network(path) {
+        return Err(localized_message(
+            zh,
+            format!("{label_zh}必须是本地绝对路径：{raw}"),
+            format!("{label_en} must be a local absolute path: {raw}"),
+        ));
+    }
     if !path.exists() {
         return Err(localized_message(
             zh,
@@ -109,6 +116,13 @@ pub(super) fn validate_settings_sources_for_locale(
     let desktop_text = desktop.to_string_lossy();
     let mut sources = Vec::new();
     for source in bentodesk_backend::desktop_sources::all_desktop_dirs(Some(&desktop_text)) {
+        if bentodesk_backend::path_may_access_network(&source) {
+            return Err(localized_message(
+                zh,
+                "桌面来源不是受信任的本地路径",
+                "A desktop source is not a trusted local path",
+            ));
+        }
         if source.is_dir() {
             push_unique_settings_source(
                 &mut sources,
@@ -158,6 +172,16 @@ pub(super) fn rebuild_desktop_watcher(root: &AppRoot, sources: &[PathBuf]) -> Re
         return Ok(());
     }
     let zh = bentodesk_style::current_locale_is(&bentodesk_style::ZH_CN);
+    if sources
+        .iter()
+        .any(|source| bentodesk_backend::path_may_access_network(source))
+    {
+        return Err(localized_message(
+            zh,
+            "拒绝监控非本地桌面路径",
+            "Refusing to watch a non-local desktop path",
+        ));
+    }
     let replacement =
         bentodesk_backend::watcher::setup_file_watcher(sources, root.desktop_event_tx.clone())
             .map_err(|error| {
@@ -182,6 +206,15 @@ pub(super) fn copy_state_dir_recursive(
     target: &Path,
     zh: bool,
 ) -> Result<(), SmolStr> {
+    if bentodesk_backend::path_may_access_network(source)
+        || bentodesk_backend::path_may_access_network(target)
+    {
+        return Err(localized_message(
+            zh,
+            "便携数据路径必须是本地绝对路径",
+            "Portable data paths must be local absolute paths",
+        ));
+    }
     if source == target || !source.exists() {
         return Ok(());
     }
@@ -207,6 +240,17 @@ pub(super) fn copy_state_dir_recursive(
                 format!("Unable to read a data-directory entry: {error}"),
             )
         })?;
+        let entry_path = entry.path();
+        let destination = target.join(entry.file_name());
+        if bentodesk_backend::path_may_access_network(entry_path.as_path())
+            || bentodesk_backend::path_may_access_network(destination.as_path())
+        {
+            return Err(localized_message(
+                zh,
+                "便携迁移拒绝非本地或重解析路径",
+                "Portable migration rejected a non-local or reparse path",
+            ));
+        }
         let file_type = entry.file_type().map_err(|error| {
             localized_message(
                 zh,
@@ -214,7 +258,6 @@ pub(super) fn copy_state_dir_recursive(
                 format!("Unable to read a data-directory entry type: {error}"),
             )
         })?;
-        let destination = target.join(entry.file_name());
         if file_type.is_symlink() {
             return Err(localized_message(
                 zh,

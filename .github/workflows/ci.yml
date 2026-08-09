@@ -46,6 +46,10 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Prepare NSIS
+        shell: pwsh
+        run: choco install nsis --version=3.12.0 -y --no-progress
+
       - name: Verify release version availability
         shell: pwsh
         run: |
@@ -102,6 +106,7 @@ jobs:
               throw "Could not read the workspace version from the pull-request base"
             }
             $baseVersion = $baseMatch.Groups[1].Value
+            $previousVersion = $baseVersion
             if ((Compare-StableSemver $currentVersion $baseVersion) -le 0) {
               throw "Workspace version $currentVersion must be newer than base version $baseVersion"
             }
@@ -116,6 +121,7 @@ jobs:
               throw "Could not read the workspace version from the parent commit"
             }
             $parentVersion = $parentMatch.Groups[1].Value
+            $previousVersion = $parentVersion
             if ((Compare-StableSemver $currentVersion $parentVersion) -le 0) {
               throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
             }
@@ -131,6 +137,7 @@ jobs:
           } else {
             throw "Unsupported CI event: $env:GITHUB_EVENT_NAME"
           }
+          "PREVIOUS_VERSION=$previousVersion" >> $env:GITHUB_ENV
 
       - name: Minimum supported Rust
         env:
@@ -243,6 +250,8 @@ jobs:
           }
 
       - name: Release build and identity
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -285,5 +294,21 @@ jobs:
           if ($exe.Length -gt $limit) {
             throw "BentoDesk.exe is $($exe.Length) bytes; limit is $limit"
           }
+
+          $setup = Join-Path $env:RUNNER_TEMP "BentoDesk-$version-windows-x64-setup.exe"
+          $previousSetup = Join-Path $env:RUNNER_TEMP "BentoDesk-$env:PREVIOUS_VERSION-upgrade-fixture-setup.exe"
+          & "tools/release/Build-Installer.ps1" `
+            -Version $version `
+            -AppExe $exe.FullName `
+            -OutputPath $setup
+          & "tools/release/Get-PreviousSetup.ps1" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -PreviousVersion $env:PREVIOUS_VERSION `
+            -OutputPath $previousSetup
+          & "tools/release/Test-InstallerLifecycle.ps1" `
+            -SetupPath $setup `
+            -ExpectedVersion $version `
+            -PreviousSetupPath $previousSetup
+
           Write-Host "BentoDesk.exe: $($exe.Length) bytes"
           Write-Host "SHA-256: $((Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant())"

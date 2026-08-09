@@ -13,6 +13,7 @@
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><strong>下载</strong></a> ·
     <a href="docs/media/desktop-tour.mp4">观看完整演示</a> ·
     <a href="#动画就是界面">看看怎么用</a> ·
+    <a href="installer/legal/PrivacyPolicy.zh-CN.txt">隐私</a> ·
     <a href="#从源码构建">从源码构建</a> ·
     <a href="#参与贡献">参与贡献</a>
   </p>
@@ -154,15 +155,17 @@ BentoDesk 刻意保持专注：只支持 Windows，不替代 Explorer，也不�
 ## 快速开始
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-   下载 `BentoDesk-2.0.6-windows-x64-portable.zip`；
-2. 使用同页 `SHA256SUMS.txt` 校验压缩包，解压到普通可写目录，运行
-   `BentoDesk.exe`；
+   下载 `BentoDesk-2.0.7-windows-x64-setup.exe`，在安装程序中阅读并同意用户
+   协议与隐私政策；如不想安装，也可选择便携 ZIP；
+2. 使用同页 `SHA256SUMS.txt` 校验所选安装包或便携包，然后安装或解压；
 3. 从托盘菜单新建或管理 Zone；
 4. 把文件、文件夹或快捷方式拖入 Zone；
 5. 在设置中选择主题、展开方式与语言。
 
-便携包不需要 Node.js、Tauri、WebView2 或额外浏览器运行时。程序状态默认
-保存在当前用户目录；启用便携模式后，也可以随程序目录携带。
+两种发行包都不需要 Node.js、Tauri、WebView2 或额外浏览器运行时。BentoDesk
+完全离线且不含遥测。卸载时默认保留本地设置；只有另行勾选并确认后才会删除
+BentoDesk 自身状态。详见[用户协议](installer/legal/UserAgreement.zh-CN.txt)与
+[隐私政策](installer/legal/PrivacyPolicy.zh-CN.txt)。
 
 ### 系统要求
 
@@ -191,7 +194,7 @@ BentoDesk 刻意保持专注：只支持 Windows，不替代 Explorer，也不�
 | 图形 | Direct2D、DirectWrite、DirectComposition、D3D11 |
 | 图标与图像 | Windows Imaging Component、Windows Shell |
 | 文件交互 | Shell/OLE、`ReadDirectoryChangesW` |
-| 网络与系统安全 | WinHTTP、DPAPI |
+| 离线与系统安全 | 无网络客户端、DPAPI |
 | 数据 | 本地原子写入、加密设置仓库 |
 | 构建 | MSVC x64、静态 CRT、size optimization、Fat LTO |
 
