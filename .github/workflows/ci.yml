@@ -42,6 +42,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify installer lifecycle safety guard
+        shell: pwsh
+        run: |
+          $expected = "Installer lifecycle testing requires -GitHubHostedWindowsRunner on a GitHub-hosted Windows runner"
+          try {
+            & "tools/release/Test-InstallerLifecycle.ps1" `
+              -SetupPath (Join-Path $env:RUNNER_TEMP "missing-setup.exe") `
+              -ExpectedVersion "0.0.0"
+            throw "Installer lifecycle safety guard was bypassed"
+          } catch {
+            if ($_.Exception.Message -cne $expected) { throw }
+          }
+
       - name: Prepare Rust
         shell: pwsh
         run: |
@@ -312,6 +325,7 @@ jobs:
             -PreviousVersion $env:PREVIOUS_VERSION `
             -OutputPath $previousSetup
           & "tools/release/Test-InstallerLifecycle.ps1" `
+            -GitHubHostedWindowsRunner `
             -SetupPath $setup `
             -ExpectedVersion $version `
             -PreviousSetupPath $previousSetup

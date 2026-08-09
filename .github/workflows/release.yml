@@ -570,6 +570,7 @@ jobs:
             -PreviousVersion $env:PREVIOUS_VERSION `
             -OutputPath $previousSetup
           & "tools/release/Test-InstallerLifecycle.ps1" `
+            -GitHubHostedWindowsRunner `
             -SetupPath "${{ steps.package.outputs.setup }}" `
             -ExpectedVersion "${{ steps.identity.outputs.version }}" `
             -PreviousSetupPath $previousSetup

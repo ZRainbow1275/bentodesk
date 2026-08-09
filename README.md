@@ -168,7 +168,7 @@ around that job.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.7-windows-x64-setup.exe` from
+1. Download `BentoDesk-2.0.8-windows-x64-setup.exe` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest), then
    review and accept the User Agreement and Privacy Policy in Setup. The
    portable ZIP remains available for a no-install workflow.
