@@ -142,7 +142,8 @@ pub(super) fn render_bgra(
     path: &str,
 ) -> Result<Vec<u8>, IconError> {
     use windows::Win32::Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, SelectObject,
+        BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, GetDIBits,
+        SelectObject, SetDIBits,
     };
     use windows::Win32::UI::WindowsAndMessaging::{DI_NOMIRROR, DI_NORMAL, DrawIconEx};
 
@@ -160,7 +161,7 @@ pub(super) fn render_bgra(
             message: message.to_owned(),
         }
     })?;
-    let bmi = BITMAPINFO {
+    let mut bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width_i32,
@@ -180,10 +181,21 @@ pub(super) fn render_bgra(
             ctx: "hicon_to_png/CreateDIBSection",
             message: error.to_string(),
         })?;
+    let delete_bitmap = || -> Result<(), IconError> {
+        // SAFETY: `bitmap` is owned by this scope. If DC restoration failed and
+        // it is still selected, DeleteObject reports failure without freeing it.
+        if unsafe { DeleteObject(bitmap) }.as_bool() {
+            Ok(())
+        } else {
+            Err(IconError::Extract {
+                path: path.to_owned(),
+                win32_error: last_win32_error(),
+            })
+        }
+    };
     if bits.is_null() {
-        // SAFETY: `bitmap` was created above and is not selected.
-        unsafe {
-            let _ = DeleteObject(bitmap);
+        if let Err(error) = delete_bitmap() {
+            tracing::warn!(%error, "DeleteObject failed for null-buffer DIB section");
         }
         return Err(IconError::Com {
             ctx: "hicon_to_png/CreateDIBSection",
@@ -191,21 +203,40 @@ pub(super) fn render_bgra(
         });
     }
 
-    // SAFETY: `bits` spans exactly `pixel_len` writable DIB bytes. Clearing
-    // gives DrawIconEx a deterministic transparent-black destination.
-    unsafe {
-        std::ptr::write_bytes(bits.cast::<u8>(), 0, pixel_len);
+    let mut pixels = vec![0u8; pixel_len];
+    // SAFETY: `bitmap` is not selected yet, `pixels` is exactly the bounded
+    // 32-bpp DIB size, and `bmi` describes the same top-down dimensions.
+    let initialized_rows = unsafe {
+        SetDIBits(
+            hdc,
+            bitmap,
+            0,
+            height,
+            pixels.as_ptr().cast(),
+            &bmi,
+            DIB_RGB_COLORS,
+        )
+    };
+    if initialized_rows != height_i32 {
+        let win32_error = last_win32_error();
+        if let Err(error) = delete_bitmap() {
+            tracing::warn!(%error, "DeleteObject failed after SetDIBits failure");
+        }
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error,
+        });
     }
     // SAFETY: both handles are live and owned by this scope.
     let previous = unsafe { SelectObject(hdc, bitmap) };
     if previous.is_invalid() {
-        // SAFETY: selection failed, so `bitmap` is not selected.
-        unsafe {
-            let _ = DeleteObject(bitmap);
+        let win32_error = last_win32_error();
+        if let Err(error) = delete_bitmap() {
+            tracing::warn!(%error, "DeleteObject failed after SelectObject failure");
         }
         return Err(IconError::Extract {
             path: path.to_owned(),
-            win32_error: last_win32_error(),
+            win32_error,
         });
     }
 
@@ -224,22 +255,48 @@ pub(super) fn render_bgra(
             DI_NORMAL | DI_NOMIRROR,
         )
     };
-    let pixels = if draw.is_ok() {
-        // SAFETY: the DIB remains selected and `bits` still spans initialized
-        // `pixel_len` bytes.
-        unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), pixel_len).to_vec() }
-    } else {
-        Vec::new()
-    };
     // SAFETY: restore the DC before deleting the selected bitmap.
-    unsafe {
-        let _ = SelectObject(hdc, previous);
-        let _ = DeleteObject(bitmap);
+    let restored = unsafe { SelectObject(hdc, previous) };
+    let read_result = if draw.is_ok() && !restored.is_invalid() {
+        // SAFETY: `bitmap` is no longer selected, and `pixels` is exactly the
+        // bounded 32-bpp buffer requested by `bmi`.
+        let rows = unsafe {
+            GetDIBits(
+                hdc,
+                bitmap,
+                0,
+                height,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            )
+        };
+        if rows == height_i32 {
+            Ok(())
+        } else {
+            Err(IconError::Extract {
+                path: path.to_owned(),
+                win32_error: last_win32_error(),
+            })
+        }
+    } else if draw.is_ok() {
+        Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        })
+    } else {
+        Ok(())
+    };
+    let delete_result = delete_bitmap();
+    if let Err(error) = &delete_result {
+        tracing::warn!(%error, "DeleteObject failed after HICON rendering");
     }
     draw.map_err(|error| IconError::Com {
         ctx: "hicon_to_png/DrawIconEx",
         message: error.to_string(),
     })?;
+    read_result?;
+    delete_result?;
     Ok(pixels)
 }
 
