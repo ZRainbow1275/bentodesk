@@ -7,8 +7,19 @@ param(
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')]
     [string] $ExpectedVersion,
 
-    [string] $PreviousSetupPath
+    [string] $PreviousSetupPath,
+
+    [switch] $GitHubHostedWindowsRunner
 )
+
+if (
+    -not $GitHubHostedWindowsRunner.IsPresent -or
+    $env:GITHUB_ACTIONS -cne 'true' -or
+    $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+    $env:RUNNER_OS -cne 'Windows'
+) {
+    throw 'Installer lifecycle testing requires -GitHubHostedWindowsRunner on a GitHub-hosted Windows runner'
+}
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
