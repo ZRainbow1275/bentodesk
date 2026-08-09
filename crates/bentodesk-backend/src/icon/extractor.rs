@@ -5,9 +5,10 @@
 //! mechanical changes from the 1.x source:
 //!
 //! 1. `image` crate (forbidden by spec §8) → `super::wic::encode_png`
-//!    + `super::wic::decode_png_alpha_check`. Same hand-shake: BGRA
-//!    pixels read from the HICON via `GetDIBits`, byte-swapped to RGBA,
-//!    encoded to PNG via WIC.
+//!    + `super::wic::decode_png_alpha_check`. BGRA pixels read from the
+//!    HICON via `GetDIBits` are normalized to straight RGBA, using the
+//!    legacy AND mask when the colour bitmap has no alpha, then encoded
+//!    to PNG via WIC.
 //! 2. `BentoDeskError::IconError { source: windows::core::Error, .. }`
 //!    → `IconError::Extract { path, win32_error }`. The
 //!    `windows::core::Error` wraps `GetLastError()`; we surface that
@@ -26,7 +27,17 @@ use std::io::Read;
 use super::IconError;
 use super::wic;
 
+pub use super::shortcut::resolve_lnk_target;
+
 const MAX_INTERNET_SHORTCUT_BYTES: usize = 64 * 1024;
+const MAX_ICON_DIMENSION: u32 = 1_024;
+
+struct HiconPixels {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    invert_mask: Option<Vec<u8>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InternetShortcutIconLocation {
@@ -41,79 +52,6 @@ pub fn compute_icon_hash(path: &str) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-// ─── .lnk → target resolver (COM IShellLinkW + IPersistFile) ─────────
-
-/// Resolve a `.lnk` shortcut to its target path using COM `IShellLinkW`.
-///
-/// Returns `None` if the target cannot be resolved (broken shortcut,
-/// non-`.lnk` path, COM init failure). This is the 1.x behaviour
-/// preserved verbatim — the only changes are spec §11 unwrap/expect
-/// removal and SAFETY comments on every unsafe.
-pub fn resolve_lnk_target(lnk_path: &str) -> Option<String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-        CoUninitialize, IPersistFile, STGM,
-    };
-    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-    use windows::core::{Interface, PCWSTR};
-
-    // SAFETY: CoInitializeEx with COINIT_APARTMENTTHREADED is safe to call
-    // from any thread. S_FALSE (already initialized) and RPC_E_CHANGED_MODE
-    // are non-fatal; we only Uninitialize when our own Init succeeded.
-    let com_init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    let need_uninit = com_init.is_ok();
-
-    let result = (|| -> Option<String> {
-        // SAFETY: CoCreateInstance creates a well-known Shell COM object.
-        let shell_link: IShellLinkW =
-            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }.ok()?;
-
-        // SAFETY: QueryInterface for IPersistFile — standard COM cast.
-        let persist_file: IPersistFile = Interface::cast(&shell_link).ok()?;
-
-        let wide_path: Vec<u16> = OsStr::new(lnk_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // SAFETY: Load the .lnk file in read-only mode. STGM(0) == STGM_READ.
-        unsafe { persist_file.Load(PCWSTR(wide_path.as_ptr()), STGM(0)) }.ok()?;
-
-        // SAFETY: GetPath fills the buffer with the resolved (long) path.
-        // We use 0 flags = expanded long path (NOT SLGP_RAWPATH which
-        // keeps env vars). Ignore the result — we'll detect "no target"
-        // by checking the buffer.
-        let mut target_buf = [0u16; 260];
-        unsafe {
-            shell_link
-                .GetPath(&mut target_buf, std::ptr::null_mut(), 0u32)
-                .ok()?;
-        }
-
-        let target_path = String::from_utf16_lossy(
-            &target_buf[..target_buf
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(target_buf.len())],
-        );
-
-        if !target_path.is_empty() && std::path::Path::new(&target_path).exists() {
-            Some(target_path)
-        } else {
-            None
-        }
-    })();
-
-    if need_uninit {
-        // SAFETY: Matched CoUninitialize for our CoInitializeEx call.
-        unsafe { CoUninitialize() };
-    }
-
-    result
 }
 
 /// Read the icon resource selected by a Windows Internet Shortcut (`.url`).
@@ -212,10 +150,8 @@ fn parse_internet_shortcut_icon(text: &str) -> Option<InternetShortcutIconLocati
 /// Extract a file's icon as PNG bytes.
 ///
 /// Strategy:
-/// 1. `.lnk` → ask the Shell for the shortcut's own visible icon first.
-///    This honours `IShellLinkW::SetIconLocation` and therefore matches
-///    Explorer. Only if that fails do we resolve the target and try its
-///    executable / file-type icon.
+/// 1. `.lnk` → read its stored icon/target locally, reject unsafe references,
+///    then extract only from a guarded local resource or target.
 /// 2. `.url` → parse its Explorer `IconFile` / `IconIndex`, then fall back to
 ///    `SHGetFileInfoW` when the resource is absent or invalid.
 /// 3. `.exe` → `ExtractIconExW` first, then `SHGetFileInfoW`.
@@ -225,33 +161,48 @@ fn parse_internet_shortcut_icon(text: &str) -> Option<InternetShortcutIconLocati
 /// WIC alpha-channel scan) to detect bogus / invisible icons; those
 /// are treated as failures.
 pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
+    if crate::path_may_access_network(std::path::Path::new(path)) {
+        return Err(IconError::Io {
+            path: std::path::PathBuf::from(path),
+            message: "automatic icon extraction does not read network paths".to_owned(),
+        });
+    }
     let lower = path.to_ascii_lowercase();
     let is_lnk = lower.ends_with(".lnk");
     let is_url = lower.ends_with(".url");
 
     if is_lnk {
-        match extract_icon_via_shgetfileinfo(path) {
-            Ok(png) if !wic::decode_png_alpha_check(&png) => {
-                tracing::info!("SHGetFileInfoW matched Explorer shortcut icon: {}", path);
-                return Ok(png);
-            }
-            Ok(_) => {
-                tracing::debug!(
-                    "SHGetFileInfoW returned transparent icon for .lnk: {}",
-                    path
-                );
-            }
-            Err(e) => {
-                tracing::debug!("SHGetFileInfoW failed for .lnk {}: {}", path, e);
+        let Some(metadata) = super::shortcut::read_link_metadata(path) else {
+            return Err(IconError::Extract {
+                path: path.to_owned(),
+                win32_error: 0,
+            });
+        };
+        if metadata.blocked_reference {
+            tracing::warn!(%path, "shortcut network reference rejected before icon extraction");
+        }
+        let blocked_reference = metadata.blocked_reference;
+        if let Some(location) = metadata.icon {
+            match extract_icon_via_extract_icon_ex(&location.path, location.index) {
+                Ok(png) if super::hicon::png_has_visible_content(&png) => return Ok(png),
+                Ok(_) => tracing::debug!(
+                    "ExtractIconExW returned transparent shortcut icon: {}",
+                    location.path
+                ),
+                Err(error) => tracing::debug!(
+                    "ExtractIconExW failed for shortcut icon {}: {}",
+                    location.path,
+                    error
+                ),
             }
         }
 
-        if let Some(target) = resolve_lnk_target(path) {
+        if let Some(target) = metadata.target {
             tracing::info!("Resolved .lnk target: {} -> {}", path, target);
 
             if target.to_ascii_lowercase().ends_with(".exe") {
                 match extract_icon_via_extract_icon_ex(&target, 0) {
-                    Ok(png) if !wic::decode_png_alpha_check(&png) => {
+                    Ok(png) if super::hicon::png_has_visible_content(&png) => {
                         tracing::info!("ExtractIconExW succeeded for target: {}", target);
                         return Ok(png);
                     }
@@ -265,7 +216,7 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
             }
 
             match extract_icon_via_shgetfileinfo(&target) {
-                Ok(png) if !wic::decode_png_alpha_check(&png) => {
+                Ok(png) if super::hicon::png_has_visible_content(&png) => {
                     tracing::info!("SHGetFileInfoW succeeded for target: {}", target);
                     return Ok(png);
                 }
@@ -278,13 +229,23 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
             }
         }
 
+        if blocked_reference {
+            return Err(IconError::Io {
+                path: std::path::PathBuf::from(path),
+                message: "shortcut references a path rejected by automatic icon extraction"
+                    .to_owned(),
+            });
+        }
+
         Err(IconError::AllTransparent {
             path: path.to_string(),
         })
     } else if is_url {
-        if let Some(location) = read_internet_shortcut_icon(path) {
+        if let Some(location) = read_internet_shortcut_icon(path)
+            && !crate::path_may_access_network(std::path::Path::new(&location.path))
+        {
             match extract_icon_via_extract_icon_ex(&location.path, location.index) {
-                Ok(png) if !wic::decode_png_alpha_check(&png) => {
+                Ok(png) if super::hicon::png_has_visible_content(&png) => {
                     tracing::info!(
                         "ExtractIconExW matched Internet Shortcut icon: {} index={} -> {}",
                         location.path,
@@ -313,7 +274,7 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
         extract_icon_via_shgetfileinfo(path)
     } else if lower.ends_with(".exe") {
         match extract_icon_via_extract_icon_ex(path, 0) {
-            Ok(png) if !wic::decode_png_alpha_check(&png) => return Ok(png),
+            Ok(png) if super::hicon::png_has_visible_content(&png) => return Ok(png),
             Ok(_) => {
                 tracing::debug!("ExtractIconExW returned transparent icon: {}", path);
             }
@@ -365,8 +326,12 @@ fn extract_icon_via_extract_icon_ex(path: &str, icon_index: i32) -> Result<Vec<u
     let result = hicon_to_png(large_icon, path);
 
     // SAFETY: We own the HICON returned by ExtractIconExW.
-    unsafe {
-        let _ = DestroyIcon(large_icon);
+    if let Err(error) = unsafe { DestroyIcon(large_icon) } {
+        tracing::warn!(
+            %path,
+            %error,
+            "DestroyIcon failed after ExtractIconExW conversion"
+        );
     }
 
     result
@@ -410,14 +375,29 @@ fn extract_icon_via_shgetfileinfo(path: &str) -> Result<Vec<u8>, IconError> {
     }
 
     let hicon = shfi.hIcon;
+    if hicon.is_invalid() {
+        return Err(IconError::Extract {
+            path: path.to_string(),
+            win32_error: last_win32_error(),
+        });
+    }
     let png = hicon_to_png(hicon, path);
 
     // SAFETY: We own the HICON populated by SHGetFileInfoW.
-    unsafe {
-        let _ = DestroyIcon(hicon);
+    if let Err(error) = unsafe { DestroyIcon(hicon) } {
+        tracing::warn!(
+            %path,
+            %error,
+            "DestroyIcon failed after SHGetFileInfoW conversion"
+        );
     }
 
-    png
+    match png {
+        Ok(png) if !super::hicon::png_has_visible_content(&png) => Err(IconError::AllTransparent {
+            path: path.to_string(),
+        }),
+        result => result,
+    }
 }
 
 // ─── HICON → RGBA → PNG via WIC ──────────────────────────────────────
@@ -428,11 +408,11 @@ fn extract_icon_via_shgetfileinfo(path: &str) -> Result<Vec<u8>, IconError> {
 /// are captured in full rather than truncated to 32x32.
 fn hicon_to_png(
     hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
-    _path: &str,
+    path: &str,
 ) -> Result<Vec<u8>, IconError> {
     use windows::Win32::Graphics::Gdi::{
         BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
-        DeleteObject, GetDIBits, GetObjectW,
+        DeleteObject, GetDIBits, GetObjectW, HBITMAP,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
 
@@ -447,70 +427,298 @@ fn hicon_to_png(
         })?;
     }
 
-    // Detect actual icon bitmap size (Windows may return 48x48 on
-    // 150% DPI scaling).
-    // SAFETY: GetObjectW reads BITMAP from a valid HBITMAP.
-    let icon_size: i32 = unsafe {
-        let mut bm = BITMAP::default();
-        let bytes_written = GetObjectW(
-            icon_info.hbmColor,
-            std::mem::size_of::<BITMAP>() as i32,
-            Some(&mut bm as *mut BITMAP as *mut std::ffi::c_void),
-        );
-        if bytes_written > 0 && bm.bmWidth > 0 && bm.bmHeight > 0 {
-            tracing::info!("HICON actual bitmap size: {}x{}", bm.bmWidth, bm.bmHeight);
-            bm.bmWidth.max(bm.bmHeight)
-        } else {
-            32
-        }
-    };
-
     // SAFETY: CreateCompatibleDC(None) = compatible with the screen DC.
     let hdc = unsafe { CreateCompatibleDC(None) };
+    let pixel_result = (|| -> Result<HiconPixels, IconError> {
+        if hdc.is_invalid() {
+            return Err(IconError::Extract {
+                path: path.to_owned(),
+                win32_error: last_win32_error(),
+            });
+        }
 
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: icon_size,
-            biHeight: -icon_size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+        fn bitmap_dimensions(bitmap: HBITMAP, path: &str) -> Result<(u32, u32), IconError> {
+            if bitmap.is_invalid() {
+                return Err(IconError::Com {
+                    ctx: "hicon_to_png/bitmap_dimensions",
+                    message: format!("missing bitmap for {path}"),
+                });
+            }
+            let mut value = BITMAP::default();
+            // SAFETY: `bitmap` is a live HBITMAP returned by GetIconInfo and
+            // `value` has exactly the size advertised to GetObjectW.
+            let written = unsafe {
+                GetObjectW(
+                    bitmap,
+                    std::mem::size_of::<BITMAP>() as i32,
+                    Some((&mut value as *mut BITMAP).cast()),
+                )
+            };
+            if written != std::mem::size_of::<BITMAP>() as i32 {
+                return Err(IconError::Extract {
+                    path: path.to_owned(),
+                    win32_error: last_win32_error(),
+                });
+            }
+            let width = u32::try_from(value.bmWidth).map_err(|_| IconError::Com {
+                ctx: "hicon_to_png/bitmap_dimensions",
+                message: "bitmap width is not positive".to_owned(),
+            })?;
+            let height = u32::try_from(value.bmHeight).map_err(|_| IconError::Com {
+                ctx: "hicon_to_png/bitmap_dimensions",
+                message: "bitmap height is not positive".to_owned(),
+            })?;
+            checked_icon_pixel_len(width, height).map_err(|message| IconError::Com {
+                ctx: "hicon_to_png/bitmap_dimensions",
+                message: message.to_owned(),
+            })?;
+            Ok((width, height))
+        }
 
-    let mut pixels = vec![0u8; (icon_size * icon_size * 4) as usize];
+        fn read_bgra(
+            hdc: windows::Win32::Graphics::Gdi::HDC,
+            bitmap: HBITMAP,
+            width: u32,
+            height: u32,
+            path: &str,
+        ) -> Result<Vec<u8>, IconError> {
+            let width_i32 = i32::try_from(width).map_err(|_| IconError::Com {
+                ctx: "hicon_to_png/GetDIBits",
+                message: "bitmap width exceeds i32".to_owned(),
+            })?;
+            let height_i32 = i32::try_from(height).map_err(|_| IconError::Com {
+                ctx: "hicon_to_png/GetDIBits",
+                message: "bitmap height exceeds i32".to_owned(),
+            })?;
+            let mut bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width_i32,
+                    biHeight: -height_i32,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels =
+                vec![
+                    0u8;
+                    checked_icon_pixel_len(width, height).map_err(|message| IconError::Com {
+                        ctx: "hicon_to_png/GetDIBits",
+                        message: message.to_owned(),
+                    },)?
+                ];
+            // SAFETY: `bitmap` and `hdc` are live GDI handles. `pixels` is
+            // exactly width * height * 4 bytes and the requested DIB is 32bpp.
+            let rows = unsafe {
+                GetDIBits(
+                    hdc,
+                    bitmap,
+                    0,
+                    height,
+                    Some(pixels.as_mut_ptr().cast()),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                )
+            };
+            if rows != height_i32 {
+                return Err(IconError::Extract {
+                    path: path.to_owned(),
+                    win32_error: last_win32_error(),
+                });
+            }
+            Ok(pixels)
+        }
 
-    // SAFETY: GetDIBits reads `icon_size` rows of pixel data from the
-    // icon's colour bitmap into our pre-sized buffer.
-    unsafe {
-        GetDIBits(
-            hdc,
-            icon_info.hbmColor,
-            0,
-            icon_size as u32,
-            Some(pixels.as_mut_ptr().cast()),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        );
-    }
-
-    // BGRA (Windows bitmap order) → RGBA (PNG/web order).
-    for chunk in pixels.chunks_exact_mut(4) {
-        chunk.swap(0, 2);
-    }
+        if !icon_info.hbmColor.is_invalid() {
+            let (width, height) = bitmap_dimensions(icon_info.hbmColor, path)?;
+            tracing::info!("HICON actual bitmap size: {}x{}", width, height);
+            let mut pixels = read_bgra(hdc, icon_info.hbmColor, width, height, path)?;
+            let all_alpha_zero = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
+            let mask = if all_alpha_zero {
+                let (mask_width, mask_height) = bitmap_dimensions(icon_info.hbmMask, path)?;
+                if mask_width != width || mask_height < height {
+                    return Err(IconError::Com {
+                        ctx: "hicon_to_png/AND-mask dimensions",
+                        message: "colour and AND-mask dimensions differ".to_owned(),
+                    });
+                }
+                Some(read_bgra(hdc, icon_info.hbmMask, width, height, path)?)
+            } else {
+                pixels = super::hicon::render_bgra(hdc, hicon, width, height, path)?;
+                None
+            };
+            normalize_color_bgra_to_rgba(&mut pixels, mask.as_deref(), !all_alpha_zero).map_err(
+                |message| IconError::Com {
+                    ctx: "hicon_to_png/normalise colour",
+                    message: message.to_owned(),
+                },
+            )?;
+            Ok(HiconPixels {
+                rgba: pixels,
+                width,
+                height,
+                invert_mask: None,
+            })
+        } else {
+            let (width, mask_height) = bitmap_dimensions(icon_info.hbmMask, path)?;
+            if mask_height % 2 != 0 {
+                return Err(IconError::Com {
+                    ctx: "hicon_to_png/monochrome dimensions",
+                    message: "monochrome HICON mask height must contain AND and XOR planes"
+                        .to_owned(),
+                });
+            }
+            let height = mask_height / 2;
+            let mask = read_bgra(hdc, icon_info.hbmMask, width, mask_height, path)?;
+            let (pixels, invert_mask) =
+                monochrome_mask_to_rgba(&mask, width, height).map_err(|message| {
+                    IconError::Com {
+                        ctx: "hicon_to_png/normalise monochrome",
+                        message: message.to_owned(),
+                    }
+                })?;
+            Ok(HiconPixels {
+                rgba: pixels,
+                width,
+                height,
+                invert_mask,
+            })
+        }
+    })();
 
     // SAFETY: We own the DC and bitmap handles from GetIconInfo. The
     // HICON itself is owned by the caller (NOT freed here).
     unsafe {
-        let _ = DeleteDC(hdc);
-        let _ = DeleteObject(icon_info.hbmColor);
-        let _ = DeleteObject(icon_info.hbmMask);
+        if !hdc.is_invalid() && !DeleteDC(hdc).as_bool() {
+            tracing::warn!(
+                %path,
+                win32_error = last_win32_error(),
+                "DeleteDC failed after HICON conversion"
+            );
+        }
+        if !icon_info.hbmColor.is_invalid() && !DeleteObject(icon_info.hbmColor).as_bool() {
+            tracing::warn!(
+                %path,
+                win32_error = last_win32_error(),
+                "DeleteObject failed for HICON colour bitmap"
+            );
+        }
+        if !icon_info.hbmMask.is_invalid() && !DeleteObject(icon_info.hbmMask).as_bool() {
+            tracing::warn!(
+                %path,
+                win32_error = last_win32_error(),
+                "DeleteObject failed for HICON mask bitmap"
+            );
+        }
     }
 
-    wic::encode_png(&pixels, icon_size as u32, icon_size as u32)
+    let pixels = pixel_result?;
+    let mut png = wic::encode_png(&pixels.rgba, pixels.width, pixels.height)?;
+    if let Some(bits) = pixels.invert_mask {
+        super::hicon::attach_legacy_invert_mask(&mut png, pixels.width, pixels.height, &bits)
+            .map_err(|message| IconError::Com {
+                ctx: "hicon_to_png/legacy invert mask",
+                message: message.to_owned(),
+            })?;
+    }
+    Ok(png)
+}
+
+pub(super) fn checked_icon_pixel_len(width: u32, height: u32) -> Result<usize, &'static str> {
+    if width == 0 || height == 0 {
+        return Err("icon dimensions must be positive");
+    }
+    if width > MAX_ICON_DIMENSION || height > MAX_ICON_DIMENSION {
+        return Err("icon dimensions exceed the extraction budget");
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("icon pixel buffer length overflow")
+}
+
+fn mask_pixel_is_set(pixel: &[u8]) -> bool {
+    pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0
+}
+
+fn unpremultiply(channel: u8, alpha: u8) -> u8 {
+    if alpha == 0 {
+        0
+    } else if alpha == u8::MAX {
+        channel
+    } else {
+        ((u32::from(channel) * u32::from(u8::MAX) + u32::from(alpha) / 2) / u32::from(alpha))
+            .min(u32::from(u8::MAX)) as u8
+    }
+}
+
+fn normalize_color_bgra_to_rgba(
+    pixels: &mut [u8],
+    and_mask_bgra: Option<&[u8]>,
+    premultiplied: bool,
+) -> Result<(), &'static str> {
+    if pixels.is_empty() || !pixels.len().is_multiple_of(4) {
+        return Err("colour pixel buffer is not complete BGRA data");
+    }
+    let all_alpha_zero = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
+    if all_alpha_zero && and_mask_bgra.is_none_or(|mask| mask.len() != pixels.len()) {
+        return Err("zero-alpha colour icon requires a matching AND mask");
+    }
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let (blue, green, red) = if premultiplied {
+            (
+                unpremultiply(pixel[0], pixel[3]),
+                unpremultiply(pixel[1], pixel[3]),
+                unpremultiply(pixel[2], pixel[3]),
+            )
+        } else {
+            (pixel[0], pixel[1], pixel[2])
+        };
+        pixel[0] = red;
+        pixel[1] = green;
+        pixel[2] = blue;
+        if all_alpha_zero {
+            let mask = and_mask_bgra.ok_or("missing AND mask")?;
+            pixel[3] = if mask_pixel_is_set(&mask[index * 4..index * 4 + 4]) {
+                0
+            } else {
+                u8::MAX
+            };
+        } else if pixel[3] == 0 {
+            pixel[..3].fill(0);
+        }
+    }
+    Ok(())
+}
+
+fn monochrome_mask_to_rgba(
+    mask_bgra: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), &'static str> {
+    let plane_len = checked_icon_pixel_len(width, height)?;
+    if mask_bgra.len() != plane_len.checked_mul(2).ok_or("mask length overflow")? {
+        return Err("monochrome mask does not contain equal AND and XOR planes");
+    }
+    let (and_plane, xor_plane) = mask_bgra.split_at(plane_len);
+    let mut pixels = vec![0u8; plane_len];
+    let mut invert_mask = vec![0u8; (width as usize * height as usize).div_ceil(8)];
+    let mut has_invert = false;
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let and_set = mask_pixel_is_set(&and_plane[index * 4..index * 4 + 4]);
+        let xor_set = mask_pixel_is_set(&xor_plane[index * 4..index * 4 + 4]);
+        let value = if xor_set { u8::MAX } else { 0 };
+        pixel[..3].fill(value);
+        pixel[3] = if and_set { 0 } else { u8::MAX };
+        if and_set && xor_set {
+            invert_mask[index / 8] |= 1 << (index % 8);
+            has_invert = true;
+        }
+    }
+    Ok((pixels, has_invert.then_some(invert_mask)))
 }
 
 /// Wrap `GetLastError()` in plain `u32`. Typed `windows::core::Error`
@@ -523,99 +731,4 @@ fn last_win32_error() -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compute_icon_hash_deterministic() {
-        let hash1 = compute_icon_hash("C:\\Users\\test\\Desktop\\file.txt");
-        let hash2 = compute_icon_hash("C:\\Users\\test\\Desktop\\file.txt");
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn compute_icon_hash_different_paths_differ() {
-        let hash1 = compute_icon_hash("C:\\file_a.txt");
-        let hash2 = compute_icon_hash("C:\\file_b.txt");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn compute_icon_hash_is_hex_string() {
-        let hash = compute_icon_hash("test_path");
-        assert_eq!(hash.len(), 16);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn resolve_lnk_target_returns_none_for_non_lnk() {
-        // Passing a plain file path to a function that internally
-        // initialises COM and asks for IPersistFile::Load on a
-        // non-.lnk should fail-soft and return None.
-        let r = resolve_lnk_target("C:/does-not-exist.txt");
-        assert!(r.is_none());
-    }
-
-    #[test]
-    fn internet_shortcut_parser_reads_explorer_icon_resource() {
-        let parsed = parse_internet_shortcut_icon(
-            "[{000214A0-0000-0000-C000-000000000046}]\r\n\
-             Prop3=19,0\r\n\
-             [InternetShortcut]\r\n\
-             IDList=\r\n\
-             IconIndex=3\r\n\
-             URL=steam://rungameid/843380\r\n\
-             IconFile=D:\\Steam\\steam\\games\\fox.ico\r\n",
-        )
-        .expect("icon resource");
-
-        assert_eq!(parsed.path, "D:\\Steam\\steam\\games\\fox.ico");
-        assert_eq!(parsed.index, 3);
-    }
-
-    #[test]
-    fn internet_shortcut_parser_is_case_insensitive_and_unquotes_path() {
-        let parsed = parse_internet_shortcut_icon(
-            "[internetshortcut]\niconfile=\"C:\\Icons\\game.dll\"\niconindex=-42\n",
-        )
-        .expect("quoted icon resource");
-
-        assert_eq!(parsed.path, "C:\\Icons\\game.dll");
-        assert_eq!(parsed.index, -42);
-    }
-
-    #[test]
-    fn internet_shortcut_parser_ignores_icon_outside_target_section() {
-        assert!(parse_internet_shortcut_icon("[Other]\nIconFile=C:\\wrong.ico\n").is_none());
-    }
-
-    #[test]
-    fn internet_shortcut_decoder_accepts_utf16le_bom() {
-        let source = "[InternetShortcut]\r\nIconFile=C:\\Icons\\fox.ico\r\n";
-        let mut bytes = vec![0xff, 0xfe];
-        for unit in source.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-
-        let decoded = decode_internet_shortcut_text(&bytes).expect("UTF-16LE shortcut");
-        assert_eq!(
-            parse_internet_shortcut_icon(&decoded)
-                .expect("decoded icon")
-                .path,
-            "C:\\Icons\\fox.ico"
-        );
-    }
-
-    #[test]
-    fn internet_shortcut_file_read_is_bounded() {
-        let path =
-            std::env::temp_dir().join(format!("bentodesk-url-limit-{}.url", std::process::id()));
-        let mut content = b"[InternetShortcut]\nIconFile=C:\\Icons\\fox.ico\n".to_vec();
-        content.resize(MAX_INTERNET_SHORTCUT_BYTES + 1, b' ');
-        std::fs::write(&path, content).expect("write shortcut");
-
-        assert!(read_internet_shortcut_icon(&path.to_string_lossy()).is_none());
-
-        let _ = std::fs::remove_file(path);
-    }
-}
+mod tests;

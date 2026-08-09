@@ -265,11 +265,9 @@ pub(super) fn item_icon_startup_rehydrate_force(
     if icon_hash.starts_with("builtin:") {
         return None;
     }
-    let lower = path.to_ascii_lowercase();
-    let shortcut_identity_changed = (lower.ends_with(".lnk") || lower.ends_with(".url"))
-        && !icon_hash.is_empty()
+    let extractor_identity_changed = !icon_hash.is_empty()
         && icon_hash != bentodesk_backend::icon::protocol::icon_cache_key(path);
-    if shortcut_identity_changed {
+    if extractor_identity_changed {
         Some(true)
     } else if icon_hash.is_empty() || !cache_has_icon {
         Some(false)

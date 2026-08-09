@@ -613,5 +613,18 @@ fn settings_source_validation_accepts_real_dirs_dedupes_and_rejects_files() {
         r"c:\windows"
     ));
 
+    snapshot.watch_paths_draft = SmolStr::new("relative-watch");
+    assert!(
+        super::validate_settings_sources_for_locale(&snapshot, true)
+            .expect_err("relative watch path must be rejected before filesystem access")
+            .contains("本地绝对路径")
+    );
+    snapshot.watch_paths_draft = SmolStr::new(r"\\server\share\watch");
+    assert!(
+        super::validate_settings_sources_for_locale(&snapshot, false)
+            .expect_err("UNC watch path must be rejected before filesystem access")
+            .contains("local absolute path")
+    );
+
     let _ = std::fs::remove_dir_all(scratch);
 }

@@ -67,11 +67,15 @@ fn strip_unc_prefix(p: &Path) -> PathBuf {
 
 /// Canonicalise a path for deduplication. If canonicalisation fails (e.g. the
 /// directory does not exist), fall back to the original path so we never
-/// silently drop candidates that simply can't be resolved on the current box.
-fn canonicalize_or_raw(p: &Path) -> PathBuf {
+/// silently drop safe candidates that simply can't be resolved on the current
+/// box. Unsafe candidates are dropped before canonicalisation.
+fn canonicalize_or_raw(p: &Path) -> Option<PathBuf> {
+    if crate::path_may_access_network(p) {
+        return None;
+    }
     match p.canonicalize() {
-        Ok(c) => strip_unc_prefix(&c),
-        Err(_) => p.to_path_buf(),
+        Ok(c) => Some(strip_unc_prefix(&c)),
+        Err(_) => Some(p.to_path_buf()),
     }
 }
 
@@ -133,6 +137,9 @@ pub(crate) fn known_folder_path(
     unsafe { CoTaskMemFree(raw as *const _) };
 
     let path = PathBuf::from(s);
+    if crate::path_may_access_network(&path) {
+        return Ok(None);
+    }
     if path.exists() {
         Ok(Some(path))
     } else {
@@ -169,7 +176,7 @@ fn public_desktop_dir() -> Option<PathBuf> {
         Ok(Some(p)) => Some(p),
         _ => std::env::var_os("PUBLIC")
             .map(|p| PathBuf::from(p).join("Desktop"))
-            .filter(|p| p.exists()),
+            .filter(|p| !crate::path_may_access_network(p) && p.exists()),
     }
 }
 
@@ -182,7 +189,7 @@ fn onedrive_desktop_dir() -> Option<PathBuf> {
     for var in &["OneDrive", "OneDriveConsumer"] {
         if let Some(root) = std::env::var_os(var) {
             let candidate = PathBuf::from(root).join("Desktop");
-            if candidate.exists() {
+            if !crate::path_may_access_network(&candidate) && candidate.exists() {
                 return Some(candidate);
             }
         }
@@ -202,7 +209,9 @@ pub fn all_desktop_dirs(custom: Option<&str>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
 
     let mut push = |candidate: PathBuf| {
-        let canonical = canonicalize_or_raw(&candidate);
+        let Some(canonical) = canonicalize_or_raw(&candidate) else {
+            return;
+        };
         let key = normalize_key(&canonical);
         if !key.is_empty() && seen.insert(key) {
             out.push(canonical);
@@ -282,7 +291,9 @@ pub fn is_under_any_desktop(path: &Path, custom: Option<&str>) -> bool {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => path.to_path_buf(),
     };
-    let parent_canon = canonicalize_or_raw(&parent);
+    let Some(parent_canon) = canonicalize_or_raw(&parent) else {
+        return false;
+    };
     let parent_key = normalize_key(&parent_canon);
     if parent_key.is_empty() {
         return false;
@@ -301,7 +312,9 @@ pub fn is_under_any_desktop(path: &Path, custom: Option<&str>) -> bool {
 /// nested subdirectories. Used by grouping scanners that follow `.bentodesk/`
 /// hidden subdirectories under a managed Desktop.
 pub fn is_inside_any_desktop(path: &Path, custom: Option<&str>) -> bool {
-    let canon = canonicalize_or_raw(path);
+    let Some(canon) = canonicalize_or_raw(path) else {
+        return false;
+    };
     let canon_key = normalize_key(&canon);
     if canon_key.is_empty() {
         return false;
@@ -374,6 +387,42 @@ mod tests {
         let raw = PathBuf::from(r"C:\Users\Alice\Desktop");
         let stripped = strip_unc_prefix(&raw);
         assert_eq!(stripped, raw);
+    }
+
+    #[test]
+    fn background_path_guard_rejects_relative_and_unc_but_accepts_local() {
+        assert!(crate::path_may_access_network(Path::new("Desktop")));
+        assert!(crate::path_may_access_network(Path::new(
+            r"\\server\share\Desktop"
+        )));
+        assert!(!crate::path_may_access_network(
+            &std::env::current_dir().expect("current directory")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_path_guard_rejects_a_real_reparse_prefix_when_available() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = std::env::temp_dir().join(format!(
+            "bentodesk-reparse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let target = root.join("target");
+        let link = root.join("link");
+        std::fs::create_dir_all(&target).expect("create reparse target");
+        if symlink_dir(&target, &link).is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        assert!(crate::path_may_access_network(&link.join("child")));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── M1i — DesktopSourceKind classifier ──────────────────────────────

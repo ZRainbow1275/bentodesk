@@ -81,17 +81,19 @@ fn update_artifact_size_is_bounded() {
 }
 
 #[test]
-fn updater_http_transport_rejects_remote_plaintext() {
-    let remote = parse_http_url("http://example.com/update.json").expect("parse");
-    assert!(matches!(
-        validate_http_transport(&remote, "http://example.com/update.json"),
-        Err(UpdaterError::UnsupportedManifestSource(message))
-            if message.contains("plaintext HTTP")
-    ));
-
-    let loopback = parse_http_url("http://127.0.0.1:8080/update.json").expect("parse");
-    assert!(validate_http_transport(&loopback, "http://127.0.0.1:8080/update.json").is_ok());
-
-    let secure = parse_http_url("https://example.com/update.json").expect("parse");
-    assert!(validate_http_transport(&secure, "https://example.com/update.json").is_ok());
+fn updater_rejects_network_manifest_sources() {
+    let (tx, _rx) = unbounded::<UpdateEvent>();
+    for source in [
+        "https://example.com/update.json",
+        "http://127.0.0.1/update.json",
+        r"\\server\share\update.json",
+        r"file://\\server\share\update.json",
+        r"\\?\UNC\server\share\update.json",
+    ] {
+        let updater = Updater::with_manifest_source(tx.clone(), Some(SmolStr::new(source)));
+        assert!(matches!(
+            updater.load_manifest_text(),
+            Err(UpdaterError::UnsupportedManifestSource(message)) if message == source
+        ));
+    }
 }

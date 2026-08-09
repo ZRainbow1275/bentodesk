@@ -1,0 +1,31 @@
+﻿BentoDesk Privacy Policy
+Effective date: 2 August 2026
+
+This policy describes BentoDesk's data behavior. It is intentionally short because BentoDesk has no server, account system, telemetry, advertising, analytics, or cloud storage.
+
+1. No collection
+
+BentoDesk does not collect, upload, sell, or share personal data or information from your computer. It does not generate device identifiers, usage profiles, analytics events, crash uploads, or remote logs.
+
+2. Fully offline
+
+The BentoDesk process creates no network connection. Core features, settings, icon extraction, search, Zone layout, plugins, backups, and local update-package verification operate entirely on your computer.
+
+Background icon hydration and local update checks reject UNC and mapped-network paths. When you explicitly open an external link or network location, BentoDesk asks Windows to use the corresponding default application. Any subsequent network activity belongs to Windows or that application and the service you chose to visit, not to BentoDesk.
+
+3. Local data
+
+The installed edition normally stores its state in %APPDATA%\BentoDesk. Portable mode stores state in BentoDeskData beside the executable. State can include Zone layout, item paths, display preferences, local icon cache, plugins, and backups.
+
+BentoDesk locally reads Windows desktop metadata and the files or folders you explicitly drag, select, search, or bind. It does not upload their names, paths, icons, or contents.
+
+4. Retention and deletion
+
+Your local state remains until you remove it. Uninstall preserves state by default so a reinstall can restore your layout. The uninstaller offers a separate, unchecked option to delete BentoDesk settings and local cache. That option is confirmed before deletion and never deletes the user-managed desktop files or folders represented by Zones.
+
+5. Contact
+
+Author: Fang Han (方寒)
+Email: hybridrevis@gmail.com
+GitHub: https://github.com/ZRainbow1275
+X: https://x.com/zrainbo (@zrainbo)

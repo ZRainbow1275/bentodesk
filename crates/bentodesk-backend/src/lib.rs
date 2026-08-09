@@ -85,3 +85,83 @@ pub mod timeline;
 pub mod updater;
 pub mod watcher;
 pub mod worker_pool;
+
+/// Return whether automatic background access to `path` must be rejected.
+///
+/// BentoDesk's background workers use this before opening persisted paths so
+/// startup icon hydration and local update checks stay offline. Relative paths,
+/// UNC paths, mapped network drives, and paths containing a Windows reparse
+/// point are rejected; explicit user launches remain owned by the Windows Shell
+/// rather than these background readers.
+pub fn path_may_access_network(path: &std::path::Path) -> bool {
+    #[cfg(not(windows))]
+    {
+        return path.is_relative() || path.to_string_lossy().starts_with(r"\\");
+    }
+
+    #[cfg(windows)]
+    {
+        use std::path::{Component, PathBuf, Prefix};
+
+        // A background worker must never turn an ambiguous path into an OS
+        // lookup. This also rejects drive-relative paths such as `C:foo`.
+        if path.is_relative()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return true;
+        }
+
+        let mut components = path.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return true;
+        };
+        let drive = match prefix.kind() {
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..) => return true,
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            Prefix::Verbatim(..) => return true,
+        };
+        let root = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+        // SAFETY: `root` is a valid, NUL-terminated `X:\\` path. GetDriveTypeW
+        // only classifies the mounted root and does not open the target file.
+        if unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) } == 4
+        // DRIVE_REMOTE
+        {
+            return true;
+        }
+
+        let mut current = PathBuf::from(prefix.as_os_str());
+        let Some(Component::RootDir) = components.next() else {
+            return true;
+        };
+        current.push(std::path::MAIN_SEPARATOR_STR);
+        if windows_path_has_reparse_attribute(&current) {
+            return true;
+        }
+        for component in components {
+            current.push(component.as_os_str());
+            if windows_path_has_reparse_attribute(&current) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_has_reparse_attribute(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetFileAttributesW;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 path that lives for the
+    // call. We inspect each already-built prefix before any std::fs operation
+    // can follow it.
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    attributes != u32::MAX && attributes & 0x0000_0400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+}

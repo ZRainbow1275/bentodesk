@@ -1,0 +1,37 @@
+﻿BentoDesk User Agreement
+Effective date: 2 August 2026
+
+Please read this agreement before installing BentoDesk. By selecting the acceptance checkbox and continuing, you confirm that you have read and accepted these terms.
+
+1. Software and license
+
+BentoDesk is a native Windows desktop organizer maintained by Fang Han. Its source code is licensed under the GNU Affero General Public License, version 3 or any later version (AGPL-3.0-or-later). The AGPL governs your rights to use, study, modify, and redistribute the software. This agreement does not reduce the rights granted by that license.
+
+2. Local operation
+
+BentoDesk runs fully offline. It does not require an account or cloud service and does not collect or transmit personal data, device identifiers, usage analytics, crash reports, file lists, file contents, or any other information from your computer.
+
+To provide its desktop-organizing features, BentoDesk reads local desktop metadata and the files or folders you explicitly drag, select, or bind. This processing stays on your computer. External links and network locations are opened only after your explicit action and are handed to the corresponding default Windows application; any network access then belongs to Windows or that application, not to BentoDesk.
+
+3. Files and settings
+
+BentoDesk uses Windows Shell operations for file interaction. A normal drag can move an item; holding Ctrl requests a copy. Keep independent backups of important files before reorganizing them.
+
+Application settings are stored locally. The uninstaller preserves them by default. They are removed only when you explicitly select the data-removal option and confirm it. Removing BentoDesk settings never authorizes deletion of the desktop files or folders represented inside a Zone.
+
+4. Updates
+
+BentoDesk does not contact an update server. New versions are distributed through the official GitHub Releases page and can be downloaded and installed at your discretion.
+
+5. Warranty and liability
+
+BentoDesk is provided without warranty, to the extent permitted by applicable law. The warranty and liability terms of the AGPL apply. Nothing in this agreement excludes rights that cannot legally be excluded.
+
+6. Author and contact
+
+Author: Fang Han (方寒)
+Email: hybridrevis@gmail.com
+GitHub: https://github.com/ZRainbow1275
+X: https://x.com/zrainbo (@zrainbo)
+
+If you do not accept these terms, cancel the installation.

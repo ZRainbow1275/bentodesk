@@ -139,11 +139,15 @@ pub(super) fn artifact_source_path(source: &str) -> Result<PathBuf, UpdaterError
     if source.contains("://") && !source.starts_with("file://") {
         return Err(UpdaterError::UnsupportedManifestSource(source.to_owned()));
     }
-    if let Some(rest) = source.strip_prefix("file://") {
-        Ok(PathBuf::from(rest))
+    let path = if let Some(rest) = source.strip_prefix("file://") {
+        PathBuf::from(rest)
     } else {
-        Ok(PathBuf::from(source))
+        PathBuf::from(source)
+    };
+    if crate::path_may_access_network(&path) {
+        return Err(UpdaterError::UnsupportedManifestSource(source.to_owned()));
     }
+    Ok(path)
 }
 
 pub(super) fn copy_artifact_to_stage(
@@ -152,9 +156,6 @@ pub(super) fn copy_artifact_to_stage(
     event_tx: &Sender<UpdateEvent>,
 ) -> Result<(), UpdaterError> {
     let source = source.trim();
-    if source.starts_with("http://") || source.starts_with("https://") {
-        return copy_http_artifact_to_stage_winhttp(source, stage_path, event_tx);
-    }
     let source_path = artifact_source_path(source)?;
     let mut input = File::open(&source_path).map_err(|error| {
         UpdaterError::FetchFailed(format!("{}: {error}", source_path.display()))
@@ -566,7 +567,6 @@ pub(super) fn validate_staged_installer(path: &Path) -> Result<(), UpdaterError>
 
 pub(super) fn launch_nsis_installer(path: &Path) -> Result<(), UpdaterError> {
     ProcessCommand::new(path)
-        .arg("/S")
         .spawn()
         .map(|_| ())
         .map_err(|error| UpdaterError::InstallFailed(format!("{}: {error}", path.display())))

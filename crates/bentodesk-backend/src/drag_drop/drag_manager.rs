@@ -20,6 +20,28 @@ use windows::Win32::{
 };
 use windows::core::{HRESULT, Interface};
 
+/// Balances every successful `OleInitialize`, including `S_FALSE`, after all
+/// COM drag objects declared later in the scope have been released.
+struct OleApartmentGuard;
+
+impl OleApartmentGuard {
+    fn initialize() -> Result<Self, HRESULT> {
+        // SAFETY: the matching OleUninitialize is owned by this guard on the
+        // same thread.
+        unsafe { OleInitialize(None) }
+            .map(|()| Self)
+            .map_err(|error| error.code())
+    }
+}
+
+impl Drop for OleApartmentGuard {
+    fn drop(&mut self) {
+        // SAFETY: this guard exists only after a successful OleInitialize on
+        // this thread and is dropped on that same thread.
+        unsafe { OleUninitialize() };
+    }
+}
+
 /// Errors surfaced by [`start_drag_operation`].
 #[derive(Debug)]
 pub enum DragDropError {
@@ -95,7 +117,7 @@ fn log_drag_proof(msg: &str) {
 /// - `Err(DragDropError::NoFiles)` if `file_paths` is empty.
 /// - `Err(DragDropError::Unexpected(hr))` for any other HRESULT.
 pub fn start_drag_operation(file_paths: &[String]) -> Result<DragOutcome, DragDropError> {
-    start_drag_operation_inner(file_paths, None)
+    start_drag_operation_inner(file_paths, None, false)
 }
 
 /// Initiate an OLE drag-and-drop operation for the given file paths using the
@@ -103,13 +125,15 @@ pub fn start_drag_operation(file_paths: &[String]) -> Result<DragOutcome, DragDr
 ///
 /// The source HWND lets the dedicated STA worker attach to the selected-stack
 /// input thread and keep diagnostics tied to the real BentoDesk window while
-/// `DoDragDrop` still uses BentoDesk's own `IDropSource` semantics.
+/// `DoDragDrop` still uses BentoDesk's own `IDropSource` semantics. `copy_only`
+/// maps the captured Ctrl modifier to COPY; the ordinary gesture prefers MOVE.
 pub fn start_drag_operation_from_hwnd(
     file_paths: &[String],
     source_hwnd: isize,
+    copy_only: bool,
 ) -> Result<DragOutcome, DragDropError> {
     if source_hwnd == 0 {
-        return start_drag_operation_inner(file_paths, None);
+        return start_drag_operation_inner(file_paths, None, copy_only);
     }
     if file_paths.is_empty() {
         return Err(DragDropError::NoFiles);
@@ -138,7 +162,7 @@ pub fn start_drag_operation_from_hwnd(
                 )
                 .as_str(),
             );
-            return start_drag_operation_inner(file_paths, Some(hwnd));
+            return start_drag_operation_inner(file_paths, Some(hwnd), copy_only);
         }
         log_drag_proof(
             format!(
@@ -155,7 +179,7 @@ pub fn start_drag_operation_from_hwnd(
         .name("bentodesk-ole-drag-out".to_owned())
         .spawn(move || {
             let worker_hwnd = HWND(source_hwnd_bits as *mut core::ffi::c_void);
-            start_drag_operation_inner(paths.as_slice(), Some(worker_hwnd))
+            start_drag_operation_inner(paths.as_slice(), Some(worker_hwnd), copy_only)
         })
         .map_err(|_| DragDropError::WorkerSpawn)?;
     worker.join().map_err(|_| DragDropError::WorkerPanicked)?
@@ -185,9 +209,30 @@ fn classify_drag_result(
     }
 }
 
+fn preferred_drop_effect(copy_only: bool) -> DROPEFFECT {
+    if copy_only {
+        DROPEFFECT_COPY
+    } else {
+        DROPEFFECT_MOVE
+    }
+}
+
+fn resolved_drop_effect(
+    raw: DROPEFFECT,
+    logical: Option<DROPEFFECT>,
+    performed: Option<DROPEFFECT>,
+) -> DROPEFFECT {
+    [logical, performed, Some(raw)]
+        .into_iter()
+        .flatten()
+        .find(|effect| *effect == DROPEFFECT_MOVE || *effect == DROPEFFECT_COPY)
+        .unwrap_or(raw)
+}
+
 fn start_drag_operation_inner(
     file_paths: &[String],
     source_hwnd: Option<HWND>,
+    copy_only: bool,
 ) -> Result<DragOutcome, DragDropError> {
     if file_paths.is_empty() {
         return Err(DragDropError::NoFiles);
@@ -215,12 +260,13 @@ fn start_drag_operation_inner(
     unsafe {
         // `DoDragDrop` requires OLE initialisation, not just plain COM STA.
         // This worker owns its OLE apartment for the duration of the drag.
-        if let Err(err) = OleInitialize(None) {
-            log_drag_proof(
-                format!("drag_drop: OleInitialize failed hr={:?}\n", err.code()).as_str(),
-            );
-            return Err(DragDropError::Unexpected(err.code()));
-        }
+        let _ole_apartment = match OleApartmentGuard::initialize() {
+            Ok(guard) => guard,
+            Err(hr) => {
+                log_drag_proof(format!("drag_drop: OleInitialize failed hr={hr:?}\n").as_str());
+                return Err(DragDropError::Unexpected(hr));
+            }
+        };
         log_drag_proof("drag_drop: OleInitialize ok\n");
 
         // Ensure the dedicated STA worker has a message queue before entering
@@ -237,8 +283,17 @@ fn start_drag_operation_inner(
         let left_state = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01);
         log_drag_proof(format!("drag_drop: VK_LBUTTON state=0x{left_state:x}\n").as_str());
 
-        let data_object: IDataObject = super::data_object::create_drag_data_object(file_paths)
-            .map_err(|err| DragDropError::Unexpected(err.code()))?;
+        let preferred_effect = preferred_drop_effect(copy_only);
+        log_drag_proof(
+            format!(
+                "drag_drop: intent copy_only={} preferred_effect={preferred_effect:?}\n",
+                copy_only
+            )
+            .as_str(),
+        );
+        let data_object: IDataObject =
+            super::data_object::create_drag_data_object(file_paths, preferred_effect)
+                .map_err(|err| DragDropError::Unexpected(err.code()))?;
 
         let source_window_drag = source_hwnd.is_some();
         let mut attached_source_thread = None;
@@ -321,13 +376,19 @@ fn start_drag_operation_inner(
             );
         }
 
-        OleUninitialize();
-
-        let (hr, effect) = match drag_result {
+        let (hr, raw_effect) = match drag_result {
             Ok(value) => value,
             Err(hr) => return Err(DragDropError::Unexpected(hr)),
         };
-
+        let (logical_effect, performed_effect) =
+            super::data_object::reported_drop_effects(&data_object);
+        let effect = resolved_drop_effect(raw_effect, logical_effect, performed_effect);
+        log_drag_proof(
+            format!(
+                "drag_drop: effect feedback raw={raw_effect:?} logical={logical_effect:?} performed={performed_effect:?} resolved={effect:?}\n"
+            )
+            .as_str(),
+        );
         match classify_drag_result(hr, effect, source_window_drag) {
             Ok(outcome @ (DragOutcome::Copied | DragOutcome::Moved | DragOutcome::Dropped)) => {
                 tracing::info!("drag_drop: completed (effect = {:?})", effect);
@@ -384,6 +445,24 @@ mod tests {
         assert!(should_run_drag_inline_for_source_thread(42, 42));
         assert!(!should_run_drag_inline_for_source_thread(0, 42));
         assert!(!should_run_drag_inline_for_source_thread(7, 42));
+    }
+
+    #[test]
+    fn ctrl_selects_copy_and_default_selects_move_preference() {
+        assert_eq!(preferred_drop_effect(true), DROPEFFECT_COPY);
+        assert_eq!(preferred_drop_effect(false), DROPEFFECT_MOVE);
+    }
+
+    #[test]
+    fn shell_feedback_recovers_optimized_move_when_raw_effect_is_none() {
+        assert_eq!(
+            resolved_drop_effect(DROPEFFECT(0), Some(DROPEFFECT_MOVE), Some(DROPEFFECT(0)),),
+            DROPEFFECT_MOVE
+        );
+        assert_eq!(
+            resolved_drop_effect(DROPEFFECT_COPY, None, None),
+            DROPEFFECT_COPY
+        );
     }
 
     #[test]

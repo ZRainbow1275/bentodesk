@@ -13,6 +13,7 @@
     <a href="https://github.com/ZRainbow1275/bentodesk/releases/latest"><strong>Download</strong></a> ·
     <a href="docs/media/desktop-tour.mp4">Watch the full tour</a> ·
     <a href="#the-motion-is-the-interface">See how it works</a> ·
+    <a href="installer/legal/PrivacyPolicy.en.txt">Privacy</a> ·
     <a href="#building-from-source">Build from source</a> ·
     <a href="#contributing">Contributing</a>
   </p>
@@ -167,17 +168,21 @@ around that job.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.6-windows-x64-portable.zip` from
-   [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest).
-2. Check the archive against `SHA256SUMS.txt`, extract it to a writable
-   directory, and run `BentoDesk.exe`.
+1. Download `BentoDesk-2.0.7-windows-x64-setup.exe` from
+   [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest), then
+   review and accept the User Agreement and Privacy Policy in Setup. The
+   portable ZIP remains available for a no-install workflow.
+2. Check the chosen package against `SHA256SUMS.txt`, then install it or extract
+   the portable ZIP to a writable directory.
 3. Create or manage Zones from the tray menu.
 4. Drag files, folders, or shortcuts into a Zone.
 5. Choose a theme, expansion mode, and language in Settings.
 
-The portable package needs no Node.js, Tauri, WebView2, or separate browser
-runtime. State lives in the current user profile by default; portable mode can
-keep it beside the executable.
+Neither package needs Node.js, Tauri, WebView2, or a separate browser runtime.
+BentoDesk is fully offline and contains no telemetry. Setup preserves local
+settings on uninstall by default; its separate, unchecked removal option only
+deletes BentoDesk state. See the [User Agreement](installer/legal/UserAgreement.en.txt)
+and [Privacy Policy](installer/legal/PrivacyPolicy.en.txt).
 
 ### Requirements
 
@@ -206,7 +211,7 @@ One isolated run of the public BentoDesk 2.0.2 Windows x64 release at
 | Graphics | Direct2D, DirectWrite, DirectComposition, D3D11 |
 | Icons and images | Windows Imaging Component, Windows Shell |
 | File interaction | Shell/OLE, `ReadDirectoryChangesW` |
-| Network and system security | WinHTTP, DPAPI |
+| Offline and system security | No network client, DPAPI |
 | Data | Atomic local persistence, encrypted settings vault |
 | Build | MSVC x64, static CRT, size optimization, Fat LTO |
 

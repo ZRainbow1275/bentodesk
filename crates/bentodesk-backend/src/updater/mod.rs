@@ -2,8 +2,8 @@
 //!
 //! Per the 2026-05-03 team-lead Q3 ruling (`feedback_compiles_clean_stub_during_multi_agent_coord.md`,
 //! sanctioned), the initial updater slice shipped IPC scaffolding first. The
-//! selected-stack manifest check is now implemented with a minimal WinHTTP/file
-//! loader; local/file and remote HTTP(S) artifact staged downloads are real;
+//! selected-stack manifest check is implemented with a bounded local-file
+//! loader; local/file artifact staging is real and deliberately offline;
 //! local NSIS installer launch is real; artifact SHA-256 integrity verification
 //! is real when a manifest supplies a digest; manifests that carry a
 //! Tauri/minisign signature are verified against the embedded BentoDesk public
@@ -22,15 +22,15 @@
 //!   `skip_version()` / `current_skipped()` entry points so callers compile
 //!   against the final v2.x surface.
 //! - Manifest check through `BENTODESK_UPDATE_MANIFEST_URL`, supporting
-//!   `https://`, loopback-only `http://`, `file://`, and plain filesystem
-//!   paths. The parser accepts both selected-stack flat artifact fields and
+//!   `file://` and plain filesystem paths only. The parser accepts both selected-stack flat artifact fields and
 //!   Tauri v2 static `platforms.windows-x86_64` artifact entries.
-//! - Local/file and remote HTTP(S) `.exe` artifact staging requires a manifest
+//! - Local/file `.exe` artifact staging requires a manifest
 //!   SHA-256 digest or minisign signature before the staged artifact becomes
 //!   installable. Signatures are streamed through minisign verification using
 //!   the embedded BentoDesk updater public key.
-//! - NSIS `/S` launch for the install step. The shell quits after a successful
-//!   launch so the installer can replace files.
+//! - Interactive NSIS launch for the install step. The user must review the
+//!   installer legal pages; the shell quits after a successful launch so the
+//!   installer can replace files.
 //! - Background one-shot and recurring automatic checks, using the same
 //!   manifest check path and typed event channel as visible checks.
 //! - [`check_interval_hours`] preserved verbatim — it's pure-logic settings
@@ -135,7 +135,7 @@ impl core::fmt::Display for UpdaterError {
             }
             Self::UnsupportedManifestSource(source) => write!(
                 f,
-                "unsupported updater manifest source '{source}' (expected http://, https://, file://, or a filesystem path)"
+                "unsupported updater manifest source '{source}' (expected file:// or a filesystem path)"
             ),
         }
     }
@@ -205,9 +205,8 @@ impl Updater {
     /// manifest version is not newer than the current build, or when the user
     /// has skipped the manifest version.
     ///
-    /// Network checks use WinHTTP for `https://` and loopback-only `http://`
-    /// sources. Local `file://` and plain path sources exist for internal
-    /// channels and tests.
+    /// Only local `file://` and plain path sources are accepted. BentoDesk does
+    /// not open network connections for update checks or downloads.
     pub fn check(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
         let manifest_text = match self.load_manifest_text() {
             Ok(Some(manifest_text)) => manifest_text,
@@ -300,9 +299,9 @@ impl Updater {
     ///
     /// The selected-stack shell owns the actual app quit/restart decision.
     /// This backend method validates that a local/file `.exe` artifact was
-    /// staged, launches it with the NSIS silent flag (`/S`), and emits
-    /// [`UpdateEvent::Installing`]. The shell responds by quitting the message
-    /// loop so the installer can replace files.
+    /// staged, launches the NSIS UI, and emits [`UpdateEvent::Installing`]. The
+    /// shell responds by quitting the message loop so the installer can replace
+    /// files. Legal acceptance is never synthesized by the updater.
     pub fn install(&self) -> Result<(), UpdaterError> {
         self.install_with_launcher(launch_nsis_installer)
     }
@@ -480,16 +479,7 @@ impl Updater {
         if source.is_empty() {
             return Ok(None);
         }
-        if source.starts_with("http://") || source.starts_with("https://") {
-            return fetch_manifest_winhttp(source).map(Some);
-        }
-        let path = if let Some(rest) = source.strip_prefix("file://") {
-            PathBuf::from(rest)
-        } else if source.contains("://") {
-            return Err(UpdaterError::UnsupportedManifestSource(source.to_owned()));
-        } else {
-            PathBuf::from(source)
-        };
+        let path = artifact_source_path(source)?;
         let mut text = String::new();
         File::open(&path)
             .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", path.display())))?
@@ -508,10 +498,8 @@ impl Updater {
 }
 
 mod artifact;
-mod http;
 
 use artifact::*;
-use http::*;
 
 /// Hours between automatic update checks for the chosen frequency. Returns
 /// `None` for `Manual`. Unchanged from 1.x.

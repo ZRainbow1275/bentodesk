@@ -46,6 +46,7 @@ pub enum LiveFolderError {
     EmptyPath,
     NotFound(PathBuf),
     NotADirectory(PathBuf),
+    UnsafePath(PathBuf),
     Blacklisted(PathBuf),
     DriveRoot(PathBuf),
     NotInitialised,
@@ -59,6 +60,13 @@ impl core::fmt::Display for LiveFolderError {
             Self::EmptyPath => f.write_str("empty folder path"),
             Self::NotFound(p) => write!(f, "folder does not exist: {}", p.display()),
             Self::NotADirectory(p) => write!(f, "not a directory: {}", p.display()),
+            Self::UnsafePath(p) => {
+                write!(
+                    f,
+                    "refusing to access a non-local or reparse folder: {}",
+                    p.display()
+                )
+            }
             Self::Blacklisted(p) => {
                 write!(f, "refusing to bind system folder: {}", p.display())
             }
@@ -86,6 +94,9 @@ pub fn validate_folder(path: &Path) -> Result<(), LiveFolderError> {
     let p = path.to_string_lossy().to_string();
     if p.is_empty() {
         return Err(LiveFolderError::EmptyPath);
+    }
+    if crate::path_may_access_network(path) {
+        return Err(LiveFolderError::UnsafePath(path.to_path_buf()));
     }
     if !path.exists() {
         return Err(LiveFolderError::NotFound(path.to_path_buf()));
@@ -272,6 +283,45 @@ mod tests {
             validate_folder(&p),
             Err(LiveFolderError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn rejects_relative_and_unc_before_filesystem_access() {
+        for path in [
+            Path::new("relative-live-folder"),
+            Path::new(r"\\server\share\folder"),
+        ] {
+            assert!(matches!(
+                validate_folder(path),
+                Err(LiveFolderError::UnsafePath(_))
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_reparse_folder_before_following_it() {
+        use std::os::windows::fs::symlink_dir;
+
+        let root = std::env::temp_dir().join(format!(
+            "bentodesk-live-folder-reparse-{}",
+            std::process::id()
+        ));
+        let target = root.join("target");
+        let link = root.join("link");
+        std::fs::create_dir_all(&target).expect("create reparse target");
+        if symlink_dir(&target, &link).is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        assert!(matches!(
+            validate_folder(&link),
+            Err(LiveFolderError::UnsafePath(_))
+        ));
+
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

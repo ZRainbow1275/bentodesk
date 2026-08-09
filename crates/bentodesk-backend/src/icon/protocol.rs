@@ -28,6 +28,7 @@ use super::extractor;
 use super::{IconConfig, IconError, custom_icons};
 
 const INTERNET_SHORTCUT_ICON_CACHE_REVISION: &str = "internet-shortcut-icon-resource-v1";
+const NATIVE_ICON_EXTRACTOR_CACHE_REVISION: &str = "native-hicon-alpha-mask-v3";
 
 /// Status code mirroring the 1.x HTTP response shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,8 +130,12 @@ fn extract_and_cache_inner(
 
     if force {
         cache.remove(&hash);
-        // Remove the pre-fix target-keyed entry as well. This is intentionally
-        // migration-only: normal lookups never key a shortcut by its target.
+        // Remove pre-revision entries as well. Normal lookups use only the
+        // current key; this keeps explicit refreshes from retaining bad PNGs.
+        let legacy_path_hash = extractor::compute_icon_hash(path);
+        if legacy_path_hash != hash {
+            cache.remove(&legacy_path_hash);
+        }
         let lower = path.to_ascii_lowercase();
         if lower.ends_with(".lnk")
             && let Some(target) = extractor::resolve_lnk_target(path)
@@ -140,7 +145,9 @@ fn extract_and_cache_inner(
                 cache.remove(&legacy_target_hash);
             }
         } else if lower.ends_with(".url") {
-            let legacy_url_hash = extractor::compute_icon_hash(path);
+            let legacy_url_hash = extractor::compute_icon_hash(
+                format!("{INTERNET_SHORTCUT_ICON_CACHE_REVISION}\0{path}").as_str(),
+            );
             if legacy_url_hash != hash {
                 cache.remove(&legacy_url_hash);
             }
@@ -157,18 +164,18 @@ fn extract_and_cache_inner(
 /// Return the stable cache identity for a concrete item path.
 ///
 /// Shortcut identity intentionally belongs to the shortcut itself rather than
-/// its resolved target because Explorer can assign a per-shortcut icon. `.url`
-/// keys carry an extractor revision so installations with the former generic
-/// URL-file icon perform one bounded startup refresh without invalidating all
-/// other cached file icons.
+/// its resolved target because Explorer can assign a per-shortcut icon. Every
+/// key carries the native extractor revision so a corrected alpha/mask decoder
+/// replaces stale warm-cache PNGs once without requiring a manual cache wipe.
 pub fn icon_cache_key(path: &str) -> String {
-    if path.to_ascii_lowercase().ends_with(".url") {
-        extractor::compute_icon_hash(
-            format!("{INTERNET_SHORTCUT_ICON_CACHE_REVISION}\0{path}").as_str(),
+    let identity = if path.to_ascii_lowercase().ends_with(".url") {
+        format!(
+            "{NATIVE_ICON_EXTRACTOR_CACHE_REVISION}\0{INTERNET_SHORTCUT_ICON_CACHE_REVISION}\0{path}"
         )
     } else {
-        extractor::compute_icon_hash(path)
-    }
+        format!("{NATIVE_ICON_EXTRACTOR_CACHE_REVISION}\0{path}")
+    };
+    extractor::compute_icon_hash(&identity)
 }
 
 #[cfg(test)]
@@ -217,7 +224,7 @@ mod tests {
         // needs a real file + Win32 shell), so we only verify the
         // skip-when-cached branch.
         let path = "C:/test/file.txt";
-        let h = extractor::compute_icon_hash(path);
+        let h = icon_cache_key(path);
         cache.put(h.clone(), vec![1, 2, 3]);
         let got = extract_and_cache(&cache, path).expect("hit");
         assert_eq!(got, h);
@@ -235,16 +242,20 @@ mod tests {
     }
 
     #[test]
-    fn internet_shortcut_cache_identity_revisions_the_legacy_generic_icon() {
+    fn native_cache_identity_revisions_legacy_pngs_for_every_path_kind() {
         let path = "C:/Desktop/Game.url";
         let legacy = extractor::compute_icon_hash(path);
         let current = icon_cache_key(path);
 
         assert_ne!(current, legacy);
         assert_eq!(current, icon_cache_key(path));
-        assert_eq!(
+        assert_ne!(
             icon_cache_key("C:/Desktop/Game.lnk"),
             extractor::compute_icon_hash("C:/Desktop/Game.lnk")
+        );
+        assert_ne!(
+            icon_cache_key("C:/Desktop/Game.exe"),
+            extractor::compute_icon_hash("C:/Desktop/Game.exe")
         );
     }
 }

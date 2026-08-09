@@ -164,7 +164,25 @@ impl Renderer {
             let Some(surface) = self.surface.as_ref() else {
                 return Ok(false);
             };
-            match d2d::bitmap_from_png_bytes(&surface.ctx, bytes.as_ref()) {
+            let decoded =
+                d2d::bitmap_from_png_bytes(&surface.ctx, bytes.as_ref()).and_then(|bitmap| {
+                    let invert_mask = bentodesk_backend::icon::legacy_invert_mask(bytes.as_ref())
+                        .map(|(width, height, bits)| {
+                            d2d::invert_mask_effect(&surface.ctx, width, height, bits).map(
+                                |effect| CachedInvertMask {
+                                    effect,
+                                    width,
+                                    height,
+                                },
+                            )
+                        })
+                        .transpose()?;
+                    Ok(CachedIconBitmap {
+                        bitmap,
+                        invert_mask,
+                    })
+                });
+            match decoded {
                 Ok(bitmap) => {
                     if self.icon_bitmaps.len() >= ICON_BITMAP_CACHE_CAPACITY
                         && let Some(oldest) = self.icon_bitmaps.keys().next().cloned()
@@ -198,7 +216,17 @@ impl Renderer {
         let Some(surface) = self.surface.as_ref() else {
             return Ok(false);
         };
-        d2d::draw_bitmap(&surface.ctx, &bitmap, d2d_rect, opacity)?;
+        d2d::draw_bitmap(&surface.ctx, &bitmap.bitmap, d2d_rect, opacity)?;
+        if let Some(mask) = bitmap.invert_mask.as_ref() {
+            d2d::draw_invert_mask(
+                &surface.ctx,
+                &mask.effect,
+                mask.width,
+                mask.height,
+                d2d_rect,
+                opacity,
+            )?;
+        }
         Ok(true)
     }
 

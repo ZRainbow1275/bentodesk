@@ -9,6 +9,18 @@ pub(super) fn preferred_drop_effect_format() -> u16 {
     unsafe { RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT) as u16 }
 }
 
+pub(super) fn performed_drop_effect_format() -> u16 {
+    // SAFETY: `CFSTR_PERFORMEDDROPEFFECT` is a process-static, null-terminated
+    // Shell clipboard format name. Re-registration returns the existing atom.
+    unsafe { RegisterClipboardFormatW(CFSTR_PERFORMEDDROPEFFECT) as u16 }
+}
+
+pub(super) fn logical_performed_drop_effect_format() -> u16 {
+    // SAFETY: `CFSTR_LOGICALPERFORMEDDROPEFFECT` is process-static and maps to
+    // the same clipboard atom when registered more than once.
+    unsafe { RegisterClipboardFormatW(CFSTR_LOGICALPERFORMEDDROPEFFECT) as u16 }
+}
+
 pub(super) fn shell_id_list_array_format() -> u16 {
     // SAFETY: `CFSTR_SHELLIDLIST` is a process-static, null-terminated Shell
     // clipboard format name. Registering the same name repeatedly returns the

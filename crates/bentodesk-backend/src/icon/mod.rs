@@ -56,9 +56,13 @@ pub mod cache;
 pub mod cache_tier;
 pub mod custom_icons;
 pub mod extractor;
+mod hicon;
 pub mod protocol;
+mod shortcut;
 pub mod stats;
 pub mod svg_sanitize;
+
+pub use hicon::legacy_invert_mask;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{HashMap, VecDeque};
