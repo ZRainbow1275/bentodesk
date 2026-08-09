@@ -31,6 +31,12 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: Isolate BentoDesk test state
+        shell: pwsh
+        run: |
+          $stateDir = Join-Path $env:RUNNER_TEMP 'bentodesk-test-state'
+          "BENTODESK_STATE_DIR=$stateDir" >> $env:GITHUB_ENV
+
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
