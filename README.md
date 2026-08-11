@@ -168,7 +168,7 @@ around that job.
 
 ## Quick start
 
-1. Download `BentoDesk-2.0.8-windows-x64-setup.exe` from
+1. Download `BentoDesk-2.0.9-windows-x64-setup.exe` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest), then
    review and accept the User Agreement and Privacy Policy in Setup. The
    portable ZIP remains available for a no-install workflow.
@@ -276,9 +276,10 @@ Report security issues through GitHub's private channel described in
 
 Thanks to GPT 5.6 SOL for the help, to
 [Tibo](https://x.com/thsottiaux) for the frequent resets that sped up
-BentoDesk's release and polish, and to the
-[Linux Do](https://linux.do/) community for its discussion, testing, and
-candid feedback.
+BentoDesk's release and polish.
+
+Thanks to [Linux Do](https://linux.do/), [NodeSeek](https://www.nodeseek.com/),
+and other communities for their support.
 
 <p align="center">
   <img src="docs/media/tibo-reset.webp" width="160" alt="Tibo reset meme">
