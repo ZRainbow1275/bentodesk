@@ -155,7 +155,7 @@ BentoDesk 刻意保持专注：只支持 Windows，不替代 Explorer，也不�
 ## 快速开始
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-   下载 `BentoDesk-2.0.8-windows-x64-setup.exe`，在安装程序中阅读并同意用户
+   下载 `BentoDesk-2.0.9-windows-x64-setup.exe`，在安装程序中阅读并同意用户
    协议与隐私政策；如不想安装，也可选择便携 ZIP；
 2. 使用同页 `SHA256SUMS.txt` 校验所选安装包或便携包，然后安装或解压；
 3. 从托盘菜单新建或管理 Zone；
