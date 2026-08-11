@@ -276,9 +276,9 @@ Report security issues through GitHub's private channel described in
 
 Thanks to GPT 5.6 SOL for the help, to
 [Tibo](https://x.com/thsottiaux) for the frequent resets that sped up
-BentoDesk's release and polish, and to the
-[Linux Do](https://linux.do/) community for its discussion, testing, and
-candid feedback.
+BentoDesk's release and polish.
+
+Thanks to Linux Do, NodeSeek, and other communities for their support.
 
 <p align="center">
   <img src="docs/media/tibo-reset.webp" width="160" alt="Tibo reset meme">

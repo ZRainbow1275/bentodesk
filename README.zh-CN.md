@@ -258,8 +258,9 @@ Issue。
 ## 致谢
 
 感谢GPT 5.6 SOL的帮助，以及[Tibo](https://x.com/thsottiaux)多次频繁的reset，
-大大加快了本项目的面世和完善。也感谢
-[Linux Do](https://linux.do/) 社区一路以来的讨论、测试与直率反馈。
+大大加快了本项目的面世和完善。
+
+感谢 Linux Do、NodeSeek 等社区的支持。
 
 <p align="center">
   <img src="docs/media/tibo-reset.webp" width="160" alt="Tibo reset 搞怪图">
