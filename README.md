@@ -278,7 +278,8 @@ Thanks to GPT 5.6 SOL for the help, to
 [Tibo](https://x.com/thsottiaux) for the frequent resets that sped up
 BentoDesk's release and polish.
 
-Thanks to Linux Do, NodeSeek, and other communities for their support.
+Thanks to [Linux Do](https://linux.do/), [NodeSeek](https://www.nodeseek.com/),
+and other communities for their support.
 
 <p align="center">
   <img src="docs/media/tibo-reset.webp" width="160" alt="Tibo reset meme">
