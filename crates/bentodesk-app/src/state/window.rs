@@ -6,10 +6,9 @@ use super::*;
 #[derive(Debug)]
 pub struct WindowState {
     pub layout: LayoutEngine,
-    /// `false` until `Renderer::render` has had one chance to call
-    /// `storage::read_zones` against `app.zones_path`. Subsequent paints
-    /// short-circuit. Failure to load (corrupt / missing) still flips this
-    /// — empty zones is the recovery path (Ruling A: silent continue).
+    /// `false` until `load_zones_once` has checked `app.zones_path`. The shell
+    /// calls it before Main's first draw; `Renderer::render` retains a fallback
+    /// for other consumers. Failure still flips this so paints never retry.
     pub loaded: Cell<bool>,
     /// Phase 2.3.1a — current device DPI for this HWND (PER_MONITOR_AWARE_V2).
     /// Updated by the shell on `WM_DPICHANGED` and seeded once after window
@@ -66,6 +65,22 @@ impl Default for WindowState {
 impl WindowState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load persisted Zones once before this HWND's first draw.
+    pub fn load_zones_once(&self, app: &mut AppState) {
+        if self.loaded.replace(true) || app.zones_path.as_os_str().is_empty() {
+            return;
+        }
+        match bentodesk_platform::storage::read_zones(&app.zones_path) {
+            Ok(loaded) => app.zones = loaded,
+            Err(bentodesk_platform::PlatformError::Storage(_)) => {
+                let _ = bentodesk_platform::storage::quarantine_corrupt(&app.zones_path);
+            }
+            Err(_) => {
+                // IO / permission / other — leave the file in place.
+            }
+        }
     }
 
     /// Run a layout pass over `app.tree` at `app.viewport`. Cached — see

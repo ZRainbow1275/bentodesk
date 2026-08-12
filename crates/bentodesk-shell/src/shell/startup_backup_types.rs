@@ -132,6 +132,28 @@ pub(super) fn install_startup_zones(root: &AppRoot, zones_path: &Path, zones: Zo
     count
 }
 
+/// Clamp selected-stack zones against the first measured logical viewport.
+///
+/// Persisted positions can be device-pixel or screen coordinates from older
+/// tray producers, so a valid `zones.bin` may still place every Zone outside
+/// the renderer's logical coordinate space. The caller flushes the dirty flag
+/// after this one-shot startup repair.
+pub(super) fn normalize_startup_zone_geometry(app: &mut AppState) -> usize {
+    let viewport = app.viewport;
+    let mut repaired = 0;
+    for zone in app.zones.iter_mut() {
+        let next = clamp_zone_rect_to_viewport(zone.x, zone.y, zone.w, zone.h, viewport);
+        if (zone.x, zone.y, zone.w, zone.h) != next {
+            (zone.x, zone.y, zone.w, zone.h) = next;
+            repaired += 1;
+        }
+    }
+    if repaired > 0 {
+        app.mark_dirty();
+    }
+    repaired
+}
+
 pub(super) fn startup_layout_viewport(root: &AppRoot) -> bentodesk_style::Size {
     let viewport = root.app.borrow().viewport;
     if viewport.width >= 1.0 && viewport.height >= 1.0 {

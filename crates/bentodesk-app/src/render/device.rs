@@ -251,40 +251,10 @@ impl Renderer {
         // the same layout source produces the same logical rects.
         app.viewport = bentodesk_style::dpi::device_size_to_logical(device_size, dpi);
         self.ensure_text_format_for_active_theme(app)?;
-        // Phase 2.1 / Ruling A + Q2 — first-paint zone load.
-        //
-        // Error-class routing:
-        //   Ok(list)                  → adopt the list.
-        //   Err(Storage(_))           → structural corruption (bad magic /
-        //                               version mismatch / truncated). Rename
-        //                               the file so the user can recover it,
-        //                               start empty.
-        //   Err(StorageIo { kind: NotFound, .. })
-        //                             → handled inside `read_zones` itself
-        //                               (returns Ok(empty)); never reaches
-        //                               this arm.
-        //   Err(StorageIo { .. })     → access issue (permission denied,
-        //                               sharing violation). DON'T rename —
-        //                               the file is probably fine, we just
-        //                               can't open it now. Start empty.
-        //
-        // Either branch flips `loaded` so the paint hot path never retries.
-        if !win.loaded.get() {
-            if !app.zones_path.as_os_str().is_empty() {
-                match bentodesk_platform::storage::read_zones(&app.zones_path) {
-                    Ok(loaded) => {
-                        app.zones = loaded;
-                    }
-                    Err(bentodesk_platform::PlatformError::Storage(_)) => {
-                        let _ = bentodesk_platform::storage::quarantine_corrupt(&app.zones_path);
-                    }
-                    Err(_) => {
-                        // IO / permission / other — leave the file in place.
-                    }
-                }
-            }
-            win.loaded.set(true);
-        }
+        // Phase 2.1 / Ruling A + Q2 — first-paint zone load. The native shell
+        // invokes this same one-shot seam before its startup geometry repair;
+        // other renderer consumers retain the fallback here.
+        win.load_zones_once(app);
         // Phase 2.3.1b — record `base_scale` for the frame so SVG draw paths
         // can compose against it instead of resetting to identity.
         self.base_scale = scale;

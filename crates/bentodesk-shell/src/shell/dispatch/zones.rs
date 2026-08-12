@@ -10,15 +10,23 @@ pub(super) fn dispatch(
 ) {
     match command {
         Command::CreateZone(spec) => {
+            let viewport = startup_layout_viewport(root);
+            let (x, y, width, height) = clamp_zone_rect_to_viewport(
+                spec.origin.x,
+                spec.origin.y,
+                spec.size.width,
+                spec.size.height,
+                viewport,
+            );
             let mut app = root.app.borrow_mut();
             let id = app.alloc_zone_id();
             let zone = bentodesk_zone::Zone::new(
                 id,
                 std::borrow::Cow::Owned(spec.name.to_string()),
-                spec.origin.x,
-                spec.origin.y,
-                spec.size.width,
-                spec.size.height,
+                x,
+                y,
+                width,
+                height,
             );
             app.zones.add(zone);
             app.mark_dirty();

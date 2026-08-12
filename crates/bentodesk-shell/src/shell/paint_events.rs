@@ -166,11 +166,32 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
     // cannot poison desktop hit-testing. Main itself keeps its live viewport.
     let previous_viewport = app.viewport;
     app.viewport = window_slot_logical_viewport(slot);
+    // Load and repair before the first BeginDraw so invalid persisted geometry
+    // is never presented or installed as the Main HWND's click region.
+    let repaired = if slot.kind == WindowKind::Main && !slot.state.first_paint_done.get() {
+        slot.state.load_zones_once(&mut app);
+        let repaired = normalize_startup_zone_geometry(&mut app);
+        if repaired > 0 {
+            tracing::warn!(
+                target: "bentodesk::layout",
+                repaired,
+                "clamped persisted Zone geometry to the measured viewport"
+            );
+            log_static(format!("layout: startup geometry repaired_zones={repaired}\n").as_str());
+        }
+        repaired
+    } else {
+        0
+    };
     let r = slot.paint(&mut app);
     if slot.kind != WindowKind::Main {
         app.viewport = previous_viewport;
     }
     drop(app);
+
+    if repaired > 0 {
+        request_redraw(hwnd);
+    }
 
     if rehydrate_live_folder_bindings(root) {
         request_redraw(hwnd);
