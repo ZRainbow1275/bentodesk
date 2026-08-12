@@ -36,6 +36,111 @@ fn startup_layout_prefers_non_empty_zones_bin_over_legacy_layout() {
 }
 
 #[test]
+fn startup_empty_state_remains_zone_free() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("startup-empty-state-zone-free");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    let _ = std::fs::remove_dir_all(state_dir);
+
+    let outcome = load_startup_zones_or_migrate_legacy(&root, &zones_path)
+        .expect("empty startup load");
+
+    assert!(outcome.is_none());
+    let app = root.app.borrow();
+    assert!(app.zones.is_empty());
+    assert!(!app.dirty.get());
+    assert!(!zones_path.exists(), "empty startup must not seed ghost Zones");
+}
+
+#[test]
+fn first_paint_load_repairs_zones_before_draw_and_does_not_reload_them() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("startup-clamps-selected-zones");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    let _ = std::fs::remove_dir_all(state_dir);
+    std::fs::create_dir_all(state_dir).expect("scratch");
+    let mut selected_zones = ZoneList::new();
+    selected_zones.add(Zone::new(
+        ZoneId(3),
+        "Offscreen tray Zone",
+        2_011,
+        1_418,
+        200,
+        120,
+    ));
+    selected_zones.add(Zone::new(
+        ZoneId(4),
+        "Legal Zone",
+        40,
+        50,
+        260,
+        180,
+    ));
+    storage::write_zones_atomic(&zones_path, &selected_zones).expect("persist zones");
+    let window = WindowState::new();
+    {
+        let mut app = root.app.borrow_mut();
+        app.zones_path = zones_path.clone();
+        app.viewport = Size {
+            width: 1_707.0,
+            height: 912.0,
+        };
+        window.load_zones_once(&mut app);
+        assert_eq!(normalize_startup_zone_geometry(&mut app), 1);
+        assert!(app.dirty.get());
+        let repaired = app.zones.get(ZoneId(3)).expect("repaired zone");
+        assert_eq!((repaired.x, repaired.y, repaired.w, repaired.h), (1_507, 792, 200, 120));
+        let legal = app.zones.get(ZoneId(4)).expect("legal zone");
+        assert_eq!((legal.x, legal.y, legal.w, legal.h), (40, 50, 260, 180));
+
+        // Renderer::render calls the same seam. It must not reload the still
+        // off-screen file after the shell repairs the in-memory first frame.
+        window.load_zones_once(&mut app);
+        let repaired = app.zones.get(ZoneId(3)).expect("one-shot repaired zone");
+        assert_eq!((repaired.x, repaired.y, repaired.w, repaired.h), (1_507, 792, 200, 120));
+    }
+
+    flush_dirty_zones(&root);
+    let persisted = storage::read_zones(&zones_path).expect("read repaired zones");
+    let repaired = persisted.get(ZoneId(3)).expect("persisted repaired zone");
+    assert_eq!((repaired.x, repaired.y, repaired.w, repaired.h), (1_507, 792, 200, 120));
+    assert!(!root.app.borrow().dirty.get());
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
+fn create_zone_clamps_every_producer_to_viewport_and_persists() {
+    let root = test_app_root();
+    let zones_path = scratch_zones_path("create-zone-clamps-and-persists");
+    let state_dir = zones_path.parent().expect("scratch parent");
+    let _ = std::fs::remove_dir_all(state_dir);
+    std::fs::create_dir_all(state_dir).expect("scratch");
+    {
+        let mut app = root.app.borrow_mut();
+        app.viewport = Size {
+            width: 1_707.0,
+            height: 912.0,
+        };
+        app.zones_path = zones_path.clone();
+    }
+    root.dispatcher.push(Command::CreateZone(ZoneSpec {
+        name: SmolStr::new_static("Zone"),
+        origin: DispatchPoint::new(2_011, 1_418),
+        size: DispatchSize::new(200, 120),
+    }));
+
+    consume_dispatcher(&root, std::ptr::null_mut());
+
+    let persisted = storage::read_zones(&zones_path).expect("read created zone");
+    let zone = persisted.get(ZoneId(1)).expect("created zone");
+    assert_eq!((zone.x, zone.y, zone.w, zone.h), (1_507, 792, 200, 120));
+    assert!(!root.app.borrow().dirty.get());
+
+    let _ = std::fs::remove_dir_all(state_dir);
+}
+
+#[test]
 fn startup_layout_imports_legacy_when_zones_bin_is_empty() {
     let root = test_app_root();
     let zones_path = scratch_zones_path("startup-empty-zones-bin-legacy");

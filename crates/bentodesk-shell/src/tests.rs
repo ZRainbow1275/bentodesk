@@ -199,6 +199,7 @@ use super::{
     next_update_frequency,
     normal_pointer_drag_active,
     normalize_icon_slug,
+    normalize_startup_zone_geometry,
     normalized_rename_leaf,
     on_hover_target_changed,
     palette_picker,
@@ -303,6 +304,7 @@ use super::{
     tray_command_for_callback,
     tray_menu_command_for_choice,
     tray_menu_command_for_item,
+    tray_zone_origin_from_client_device,
     ui,
     unlock_passphrase_vault,
     unpin_zone_minibar,
@@ -337,7 +339,7 @@ use bentodesk_app::business::smart_group_suggestor;
 use bentodesk_app::business::stack_tray;
 use bentodesk_app::business::tray_menu::TrayMenuItem;
 use bentodesk_app::business::{icons::IconKind, popover};
-use bentodesk_app::dispatcher::PaletteTarget;
+use bentodesk_app::dispatcher::{PaletteTarget, ZoneSpec};
 use bentodesk_app::item_file_rename_geometry::{
     item_file_rename_input_rect, item_file_rename_path_rect, item_file_rename_status_rect,
 };

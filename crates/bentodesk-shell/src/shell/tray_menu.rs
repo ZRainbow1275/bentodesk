@@ -40,6 +40,15 @@ pub(super) fn tray_menu_command_for_choice(
     Some(tray_menu_command_for_item(*item, main_visible, origin))
 }
 
+/// Convert a Main-client device-pixel point to the logical coordinate space
+/// used by Zone geometry.
+pub(super) fn tray_zone_origin_from_client_device(x: i32, y: i32, dpi: u32) -> DispatchPoint {
+    DispatchPoint::new(
+        bentodesk_style::dpi::device_to_logical_f32(x as f32, dpi).round() as i32,
+        bentodesk_style::dpi::device_to_logical_f32(y as f32, dpi).round() as i32,
+    )
+}
+
 pub(super) fn handle_tray_wm_command(root: &AppRoot, hwnd: HWND, choice: usize) -> bool {
     let Some(pending) = root.tray_context_menu.borrow().as_ref().copied() else {
         return false;
@@ -115,7 +124,7 @@ pub(super) unsafe fn show_tray_menu(root: &AppRoot, hwnd: HWND) {
 
     let mut pt = POINT { x: 0, y: 0 };
     // SAFETY: GetCursorPos canonical.
-    unsafe { GetCursorPos(&mut pt) };
+    let cursor_available = unsafe { GetCursorPos(&mut pt) } != 0;
     log_static(
         format!(
             "tray: popup opening at {},{} main_visible={} items={}\n",
@@ -129,7 +138,20 @@ pub(super) unsafe fn show_tray_menu(root: &AppRoot, hwnd: HWND) {
     // SAFETY: SetForegroundWindow canonical — required by TrackPopupMenu so
     //         the menu dismisses on outside click.
     unsafe { SetForegroundWindow(hwnd) };
-    let origin = DispatchPoint::new(pt.x, pt.y);
+    let mut client_point = pt;
+    let origin = if cursor_available && unsafe { ScreenToClient(hwnd, &mut client_point) } != 0 {
+        tray_zone_origin_from_client_device(
+            client_point.x,
+            client_point.y,
+            bentodesk_platform::dpi::get_dpi_for_window(hwnd),
+        )
+    } else {
+        tracing::warn!(
+            target: "bentodesk::tray_menu",
+            "tray cursor unavailable for New Zone origin; using viewport centre"
+        );
+        default_zone_spec(root).origin
+    };
     root.tray_context_menu
         .borrow_mut()
         .replace(PendingTrayContextMenu {

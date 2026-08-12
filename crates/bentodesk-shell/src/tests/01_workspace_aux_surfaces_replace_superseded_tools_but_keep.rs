@@ -537,6 +537,14 @@ fn tray_menu_item_mapping_covers_one_x_actions() {
 }
 
 #[test]
+fn tray_new_zone_origin_converts_device_pixels_to_logical_dips() {
+    assert_eq!(
+        tray_zone_origin_from_client_device(2250, 1350, 144),
+        DispatchPoint::new(1500, 900)
+    );
+}
+
+#[test]
 fn tray_menu_choice_mapping_preserves_dismiss_and_one_based_ids() {
     let origin = DispatchPoint::new(640, 360);
 
