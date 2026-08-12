@@ -46,7 +46,7 @@ authors      = ["方寒"]
 # --- Win32 plain API surface (spec §3.1.1, §3.2) ---
 # windows-sys 0.59 dropped all COM-typed graphics interfaces; it is the lighter
 # binding for plain C Win32 (kernel32 / user32 / GDI / DPI / message loop).
-windows-sys = { version = "0.59", default-features = false, features = [
+windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
     "Win32_System_Com",
