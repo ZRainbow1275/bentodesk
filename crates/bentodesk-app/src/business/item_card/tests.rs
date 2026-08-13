@@ -197,6 +197,16 @@ fn item_hover_enter_ramps_up_and_changes_target() {
 }
 
 #[test]
+fn previous_presented_frame_does_not_finish_a_new_item_hover() {
+    let mut st = ItemHoverState::new();
+    assert!(st.on_hover(Some(card(1, 7)), 1_001));
+
+    assert_eq!(st.sample(card(1, 7), 1_000), (0.0, 0.0));
+    assert!(st.is_active(1_000));
+    assert!(st.tick(1_000));
+}
+
+#[test]
 fn item_hover_handoff_ramps_prev_down_and_next_up() {
     let mut st = ItemHoverState::new();
     st.on_hover(Some(card(1, 1)), 0); // settle card A up

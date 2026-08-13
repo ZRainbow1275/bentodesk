@@ -21,17 +21,24 @@ function Assert-ProofPathUnder {
 }
 
 function New-ProofRunDirectory {
-    param([Parameter(Mandatory = $true)][string]$Name)
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$ArtifactsRoot
+    )
 
-    $artifactsRoot = Join-Path $script:RepoRoot 'artifacts\proof'
+    if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
+        $ArtifactsRoot = Join-Path $script:RepoRoot 'artifacts\proof'
+    }
+    $ArtifactsRoot = [System.IO.Path]::GetFullPath($ArtifactsRoot)
+    New-Item -ItemType Directory -Path $ArtifactsRoot -Force | Out-Null
     $runId = '{0}-{1}-{2}' -f $Name, (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ'), $PID
-    $runDirectory = Join-Path $artifactsRoot $runId
-    [void](Assert-ProofPathUnder -Path $runDirectory -Parent $artifactsRoot)
+    $runDirectory = Join-Path $ArtifactsRoot $runId
+    [void](Assert-ProofPathUnder -Path $runDirectory -Parent $ArtifactsRoot)
     New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
     return [pscustomobject]@{
         Id = $runId
         Directory = [System.IO.Path]::GetFullPath($runDirectory)
-        ArtifactsRoot = [System.IO.Path]::GetFullPath($artifactsRoot)
+        ArtifactsRoot = $ArtifactsRoot
     }
 }
 
@@ -254,6 +261,9 @@ public static class BentoDeskProofNative {
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int X, int Y);
 
     [DllImport("user32.dll")]
@@ -459,7 +469,28 @@ function Set-ProofWindowInputForeground {
     if (-not $raised) {
         throw 'SetWindowPos(HWND_TOPMOST) failed for the isolated proof window'
     }
-    Start-Sleep -Milliseconds 100
+    if ($Window.class -eq 'BentoDeskShell') {
+        # Main is intentionally WS_EX_NOACTIVATE. Its registered chords are
+        # system-wide; mouse stages prove delivery through candidate live logs.
+        $Window | Add-Member NoteProperty foreground_verified $false -Force
+        $Window | Add-Member NoteProperty foreground_not_required $true -Force
+        return
+    }
+    [void][BentoDeskProofNative]::SetForegroundWindow([IntPtr]$Window.hwnd)
+    $deadline = [DateTime]::UtcNow.AddSeconds(2)
+    do {
+        $foreground = [BentoDeskProofNative]::GetForegroundWindow()
+        if ($foreground -eq [IntPtr]$Window.hwnd) {
+            [uint32]$foregroundPid = 0
+            [void][BentoDeskProofNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+            $Window | Add-Member NoteProperty foreground_verified $true -Force
+            $Window | Add-Member NoteProperty foreground_hwnd ([long]$foreground) -Force
+            $Window | Add-Member NoteProperty foreground_process_id ([int]$foregroundPid) -Force
+            return
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "foreground verification failed: expected=$($Window.hwnd) actual=$foreground"
 }
 
 function Request-ProofPaint {

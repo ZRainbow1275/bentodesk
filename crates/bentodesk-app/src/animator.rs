@@ -121,6 +121,20 @@ pub fn ease_in_out_quad(t: f32) -> f32 {
     }
 }
 
+/// Elapsed tick time for samples that may precede a just-started animation.
+/// Durations are far below half the `u32` range, so a wrapped delta with its
+/// high bit set means `now_ms` is the previous presented frame, not 49 days
+/// after `started_ms`. Real `GetTickCount` wraparound remains supported.
+#[inline]
+pub fn elapsed_ms_at_or_after(now_ms: u32, started_ms: u32) -> u32 {
+    let elapsed = now_ms.wrapping_sub(started_ms);
+    if elapsed > i32::MAX as u32 {
+        0
+    } else {
+        elapsed
+    }
+}
+
 #[inline]
 fn apply_easing(easing: Easing, t: f32) -> f32 {
     match easing {
@@ -274,7 +288,7 @@ impl Animator {
         }
         for entry in self.entries.iter().flatten() {
             if entry.zone == zone && entry.channel == channel {
-                let elapsed = now_ms.wrapping_sub(entry.start_ms);
+                let elapsed = elapsed_ms_at_or_after(now_ms, entry.start_ms);
                 if elapsed >= entry.duration_ms {
                     return Some(entry.to);
                 }
@@ -294,7 +308,7 @@ impl Animator {
         self.entries.iter().flatten().any(|entry| {
             entry.zone == zone
                 && entry.channel == channel
-                && now_ms.wrapping_sub(entry.start_ms) < entry.duration_ms
+                && elapsed_ms_at_or_after(now_ms, entry.start_ms) < entry.duration_ms
         })
     }
 
@@ -306,7 +320,7 @@ impl Animator {
         let mut any_active = false;
         for slot in self.entries.iter_mut() {
             if let Some(entry) = slot {
-                let elapsed = now_ms.wrapping_sub(entry.start_ms);
+                let elapsed = elapsed_ms_at_or_after(now_ms, entry.start_ms);
                 if elapsed < entry.duration_ms {
                     any_active = true;
                     continue;
@@ -325,12 +339,23 @@ impl Animator {
     /// keep requesting redraws while animations are mid-flight.
     pub fn is_active(&self, now_ms: u32) -> bool {
         for entry in self.entries.iter().flatten() {
-            let elapsed = now_ms.wrapping_sub(entry.start_ms);
+            let elapsed = elapsed_ms_at_or_after(now_ms, entry.start_ms);
             if elapsed < entry.duration_ms {
                 return true;
             }
         }
         false
+    }
+
+    /// Keep the frame pump alive for one terminal paint before `tick` retires
+    /// a completed morph or zero-terminal entry. Without this final tick, a
+    /// coalesced Windows timer can leave the last presented frame mid-animation.
+    pub fn needs_tick(&self, now_ms: u32) -> bool {
+        self.entries.iter().flatten().any(|entry| {
+            elapsed_ms_at_or_after(now_ms, entry.start_ms) < entry.duration_ms
+                || entry.channel == AnimChannel::PillMorph
+                || entry.to.abs() < f32::EPSILON
+        })
     }
 
     /// Count of occupied slots — used by unit tests and diagnostics.
@@ -463,6 +488,34 @@ mod tests {
         );
         let s = a.sample(z(1), AnimChannel::PillHover, 1_000);
         assert!(s.abs() < 1e-5);
+    }
+
+    #[test]
+    fn previous_presented_frame_keeps_a_just_started_animation_at_from() {
+        let mut a = Animator::new();
+        a.start(
+            z(20),
+            AnimChannel::PillMorph,
+            1_001,
+            240,
+            0.25,
+            1.0,
+            Easing::PillMorph,
+        );
+
+        assert_eq!(elapsed_ms_at_or_after(1_000, 1_001), 0);
+        assert_eq!(a.sample(z(20), AnimChannel::PillMorph, 1_000), 0.25);
+        assert!(a.is_active_entry(z(20), AnimChannel::PillMorph, 1_000));
+        assert!(a.is_active(1_000));
+        assert!(a.needs_tick(1_000));
+        assert!(a.tick(1_000));
+        assert!(a.contains(z(20), AnimChannel::PillMorph));
+    }
+
+    #[test]
+    fn elapsed_time_distinguishes_real_tick_wrap_from_a_pre_start_sample() {
+        assert_eq!(elapsed_ms_at_or_after(10, u32::MAX - 5), 16);
+        assert_eq!(elapsed_ms_at_or_after(u32::MAX - 5, 10), 0);
     }
 
     #[test]
@@ -617,7 +670,9 @@ mod tests {
         assert!(second > 0.0 && second < 1.0);
         assert!((first + second - 1.0).abs() < 1e-5);
         assert!(a.tick(239));
+        assert!(a.needs_tick(240));
         assert!(!a.tick(240));
+        assert!(!a.needs_tick(240));
         assert_eq!(a.occupancy(), 0);
     }
 

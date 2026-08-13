@@ -29,11 +29,8 @@ pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32, now_ms: u32) 
             if app.zone_on_top_at(zone, now_ms) != on_top_layer {
                 continue;
             }
-            let left = zone.x as f32;
-            let top = zone.y as f32;
-            let right = left + zone.w as f32;
-            let bottom = top + zone.h as f32;
-            if x >= left && x < right && y >= top && y < bottom {
+            let rect = app.zone_effective_rect_at(zone, now_ms);
+            if x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom() {
                 return Some(zone.id);
             }
         }
@@ -43,63 +40,68 @@ pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32, now_ms: u32) 
 
 pub(super) fn drop_preview_rect_for_zone(
     zone: &Zone,
+    panel: bentodesk_style::Rect,
     drag: Option<ActiveItemDragVisual>,
     is_wide: bool,
     scroll_offset: f32,
     item_top_offset: f32,
+    item_visible: impl FnMut(&ZoneItem) -> bool,
 ) -> Option<bentodesk_style::Rect> {
     let drag = drag?;
-    let (grid_x, grid_y) = item_grid_position_for_zone(
+    let source_item = (drag.zone_id == zone.id).then_some(drag.item_id);
+    let (_, _, _, mut rect) = highlight_overlay::item_drop_target_for_panel(
         zone,
-        drag.last_x,
-        drag.last_y,
-        scroll_offset,
+        panel,
+        source_item,
+        is_wide,
+        (drag.last_x, drag.last_y + scroll_offset),
         item_top_offset,
-    );
-    let mut rect = item_card_rect_for_grid(zone, grid_x, grid_y, is_wide);
-    rect.y += item_top_offset - scroll_offset;
+        item_visible,
+    )?;
+    rect.y -= scroll_offset;
     rect.height = item_grid::ITEM_GRID_ROW_HEIGHT_PX;
     (rect.width > 0.0 && rect.height > 0.0).then_some(rect)
 }
 
-pub(super) fn item_grid_position_for_zone(
+pub(super) fn drop_preview_rect_for_visible_drag(
+    app: &AppState,
     zone: &Zone,
-    x: f32,
-    y: f32,
+    panel: bentodesk_style::Rect,
+    drag: Option<ActiveItemDragVisual>,
     scroll_offset: f32,
     item_top_offset: f32,
-) -> (i32, i32) {
-    let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
-    // P3.5 (1:1) — mirror the paint-side horizontal grid inset (`HEADER_INSET_X`
-    // = 16 per side) so the drag-position hit math stays in lockstep with the
-    // painted card rects (`highlight_overlay::item_card_rect_for_grid`).
-    let inset_x = expanded_zone_grid::HEADER_INSET_X;
-    let columns =
-        item_grid::effective_column_count(zone.w as f32, zone.grid_columns.max(1), inset_x).max(1)
-            as i32;
-    let columns_f = columns as f32;
-    let cell_w = ((zone.w as f32 - inset_x * 2.0) - gap * (columns_f - 1.0)).max(44.0) / columns_f;
-    let col_stride = cell_w + gap;
-    let row_stride = item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX;
-    let raw_col = ((x - zone.x as f32 - inset_x) / col_stride).floor() as i32;
-    let raw_row =
-        ((y + scroll_offset - zone.y as f32 - item_grid::ITEM_GRID_TOP_OFFSET_PX - item_top_offset)
-            / row_stride)
-            .floor() as i32;
-    (raw_col.clamp(0, columns - 1), raw_row.max(0))
+    mut item_visible: impl FnMut(&ZoneItem) -> bool,
+) -> Option<bentodesk_style::Rect> {
+    let drag = drag?;
+    let dragged = app.zones.item(drag.zone_id, drag.item_id)?;
+    item_visible(dragged).then_some(())?;
+    drop_preview_rect_for_zone(
+        zone,
+        panel,
+        Some(drag),
+        dragged.is_wide,
+        scroll_offset,
+        item_top_offset,
+        item_visible,
+    )
 }
 
-pub(super) fn item_card_rect_for_grid(
-    zone: &Zone,
-    grid_x: i32,
-    grid_y: i32,
-    is_wide: bool,
-) -> bentodesk_style::Rect {
-    highlight_overlay::item_card_rect_for_grid(zone, grid_x, grid_y, is_wide)
-}
-
-pub(super) fn item_card_rect_for_item(zone: &Zone, item: &ZoneItem) -> bentodesk_style::Rect {
-    highlight_overlay::item_card_rect_for_item(zone, item)
+impl Renderer {
+    pub(super) fn draw_item_drop_preview(
+        &mut self,
+        app: &AppState,
+        preview: bentodesk_style::Rect,
+        card_radius: bentodesk_style::BorderRadius,
+    ) -> Result<(), RenderError> {
+        let palette = app.active_theme_palette();
+        self.fill_rounded_rect(preview, with_alpha(palette.accent, 0.20), card_radius)?;
+        self.fill_rounded_rect(
+            inset_rect(preview, 4.0),
+            with_alpha(palette.accent_hover, 0.34),
+            zone_surface_geometry::ZoneSurfaceChrome::from_radius(app.active_theme_radius())
+                .drop_preview_core_radius,
+        )
+    }
 }
 
 pub(super) fn source_drag_item(
@@ -152,8 +154,7 @@ pub(super) fn centered_square_rect(
 
 #[inline]
 pub(super) fn stack_bloom_active_transition_t(now_ms: u32, started_ms: u32) -> f32 {
-    let raw = now_ms.wrapping_sub(started_ms) as f32 / STACK_BLOOM_ACTIVE_TRANSITION_MS as f32;
-    animator::ease_in_out_quad(raw.clamp(0.0, 1.0))
+    stack_tray::stack_bloom_active_transition_t(now_ms, started_ms)
 }
 
 /// Return the active petal's crisp outer-halo spread and alpha.
@@ -170,7 +171,7 @@ pub(super) fn stack_bloom_active_pulse(
     if many_members {
         return (4.0, 0.18);
     }
-    let elapsed = now_ms.wrapping_sub(started_ms);
+    let elapsed = animator::elapsed_ms_at_or_after(now_ms, started_ms);
     if elapsed <= STACK_BLOOM_ACTIVE_PULSE_DELAY_MS {
         return (5.5, 0.16);
     }

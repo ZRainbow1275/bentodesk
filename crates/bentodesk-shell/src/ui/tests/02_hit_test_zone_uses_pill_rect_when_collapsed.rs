@@ -5,6 +5,7 @@ fn seed_live_pill_morph(app: &AppState, zone_id: ZoneId, progress: f32) -> u32 {
     // A long duration makes the few microseconds between this seed and
     // `hit_test_zone` immaterial while still exercising the real clock path.
     let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    app.geometry_frame_now_ms.set(now_ms);
     let elapsed = (progress.clamp(0.0, 1.0) * TEST_DURATION_MS as f32) as u32;
     app.pill_animator.borrow_mut().start(
         zone_id,
@@ -131,6 +132,72 @@ fn hit_test_zone_morph_in_flight_uses_interpolated_rect() {
 }
 
 #[test]
+fn hit_test_uses_last_committed_main_frame_sample() {
+    let zone = Zone::new(ZoneId(450), Cow::Borrowed("Frame"), 580, 500, 320, 240);
+    let app = app_with_zones(vec![zone]);
+    app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+    let now_ms = seed_live_pill_morph(&app, ZoneId(450), 0.25);
+    let zone = app.zones.get(ZoneId(450)).expect("zone");
+    let painted = app.zone_effective_rect_at(zone, now_ms);
+    assert_eq!(
+        hit_test_zone(
+            &app,
+            painted.x + painted.width * 0.5,
+            painted.y + painted.height * 0.5,
+        ),
+        Some(ZoneId(450))
+    );
+    assert_eq!(app.geometry_frame_now_ms.get(), now_ms);
+}
+
+#[test]
+fn item_hit_during_directional_morph_uses_live_rect_not_final_panel() {
+    let mut zone = Zone::new(ZoneId(451), Cow::Borrowed("Docs"), 580, 500, 400, 300);
+    let item_id = zone
+        .add_item(r"C:\Desktop\contract.txt", "hash")
+        .expect("item");
+    let app = app_with_zones(vec![zone]);
+    app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+    let now_ms = seed_live_pill_morph(&app, ZoneId(451), 0.05);
+    let zone = app.zones.get(ZoneId(451)).expect("zone");
+    let final_panel = app.zone_expanded_placement(zone).panel;
+    let final_card = bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+        zone,
+        zone.item(item_id).expect("item"),
+        final_panel,
+    );
+    let final_point = (
+        final_card.x + final_card.width * 0.5,
+        final_card.y + final_card.height * 0.5,
+    );
+    let live = app.zone_effective_rect_at(zone, now_ms);
+    assert!(
+        final_point.0 < live.x
+            || final_point.0 >= live.right()
+            || final_point.1 < live.y
+            || final_point.1 >= live.bottom(),
+        "fixture point must be outside early morph rect: point={final_point:?} live={live:?}"
+    );
+    assert_eq!(hit_test_zone_item(&app, final_point.0, final_point.1), None);
+
+    let now_ms = seed_live_pill_morph(&app, ZoneId(451), 0.75);
+    let live = app.zone_effective_rect_at(zone, now_ms);
+    let live_card = bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+        zone,
+        zone.item(item_id).expect("item"),
+        live,
+    );
+    let live_point = (
+        live_card.x + live_card.width * 0.5,
+        live_card.y + live_card.height * 0.5,
+    );
+    assert_eq!(
+        hit_test_zone_item(&app, live_point.0, live_point.1).map(|(_, id, _)| id),
+        Some(item_id)
+    );
+}
+
+#[test]
 fn hit_test_zone_morph_complete_uses_full_rect() {
     let zone = Zone::new(ZoneId(46), Cow::Borrowed("Docs"), 100, 100, 240, 180);
     let app = app_with_zones(vec![zone]);
@@ -142,6 +209,120 @@ fn hit_test_zone_morph_complete_uses_full_rect() {
         hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
         Some(ZoneId(46))
     );
+}
+
+#[test]
+fn four_quadrant_live_morph_hit_boundary_tracks_effective_rect_within_one_dip() {
+    let quadrants = [
+        ("left-top", 20, 20, false, false),
+        ("right-top", 720, 20, true, false),
+        ("left-bottom", 20, 520, false, true),
+        ("right-bottom", 720, 520, true, true),
+    ];
+
+    for (name, x, y, anchor_right, anchor_bottom) in quadrants {
+        for progress in [0.0_f32, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0] {
+            let zone = Zone::new(ZoneId(460), Cow::Borrowed("Joint"), x, y, 320, 240);
+            let app = app_with_zones(vec![zone]);
+            app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+            let now_ms = seed_live_pill_morph(&app, ZoneId(460), progress);
+            let zone = app.zones.get(ZoneId(460)).expect("zone");
+            let placement = app.zone_expanded_placement(zone);
+            assert_eq!(placement.anchor_right, anchor_right, "{name}");
+            assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
+            let rect = app.zone_effective_rect_at(zone, now_ms);
+            let cx = rect.x + rect.width * 0.5;
+            let cy = rect.y + rect.height * 0.5;
+            assert_eq!(
+                hit_test_zone(&app, cx, cy),
+                Some(ZoneId(460)),
+                "{name} progress={progress} center"
+            );
+
+            let (inside_x, outside_x) = if anchor_right {
+                (rect.right() - 0.5, rect.right() + 1.1)
+            } else {
+                (rect.x + 0.5, rect.x - 1.1)
+            };
+            assert_eq!(hit_test_zone(&app, inside_x, cy), Some(ZoneId(460)));
+            assert_eq!(hit_test_zone(&app, outside_x, cy), None);
+            let (inside_y, outside_y) = if anchor_bottom {
+                (rect.bottom() - 0.5, rect.bottom() + 1.1)
+            } else {
+                (rect.y + 0.5, rect.y - 1.1)
+            };
+            assert_eq!(hit_test_zone(&app, cx, inside_y), Some(ZoneId(460)));
+            assert_eq!(hit_test_zone(&app, cx, outside_y), None);
+        }
+    }
+}
+
+#[test]
+fn four_quadrant_settled_header_item_and_inline_search_use_resolved_panel() {
+    for (name, x, y, anchor_right, anchor_bottom) in [
+        ("left-top", 20, 20, false, false),
+        ("right-top", 720, 20, true, false),
+        ("left-bottom", 20, 520, false, true),
+        ("right-bottom", 720, 520, true, true),
+    ] {
+        let mut zone = Zone::new(ZoneId(461), Cow::Borrowed("Consumers"), x, y, 320, 240);
+        let item_id = zone
+            .add_item(r"C:\Desktop\consumer.txt", "hash")
+            .expect("item");
+        let app = app_with_zones(vec![zone]);
+        app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+        let zone = app.zones.get(ZoneId(461)).expect("zone");
+        let placement = app.zone_expanded_placement(zone);
+        assert_eq!(placement.anchor_right, anchor_right, "{name}");
+        assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
+        let panel = app.zone_effective_rect_at(zone, 0);
+
+        let layout = bentodesk_app::expanded_zone_grid::expanded_zone_layout_for_rect(
+            panel,
+            zone.items.len(),
+        );
+        for (button, expected) in [
+            (layout.header_search_btn, HeaderButton::Search),
+            (layout.header_close_btn, HeaderButton::Close),
+        ] {
+            assert_eq!(
+                hit_test_zone_header_button(
+                    &app,
+                    button.x + button.width * 0.5,
+                    button.y + button.height * 0.5,
+                ),
+                Some((ZoneId(461), expected)),
+                "{name} {expected:?} header"
+            );
+        }
+
+        let item = zone.item(item_id).expect("item");
+        let card = bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+            zone, item, panel,
+        );
+        assert_eq!(
+            hit_test_zone_item(
+                &app,
+                card.x + card.width * 0.5,
+                card.y + card.height * 0.5,
+            )
+            .map(|(_, id, _)| id),
+            Some(item_id),
+            "{name} item"
+        );
+
+        app.zone_search_target.set(Some(ZoneId(461)));
+        let search = bentodesk_app::business::search_bar::zone_inline_rect(panel);
+        assert_eq!(
+            hit_test_inline_zone_search(
+                &app,
+                search.x + search.width * 0.5,
+                search.y + search.height * 0.5,
+            ),
+            Some(InlineZoneSearchHit::Body),
+            "{name} inline search"
+        );
+    }
 }
 
 // #5 / Bug A (2026-06-02) — DRAGGING a COLLAPSED pill must keep its hit rect
@@ -183,7 +364,16 @@ fn hit_test_resizing_zone_keeps_full_rect() {
     let app = app_with_zones(vec![zone]);
     // Resize is only ever armed on an expanded panel; emulate that state.
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
-    app.zone_resize.set(Some((ZoneId(48), 240, 180)));
+    app.zone_resize
+        .set(Some(bentodesk_app::ZoneResizeSession {
+            id: ZoneId(48),
+            start_pointer_x: 340.0,
+            start_pointer_y: 280.0,
+            start_visible_width: 240.0,
+            start_visible_height: 180.0,
+            anchor_right: false,
+            anchor_bottom: false,
+        }));
     // Far corner of the expanded rect remains reachable during the resize.
     assert_eq!(
         hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
@@ -344,7 +534,7 @@ fn hit_test_zone_item_skipped_in_collapsed_pill_mode() {
 }
 
 #[test]
-fn item_grid_position_for_point_clamps_to_visible_columns() {
+fn item_grid_position_for_point_clamps_within_configured_columns() {
     let app = app_with_zones(vec![Zone::new(
         ZoneId(9),
         Cow::Borrowed("grid"),
@@ -360,7 +550,7 @@ fn item_grid_position_for_point_clamps_to_visible_columns() {
     );
     assert_eq!(
         item_grid_position_for_point(&app, ZoneId(9), 500.0, 200.0),
-        Some((2, 1))
+        Some((3, 1))
     );
     assert_eq!(
         item_grid_position_for_point(&app, ZoneId(99), 28.0, 80.0),
@@ -381,14 +571,32 @@ fn item_grid_position_for_point_uses_zone_grid_columns() {
 }
 
 #[test]
-fn item_grid_position_for_point_uses_effective_columns_for_narrow_five_column_zones() {
+fn item_grid_position_for_point_preserves_narrow_five_column_zones() {
     let mut zone = Zone::new(ZoneId(11), Cow::Borrowed("grid"), 64, 332, 320, 220);
     zone.set_grid_columns(5);
     let app = app_with_zones(vec![zone]);
+    let zone = app.zones.get(ZoneId(11)).expect("zone");
+    let panel = app.zone_expanded_placement(zone).panel;
+    let columns = bentodesk_app::business::item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns,
+        bentodesk_app::expanded_zone_grid::HEADER_INSET_X,
+    ) as f32;
+    let gap = bentodesk_app::business::item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    let cell_width = ((panel.width
+        - bentodesk_app::expanded_zone_grid::HEADER_INSET_X * 2.0)
+        - gap * (columns - 1.0))
+        .max(44.0)
+        / columns;
+    let fifth_column_x = panel.x
+        + bentodesk_app::expanded_zone_grid::HEADER_INSET_X
+        + 4.5 * (cell_width + gap);
+    let first_row_y =
+        panel.y + bentodesk_app::business::item_grid::ITEM_GRID_TOP_OFFSET_PX + 10.0;
 
     assert_eq!(
-        item_grid_position_for_point(&app, ZoneId(11), 335.0, 458.0),
-        Some((3, 0))
+        item_grid_position_for_point(&app, ZoneId(11), fifth_column_x, first_row_y),
+        Some((4, 0))
     );
 }
 

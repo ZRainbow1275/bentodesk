@@ -23,9 +23,6 @@ pub(super) const ZONE_DRAG_VISUAL_OPACITY: f32 = 0.70;
 /// the authored 240 ms keyframe while retaining the same curve and endpoint.
 pub(super) const STACK_CAPSULE_EMERGE_MIN_PRESENTED_PROGRESS: f32 =
     48.0 / animator::STACK_EMERGE_DURATION_MS as f32;
-/// Tauri Bloom petal hover/active transform and transition.
-pub(super) const STACK_BLOOM_ACTIVE_SCALE: f32 = 1.05;
-pub(super) const STACK_BLOOM_ACTIVE_TRANSITION_MS: u32 = 180;
 /// Tauri active-petal halo breathes after a short settle delay.
 pub(super) const STACK_BLOOM_ACTIVE_PULSE_DELAY_MS: u32 = 600;
 pub(super) const STACK_BLOOM_ACTIVE_PULSE_PERIOD_MS: u32 = 1_500;
@@ -244,16 +241,19 @@ pub(super) fn expanded_header_title_rect(
     }
 }
 
-/// Move the single icon/title/badge identity row into the final PanelHeader
-/// slots. The identity is painted once during morph, so it travels with the
-/// shell instead of cross-fading between two visibly separate copies.
+/// Move one Zone's icon/title/badge identity row directly from its collapsed
+/// slots into the final PanelHeader slots. Both endpoints are fixed for the
+/// whole transition, so the title cannot first follow the growing panel centre
+/// and then spring back into the header.
 #[inline]
-pub(super) fn morph_zen_content_to_header(
-    zen: ZonePillLayout,
-    header: &expanded_zone_grid::ExpandedZoneLayout,
+pub(super) fn zone_identity_layout_at(
+    zone: &Zone,
+    expanded_rect: bentodesk_style::Rect,
     progress: f32,
 ) -> ZonePillLayout {
-    let header_title = expanded_header_title_rect(header);
+    let zen = zone_pill_geometry::pill_layout_for_zone(zone, zone.items.len());
+    let header = expanded_zone_grid::expanded_zone_layout_for_rect(expanded_rect, zone.items.len());
+    let header_title = expanded_header_title_rect(&header);
     ZonePillLayout {
         rect: lerp_rect_clamped(zen.rect, header.header_band, progress),
         shadow_outer: zen.shadow_outer,

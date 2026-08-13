@@ -184,15 +184,15 @@ pub(super) fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND,
         }
     }
 
-    if let Some(id) = ui::hit_test_zone_resize_corner(&app, x, y) {
-        if let Some(z) = app.zones.get(id) {
+    if let Some(session) = ui::zone_resize_session_for_point(&app, x, y) {
+        if let Some(z) = app.zones.get(session.id) {
             // M4 locked gate — a locked zone cannot resize (Tauri parity:
             // BentoZone.tsx:1198 `if (zoneLocked()) return;`). Selection on
             // mouse-down (above) still applies; we just don't arm zone_resize.
             if z.locked {
                 return;
             }
-            app.zone_resize.set(Some((id, z.w, z.h)));
+            app.zone_resize.set(Some(session));
             // SAFETY: SetCapture canonical.
             unsafe { SetCapture(hwnd) };
         }

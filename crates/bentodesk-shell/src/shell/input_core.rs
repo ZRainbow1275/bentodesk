@@ -138,9 +138,10 @@ pub(super) fn focus_visible_zone(root: &AppRoot, forward: bool) -> bool {
     let app = root.app.borrow();
     let ids = visible_top_level_zone_ids(&app);
     if ids.is_empty() {
+        app.keyboard_focused_zone.set(None);
         return false;
     }
-    let current = app.selected_zone.get();
+    let current = app.selected_zone.get().or(app.keyboard_focused_zone.get());
     let current_index = current.and_then(|id| ids.iter().position(|candidate| *candidate == id));
     let next_index = match (current_index, forward) {
         (Some(index), true) => (index + 1) % ids.len(),
@@ -150,8 +151,19 @@ pub(super) fn focus_visible_zone(root: &AppRoot, forward: bool) -> bool {
         (None, false) => ids.len() - 1,
     };
     let next = ids[next_index];
-    app.selected_zone.set(Some(next));
-    app.hovered_zone.set(Some(next));
+    if app
+        .zones
+        .get(next)
+        .is_some_and(|zone| !zone.is_stack_anchor() && !zone.is_stacked_child())
+    {
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        activate_free_zone_surface(&app, next, unsafe { GetTickCount() });
+        app.explicit_zone_surface_hold.set(Some(next));
+    } else {
+        app.selected_zone.set(Some(next));
+        app.hovered_zone.set(Some(next));
+    }
+    app.keyboard_focused_zone.set(Some(next));
     true
 }
 
@@ -385,17 +397,22 @@ pub(super) fn handle_settings_mousewheel(
     true
 }
 
-pub(super) fn zone_item_max_scroll(app: &AppState, zone: &bentodesk_zone::Zone) -> f32 {
+pub(super) fn zone_item_max_scroll_at(
+    app: &AppState,
+    zone: &bentodesk_zone::Zone,
+    now_ms: u32,
+) -> f32 {
     let search_active = app.zone_search_target.get() == Some(zone.id);
     let item_top_offset = if search_active {
-        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
     } else {
         0.0
     };
     if search_active {
         let query = app.search_bar.borrow();
-        highlight_overlay::item_flow_max_scroll(
+        highlight_overlay::item_flow_max_scroll_in_panel(
             zone,
+            app.zone_effective_rect_at(zone, now_ms),
             item_top_offset,
             zone.items
                 .iter()
@@ -405,8 +422,9 @@ pub(super) fn zone_item_max_scroll(app: &AppState, zone: &bentodesk_zone::Zone) 
                 .map(|item| item.is_wide),
         )
     } else {
-        highlight_overlay::item_flow_max_scroll(
+        highlight_overlay::item_flow_max_scroll_in_panel(
             zone,
+            app.zone_effective_rect_at(zone, now_ms),
             item_top_offset,
             zone.items.iter().map(|item| item.is_wide),
         )
@@ -418,19 +436,23 @@ pub(super) fn zone_scroll_target_for_point(
     x: f32,
     y: f32,
 ) -> Option<(ZoneId, f32)> {
+    let now_ms = app.geometry_frame_now_ms.get();
     for zone in app.zones.iter().rev() {
         if !zone.is_visible() || zone.is_stacked_child() || !app.zone_pill_body_visible(zone) {
             continue;
         }
         let search_active = app.zone_search_target.get() == Some(zone.id);
         let item_top_offset = if search_active {
-            search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
         } else {
             0.0
         };
-        let clip = highlight_overlay::item_content_clip_rect(zone, item_top_offset);
+        let clip = highlight_overlay::item_content_clip_rect_in_panel(
+            app.zone_effective_rect_at(zone, now_ms),
+            item_top_offset,
+        );
         if x >= clip.x && x < clip.right() && y >= clip.y && y < clip.bottom() {
-            return Some((zone.id, zone_item_max_scroll(app, zone)));
+            return Some((zone.id, zone_item_max_scroll_at(app, zone, now_ms)));
         }
     }
     None

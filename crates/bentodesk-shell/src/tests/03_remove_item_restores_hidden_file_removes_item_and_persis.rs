@@ -142,14 +142,51 @@ fn move_item_to_zone_moves_hidden_file_between_zone_dirs_and_persists() {
             )
             .expect("item id");
         app.zones.add(from_zone);
-        app.zones.add(Zone::new(to_zone_id, "To", 260, 0, 240, 160));
+        let mut to_zone = Zone::new(to_zone_id, "To", 260, 0, 240, 260);
+        for id in [1, 10, 11, 12] {
+            to_zone.items.push(ZoneItem::new(
+                ZoneItemId(id),
+                format!("C:/Desktop/resident-{id}.txt"),
+                "",
+                0,
+                0,
+            ));
+        }
+        app.zones.add(to_zone);
         item_id
+    };
+
+    let (drop_point, target_index, preview) = {
+        let app = root.app.borrow();
+        let zone = app.zones.get(to_zone_id).expect("target zone");
+        let panel = bentodesk_style::Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        };
+        let cell = bentodesk_app::business::highlight_overlay::item_card_rect_for_grid_in_panel(
+            zone, 3, 0, false, panel,
+        );
+        let (grid_x, grid_y, target_index, preview) =
+            bentodesk_app::business::highlight_overlay::item_drop_target_for_panel(
+                zone,
+                panel,
+                None,
+                false,
+                (cell.x + 2.0, cell.y + 2.0),
+                0.0,
+                |_| true,
+            )
+            .expect("cross-zone target");
+        (DispatchPoint::new(grid_x, grid_y), target_index, preview)
     };
 
     root.dispatcher.push(Command::MoveItemToZone(
         from_zone_id,
         to_zone_id,
         bentodesk_app::ItemId(item_id.0),
+        Some((drop_point, target_index)),
     ));
     consume_dispatcher(&root, std::ptr::null_mut());
 
@@ -162,16 +199,54 @@ fn move_item_to_zone_moves_hidden_file_between_zone_dirs_and_persists() {
         let app = root.app.borrow();
         assert!(!app.dirty.get(), "dispatcher should flush moved item");
         assert!(app.zones.item(from_zone_id, item_id).is_none());
-        let item = app
-            .zones
-            .item(to_zone_id, item_id)
+        let zone = app.zones.get(to_zone_id).expect("target zone");
+        let item = zone
+            .items
+            .iter()
+            .find(|item| item.path.as_ref() == expected_hidden_path)
             .expect("moved item in target zone");
+        assert_ne!(item.id, item_id, "target collision must remint the item id");
+        assert_eq!(item.id, ZoneItemId(13));
+        assert_eq!(
+            zone.items.iter().filter(|candidate| candidate.id == item_id).count(),
+            1,
+            "resident target id must remain unique"
+        );
         assert_eq!(item.path.as_ref(), expected_hidden_path.as_str());
         assert_eq!(
             item.hidden_path.as_deref(),
             Some(expected_hidden_path.as_str())
         );
         assert_eq!(item.original_path.as_deref(), Some(original_path.as_str()));
+        assert_eq!((item.x, item.y), (drop_point.x, drop_point.y));
+        assert_eq!(
+            app.zones
+                .get(to_zone_id)
+                .and_then(|zone| zone.items.get(target_index))
+                .map(|item| item.id),
+            Some(ZoneItemId(13))
+        );
+        let panel = bentodesk_style::Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        };
+        assert_eq!(
+            bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+                zone, item, panel,
+            ),
+            preview,
+            "cross-zone preview must equal post-dispatch paint"
+        );
+        let resident = zone.item(item_id).expect("resident item remains addressable");
+        assert_ne!(
+            bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+                zone, resident, panel,
+            ),
+            preview,
+            "resident and moved item must not overlap after remint"
+        );
         assert_eq!(
             app.item_operation_status
                 .borrow()
@@ -186,14 +261,28 @@ fn move_item_to_zone_moves_hidden_file_between_zone_dirs_and_persists() {
         "target zone hidden file should exist"
     );
     let reloaded = storage::read_zones(&zones_path).expect("read persisted zones");
-    let item = reloaded
-        .item(to_zone_id, item_id)
+    let zone = reloaded.get(to_zone_id).expect("persisted target zone");
+    let item = zone
+        .items
+        .iter()
+        .find(|item| item.path.as_ref() == expected_hidden_path)
         .expect("persisted moved item");
+    assert_eq!(item.id, ZoneItemId(13));
+    assert_eq!(
+        zone.items
+            .iter()
+            .map(|item| item.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        zone.items.len(),
+        "persisted target item ids must be unique"
+    );
     assert_eq!(item.path.as_ref(), expected_hidden_path.as_str());
     assert_eq!(
         item.hidden_path.as_deref(),
         Some(expected_hidden_path.as_str())
     );
+    assert_eq!((item.x, item.y), (drop_point.x, drop_point.y));
 
     let _ = std::fs::remove_dir_all(state_dir);
 }
@@ -222,6 +311,7 @@ fn move_item_command_updates_grid_position_status_and_persists() {
         zone_id,
         bentodesk_app::ItemId(item_id.0),
         DispatchPoint::new(3, 4),
+        0,
     ));
     consume_dispatcher(&root, std::ptr::null_mut());
 

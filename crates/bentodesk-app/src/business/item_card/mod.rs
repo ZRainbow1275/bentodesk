@@ -221,14 +221,16 @@ impl ItemHoverState {
     pub fn tick(&mut self, now_ms: u32) -> bool {
         let mut active = false;
         if let Some(_card) = self.leaving {
-            if now_ms.wrapping_sub(self.leave_started_ms) >= CARD_HOVER_DURATION_MS {
+            if crate::animator::elapsed_ms_at_or_after(now_ms, self.leave_started_ms)
+                >= CARD_HOVER_DURATION_MS
+            {
                 self.leaving = None;
             } else {
                 active = true;
             }
         }
         if self.pressed.is_some() {
-            let elapsed = now_ms.wrapping_sub(self.press_started_ms);
+            let elapsed = crate::animator::elapsed_ms_at_or_after(now_ms, self.press_started_ms);
             if !self.press_down && elapsed >= CARD_PRESS_DURATION_MS {
                 self.pressed = None;
             } else {
@@ -238,7 +240,8 @@ impl ItemHoverState {
         // The held hover card keeps ramping until it reaches 1.0; after that it
         // stays pinned (no redraw needed) but does not count as "active".
         if self.hovered.is_some()
-            && now_ms.wrapping_sub(self.hover_started_ms) < CARD_HOVER_DURATION_MS
+            && crate::animator::elapsed_ms_at_or_after(now_ms, self.hover_started_ms)
+                < CARD_HOVER_DURATION_MS
         {
             active = true;
         }
@@ -253,13 +256,13 @@ impl ItemHoverState {
     pub fn sample(&self, card: (ZoneId, ZoneItemId), now_ms: u32) -> (f32, f32) {
         let hover_t = if self.hovered == Some(card) {
             card_ramp_t(
-                now_ms.wrapping_sub(self.hover_started_ms),
+                crate::animator::elapsed_ms_at_or_after(now_ms, self.hover_started_ms),
                 CARD_HOVER_DURATION_MS,
                 true,
             )
         } else if self.leaving == Some(card) {
             card_ramp_t(
-                now_ms.wrapping_sub(self.leave_started_ms),
+                crate::animator::elapsed_ms_at_or_after(now_ms, self.leave_started_ms),
                 CARD_HOVER_DURATION_MS,
                 false,
             )
@@ -268,7 +271,7 @@ impl ItemHoverState {
         };
         let press_t = if self.pressed == Some(card) {
             card_ramp_t(
-                now_ms.wrapping_sub(self.press_started_ms),
+                crate::animator::elapsed_ms_at_or_after(now_ms, self.press_started_ms),
                 CARD_PRESS_DURATION_MS,
                 self.press_down,
             )
@@ -295,17 +298,19 @@ impl ItemHoverState {
     #[inline]
     pub fn is_active(&self, now_ms: u32) -> bool {
         if self.leaving.is_some()
-            && now_ms.wrapping_sub(self.leave_started_ms) < CARD_HOVER_DURATION_MS
+            && crate::animator::elapsed_ms_at_or_after(now_ms, self.leave_started_ms)
+                < CARD_HOVER_DURATION_MS
         {
             return true;
         }
         if self.hovered.is_some()
-            && now_ms.wrapping_sub(self.hover_started_ms) < CARD_HOVER_DURATION_MS
+            && crate::animator::elapsed_ms_at_or_after(now_ms, self.hover_started_ms)
+                < CARD_HOVER_DURATION_MS
         {
             return true;
         }
         if self.pressed.is_some() {
-            let elapsed = now_ms.wrapping_sub(self.press_started_ms);
+            let elapsed = crate::animator::elapsed_ms_at_or_after(now_ms, self.press_started_ms);
             if self.press_down || elapsed < CARD_PRESS_DURATION_MS {
                 return true;
             }

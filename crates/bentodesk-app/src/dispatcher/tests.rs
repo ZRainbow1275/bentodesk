@@ -102,7 +102,7 @@ fn variant_name_matches_for_every_variant_shape() {
         "OpenItemFile"
     );
     assert_eq!(
-        Command::MoveItem(ZoneId(1), ItemId(2), Point::ZERO).variant_name(),
+        Command::MoveItem(ZoneId(1), ItemId(2), Point::ZERO, 0).variant_name(),
         "MoveItem"
     );
     assert_eq!(
@@ -110,7 +110,7 @@ fn variant_name_matches_for_every_variant_shape() {
         "ToggleItemWide"
     );
     assert_eq!(
-        Command::MoveItemToZone(ZoneId(1), ZoneId(3), ItemId(2)).variant_name(),
+        Command::MoveItemToZone(ZoneId(1), ZoneId(3), ItemId(2), None).variant_name(),
         "MoveItemToZone"
     );
     assert_eq!(
@@ -383,9 +383,9 @@ fn unhandled_command_log_does_not_panic_on_any_variant() {
         Command::RemoveItem(ZoneId(7), ItemId(99)),
         Command::OpenItemFile(ZoneId(7), ItemId(99)),
         Command::CopyItemPath(ItemPath::new("/path/file.txt")),
-        Command::MoveItem(ZoneId(7), ItemId(99), Point::ZERO),
+        Command::MoveItem(ZoneId(7), ItemId(99), Point::ZERO, 0),
         Command::ToggleItemWide(ZoneId(7), ItemId(99)),
-        Command::MoveItemToZone(ZoneId(7), ZoneId(8), ItemId(99)),
+        Command::MoveItemToZone(ZoneId(7), ZoneId(8), ItemId(99), None),
         Command::OpenItemFileRename(ZoneId(7), ItemId(99)),
         Command::RenameItemFile(ZoneId(7), ItemId(99), SmolStr::new_static("renamed.txt")),
         Command::DeleteItemFileToRecycleBin(ZoneId(7), ItemId(99)),

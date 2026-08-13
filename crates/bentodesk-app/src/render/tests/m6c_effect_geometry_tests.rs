@@ -37,6 +37,7 @@ fn zone_shadow_suppresses_blur_but_preserves_crisp_ring() {
 
 #[test]
 fn stack_bloom_active_scale_transition_settles_by_180ms() {
+    assert_eq!(stack_bloom_active_transition_t(999, 1_000), 0.0);
     assert_eq!(stack_bloom_active_transition_t(1_000, 1_000), 0.0);
     assert!((stack_bloom_active_transition_t(1_090, 1_000) - 0.5).abs() < 1e-6);
     assert_eq!(stack_bloom_active_transition_t(1_180, 1_000), 1.0);
@@ -45,6 +46,7 @@ fn stack_bloom_active_scale_transition_settles_by_180ms() {
 
 #[test]
 fn stack_bloom_active_pulse_keeps_tauri_bounds_and_many_member_static_rule() {
+    assert_eq!(stack_bloom_active_pulse(999, 1_000, false), (5.5, 0.16));
     assert_eq!(stack_bloom_active_pulse(1_000, 1_000, false), (5.5, 0.16));
     assert_eq!(stack_bloom_active_pulse(1_600, 1_000, false), (5.5, 0.16));
     let peak = stack_bloom_active_pulse(2_350, 1_000, false);

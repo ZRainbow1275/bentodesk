@@ -103,8 +103,10 @@ impl WindowSlot {
     /// per-window state lookup so the wndproc can paint without
     /// hand-untangling field borrows. Increments `paint_err` on failure
     /// (T-010 reads the per-window count for diagnostics).
-    pub fn paint(&mut self, app: &mut AppState) -> Result<(), RenderError> {
-        let r = self.renderer.render(app, &mut self.state, self.kind);
+    pub fn paint(&mut self, app: &mut AppState, frame_now_ms: u32) -> Result<(), RenderError> {
+        let r = self
+            .renderer
+            .render(app, &mut self.state, self.kind, frame_now_ms);
         if r.is_err() {
             self.note_paint_err();
         }

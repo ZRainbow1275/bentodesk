@@ -48,7 +48,7 @@
 use bentodesk_app::{
     AppState, WindowState,
     business::{bulk_manager_panel, highlight_overlay, popover, search_bar, stack_tray},
-    expanded_zone_grid, zone_pill_geometry,
+    expanded_zone_grid,
 };
 use bentodesk_layout::Direction;
 use bentodesk_style::{BorderRadius, Color, Edges, Length, Rect, Shadow};

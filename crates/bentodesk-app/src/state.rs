@@ -16,11 +16,11 @@ use bentodesk_backend::{
 };
 use bentodesk_layout::{LayoutEngine, LayoutError};
 use bentodesk_platform::MonitorInfo;
-use bentodesk_style::Size;
 use bentodesk_style::tokens::{
     EffectTauri, PALETTE_DARK, PaletteTauri, RADIUS, RadiusTauri, SHADOW, ShadowTauri, TYPOGRAPHY,
     TypographyTauri,
 };
+use bentodesk_style::{Rect, Size};
 use bentodesk_theme::{
     DARK_DEFAULT, LIGHT_DEFAULT, PaletteTokens, RadiusTokens, ShadowTokens, SpacingTokens, THEMES,
     ThemeTokens, TypoTokens,
@@ -67,6 +67,25 @@ pub use window::*;
 
 use settings::{is_valid_accent_hex, normalize_accent_hex_char};
 
+/// Transient geometry captured when one directional panel resize begins.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZoneResizeSession {
+    /// Zone being resized.
+    pub id: ZoneId,
+    /// Pointer x coordinate at mouse-down, in Main-client logical DIPs.
+    pub start_pointer_x: f32,
+    /// Pointer y coordinate at mouse-down, in Main-client logical DIPs.
+    pub start_pointer_y: f32,
+    /// Visible panel width at mouse-down.
+    pub start_visible_width: f32,
+    /// Visible panel height at mouse-down.
+    pub start_visible_height: f32,
+    /// Whether the panel's right edge stays fixed during this session.
+    pub anchor_right: bool,
+    /// Whether the panel's bottom edge stays fixed during this session.
+    pub anchor_bottom: bool,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub tree: Tree<WidgetNode>,
@@ -74,6 +93,9 @@ pub struct AppState {
     /// matches the single window's client rect; when the second window
     /// lands, viewport moves onto `WindowState` and this field is dropped.
     pub viewport: Size,
+    /// `GetTickCount` sampled once for the last Main frame. Zone paint, shell
+    /// hit-testing, and HWND-region generation all consume this exact sample.
+    pub geometry_frame_now_ms: Cell<u32>,
     /// Zone collection — Ruling 2 / Phase 2 baseline. Persisted via
     /// `bentodesk-platform::storage`; renderer iterates via `zones.iter()`.
     pub zones: ZoneList,
@@ -309,6 +331,13 @@ pub struct AppState {
     /// Last zone clicked by the user. Renderer uses this for the real `click`
     /// display-mode behaviour.
     pub selected_zone: Cell<Option<ZoneId>>,
+    /// Last Zone reached by FocusNext/Previous. Pointer-leave collapse may clear
+    /// `selected_zone`, but must not restart the keyboard cycle at the first Zone.
+    pub keyboard_focused_zone: Cell<Option<ZoneId>>,
+    /// Search/keyboard activation starts away from the target surface. Keep that
+    /// panel open until the pointer actually enters it; otherwise the
+    /// existing hover-leave timer collapses it as soon as the morph completes.
+    pub explicit_zone_surface_hold: Cell<Option<ZoneId>>,
     /// Last visible Settings backup status. Set by the shell after a real
     /// config-vault backup/list/restore attempt; rendered by the Settings
     /// overlay so the backup row has a user-visible success/error result.
@@ -389,9 +418,9 @@ pub struct AppState {
     /// from a collapsed pill is not a click, so mouse-up restores this selection
     /// instead of leaving the dragged pill expanded.
     pub zone_drag_selected_before_start: Cell<Option<ZoneId>>,
-    /// In-flight resize — `Some((zone, w0, h0))` where (w0, h0) is the
-    /// zone's size at mouse-down (delta added each MOUSEMOVE).
-    pub zone_resize: Cell<Option<(ZoneId, i32, i32)>>,
+    /// In-flight directional panel resize. Pointer origin, visible start size,
+    /// and fixed anchor edges are captured once so the first move cannot jump.
+    pub zone_resize: Cell<Option<ZoneResizeSession>>,
     /// Candidate for OLE drag-out from an item card. Set on mouse-down and
     /// promoted to `drag_drop::start_drag_operation` once mouse movement
     /// exceeds the shell threshold.

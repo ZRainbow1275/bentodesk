@@ -36,6 +36,9 @@ pub struct WindowState {
     /// `Cell` (not `RefCell`) because `bool` is `Copy` and the WM_PAINT
     /// handler is single-threaded by Win32 message-pump contract.
     pub first_paint_done: Cell<bool>,
+    /// Work-area/DPI/display changes schedule one group-aware geometry repair
+    /// after the Main renderer has measured its new logical viewport.
+    pub pending_zone_geometry_normalize: Cell<bool>,
 }
 
 impl Default for WindowState {
@@ -58,6 +61,7 @@ impl Default for WindowState {
             // to `true` and never trims again (re-trimming would just
             // page-fault hot resources back in on the next frame).
             first_paint_done: Cell::new(false),
+            pending_zone_geometry_normalize: Cell::new(false),
         }
     }
 }
@@ -67,13 +71,28 @@ impl WindowState {
         Self::default()
     }
 
+    /// Schedule one geometry normalization on the next Main paint.
+    pub fn schedule_zone_geometry_normalize(&self) -> bool {
+        !self.pending_zone_geometry_normalize.replace(true)
+    }
+
+    /// Consume the pending normalization flag exactly once.
+    pub fn take_zone_geometry_normalize(&self) -> bool {
+        self.pending_zone_geometry_normalize.replace(false)
+    }
+
     /// Load persisted Zones once before this HWND's first draw.
     pub fn load_zones_once(&self, app: &mut AppState) {
         if self.loaded.replace(true) || app.zones_path.as_os_str().is_empty() {
             return;
         }
         match bentodesk_platform::storage::read_zones(&app.zones_path) {
-            Ok(loaded) => app.zones = loaded,
+            Ok(mut loaded) => {
+                if loaded.repair_duplicate_item_ids() > 0 {
+                    app.mark_dirty();
+                }
+                app.zones = loaded;
+            }
             Err(bentodesk_platform::PlatformError::Storage(_)) => {
                 let _ = bentodesk_platform::storage::quarantine_corrupt(&app.zones_path);
             }

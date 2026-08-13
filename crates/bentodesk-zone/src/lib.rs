@@ -117,8 +117,10 @@ pub fn display_name_for_path(path: &str) -> String {
     file_name
 }
 
-/// One zone. Coordinates are in screen-space DIPs (i32 to match the
-/// persisted schema; Win32 `SetWindowPos` consumes i32 anyway).
+/// One zone. Coordinates are Main HWND client logical DIPs. `x/y` are the
+/// collapsed capsule home; `w/h` are the stored expanded-panel size (the
+/// visible panel may shrink directionally at a work-area edge). Integers keep
+/// the existing persisted schema stable.
 ///
 /// `title` is `Cow<'static, str>` so a bundled default zone can borrow from
 /// a string literal (zero allocation), while user-named zones own their

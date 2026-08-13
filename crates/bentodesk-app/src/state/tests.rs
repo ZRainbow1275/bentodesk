@@ -8,3 +8,4 @@ use super::*;
 include!("tests/01_panel_header_button_hover_tracks_visible_changes_only.rs");
 include!("tests/02_m6c_unknown_id_leaves_effect_none.rs");
 include!("tests/03_tooltip_session_tracks_visible_payload_and_hide.rs");
+include!("tests/04_workarea_refresh_cancels_all_zone_geometry_gestures.rs");

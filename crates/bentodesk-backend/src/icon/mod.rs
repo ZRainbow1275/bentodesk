@@ -321,7 +321,7 @@ pub(crate) mod wic {
 
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::Graphics::Imaging::{
-        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppRGBA,
+        CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppBGRA,
         IWICBitmapDecoder, IWICBitmapEncoder, IWICBitmapFrameDecode, IWICBitmapFrameEncode,
         IWICImagingFactory, IWICStream, WICBitmapEncoderNoCache,
         WICBitmapPaletteTypeFixedHalftone256, WICDecodeMetadataCacheOnLoad,
@@ -415,19 +415,29 @@ pub(crate) mod wic {
             message: e.to_string(),
         })?;
 
-        // SAFETY: Pixel format negotiation. We request 32bppRGBA; WIC
-        // may return a different format if PNG container can't carry
-        // it, but for the formats we use this is always honoured.
-        let mut pf = GUID_WICPixelFormat32bppRGBA;
+        // WIC's PNG encoder natively consumes BGRA. Convert the extractor's
+        // RGBA contract explicitly instead of writing RGBA bytes into whatever
+        // format SetPixelFormat negotiates (which swaps red and blue).
+        let mut bgra = pixels.to_vec();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let mut pf = GUID_WICPixelFormat32bppBGRA;
         unsafe { frame.SetPixelFormat(&mut pf) }.map_err(|e| IconError::Wic {
             ctx: "encode_png/SetPixelFormat",
             message: e.to_string(),
         })?;
+        if pf != GUID_WICPixelFormat32bppBGRA {
+            return Err(IconError::Wic {
+                ctx: "encode_png/SetPixelFormat",
+                message: format!("PNG encoder negotiated unsupported pixel format {pf:?}"),
+            });
+        }
 
         // SAFETY: WritePixels writes `height` rows of `width*4` bytes
         // from our caller-owned pixel buffer.
         let stride = width * 4;
-        unsafe { frame.WritePixels(height, stride, pixels) }.map_err(|e| IconError::Wic {
+        unsafe { frame.WritePixels(height, stride, &bgra) }.map_err(|e| IconError::Wic {
             ctx: "encode_png/WritePixels",
             message: e.to_string(),
         })?;
@@ -556,10 +566,17 @@ pub(crate) mod wic {
             // SAFETY: WIC is COM-based. Balance only a successful apartment
             // initialisation; an existing apartment remains owned by its host.
             let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
-            let outcome = (|| -> Result<(Vec<u8>, bool), IconError> {
-                let png = encode_png(&[0xE2, 0x44, 0x44, 0xFF], 1, 1)?;
+            let source = [0xE2, 0x44, 0x19, 0xA5];
+            let outcome = (|| -> Result<(Vec<u8>, Vec<u8>, bool), IconError> {
+                let png = encode_png(&source, 1, 1)?;
+                let (decoded, width, height) = super::super::custom_icons::wic_decode_to_rgba(
+                    &png,
+                    super::super::custom_icons::ContainerFormat::Png,
+                )
+                .map_err(|message| IconError::InvalidPng { message })?;
+                assert_eq!((width, height), (1, 1));
                 let transparent = decode_png_alpha_check(&png);
-                Ok((png, transparent))
+                Ok((png, decoded, transparent))
             })();
             if initialized {
                 // SAFETY: balances the successful CoInitializeEx above on
@@ -567,8 +584,9 @@ pub(crate) mod wic {
                 unsafe { CoUninitialize() };
             }
 
-            let (png, transparent) = outcome.expect("encode one opaque pixel");
+            let (png, decoded, transparent) = outcome.expect("encode one asymmetric pixel");
             assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert_eq!(decoded, source);
             assert!(!transparent);
         }
     }

@@ -10,8 +10,7 @@ impl Renderer {
         // `GetTickCount` once per frame so all pills share the same phase
         // (the breathing dot looks broken if each pill samples a different
         // `now`). Allocation-free per spec §10.
-        // SAFETY: `GetTickCount` is total + thread-safe.
-        let anim_now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        let anim_now_ms = app.geometry_frame_now_ms.get();
         let palette = app.active_theme_palette();
         // M6a — live Tauri-parity palette for this frame. Bound ONCE here and
         // threaded into the pill / morph paint helpers so the whole zone
@@ -62,8 +61,6 @@ impl Renderer {
         // (stack_shadow / stack_wrapper_halo / stack_badge_fill / stack_peek_fill)
         // went with them.
         let zone_drop_target_glow = with_alpha(palette.accent_hover, 0.30);
-        let drop_preview_fill = with_alpha(palette.accent, 0.20);
-        let drop_preview_core = with_alpha(palette.accent_hover, 0.34);
         // The expanded panel and morph endpoint share the authored Tauri
         // surface radius. `RadiusTokens::lg` is the widget scale (8 DIP in the
         // default theme), not `.bento-zone--expanded`'s 16-DIP radius.
@@ -72,7 +69,7 @@ impl Renderer {
             .zone_drag
             .get()
             .map(|t| t.0)
-            .or_else(|| app.zone_resize.get().map(|t| t.0));
+            .or_else(|| app.zone_resize.get().map(|session| session.id));
         let zone_search_target = app.zone_search_target.get();
         let zone_search_query = app.search_bar.borrow().query.clone();
         // #5 (2026-06-02) — `active_id` (drag OR resize) drives the active-fill
@@ -90,13 +87,6 @@ impl Renderer {
         let item_drag = active_item_drag_visual(app);
         let drag_target_id = item_drag
             .and_then(|drag| hit_test_render_zone(app, drag.last_x, drag.last_y, anim_now_ms));
-        let dragged_item_wide = item_drag
-            .and_then(|drag| {
-                app.zones
-                    .item(drag.zone_id, drag.item_id)
-                    .map(|item| item.is_wide)
-            })
-            .unwrap_or(false);
         // Z-order — three fixed passes. Expanded/morphing zones form the normal
         // TOP layer, collapsed pills are the BOTTOM layer, and the actively
         // moved capsule is painted last. This matches Tauri's `Z_ZONE_DRAG`
@@ -141,12 +131,7 @@ impl Renderer {
                 if let Some(morph) = app.zone_pill_morph_at(zone.id, anim_now_ms) {
                     let count = zone.items.len();
                     let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
-                    let expanded_rect = bentodesk_style::Rect {
-                        x: zone.x as f32,
-                        y: zone.y as f32,
-                        width: zone.w as f32,
-                        height: zone.h as f32,
-                    };
+                    let expanded_rect = app.zone_expanded_placement(zone).panel;
                     // V21-C9 — still sample the V-8 PillHover channel at the
                     // morph boundary, but keep the collapsed endpoint at the
                     // exact Tauri `surface_zen` token. Tauri has no hover
@@ -231,12 +216,7 @@ impl Renderer {
                     )?;
                     continue;
                 }
-                let rect = bentodesk_style::Rect {
-                    x: zone.x as f32,
-                    y: zone.y as f32,
-                    width: zone.w as f32,
-                    height: zone.h as f32,
-                };
+                let rect = app.zone_expanded_placement(zone).panel;
                 // Wave I2 — expanded body chrome (panel shadow / header band /
                 // divider / count badge). M2 (05-29): the footer thumbnail strip
                 // (E-01) was deleted — Tauri's BentoPanel has no footer node.
@@ -244,7 +224,8 @@ impl Renderer {
                 // renders as the NORMAL expanded panel, so the shadow is no longer
                 // suppressed for anchors (the bespoke anchor halo + double-shadow
                 // that this guard avoided double-stamping was removed below).
-                let expanded_layout = expanded_zone_grid::expanded_zone_layout(zone);
+                let expanded_layout =
+                    expanded_zone_grid::expanded_zone_layout_for_rect(rect, zone.items.len());
                 {
                     // M6b — per-theme `expanded` stack under the panel band so the
                     // expanded surface lifts off the desktop backdrop. `draw_shadow_stack`
@@ -364,8 +345,9 @@ impl Renderer {
                 }
                 let item_top_offset = search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * zone_search_reveal;
                 let item_scroll_max = if zone_search_active {
-                    highlight_overlay::item_flow_max_scroll(
+                    highlight_overlay::item_flow_max_scroll_in_panel(
                         zone,
+                        rect,
                         item_top_offset,
                         zone.items
                             .iter()
@@ -378,14 +360,16 @@ impl Renderer {
                             .map(|item| item.is_wide),
                     )
                 } else {
-                    highlight_overlay::item_flow_max_scroll(
+                    highlight_overlay::item_flow_max_scroll_in_panel(
                         zone,
+                        rect,
                         item_top_offset,
                         zone.items.iter().map(|item| item.is_wide),
                     )
                 };
                 let item_scroll = app.zone_content_scroll_offset(zone.id).min(item_scroll_max);
-                let content_clip = highlight_overlay::item_content_clip_rect(zone, item_top_offset);
+                let content_clip =
+                    highlight_overlay::item_content_clip_rect_in_panel(rect, item_top_offset);
                 self.push_clip(content_clip)?;
                 let content_result = (|| -> Result<(), RenderError> {
                     let item_label_group_px = {
@@ -401,8 +385,9 @@ impl Renderer {
                             }
                             let card_rect = if zone_search_active {
                                 let (card, next_slot) =
-                                    highlight_overlay::item_card_rect_for_flow_slot_scrolled(
+                                    highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
                                         zone,
+                                        rect,
                                         label_flow_slot,
                                         item.is_wide,
                                         item_top_offset,
@@ -411,9 +396,10 @@ impl Renderer {
                                 label_flow_slot = next_slot;
                                 card
                             } else {
-                                highlight_overlay::item_card_rect_for_item_scrolled(
+                                highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
                                     zone,
                                     item,
+                                    rect,
                                     item_scroll,
                                 )
                             };
@@ -437,8 +423,9 @@ impl Renderer {
                         visible_item_count += 1;
                         let card_rect = if zone_search_active {
                             let (card, next_slot) =
-                                highlight_overlay::item_card_rect_for_flow_slot_scrolled(
+                                highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
                                     zone,
+                                    rect,
                                     search_flow_slot,
                                     item.is_wide,
                                     item_top_offset,
@@ -447,9 +434,10 @@ impl Renderer {
                             search_flow_slot = next_slot;
                             card
                         } else {
-                            highlight_overlay::item_card_rect_for_item_scrolled(
+                            highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
                                 zone,
                                 item,
+                                rect,
                                 item_scroll,
                             )
                         };
@@ -534,28 +522,26 @@ impl Renderer {
                         )?;
                     }
                     if Some(zone.id) == drag_target_id
-                        && let Some(preview) = drop_preview_rect_for_zone(
+                        && let Some(preview) = drop_preview_rect_for_visible_drag(
+                            app,
                             zone,
+                            rect,
                             item_drag,
-                            dragged_item_wide,
                             item_scroll,
                             item_top_offset,
+                            |item| {
+                                zone_search_target != Some(zone.id)
+                                    || search_bar::zone_item_matches_query(
+                                        item.name.as_ref(),
+                                        zone_search_query.as_str(),
+                                    )
+                            },
                         )
                     {
                         // Drag preview is a target affordance, not card chrome. Paint it
                         // after resident cards so occupied cells cannot cover the target core,
                         // but before the floating ghost so the dragged item remains topmost.
-                        self.fill_rounded_rect(
-                            preview,
-                            drop_preview_fill,
-                            item_chrome.card_radius,
-                        )?;
-                        let core = inset_rect(preview, 4.0);
-                        self.fill_rounded_rect(
-                            core,
-                            drop_preview_core,
-                            zone_chrome.drop_preview_core_radius,
-                        )?;
+                        self.draw_item_drop_preview(app, preview, item_chrome.card_radius)?;
                     }
                     Ok(())
                 })();
@@ -619,7 +605,11 @@ impl Renderer {
         if let Some(drag) = item_drag
             && let Some((zone, item)) = source_drag_item(app, drag)
         {
-            let source_rect = item_card_rect_for_item(zone, item);
+            let source_rect = highlight_overlay::item_card_rect_for_item_in_panel(
+                zone,
+                item,
+                app.zone_effective_rect_at(zone, anim_now_ms),
+            );
             let ghost_rect = drag_ghost_rect(app, drag, source_rect);
             let shadow_rect = bentodesk_style::Rect {
                 x: ghost_rect.x + 4.0,

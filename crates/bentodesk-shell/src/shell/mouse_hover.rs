@@ -363,8 +363,12 @@ pub(super) fn clear_hover(root: &AppRoot) {
     let now_ms = unsafe { GetTickCount() };
     let should_hide_tooltip = app.active_tooltip.borrow().is_some();
     if normal_pointer_drag_active(&app) {
-        let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
-        reset_pointer_drag_hover_channels(&app, dragged_zone, now_ms);
+        if app.item_drag.borrow().is_some() {
+            reset_item_drag_hover_channels(&app, now_ms);
+        } else {
+            let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
+            reset_pointer_drag_hover_channels(&app, dragged_zone, now_ms);
+        }
         app.set_panel_header_button_hover(None);
         drop(app);
         if should_hide_tooltip {

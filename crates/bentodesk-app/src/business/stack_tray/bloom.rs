@@ -99,6 +99,19 @@ pub fn stack_bloom_exit_frames_at(
     stack_bloom_frames_at_with_motion(viewport, anchor, member_count, exit_progress, true)
 }
 
+/// The exact Bloom frames visible on the current animation sample. Paint,
+/// hit-testing, and the Main HWND region all use this seam so reveal and exit
+/// never expose settled petals before they are drawn.
+pub fn stack_bloom_visible_frames_at(
+    viewport: Size,
+    anchor: &Zone,
+    member_count: usize,
+    progress: f32,
+    leaving: bool,
+) -> SmallVec<[StackBloomFrame; BLOOM_VISIBLE_PETAL_LIMIT]> {
+    stack_bloom_frames_at_with_motion(viewport, anchor, member_count, progress, leaving)
+}
+
 fn stack_bloom_frames_at_with_motion(
     viewport: Size,
     anchor: &Zone,
@@ -209,6 +222,48 @@ pub fn stack_bloom_exit_petal_rects_at(
         .collect()
 }
 
+pub fn stack_bloom_visible_petal_rects_at(
+    viewport: Size,
+    anchor: &Zone,
+    member_count: usize,
+    progress: f32,
+    leaving: bool,
+    active_index: Option<usize>,
+    active_t: f32,
+) -> SmallVec<[Rect; BLOOM_VISIBLE_PETAL_LIMIT]> {
+    stack_bloom_visible_frames_at(viewport, anchor, member_count, progress, leaving)
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            if active_index == Some(index) {
+                stack_bloom_active_rect(frame.rect, active_t)
+            } else {
+                frame.rect
+            }
+        })
+        .collect()
+}
+
+#[inline]
+pub fn stack_bloom_active_transition_t(now_ms: u32, started_ms: u32) -> f32 {
+    let raw = crate::animator::elapsed_ms_at_or_after(now_ms, started_ms) as f32
+        / BLOOM_ACTIVE_TRANSITION_MS as f32;
+    crate::animator::ease_in_out_quad(raw.clamp(0.0, 1.0))
+}
+
+#[inline]
+pub fn stack_bloom_active_rect(rect: Rect, active_t: f32) -> Rect {
+    let scale = 1.0 + (BLOOM_ACTIVE_SCALE - 1.0) * active_t.clamp(0.0, 1.0);
+    let width = rect.width * scale;
+    let height = rect.height * scale;
+    Rect {
+        x: rect.x + (rect.width - width) * 0.5,
+        y: rect.y + (rect.height - height) * 0.5,
+        width,
+        height,
+    }
+}
+
 pub fn stack_bloom_hit_test(
     viewport: Size,
     anchor: &Zone,
@@ -243,6 +298,32 @@ pub fn stack_bloom_exit_hit_test_at(
     stack_bloom_exit_petal_rects_at(viewport, anchor, member_count, exit_progress)
         .iter()
         .position(|rect| rect_contains(inflate_rect(*rect, BLOOM_PETAL_HIT_INFLATE_PX), x, y))
+}
+
+pub fn stack_bloom_visible_hit_test_at(
+    viewport: Size,
+    anchor: &Zone,
+    member_count: usize,
+    progress: f32,
+    leaving: bool,
+    active: Option<(usize, f32)>,
+    point: (f32, f32),
+) -> Option<usize> {
+    let (active_index, active_t) = active
+        .map(|(index, t)| (Some(index), t))
+        .unwrap_or((None, 0.0));
+    let (x, y) = point;
+    stack_bloom_visible_petal_rects_at(
+        viewport,
+        anchor,
+        member_count,
+        progress,
+        leaving,
+        active_index,
+        active_t,
+    )
+    .iter()
+    .position(|rect| rect_contains(inflate_rect(*rect, BLOOM_PETAL_HIT_INFLATE_PX), x, y))
 }
 
 /// Map a visible Bloom slot to a real member. The final slot is reserved for

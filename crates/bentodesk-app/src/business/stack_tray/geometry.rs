@@ -8,9 +8,9 @@ pub fn stack_tray_rect(viewport: Size, anchor: &Zone, member_count: usize) -> Re
     let visible_rows = stack_tray_visible_rows(member_count);
     let height = (TRAY_HEADER_HEIGHT_PX + visible_rows as f32 * TRAY_ROW_STRIDE_PX + TRAY_INSET_PX)
         .max(TRAY_MIN_HEIGHT_PX);
-    let anchor_right = anchor.x as f32 + anchor.w as f32;
-    let right_candidate = anchor_right + TRAY_GAP_PX;
-    let left_candidate = anchor.x as f32 - TRAY_GAP_PX - TRAY_WIDTH_PX;
+    let capsule = zone_pill_geometry::stack_capsule_layout_for_zone(anchor, member_count).rect;
+    let right_candidate = capsule.right() + TRAY_GAP_PX;
+    let left_candidate = capsule.x - TRAY_GAP_PX - TRAY_WIDTH_PX;
     let x = if right_candidate + TRAY_WIDTH_PX + TRAY_VIEWPORT_MARGIN_PX <= viewport.width {
         right_candidate
     } else {
@@ -21,7 +21,7 @@ pub fn stack_tray_rect(viewport: Size, anchor: &Zone, member_count: usize) -> Re
     let max_y = (viewport.height - height - TRAY_VIEWPORT_MARGIN_PX).max(TRAY_VIEWPORT_MARGIN_PX);
     Rect {
         x: x.clamp(TRAY_VIEWPORT_MARGIN_PX, max_x),
-        y: (anchor.y as f32).clamp(TRAY_VIEWPORT_MARGIN_PX, max_y),
+        y: capsule.y.clamp(TRAY_VIEWPORT_MARGIN_PX, max_y),
         width: TRAY_WIDTH_PX,
         height,
     }

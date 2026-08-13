@@ -223,8 +223,7 @@ impl Renderer {
         }
 
         if draw_identity {
-            let pill = zone_pill_geometry::pill_layout_for_zone(zone, zone.items.len());
-            let identity = morph_zen_content_to_header(pill, layout, 1.0);
+            let identity = zone_identity_layout_at(zone, layout.panel, 1.0);
             self.draw_zone_pill_content(zone, &identity, zone.items.len(), opacity, pal)?;
         }
 
@@ -620,9 +619,7 @@ impl Renderer {
 
         let morph_layout =
             expanded_zone_grid::expanded_zone_layout_for_rect(rect, zone.items.len());
-        let live_zen_layout = zone_pill_geometry::pill_content_layout_in_rect(*pill_layout, rect);
-        let identity_layout =
-            morph_zen_content_to_header(live_zen_layout, &morph_layout, morph_clamped);
+        let identity_layout = zone_identity_layout_at(zone, expanded_rect, morph_clamped);
         // Tauri's outer `.bento-zone` owns `overflow: hidden`. Keep every child
         // on the same live morph surface too: during collapse the cards reflow
         // faster than their opacity reaches zero, and without this clip they can

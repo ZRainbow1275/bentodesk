@@ -20,42 +20,7 @@ use super::*;
 ///
 /// Pure / allocation-free.
 fn effective_zone_hit_rect(app: &AppState, zone: &Zone, now_ms: u32) -> Rect {
-    // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
-    // explicitly selected (a focused member), NOT on hover (hover shows the
-    // bloom). #5 (2026-06-02) — only a RESIZE (armable solely on an already-
-    // expanded panel, gated by `hit_test_zone_resize_corner`) may force the
-    // expanded body; a DRAG keeps a collapsed pill a pill so its hit rect stays
-    // the PILL rect and follows the cursor. Both rules now live in the shared
-    // `AppState::zone_pill_body_visible` SSoT — the SAME predicate the paint side
-    // (`Renderer::draw_zones`) and the z-layering (`zone_on_top`) key off — so
-    // paint == hit geometry can never drift across the app/shell boundary.
-    let body_visible = app.zone_pill_body_visible(zone);
-    let stack_member_count = app.zones.stack_member_ids(zone.id).map(|m| m.len());
-    let count = stack_member_count.unwrap_or_else(|| zone.items.len());
-    let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
-    let expanded_rect = Rect {
-        x: zone.x as f32,
-        y: zone.y as f32,
-        width: zone.w as f32,
-        height: zone.h as f32,
-    };
-
-    // V-13 case 1 — pill morph in flight. Anchors don't morph (the paint-side
-    // pill_anim_active also excludes them).
-    // V-13 paint–hit parity: the same sampled morph drives both surfaces.
-    if let Some(morph) = app.zone_pill_morph_at(zone.id, now_ms) {
-        return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
-    }
-
-    if !body_visible {
-        if let Some(member_count) = stack_member_count {
-            return zone_pill_geometry::stack_capsule_layout_for_zone(zone, member_count).rect;
-        }
-        return pill_layout.rect;
-    }
-
-    // V-13 case 3 — expanded body (focused stack member uses the normal panel).
-    expanded_rect
+    app.zone_effective_rect_at(zone, now_ms)
 }
 
 // -----------------------------------------------------------------------------
@@ -76,8 +41,7 @@ pub const ZONE_RESIZE_CORNER: f32 = 12.0;
 /// Uses the shared `AppState::zone_on_top` SSoT so the hit stack and the paint
 /// stack can't drift.
 pub fn hit_test_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
-    // SAFETY: GetTickCount is total and thread-safe.
-    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    let now_ms = app.geometry_frame_now_ms.get();
     for on_top_layer in [true, false] {
         for z in app.zones.iter().rev() {
             if !z.is_visible() || z.is_stacked_child() {
@@ -99,6 +63,7 @@ pub fn hit_test_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
 /// and effective filesystem path. Geometry mirrors `Renderer::draw_zones` so
 /// drag-out hit-testing stays aligned with what the user sees.
 pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, ZoneItemId, String)> {
+    let now_ms = app.geometry_frame_now_ms.get();
     for z in app.zones.iter().rev() {
         if !z.is_visible() || z.is_stacked_child() {
             continue;
@@ -111,19 +76,13 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         if !app.zone_pill_body_visible(z) {
             continue;
         }
-        let zx = z.x as f32;
-        let zy = z.y as f32;
-        let zr = zx + z.w as f32;
-        let zb = zy + z.h as f32;
-        if x < zx || x >= zr || y < zy || y >= zb {
+        let panel = app.zone_effective_rect_at(z, now_ms);
+        if x < panel.x || x >= panel.right() || y < panel.y || y >= panel.bottom() {
             continue;
         }
         let search_active = app.zone_search_target.get() == Some(z.id);
         let search_reveal = if search_active {
-            // SAFETY: GetTickCount is total and thread-safe.
-            app.zone_search_animation_progress_at(unsafe {
-                windows_sys::Win32::System::SystemInformation::GetTickCount()
-            })
+            app.zone_search_animation_progress_at(now_ms)
         } else {
             0.0
         };
@@ -132,7 +91,8 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         } else {
             0.0
         };
-        let content_clip = highlight_overlay::item_content_clip_rect(z, item_top_offset);
+        let content_clip =
+            highlight_overlay::item_content_clip_rect_in_panel(panel, item_top_offset);
         if !rect_contains(content_clip, x, y) {
             continue;
         }
@@ -151,17 +111,24 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
             // in lockstep; the old local 8/16/48 math made hit/drag targets drift
             // from the cards the user actually saw.
             let card = if search_active {
-                let (card, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_scrolled(
-                    z,
-                    search_slot,
-                    item.is_wide,
-                    item_top_offset,
-                    scroll_offset,
-                );
+                let (card, next_slot) =
+                    highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
+                        z,
+                        panel,
+                        search_slot,
+                        item.is_wide,
+                        item_top_offset,
+                        scroll_offset,
+                    );
                 search_slot = next_slot;
                 card
             } else {
-                highlight_overlay::item_card_rect_for_item_scrolled(z, item, scroll_offset)
+                highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
+                    z,
+                    item,
+                    panel,
+                    scroll_offset,
+                )
             };
             if card.width > 0.0
                 && card.height > 0.0
@@ -190,17 +157,13 @@ pub fn hit_test_inline_zone_search(app: &AppState, x: f32, y: f32) -> Option<Inl
     }
     let zone_id = app.zone_search_target.get()?;
     let zone = app.zones.get(zone_id)?;
-    let zone_rect = Rect {
-        x: zone.x as f32,
-        y: zone.y as f32,
-        width: zone.w as f32,
-        height: zone.h as f32,
-    };
+    let now_ms = app.geometry_frame_now_ms.get();
+    if app.zone_pill_morph_in_flight_at(zone, now_ms) {
+        return None;
+    }
+    let zone_rect = app.zone_effective_rect_at(zone, now_ms);
     let final_input = search_bar::zone_inline_rect(zone_rect);
-    // SAFETY: GetTickCount is total and thread-safe.
-    let reveal = app.zone_search_animation_progress_at(unsafe {
-        windows_sys::Win32::System::SystemInformation::GetTickCount()
-    });
+    let reveal = app.zone_search_animation_progress_at(now_ms);
     let input = Rect {
         x: final_input.right() - final_input.width * reveal,
         width: final_input.width * reveal,
@@ -228,23 +191,21 @@ pub fn item_grid_position_for_point(
     y: f32,
 ) -> Option<(i32, i32)> {
     let z = app.zones.get(zone_id)?;
+    let now_ms = app.geometry_frame_now_ms.get();
     let item_top_offset = if app.zone_search_target.get() == Some(zone_id) {
         // SAFETY: GetTickCount is total and thread-safe.
-        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
-            * app.zone_search_animation_progress_at(unsafe {
-                windows_sys::Win32::System::SystemInformation::GetTickCount()
-            })
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
     } else {
         0.0
     };
     let scroll_offset = app.zone_content_scroll_offset(zone_id);
+    let panel = if app.zone_pill_morph_at(zone_id, now_ms).is_some() {
+        app.zone_effective_rect_at(z, now_ms)
+    } else {
+        app.zone_expanded_placement(z).panel
+    };
     highlight_overlay::item_grid_position_for_panel(
-        Rect {
-            x: z.x as f32,
-            y: z.y as f32,
-            width: z.w as f32,
-            height: z.h as f32,
-        },
+        panel,
         z.grid_columns,
         x,
         y + scroll_offset,
@@ -252,10 +213,54 @@ pub fn item_grid_position_for_point(
     )
 }
 
-/// Topmost zone whose bottom-right `ZONE_RESIZE_CORNER` square contains
-/// `(x, y)`. Distinct from `hit_test_zone`: a click in the corner triggers
-/// resize, anywhere else inside the body triggers drag.
-pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+pub fn item_drop_target_for_point(
+    app: &AppState,
+    zone_id: ZoneId,
+    source_item: Option<ZoneItemId>,
+    is_wide: bool,
+    x: f32,
+    y: f32,
+) -> Option<(i32, i32, usize)> {
+    let zone = app.zones.get(zone_id)?;
+    let now_ms = app.geometry_frame_now_ms.get();
+    let item_top_offset = if app.zone_search_target.get() == Some(zone_id) {
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
+    } else {
+        0.0
+    };
+    let scroll_offset = app.zone_content_scroll_offset(zone_id);
+    let search_active = app.zone_search_target.get() == Some(zone_id);
+    let search_state = app.search_bar.borrow();
+    let search_query = search_state.query.as_str();
+    let panel = if app.zone_pill_morph_at(zone_id, now_ms).is_some() {
+        app.zone_effective_rect_at(zone, now_ms)
+    } else {
+        app.zone_expanded_placement(zone).panel
+    };
+    highlight_overlay::item_drop_target_for_panel(
+        zone,
+        panel,
+        source_item,
+        is_wide,
+        (x, y + scroll_offset),
+        item_top_offset,
+        |item| {
+            !search_active || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
+        },
+    )
+    .map(|(grid_x, grid_y, target_index, _)| (grid_x, grid_y, target_index))
+}
+
+/// Capture the topmost directional resize session under `(x, y)`.
+///
+/// The handle is opposite the capsule's fixed horizontal/vertical anchor, so
+/// all four desktop quadrants resize without translating the anchored edge.
+pub fn zone_resize_session_for_point(
+    app: &AppState,
+    x: f32,
+    y: f32,
+) -> Option<bentodesk_app::ZoneResizeSession> {
+    let now_ms = app.geometry_frame_now_ms.get();
     for z in app.zones.iter().rev() {
         if !z.is_visible() || z.is_stacked_child() {
             continue;
@@ -267,15 +272,51 @@ pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<Zon
         if !app.zone_pill_body_visible(z) {
             continue;
         }
-        let zr = (z.x + z.w) as f32;
-        let zb = (z.y + z.h) as f32;
-        let cx = zr - ZONE_RESIZE_CORNER;
-        let cy = zb - ZONE_RESIZE_CORNER;
-        if x >= cx && x < zr && y >= cy && y < zb {
-            return Some(z.id);
+        // The transient shell/card layout is still moving. Arming a resize
+        // against it would capture a non-final start size and jump on move.
+        if app.zone_pill_morph_in_flight_at(z, now_ms) {
+            continue;
+        }
+        let placement = app.zone_expanded_placement(z);
+        let panel = placement.panel;
+        let corner_left = if placement.anchor_right {
+            panel.x
+        } else {
+            panel.right() - ZONE_RESIZE_CORNER
+        };
+        let corner_right = if placement.anchor_right {
+            panel.x + ZONE_RESIZE_CORNER
+        } else {
+            panel.right()
+        };
+        let corner_top = if placement.anchor_bottom {
+            panel.y
+        } else {
+            panel.bottom() - ZONE_RESIZE_CORNER
+        };
+        let corner_bottom = if placement.anchor_bottom {
+            panel.y + ZONE_RESIZE_CORNER
+        } else {
+            panel.bottom()
+        };
+        if x >= corner_left && x < corner_right && y >= corner_top && y < corner_bottom {
+            return Some(bentodesk_app::ZoneResizeSession {
+                id: z.id,
+                start_pointer_x: x,
+                start_pointer_y: y,
+                start_visible_width: panel.width,
+                start_visible_height: panel.height,
+                anchor_right: placement.anchor_right,
+                anchor_bottom: placement.anchor_bottom,
+            });
         }
     }
     None
+}
+
+/// Topmost directional resize handle under `(x, y)`.
+pub fn hit_test_zone_resize_corner(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
+    zone_resize_session_for_point(app, x, y).map(|session| session.id)
 }
 
 /// GROUP-4 (2026-06-01) — the two action buttons in an expanded zone's
@@ -301,6 +342,7 @@ pub fn hit_test_zone_header_button(
     x: f32,
     y: f32,
 ) -> Option<(ZoneId, HeaderButton)> {
+    let now_ms = app.geometry_frame_now_ms.get();
     for z in app.zones.iter().rev() {
         if !z.is_visible() || z.is_stacked_child() {
             continue;
@@ -308,7 +350,10 @@ pub fn hit_test_zone_header_button(
         if !app.zone_pill_body_visible(z) {
             continue;
         }
-        let layout = expanded_zone_grid::expanded_zone_layout(z);
+        let layout = expanded_zone_grid::expanded_zone_layout_for_rect(
+            app.zone_effective_rect_at(z, now_ms),
+            z.items.len(),
+        );
         if rect_contains(layout.header_close_btn, x, y) {
             return Some((z.id, HeaderButton::Close));
         }

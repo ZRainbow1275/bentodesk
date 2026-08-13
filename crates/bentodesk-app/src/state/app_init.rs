@@ -11,6 +11,7 @@ impl AppState {
         Self {
             tree: Tree::with_capacity(64),
             viewport: Size::ZERO,
+            geometry_frame_now_ms: Cell::new(0),
             zones: ZoneList::new(),
             next_zone_id: Cell::new(1),
             is_pinned: Cell::new(false),
@@ -75,6 +76,8 @@ impl AppState {
             hovered_zone: Cell::new(None),
             panel_header_button_hover: Cell::new(None),
             selected_zone: Cell::new(None),
+            keyboard_focused_zone: Cell::new(None),
+            explicit_zone_surface_hold: Cell::new(None),
             settings_backup_status: RefCell::new(None),
             settings_backup_entries: RefCell::new(Vec::new()),
             settings_plugin_entries: RefCell::new(Vec::new()),

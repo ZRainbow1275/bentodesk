@@ -31,7 +31,7 @@ pub(super) fn dispatch(
         Command::CopyItemPath(path) => {
             let _copied = copy_item_path_with(root, path.0.as_str(), copy_text_to_clipboard);
         }
-        Command::MoveItem(zone_id, item_id, point) => {
+        Command::MoveItem(zone_id, item_id, point, target_index) => {
             let zone_item_id = bentodesk_zone::ZoneItemId(item_id.0);
             let item = root.app.borrow().zones.item(zone_id, zone_item_id).cloned();
             let Some(item) = item else {
@@ -55,7 +55,10 @@ pub(super) fn dispatch(
             let display_path = item_file_display_path(&item);
             let leaf = item_operation_leaf(display_path.as_str()).to_owned();
             let mut app = root.app.borrow_mut();
-            if app.zones.move_item(zone_id, zone_item_id, point.x, point.y) {
+            if app
+                .zones
+                .move_item_to_index(zone_id, zone_item_id, point.x, point.y, target_index)
+            {
                 app.mark_dirty();
                 app.item_operation_status
                     .borrow_mut()
@@ -139,7 +142,7 @@ pub(super) fn dispatch(
                 effects.needs_redraw = true;
             }
         }
-        Command::MoveItemToZone(from_zone_id, to_zone_id, item_id) => {
+        Command::MoveItemToZone(from_zone_id, to_zone_id, item_id, drop_target) => {
             let zone_item_id = bentodesk_zone::ZoneItemId(item_id.0);
             let item = root
                 .app
@@ -171,6 +174,21 @@ pub(super) fn dispatch(
             let display_path = item_file_display_path(&item);
             let leaf = item_operation_leaf(display_path.as_str()).to_owned();
             let had_hidden_file = item.hidden_path.is_some();
+            if !root.app.borrow().zones.can_move_item_to_zone(
+                from_zone_id,
+                to_zone_id,
+                zone_item_id,
+            ) {
+                set_item_operation_status(
+                    root,
+                    localized_current(
+                        format!("移动项目失败：{leaf}"),
+                        format!("Move item rejected: {leaf}"),
+                    ),
+                );
+                effects.needs_redraw = true;
+                return;
+            }
             let moved_paths = move_hidden_item_file_between_zones(root, &item, to_zone_id);
             let moved_hidden_file = moved_paths.is_some();
             let mut app = root.app.borrow_mut();
@@ -184,6 +202,7 @@ pub(super) fn dispatch(
                 moved_paths
                     .as_ref()
                     .map(|paths| std::borrow::Cow::Owned(paths.hidden_path.clone())),
+                drop_target.map(|(point, target_index)| (point.x, point.y, target_index)),
             ) {
                 app.mark_dirty();
                 let status = if had_hidden_file && moved_hidden_file {

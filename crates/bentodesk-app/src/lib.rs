@@ -59,6 +59,6 @@ pub use state::{
     PanelHeaderButtonHover, PanelHeaderButtonKind, PassphraseEntryPurpose, SettingsBackupEntry,
     SettingsBackupStatus, SettingsEncryptionMode, SettingsKeybindingFeedback, SettingsPluginEntry,
     SettingsTextField, SettingsUpdaterStatus, ThemeOption, WindowState, ZoneDisplayMode,
-    ZoneEditorSession,
+    ZoneEditorSession, ZoneResizeSession,
 };
 pub use window_registry::{MAX_MINIBARS, WindowRegistry, WindowSlot};

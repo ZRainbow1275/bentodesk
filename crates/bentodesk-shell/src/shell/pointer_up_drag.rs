@@ -187,14 +187,7 @@ pub(super) fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x
         // from the capsule instead of letting `selected_zone` expose a full
         // panel for one frame on mouse-up.
         let now_ms = unsafe { GetTickCount() };
-        let mut scheduler = app.hover_scheduler.get();
-        let previous = scheduler.expanded_zone();
-        scheduler.mark_expanded(zone_id, now_ms);
-        app.hover_scheduler.set(scheduler);
-        let previous_changed = previous
-            .filter(|id| *id != zone_id)
-            .is_some_and(|id| transition_zone_pill(&app, id, false, now_ms));
-        previous_changed | transition_zone_pill(&app, zone_id, true, now_ms)
+        activate_free_zone_surface(&app, zone_id, now_ms)
     } else {
         false
     };
@@ -250,19 +243,34 @@ pub(super) fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x
         if !candidate.is_internal_dragging {
             return None;
         }
+        let is_wide = app
+            .zones
+            .item(candidate.zone_id, candidate.item_id)
+            .is_some_and(|item| item.is_wide);
         let target_zone_id = item_drag_target_zone_for_point(&app, x, y)?;
+        let (grid_x, grid_y, target_index) = item_drop_target_for_drag_point(
+            &app,
+            target_zone_id,
+            candidate.zone_id,
+            candidate.item_id,
+            is_wide,
+            x,
+            y,
+        )?;
+        let point = DispatchPoint::new(grid_x, grid_y);
         if target_zone_id != candidate.zone_id {
             return Some(Command::MoveItemToZone(
                 candidate.zone_id,
                 target_zone_id,
                 bentodesk_app::ItemId(candidate.item_id.0),
+                Some((point, target_index)),
             ));
         }
-        let (grid_x, grid_y) = item_grid_position_for_drag_point(&app, target_zone_id, x, y)?;
         Some(Command::MoveItem(
             candidate.zone_id,
             bentodesk_app::ItemId(candidate.item_id.0),
-            DispatchPoint::new(grid_x, grid_y),
+            point,
+            target_index,
         ))
     });
     drop(app);
@@ -352,10 +360,12 @@ pub(super) fn handle_active_pointer_drag(
                     }
                     return true;
                 }
-                candidate.is_internal_dragging = true;
                 // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
                 let now_ms = unsafe { GetTickCount() };
-                reset_pointer_drag_hover_channels(&app, None, now_ms);
+                if !candidate.is_internal_dragging {
+                    reset_item_drag_hover_channels(&app, now_ms);
+                }
+                candidate.is_internal_dragging = true;
                 app.item_drag.borrow_mut().replace(candidate);
                 log_animation_proof_state(&app, "item_drag_live", now_ms, Some(x), Some(y));
             }
@@ -387,19 +397,14 @@ pub(super) fn handle_active_pointer_drag(
             }
             let nx = x as i32 - dx;
             let ny = y as i32 - dy;
-            let (cx, cy) = if let Some(z) = app.zones.get(id) {
-                let (_, _, drag_w, drag_h) =
-                    bentodesk_app::zone_gesture_geometry::zone_drag_capsule_rect(&app.zones, z);
-                bentodesk_platform::clamp_rect_into_union_bounds(
-                    nx,
-                    ny,
-                    drag_w,
-                    drag_h,
-                    &slot.state.monitors,
-                )
-            } else {
-                (nx, ny)
-            };
+            let (cx, cy) = clamp_zone_drag_to_logical_viewport(
+                &app.zones,
+                id,
+                nx,
+                ny,
+                app.viewport,
+                &slot.state.monitors,
+            );
             let moved = move_zone_live(&mut app, id, DispatchPoint::new(cx, cy));
             if moved && drag_proof_log_enabled() {
                 log_static(
@@ -413,15 +418,38 @@ pub(super) fn handle_active_pointer_drag(
             log_animation_proof_state(&app, "zone_drag_live", now_ms, Some(x), Some(y));
             return true;
         }
-        if let Some((id, w0, h0)) = app.zone_resize.get() {
-            let _ = (w0, h0);
-            if let Some(z) = app.zones.get(id) {
-                let new_w = ((x as i32) - z.x).max(80);
-                let new_h = ((y as i32) - z.y).max(60);
+        if let Some(session) = app.zone_resize.get() {
+            if let Some(z) = app.zones.get(session.id) {
+                let collapsed = app.zone_collapsed_rect(z);
+                let directional_max = bentodesk_app::zone_pill_geometry::expanded_zone_placement(
+                    collapsed,
+                    i32::MAX as f32,
+                    i32::MAX as f32,
+                    app.viewport,
+                )
+                .panel;
+                let (new_w, new_h) = bentodesk_app::zone_gesture_geometry::directional_resize_size(
+                    session,
+                    x,
+                    y,
+                    directional_max.width,
+                    directional_max.height,
+                    80.0,
+                    60.0,
+                );
+                let minimum = DispatchSize::new(
+                    80.min(directional_max.width.floor() as i32),
+                    60.min(directional_max.height.floor() as i32),
+                );
                 // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
                 let now_ms = unsafe { GetTickCount() };
-                reset_pointer_drag_hover_channels(&app, Some(id), now_ms);
-                let _ = resize_zone_live(&mut app, id, DispatchSize::new(new_w, new_h));
+                reset_pointer_drag_hover_channels(&app, Some(session.id), now_ms);
+                let _ = resize_zone_live_with_minimum(
+                    &mut app,
+                    session.id,
+                    DispatchSize::new(new_w, new_h),
+                    minimum,
+                );
                 log_animation_proof_state(&app, "zone_resize_live", now_ms, Some(x), Some(y));
             }
             return true;
@@ -429,6 +457,188 @@ pub(super) fn handle_active_pointer_drag(
     }
 
     false
+}
+
+/// Clamp a live Zone drag to the Main HWND's logical viewport.
+///
+/// Device-monitor bounds are intentionally accepted only as regression-proof
+/// context: Main-client logical DIPs are the persistence coordinate space and
+/// must not roam into a larger physical/virtual-screen union.
+pub(super) fn clamp_zone_drag_to_logical_viewport(
+    zones: &ZoneList,
+    id: ZoneId,
+    x: i32,
+    y: i32,
+    viewport: bentodesk_style::Size,
+    _device_monitors: &[bentodesk_platform::MonitorInfo],
+) -> (i32, i32) {
+    let Some(zone) = zones.get(id) else {
+        return (x, y);
+    };
+    let (_, _, width, height) =
+        bentodesk_app::zone_gesture_geometry::zone_drag_capsule_rect(zones, zone);
+    bentodesk_app::zone_pill_geometry::clamp_capsule_origin_to_viewport(
+        x, y, width, height, viewport,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod viewport_drag_tests {
+    use super::*;
+
+    #[test]
+    fn logical_viewport_clamp_covers_dpi_taskbar_edges_and_capsule_footprints() {
+        use bentodesk_platform::RectI32;
+        use bentodesk_style::Size;
+
+        let viewport_cases = [
+            (
+                "100%-bottom",
+                96,
+                Size {
+                    width: 1_920.75,
+                    height: 1_040.75,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 3_840,
+                    bottom: 2_160,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 3_840,
+                    bottom: 2_080,
+                },
+            ),
+            (
+                "125%-top",
+                120,
+                Size {
+                    width: 1_920.75,
+                    height: 1_040.75,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 2_400,
+                    bottom: 1_350,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 50,
+                    right: 2_400,
+                    bottom: 1_350,
+                },
+            ),
+            (
+                "150%-left",
+                144,
+                Size {
+                    width: 1_872.75,
+                    height: 1_080.75,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 2_880,
+                    bottom: 1_620,
+                },
+                RectI32 {
+                    left: 72,
+                    top: 0,
+                    right: 2_880,
+                    bottom: 1_620,
+                },
+            ),
+            (
+                "200%-right",
+                192,
+                Size {
+                    width: 1_872.75,
+                    height: 1_080.75,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 3_840,
+                    bottom: 2_160,
+                },
+                RectI32 {
+                    left: 0,
+                    top: 0,
+                    right: 3_744,
+                    bottom: 2_160,
+                },
+            ),
+        ];
+        let footprints = [
+            ("small-pill", "small", "pill", false),
+            ("medium-pill", "medium", "pill", false),
+            ("large-pill", "large", "pill", false),
+            ("small-circle", "small", "circle", false),
+            ("stack", "medium", "pill", true),
+        ];
+
+        for (viewport_name, dpi, viewport, rect_screen, rect_work) in viewport_cases {
+            let device_monitor = bentodesk_platform::MonitorInfo {
+                hmonitor: core::ptr::null_mut(),
+                rect_screen,
+                rect_work,
+                is_primary: true,
+            };
+            assert!(
+                rect_work.right - rect_work.left > viewport.width.floor() as i32
+                    || rect_work.bottom - rect_work.top > viewport.height.floor() as i32,
+                "fixture must expose inflated device bounds: {viewport_name} dpi={dpi}"
+            );
+
+            for (footprint_name, size, shape, stack) in footprints {
+                let mut zones = ZoneList::new();
+                let mut anchor = Zone::new(ZoneId(1), "zone", 10, 10, 480, 432);
+                anchor.set_capsule(size, shape);
+                zones.add(anchor);
+                if stack {
+                    zones.add(Zone::new(ZoneId(2), "child", 20, 20, 320, 240));
+                    assert!(zones.stack(ZoneId(1), ZoneId(2)));
+                }
+                let zone = zones.get(ZoneId(1)).expect("zone");
+                let (_, _, capsule_width, capsule_height) =
+                    bentodesk_app::zone_gesture_geometry::zone_drag_capsule_rect(&zones, zone);
+                let expected = (
+                    (viewport.width.floor() as i32 - capsule_width).max(0),
+                    (viewport.height.floor() as i32 - capsule_height).max(0),
+                );
+
+                assert_eq!(
+                    clamp_zone_drag_to_logical_viewport(
+                        &zones,
+                        ZoneId(1),
+                        i32::MAX / 4,
+                        i32::MAX / 4,
+                        viewport,
+                        &[device_monitor],
+                    ),
+                    expected,
+                    "{viewport_name} dpi={dpi} footprint={footprint_name}"
+                );
+                assert_eq!(
+                    clamp_zone_drag_to_logical_viewport(
+                        &zones,
+                        ZoneId(1),
+                        -500,
+                        -500,
+                        viewport,
+                        &[device_monitor],
+                    ),
+                    (0, 0),
+                    "negative clamp: {viewport_name} footprint={footprint_name}"
+                );
+            }
+        }
+    }
 }
 
 pub(super) fn item_external_drag_modifier_down() -> bool {

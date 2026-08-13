@@ -136,6 +136,9 @@ pub const BLOOM_EXIT_STAGGER_BUDGET_MS: u32 = 30;
 /// Hard upper bound for mounted exiting petals.
 pub const BLOOM_EXIT_VISIBLE_DURATION_MS: u32 = 140;
 pub const BLOOM_EXIT_SCALE: f32 = 0.5;
+/// Tauri Bloom petal hover transform and transition.
+pub const BLOOM_ACTIVE_SCALE: f32 = 1.05;
+pub const BLOOM_ACTIVE_TRANSITION_MS: u32 = 180;
 /// Maximum visible-cluster reveal duration for Tauri's 24-slot cap.
 pub const BLOOM_REVEAL_DURATION_MS: u32 = BLOOM_PETAL_ENTER_DURATION_MS
     + (BLOOM_ENTRY_STAGGER_BUDGET_MS * (BLOOM_VISIBLE_PETAL_LIMIT as u32 - 1)

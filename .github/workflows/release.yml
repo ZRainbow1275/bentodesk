@@ -795,6 +795,120 @@ jobs:
           "RELEASE_CHECKSUMS=$checksums" >> $env:GITHUB_ENV
           "RELEASE_NOTES=$notes" >> $env:GITHUB_ENV
 
+      - name: Wait for exact-SHA CodeQL
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $codeQlPath = "dynamic/github-code-scanning/codeql"
+
+          function Test-OrdinalEqual($Left, $Right) {
+            return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
+          }
+
+          function Get-CodeQlGateState([object[]]$Runs, [string]$SourceSha) {
+            $matches = @($Runs | Where-Object {
+              (Test-OrdinalEqual $_.path $codeQlPath) -and
+              (Test-OrdinalEqual $_.event "dynamic") -and
+              (Test-OrdinalEqual $_.head_branch "main") -and
+              (Test-OrdinalEqual $_.head_sha $SourceSha)
+            } | Sort-Object -Property id -Descending)
+            if ($matches.Count -ceq 0) {
+              return [pscustomobject]@{ State = "missing"; Run = $null }
+            }
+
+            $run = $matches[0]
+            if (-not (Test-OrdinalEqual $run.status "completed")) {
+              return [pscustomobject]@{ State = "pending"; Run = $run }
+            }
+            if (Test-OrdinalEqual $run.conclusion "success") {
+              return [pscustomobject]@{ State = "success"; Run = $run }
+            }
+            return [pscustomobject]@{ State = "failed"; Run = $run }
+          }
+
+          function New-CodeQlFixture([long]$Id, [string]$Status, $Conclusion, [string]$Path) {
+            return [pscustomobject]@{
+              id = $Id
+              name = "ignored"
+              path = $Path
+              event = "dynamic"
+              head_branch = "main"
+              head_sha = $fixtureSha
+              status = $Status
+              conclusion = $Conclusion
+            }
+          }
+
+          $fixtureSha = "a" * 40
+          $fixtureSuccess = New-CodeQlFixture 1 "completed" "success" $codeQlPath
+          $fixturePending = New-CodeQlFixture 2 "in_progress" $null $codeQlPath
+          $fixtureCases = @(
+            @{ Label = "missing"; Expected = "missing"; Runs = @() },
+            @{ Label = "wrong-path"; Expected = "missing"; Runs = @(
+              (New-CodeQlFixture 1 "completed" "success" "CodeQL")
+            ) },
+            @{ Label = "pending"; Expected = "pending"; Runs = @($fixturePending) },
+            @{ Label = "latest-pending"; Expected = "pending"; Runs = @(
+              $fixtureSuccess,
+              $fixturePending
+            ) },
+            @{ Label = "failure"; Expected = "failed"; Runs = @(
+              (New-CodeQlFixture 1 "completed" "failure" $codeQlPath)
+            ) },
+            @{ Label = "cancelled"; Expected = "failed"; Runs = @(
+              (New-CodeQlFixture 1 "completed" "cancelled" $codeQlPath)
+            ) },
+            @{ Label = "timed-out"; Expected = "failed"; Runs = @(
+              (New-CodeQlFixture 1 "completed" "timed_out" $codeQlPath)
+            ) },
+            @{ Label = "success"; Expected = "success"; Runs = @($fixtureSuccess) }
+          )
+          foreach ($case in $fixtureCases) {
+            $actual = (Get-CodeQlGateState $case.Runs $fixtureSha).State
+            if (-not (Test-OrdinalEqual $actual $case.Expected)) {
+              throw "CodeQL gate fixture $($case.Label) returned $actual instead of $($case.Expected)"
+            }
+          }
+
+          $maxAttempts = 20
+          $pollSeconds = 30
+          $passed = $false
+          foreach ($attempt in 1..$maxAttempts) {
+            $response = gh api `
+              "repos/$env:GITHUB_REPOSITORY/actions/runs?head_sha=$env:RELEASE_SHA&branch=main&event=dynamic&per_page=100" |
+              ConvertFrom-Json
+            if ($null -eq $response.workflow_runs) {
+              throw "Actions Runs API response is missing workflow_runs"
+            }
+
+            $gate = Get-CodeQlGateState @($response.workflow_runs) $env:RELEASE_SHA
+            if (Test-OrdinalEqual $gate.State "success") {
+              Write-Host "CodeQL run $($gate.Run.id) succeeded for $env:RELEASE_SHA"
+              $passed = $true
+              break
+            }
+            if (Test-OrdinalEqual $gate.State "failed") {
+              throw "CodeQL run $($gate.Run.id) ended with status=$($gate.Run.status) conclusion=$($gate.Run.conclusion)"
+            }
+            if (
+              -not (Test-OrdinalEqual $gate.State "missing") -and
+              -not (Test-OrdinalEqual $gate.State "pending")
+            ) {
+              throw "Unexpected CodeQL gate state: $($gate.State)"
+            }
+
+            Write-Host "CodeQL gate attempt $attempt/${maxAttempts}: $($gate.State)"
+            if ($attempt -clt $maxAttempts) {
+              Start-Sleep -Seconds $pollSeconds
+            }
+          }
+          if (-not $passed) {
+            throw "Timed out waiting for successful CodeQL on $env:RELEASE_SHA"
+          }
+
       - name: Create or verify annotated release tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -804,8 +918,33 @@ jobs:
           function Test-OrdinalEqual($Left, $Right) {
             return [string]::Equals($Left, $Right, [StringComparison]::Ordinal)
           }
+          function Test-CurrentMainTip([string]$ReleaseSha, [string]$MainSha) {
+            return (Test-OrdinalEqual $ReleaseSha $MainSha)
+          }
+
+          $fixtureSha = "a" * 40
+          $automaticFresh = Test-CurrentMainTip $fixtureSha $fixtureSha
+          $automaticStale = Test-CurrentMainTip $fixtureSha ("b" * 40)
+          $recoveryIgnoresCurrentTip = $true
+          if (
+            -not $automaticFresh -or $automaticStale -or
+            -not $recoveryIgnoresCurrentTip
+          ) {
+            throw "Current-main-tip gate fixture failed"
+          }
+
           $tagApi = "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG"
           if ($env:GITHUB_EVENT_NAME -ceq "workflow_run") {
+            $mainRef = gh api `
+              "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" |
+              ConvertFrom-Json
+            if (
+              -not (Test-OrdinalEqual $mainRef.ref "refs/heads/main") -or
+              -not (Test-OrdinalEqual $mainRef.object.type "commit") -or
+              -not (Test-CurrentMainTip $env:RELEASE_SHA $mainRef.object.sha)
+            ) {
+              throw "Release source $env:RELEASE_SHA is no longer the current main tip"
+            }
             $tagObject = gh api `
               --method POST `
               "repos/$env:GITHUB_REPOSITORY/git/tags" `

@@ -65,6 +65,40 @@ impl Zone {
             .map(ZoneItemId)
     }
 
+    pub(crate) fn next_item_id_if_taken(&self, id: ZoneItemId) -> Option<ZoneItemId> {
+        if self.item(id).is_some() {
+            self.next_item_id()
+        } else {
+            Some(id)
+        }
+    }
+
+    pub fn repair_duplicate_item_ids(&mut self) -> usize {
+        let mut repaired = 0;
+        let mut next = self
+            .items
+            .iter()
+            .map(|item| item.id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1);
+        for index in 0..self.items.len() {
+            let duplicate = self.items[..index]
+                .iter()
+                .any(|item| item.id == self.items[index].id);
+            if !duplicate {
+                continue;
+            }
+            let Some(id) = next else {
+                break;
+            };
+            self.items[index].id = ZoneItemId(id);
+            next = id.checked_add(1);
+            repaired += 1;
+        }
+        repaired
+    }
+
     pub fn add_item(
         &mut self,
         path: impl Into<Cow<'static, str>>,
@@ -162,6 +196,23 @@ impl Zone {
         };
         item.x = x.max(0);
         item.y = y.max(0);
+        true
+    }
+
+    pub fn move_item_to_index(
+        &mut self,
+        id: ZoneItemId,
+        x: i32,
+        y: i32,
+        target_index: usize,
+    ) -> bool {
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            return false;
+        };
+        let mut item = self.items.remove(index);
+        item.x = x.max(0);
+        item.y = y.max(0);
+        self.items.insert(target_index.min(self.items.len()), item);
         true
     }
 

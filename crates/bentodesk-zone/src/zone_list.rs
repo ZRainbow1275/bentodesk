@@ -81,6 +81,13 @@ impl ZoneList {
         self.zones.iter_mut()
     }
 
+    pub fn repair_duplicate_item_ids(&mut self) -> usize {
+        self.zones
+            .iter_mut()
+            .map(Zone::repair_duplicate_item_ids)
+            .sum()
+    }
+
     /// Reorder the zone identified by `id` to position `idx` in arrival
     /// order. Returns `true` on hit, `false` if `id` is absent. The new
     /// index is clamped to `[0, len-1]` so callers receive saturating —
@@ -583,9 +590,36 @@ impl ZoneList {
             .is_some_and(|zone| zone.move_item(item_id, x, y))
     }
 
+    pub fn move_item_to_index(
+        &mut self,
+        zone_id: ZoneId,
+        item_id: ZoneItemId,
+        x: i32,
+        y: i32,
+        target_index: usize,
+    ) -> bool {
+        self.get_mut(zone_id)
+            .is_some_and(|zone| zone.move_item_to_index(item_id, x, y, target_index))
+    }
+
     pub fn toggle_item_wide(&mut self, zone_id: ZoneId, item_id: ZoneItemId) -> bool {
         self.get_mut(zone_id)
             .is_some_and(|zone| zone.toggle_item_wide(item_id))
+    }
+
+    pub fn can_move_item_to_zone(
+        &self,
+        from_zone_id: ZoneId,
+        to_zone_id: ZoneId,
+        item_id: ZoneItemId,
+    ) -> bool {
+        if from_zone_id == to_zone_id {
+            return self.item(from_zone_id, item_id).is_some();
+        }
+        self.item(from_zone_id, item_id).is_some()
+            && self
+                .get(to_zone_id)
+                .is_some_and(|zone| zone.next_item_id_if_taken(item_id).is_some())
     }
 
     pub fn move_item_to_zone(
@@ -595,6 +629,7 @@ impl ZoneList {
         item_id: ZoneItemId,
         effective_path: Option<Cow<'static, str>>,
         hidden_path: Option<Cow<'static, str>>,
+        drop_target: Option<(i32, i32, usize)>,
     ) -> bool {
         if from_zone_id == to_zone_id {
             return self
@@ -614,18 +649,29 @@ impl ZoneList {
         else {
             return false;
         };
+        let Some(target_item_id) = self.zones[to_idx].next_item_id_if_taken(item_id) else {
+            return false;
+        };
         let mut item = self.zones[from_idx].items.remove(item_idx);
+        item.id = target_item_id;
         if let Some(effective_path) = effective_path {
             item.path = effective_path;
         }
         if let Some(hidden_path) = hidden_path {
             item.hidden_path = Some(hidden_path);
         }
-        let target_len = self.zones[to_idx].items.len() as i32;
-        let columns = self.zones[to_idx].grid_columns.max(1) as i32;
-        item.x = target_len % columns;
-        item.y = target_len / columns;
-        self.zones[to_idx].items.push(item);
+        if let Some((x, y, target_index)) = drop_target {
+            item.x = x.max(0);
+            item.y = y.max(0);
+            let target_index = target_index.min(self.zones[to_idx].items.len());
+            self.zones[to_idx].items.insert(target_index, item);
+        } else {
+            let target_len = self.zones[to_idx].items.len() as i32;
+            let columns = self.zones[to_idx].grid_columns.max(1) as i32;
+            item.x = target_len % columns;
+            item.y = target_len / columns;
+            self.zones[to_idx].items.push(item);
+        }
         true
     }
 

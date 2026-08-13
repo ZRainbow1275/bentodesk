@@ -23,3 +23,4 @@ fn fixture_appearance(size: &'static str, shape: &'static str) -> Zone {
 
 include!("tests/01_pill_layout_uses_tauri_capsule_radius.rs");
 include!("tests/02_current_morph_rect_matches_shared_geometry_timeline_.rs");
+include!("tests/03_directional_expanded_placement_keeps_capsule_anchor.rs");

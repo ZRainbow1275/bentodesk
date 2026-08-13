@@ -188,6 +188,50 @@ fn stack_bloom_frames_progress_from_anchor_to_settled_geometry() {
 }
 
 #[test]
+fn visible_bloom_geometry_keeps_animation_active_scale_and_hit_joint() {
+    let viewport = Size {
+        width: 1280.0,
+        height: 720.0,
+    };
+    let zone = Zone::new(ZoneId(1), Cow::Borrowed("Anchor"), 120, 240, 180, 130);
+
+    for leaving in [false, true] {
+        for progress in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            for active_t in [0.0_f32, 0.5, 1.0] {
+                let rects = stack_bloom_visible_petal_rects_at(
+                    viewport,
+                    &zone,
+                    4,
+                    progress,
+                    leaving,
+                    Some(1),
+                    active_t,
+                );
+                for (index, target) in rects.iter().copied().enumerate() {
+                    let hit = stack_bloom_visible_hit_test_at(
+                        viewport,
+                        &zone,
+                        4,
+                        progress,
+                        leaving,
+                        Some((1, active_t)),
+                        (
+                            target.x + target.width * 0.5,
+                            target.y + target.height * 0.5,
+                        ),
+                    );
+                    assert!(hit.is_some(), "index={index} progress={progress} leaving={leaving}");
+                }
+                assert_eq!(
+                    stack_bloom_visible_frames_at(viewport, &zone, 4, progress, leaving).len(),
+                    rects.len()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn stack_bloom_two_petal_entry_preserves_a_short_stagger_window() {
     let viewport = Size {
         width: 1280.0,

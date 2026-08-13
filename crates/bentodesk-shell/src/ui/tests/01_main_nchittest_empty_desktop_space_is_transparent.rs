@@ -481,17 +481,40 @@ fn hit_test_zone_item_uses_auto_placed_item_rects_when_wide_cards_shift_followin
         .expect("third item");
     let app = app_with_zones(vec![zone]);
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+    let zone = app.zones.get(ZoneId(4)).expect("zone");
+    let panel = app.zone_expanded_placement(zone).panel;
 
     // The renderer auto-places the wide first card across slots 0-1. The
     // second item is therefore painted in effective slot 2, not at its raw
     // persisted grid_x=1. The shell hit-test must use that same item-aware
     // helper or a click on the visible second card starts no drag.
-    let second_hit = hit_test_zone_item(&app, 261.0, 427.0).expect("second item hit");
+    let second_rect =
+        bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+            zone,
+            zone.item(second).expect("second"),
+            panel,
+        );
+    let second_hit = hit_test_zone_item(
+        &app,
+        second_rect.x + second_rect.width * 0.5,
+        second_rect.y + second_rect.height * 0.5,
+    )
+    .expect("second item hit");
     assert_eq!(second_hit.0, ZoneId(4));
     assert_eq!(second_hit.1, second);
     assert_eq!(second_hit.2, "C:/Users/BentoDeskTest/Desktop/item-02.txt");
 
-    let third_hit = hit_test_zone_item(&app, 335.0, 427.0).expect("third item hit");
+    let third_rect = bentodesk_app::business::highlight_overlay::item_card_rect_for_item_in_panel(
+        zone,
+        zone.item(third).expect("third"),
+        panel,
+    );
+    let third_hit = hit_test_zone_item(
+        &app,
+        third_rect.x + third_rect.width * 0.5,
+        third_rect.y + third_rect.height * 0.5,
+    )
+    .expect("third item hit");
     assert_eq!(third_hit.1, third);
 }
 
@@ -516,6 +539,48 @@ fn hit_test_zone_resize_corner_only_in_bottom_right_box() {
     );
     // Edge boundary excluded (`<` not `<=`).
     assert_eq!(hit_test_zone_resize_corner(&app, 300.0, 200.0), None);
+}
+
+#[test]
+fn directional_resize_handle_mirrors_across_all_four_quadrants() {
+    let homes = [(80, 80), (580, 80), (80, 500), (580, 500)];
+    let anchors = [(false, false), (true, false), (false, true), (true, true)];
+    for ((x, y), (anchor_right, anchor_bottom)) in homes.into_iter().zip(anchors) {
+        let app = app_with_zones(vec![Zone::new(
+            ZoneId(70),
+            Cow::Borrowed("Directional"),
+            x,
+            y,
+            240,
+            180,
+        )]);
+        app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
+        let zone = app.zones.get(ZoneId(70)).expect("zone");
+        let placement = app.zone_expanded_placement(zone);
+        assert_eq!(
+            (placement.anchor_right, placement.anchor_bottom),
+            (anchor_right, anchor_bottom)
+        );
+        let handle_x = if anchor_right {
+            placement.panel.x + 2.0
+        } else {
+            placement.panel.right() - 2.0
+        };
+        let handle_y = if anchor_bottom {
+            placement.panel.y + 2.0
+        } else {
+            placement.panel.bottom() - 2.0
+        };
+        let session = zone_resize_session_for_point(&app, handle_x, handle_y)
+            .expect("mirrored resize handle");
+        assert_eq!(session.id, ZoneId(70));
+        assert_eq!(session.anchor_right, anchor_right);
+        assert_eq!(session.anchor_bottom, anchor_bottom);
+        assert_eq!(session.start_pointer_x, handle_x);
+        assert_eq!(session.start_pointer_y, handle_y);
+        assert_eq!(session.start_visible_width, placement.panel.width);
+        assert_eq!(session.start_visible_height, placement.panel.height);
+    }
 }
 
 #[test]

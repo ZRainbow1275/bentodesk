@@ -67,10 +67,15 @@ pub(super) const CHROME_REGION_SHADOW_MARGIN_DIP: f32 = 24.0;
 /// allocation-lean: one stack `SmallVec`, no heap beyond a spill on a very
 /// large zone count. Returns rects in DIP; the caller converts to physical px.
 pub(super) fn chrome_region_rects(app: &AppState) -> SmallVec<[bentodesk_style::Rect; 16]> {
+    chrome_region_rects_at(app, app.geometry_frame_now_ms.get())
+}
+
+pub(super) fn chrome_region_rects_at(
+    app: &AppState,
+    now_ms: u32,
+) -> SmallVec<[bentodesk_style::Rect; 16]> {
     use bentodesk_style::Rect;
     let mut out: SmallVec<[Rect; 16]> = SmallVec::new();
-    // SAFETY: GetTickCount is total and thread-safe.
-    let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
     let vp = app.viewport;
     let full = Rect {
         x: 0.0,
@@ -162,52 +167,14 @@ pub(super) fn push_clamped_inflated(
     }
 }
 
-/// Painted chrome rect for one zone — the DIP rectangle the renderer is
-/// currently drawing. Re-implements `bentodesk-shell::ui::effective_zone_hit_rect`
-/// in the `bentodesk-app` layer (the shell depends on app, not the reverse, so
-/// the helper can't be imported; both sides consume the same `zone_pill_geometry`
-/// SSoT so they stay in lockstep). Three cases: pill-morph in flight, collapsed
-/// pill, expanded body. Pure / allocation-free.
+/// Painted chrome rect for one zone — the same shared resolved rectangle used
+/// by renderer paint and shell hit-testing.
 pub(super) fn effective_zone_chrome_rect(
     app: &AppState,
     zone: &Zone,
     now_ms: u32,
 ) -> bentodesk_style::Rect {
-    use bentodesk_style::Rect;
-    // #4 / R1 (2026-06-02) — a stack anchor's body is visible only when it is
-    // explicitly selected (a focused member), NOT on hover (hover shows the
-    // bloom). #5 (2026-06-02) — only a RESIZE (armable solely on an already-
-    // expanded panel) may force the expanded body; a DRAG keeps a collapsed pill
-    // a pill. Both rules now live in the shared `AppState::zone_pill_body_visible`
-    // SSoT, the SAME predicate the paint side (`draw_zones`) and the z-layering
-    // (`zone_on_top`) key off, so paint == hit geometry can't drift.
-    let body_visible = app.zone_pill_body_visible(zone);
-    let stack_member_count = app.zones.stack_member_ids(zone.id).map(|m| m.len());
-    let count = stack_member_count.unwrap_or_else(|| zone.items.len());
-    let pill_layout = zone_pill_geometry::pill_layout_for_zone(zone, count);
-    let expanded_rect = Rect {
-        x: zone.x as f32,
-        y: zone.y as f32,
-        width: zone.w as f32,
-        height: zone.h as f32,
-    };
-
-    // Case 1 — pill morph in flight (mirrors effective_zone_hit_rect case 1).
-    // Anchors don't morph (the paint-side pill_anim_active also excludes them).
-    // #2 step 8 (2026-06-02) — shared `current_morph_rect` SSoT so paint == hit.
-    if let Some(morph) = app.zone_pill_morph_at(zone.id, now_ms) {
-        return zone_pill_geometry::morph_pill_to_rect(pill_layout.rect, expanded_rect, morph);
-    }
-
-    if !body_visible {
-        if let Some(member_count) = stack_member_count {
-            return zone_pill_geometry::stack_capsule_layout_for_zone(zone, member_count).rect;
-        }
-        return pill_layout.rect;
-    }
-
-    // Case 3 — expanded body (focused stack member uses the normal panel).
-    expanded_rect
+    app.zone_effective_rect_at(zone, now_ms)
 }
 
 /// Push the stack-overlay chrome rects (open tray + focused preview, or a
@@ -269,17 +236,27 @@ pub(super) fn push_stack_overlay_rects(
         && let Some(anchor) = app.zones.get(anchor_id)
         && let Some(members) = app.zones.stack_member_ids(anchor.id)
     {
-        let petals =
-            if app.stack_bloom_leaving.get() && app.stack_bloom_anchor.get() == Some(anchor.id) {
-                stack_tray::stack_bloom_exit_petal_rects_at(
-                    vp,
-                    anchor,
-                    members.len(),
-                    app.stack_bloom_progress.get(),
+        let interaction = app.stack_bloom_interaction.get();
+        let active_index = interaction
+            .active_member
+            .and_then(|member| members.iter().position(|candidate| *candidate == member));
+        let active_t = active_index
+            .map(|_| {
+                stack_tray::stack_bloom_active_transition_t(
+                    app.geometry_frame_now_ms.get(),
+                    interaction.active_member_started_ms,
                 )
-            } else {
-                stack_tray::stack_bloom_petal_rects(vp, anchor, members.len())
-            };
+            })
+            .unwrap_or(0.0);
+        let petals = stack_tray::stack_bloom_visible_petal_rects_at(
+            vp,
+            anchor,
+            members.len(),
+            app.stack_bloom_progress.get(),
+            app.stack_bloom_leaving.get(),
+            active_index,
+            active_t,
+        );
         for petal in petals {
             push_clamped_inflated(out, petal, full, CHROME_REGION_SHADOW_MARGIN_DIP);
         }

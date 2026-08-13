@@ -6,6 +6,70 @@ use super::*;
 // Window procedure
 // -----------------------------------------------------------------------------
 
+pub(super) fn cancel_main_client_gestures(root: &AppRoot) -> bool {
+    let pending_drag_out = root.pending_item_drag_out.borrow_mut().take().is_some();
+    let pending_stack_bloom = root.pending_stack_drop_bloom.replace(None).is_some();
+    let app = root.app.borrow();
+    let dragged_zone = app.zone_drag.get().map(|(id, _, _)| id);
+    let cancelled = app.cancel_viewport_gestures();
+    if cancelled || pending_drag_out || pending_stack_bloom {
+        // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+        reset_pointer_drag_hover_channels(&app, dragged_zone, unsafe { GetTickCount() });
+    }
+    cancelled || pending_drag_out || pending_stack_bloom
+}
+
+fn prepare_main_zone_geometry_refresh(root: &AppRoot, slot: &WindowSlot, hwnd: HWND) {
+    slot.state.schedule_zone_geometry_normalize();
+    let cancelled = cancel_main_client_gestures(root);
+    if cancelled {
+        // SAFETY: a work-area transition invalidates the Main-client gesture
+        // coordinates, so releasing this thread's current capture is required.
+        unsafe { ReleaseCapture() };
+    }
+    request_redraw(hwnd);
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod workarea_message_tests {
+    use super::*;
+
+    #[test]
+    fn only_main_display_dpi_and_setworkarea_messages_schedule_geometry_refresh() {
+        for msg in [WM_DISPLAYCHANGE, WM_DPICHANGED] {
+            assert!(message_requires_main_zone_geometry_refresh(
+                WindowKind::Main,
+                msg,
+                0,
+            ));
+            assert!(!message_requires_main_zone_geometry_refresh(
+                WindowKind::Settings,
+                msg,
+                0,
+            ));
+        }
+        assert!(message_requires_main_zone_geometry_refresh(
+            WindowKind::Main,
+            WM_SETTINGCHANGE,
+            SPI_SETWORKAREA as WPARAM,
+        ));
+        assert!(!message_requires_main_zone_geometry_refresh(
+            WindowKind::Main,
+            WM_SETTINGCHANGE,
+            0,
+        ));
+    }
+}
+
+#[inline]
+fn message_requires_main_zone_geometry_refresh(kind: WindowKind, msg: u32, wparam: WPARAM) -> bool {
+    kind == WindowKind::Main
+        && (msg == WM_DISPLAYCHANGE
+            || msg == WM_DPICHANGED
+            || (msg == WM_SETTINGCHANGE && wparam as u32 == SPI_SETWORKAREA))
+}
+
 pub(super) unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -214,22 +278,39 @@ pub(super) unsafe extern "system" fn wnd_proc(
                     slot.state.dpi.set(new_dpi);
                     slot.state.monitors = bentodesk_platform::enumerate_monitors();
 
-                    if !(lparam as *const RECT).is_null() {
+                    let target_rect = if slot.kind == WindowKind::Main {
+                        Some(bentodesk_platform::main_window_rect())
+                    } else if !(lparam as *const RECT).is_null() {
                         // SAFETY: WM_DPICHANGED ABI guarantees lParam is a
-                        //         valid pointer to a RECT for the duration
-                        //         of the message dispatch.
+                        // valid pointer for the duration of message dispatch.
                         let r = &*(lparam as *const RECT);
-                        let new_w = (r.right - r.left).max(1) as u32;
-                        let new_h = (r.bottom - r.top).max(1) as u32;
+                        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+                    } else {
+                        None
+                    };
+                    if let Some((target_x, target_y, target_w, target_h)) = target_rect {
+                        let new_w = target_w.max(1) as u32;
+                        let new_h = target_h.max(1) as u32;
+                        if message_requires_main_zone_geometry_refresh(
+                            slot.kind,
+                            WM_DPICHANGED,
+                            wparam,
+                        ) && let Some(root) = app_root()
+                        {
+                            prepare_main_zone_geometry_refresh(root, slot, hwnd);
+                        }
                         SetWindowPos(
                             hwnd,
                             ptr::null_mut(),
-                            r.left,
-                            r.top,
-                            r.right - r.left,
-                            r.bottom - r.top,
+                            target_x,
+                            target_y,
+                            target_w.max(1),
+                            target_h.max(1),
                             SWP_NOZORDER | SWP_NOACTIVATE,
                         );
+                        if slot.kind == WindowKind::Main {
+                            slot.renderer.mark_backdrop_dirty();
+                        }
                         // T-012 — rebuild swap chain at new monitor's pixel
                         // density. `Renderer::resize` re-passes the swap
                         // chain flags so the FRAME_LATENCY_WAITABLE_OBJECT
@@ -266,8 +347,15 @@ pub(super) unsafe extern "system" fn wnd_proc(
                 if !p.is_null() {
                     let slot = &mut *p;
                     slot.state.monitors = bentodesk_platform::enumerate_monitors();
-                    if slot.kind == WindowKind::Main {
+                    if message_requires_main_zone_geometry_refresh(
+                        slot.kind,
+                        WM_DISPLAYCHANGE,
+                        wparam,
+                    ) {
                         let (x, y, w, h) = bentodesk_platform::main_window_rect();
+                        if let Some(root) = app_root() {
+                            prepare_main_zone_geometry_refresh(root, slot, hwnd);
+                        }
                         SetWindowPos(
                             hwnd,
                             ptr::null_mut(),
@@ -311,6 +399,33 @@ pub(super) unsafe extern "system" fn wnd_proc(
                     let slot = &mut *p;
                     if slot.kind == WindowKind::Main {
                         slot.renderer.mark_backdrop_dirty();
+                        if message_requires_main_zone_geometry_refresh(
+                            slot.kind,
+                            WM_SETTINGCHANGE,
+                            wparam,
+                        ) {
+                            slot.state.monitors = bentodesk_platform::enumerate_monitors();
+                            let (x, y, width, height) = bentodesk_platform::main_window_rect();
+                            if let Some(root) = app_root() {
+                                prepare_main_zone_geometry_refresh(root, slot, hwnd);
+                            }
+                            SetWindowPos(
+                                hwnd,
+                                ptr::null_mut(),
+                                x,
+                                y,
+                                width.max(1),
+                                height.max(1),
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            if let Err(bentodesk_app::RenderError::DeviceLost) = slot
+                                .renderer
+                                .resize(width.max(1) as u32, height.max(1) as u32)
+                                && let Some(root) = app_root()
+                            {
+                                handle_device_lost(root, hwnd);
+                            }
+                        }
                     }
                 }
             }

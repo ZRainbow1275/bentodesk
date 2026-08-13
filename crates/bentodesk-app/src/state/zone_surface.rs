@@ -108,6 +108,54 @@ impl AppState {
                 .is_active_entry(zone.id, AnimChannel::PillMorph, now_ms)
     }
 
+    /// Actual collapsed surface for a free Zone or Stack anchor.
+    pub fn zone_collapsed_rect(&self, zone: &Zone) -> Rect {
+        if let Some(members) = self.zones.stack_member_ids(zone.id) {
+            crate::zone_pill_geometry::stack_capsule_layout_for_zone(zone, members.len()).rect
+        } else {
+            crate::zone_pill_geometry::pill_layout_for_zone(zone, zone.items.len()).rect
+        }
+    }
+
+    /// Directional expanded placement resolved from the actual capsule.
+    pub fn zone_expanded_placement(
+        &self,
+        zone: &Zone,
+    ) -> crate::zone_pill_geometry::ExpandedZonePlacement {
+        crate::zone_pill_geometry::expanded_zone_placement(
+            self.zone_collapsed_rect(zone),
+            zone.w as f32,
+            zone.h as f32,
+            self.viewport,
+        )
+    }
+
+    /// Visible paint/hit/region rectangle for `zone` at `now_ms`.
+    pub fn zone_effective_rect_at(&self, zone: &Zone, now_ms: u32) -> Rect {
+        let collapsed = self.zone_collapsed_rect(zone);
+        let expanded = self.zone_expanded_placement(zone).panel;
+        if let Some(morph) = self.zone_pill_morph_at(zone.id, now_ms) {
+            return crate::zone_pill_geometry::morph_pill_to_rect(collapsed, expanded, morph);
+        }
+        if self.zone_pill_body_visible(zone) {
+            expanded
+        } else {
+            collapsed
+        }
+    }
+
+    /// Cancel Main-client pointer sessions tied to an obsolete logical viewport.
+    pub fn cancel_viewport_gestures(&self) -> bool {
+        let had_drag = self.zone_drag.replace(None).is_some();
+        let had_resize = self.zone_resize.replace(None).is_some();
+        let had_item_drag = self.item_drag.borrow_mut().take().is_some();
+        let had_stack_tray_drag = self.stack_tray_drag.replace(None).is_some();
+        self.zone_drag_origin.set(None);
+        self.zone_drag_body_visible_at_start.set(None);
+        self.zone_drag_selected_before_start.set(None);
+        had_drag || had_resize || had_item_drag || had_stack_tray_drag
+    }
+
     /// Z-order (2026-06-02) — whether `zone`'s SETTLED render surface is the
     /// expanded body (panel) rather than the collapsed pill. This is the exact
     /// `pill_body_visible` rule shared by the paint side (`Renderer::draw_zones`)
@@ -123,7 +171,7 @@ impl AppState {
     ///
     /// SSoT so paint, hit-rect, and z-layering can never drift.
     pub fn zone_pill_body_visible(&self, zone: &Zone) -> bool {
-        let resize_id = self.zone_resize.get().map(|t| t.0);
+        let resize_id = self.zone_resize.get().map(|session| session.id);
         let is_dragged = self
             .zone_drag
             .get()
