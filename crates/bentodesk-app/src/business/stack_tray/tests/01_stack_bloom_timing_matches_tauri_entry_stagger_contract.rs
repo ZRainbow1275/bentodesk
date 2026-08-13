@@ -373,6 +373,21 @@ fn stack_tray_flips_left_near_viewport_edge() {
 }
 
 #[test]
+fn stack_tray_anchors_to_actual_capsule_not_expanded_panel_width() {
+    let viewport = Size {
+        width: 1600.0,
+        height: 900.0,
+    };
+    let zone = Zone::new(ZoneId(1), Cow::Borrowed("Anchor"), 100, 120, 900, 600);
+    let capsule = zone_pill_geometry::stack_capsule_layout_for_zone(&zone, 3).rect;
+
+    let tray = stack_tray_rect(viewport, &zone, 3);
+
+    assert_eq!(tray.x, capsule.right() + TRAY_GAP_PX);
+    assert_eq!(tray.y, capsule.y);
+}
+
+#[test]
 fn stack_tray_header_count_clears_action_buttons() {
     let viewport = Size {
         width: 1280.0,

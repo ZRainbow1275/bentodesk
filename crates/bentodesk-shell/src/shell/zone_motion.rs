@@ -73,7 +73,7 @@ pub(super) fn log_animation_proof_state(
             "anim_state: phase={phase} now_ms={now_ms} input={input} active_drag={} zone_drag={} zone_resize={} item_drag={} stack_tray_drag={} hovered_zone={} selected_zone={} pill_morph_zone={} pill_morph_value={:.3} pill_morph_active={} pill_animator_occupancy={} stack_bloom_anchor={} stack_bloom_progress={:.3} stack_bloom_leaving={} hover_scheduler_pending={} hover_scheduler_expanded={} item_hover_active={} item_hover={item_hover:?} highlight_targets={} highlight_pulses={} highlight_auto_clear_ms={} dirty={}\n",
             proof_active_drag_label(app),
             proof_zone_id_label(app.zone_drag.get().map(|(id, _, _)| id)),
-            proof_zone_id_label(app.zone_resize.get().map(|(id, _, _)| id)),
+            proof_zone_id_label(app.zone_resize.get().map(|session| session.id)),
             item_drag,
             app.stack_tray_drag.get().is_some(),
             proof_zone_id_label(app.hovered_zone.get()),
@@ -95,6 +95,68 @@ pub(super) fn log_animation_proof_state(
         )
         .as_str(),
     );
+    log_live_zone_geometry(app, phase, now_ms);
+}
+
+/// Candidate-process geometry receipt. Enabled only by the existing animation
+/// proof environment flag and emitted from the same `AppState` consumed by
+/// paint, hit testing and the Main HWND region.
+pub(super) fn log_live_zone_geometry(app: &AppState, phase: &str, now_ms: u32) {
+    if !animation_proof_log_enabled() {
+        return;
+    }
+    for zone in app.zones.iter() {
+        let capsule = app.zone_collapsed_rect(zone);
+        let placement = app.zone_expanded_placement(zone);
+        let morph = app.zone_pill_morph_at(zone.id, now_ms).unwrap_or_else(|| {
+            if app.zone_pill_body_visible(zone) {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        let effective = app.zone_effective_rect_at(zone, now_ms);
+        log_static(
+            format!(
+                "zone_geometry_live: phase={phase} now_ms={now_ms} zone={} visible={} stack_parent={} stack_members={} viewport_x=0.000 viewport_y=0.000 viewport_width={:.3} viewport_height={:.3} home_x={} home_y={} stored_width={} stored_height={} capsule_x={:.3} capsule_y={:.3} capsule_width={:.3} capsule_height={:.3} anchor_right={} anchor_bottom={} panel_x={:.3} panel_y={:.3} panel_width={:.3} panel_height={:.3} morph={morph:.3} effective_x={:.3} effective_y={:.3} effective_width={:.3} effective_height={:.3}\n",
+                zone.id.0,
+                zone.visible,
+                zone.stack_parent.map_or(0, |id| id.0),
+                zone.stack_members.len(),
+                app.viewport.width,
+                app.viewport.height,
+                zone.x,
+                zone.y,
+                zone.w,
+                zone.h,
+                capsule.x,
+                capsule.y,
+                capsule.width,
+                capsule.height,
+                placement.anchor_right,
+                placement.anchor_bottom,
+                placement.panel.x,
+                placement.panel.y,
+                placement.panel.width,
+                placement.panel.height,
+                effective.x,
+                effective.y,
+                effective.width,
+                effective.height,
+            )
+            .as_str(),
+        );
+    }
+}
+
+pub(super) fn reset_item_drag_hover_channels(app: &AppState, now_ms: u32) {
+    app.pill_pressed_zone.set(None);
+    app.set_panel_header_button_hover(None);
+    app.highlight_overlay.borrow_mut().clear();
+    let mut item_hover = app.item_hover.get();
+    let _ = item_hover.on_hover(None, now_ms);
+    let _ = item_hover.on_release(now_ms);
+    app.item_hover.set(item_hover);
 }
 
 pub(super) fn reset_pointer_drag_hover_channels(
@@ -222,6 +284,47 @@ pub(super) fn transition_zone_pill(
     true
 }
 
+/// Expand a free Zone after an explicit Search, keyboard, or pill activation.
+/// Pointer hover keeps its delayed scheduler path; explicit activation is
+/// immediate and must update the same scheduler + morph state used by paint.
+pub(super) fn activate_free_zone_surface(app: &AppState, zone_id: ZoneId, now_ms: u32) -> bool {
+    app.explicit_zone_surface_hold.set(None);
+    let Some(zone) = app.zones.get(zone_id) else {
+        return false;
+    };
+    if !zone.is_visible() || zone.is_stack_anchor() || zone.is_stacked_child() {
+        return false;
+    }
+
+    let mode = app.effective_zone_display_mode(zone);
+    let selected_changed = app.selected_zone.get() != Some(zone_id);
+    let hover_changed = update_pill_hover_animator(app, Some(zone_id), now_ms);
+    app.selected_zone.set(Some(zone_id));
+    app.keyboard_focused_zone.set(Some(zone_id));
+    app.hovered_zone.set(Some(zone_id));
+
+    let mut scheduler = app.hover_scheduler.get();
+    let previous = scheduler.expanded_zone();
+    let was_expanded = mode == ZoneDisplayMode::Always || previous == Some(zone_id);
+    if mode == ZoneDisplayMode::Always {
+        scheduler.reset();
+    } else {
+        scheduler.mark_expanded(zone_id, now_ms);
+    }
+    app.hover_scheduler.set(scheduler);
+
+    let previous_changed = previous
+        .filter(|id| *id != zone_id)
+        .filter(|id| {
+            app.zones.get(*id).is_some_and(|previous_zone| {
+                app.effective_zone_display_mode(previous_zone) != ZoneDisplayMode::Always
+            })
+        })
+        .is_some_and(|id| transition_zone_pill(app, id, false, now_ms));
+    let morph_changed = !was_expanded && transition_zone_pill(app, zone_id, true, now_ms);
+    selected_changed || hover_changed || previous_changed || morph_changed
+}
+
 /// Structural hover is a display-mode capability, not a generic pointer
 /// affordance. Micro hover tint/scale may still run in every mode, but only
 /// `Hover` may arm a pill↔panel or stack-bloom state transition.
@@ -255,6 +358,28 @@ pub(super) fn drive_hover_scheduler(app: &AppState, hover_zone: Option<ZoneId>, 
     // Treat stack anchors as non-pill so they don't engage the scheduler.
     let mut scheduler = app.hover_scheduler.get();
     let expanded = scheduler.expanded_zone();
+    let mut explicit_hold = app.explicit_zone_surface_hold.get();
+    if explicit_hold.is_some_and(|held| {
+        !app.zones.get(held).is_some_and(|zone| {
+            zone.is_visible() && !zone.is_stack_anchor() && !zone.is_stacked_child()
+        })
+    }) {
+        if expanded == explicit_hold {
+            scheduler.reset();
+        }
+        app.explicit_zone_surface_hold.set(None);
+        explicit_hold = None;
+    }
+    if explicit_hold.is_some() && hover_zone == explicit_hold {
+        app.explicit_zone_surface_hold.set(None);
+    } else if let Some(held) = expanded.filter(|zone| explicit_hold == Some(*zone)) {
+        // An unrelated surface under the resting pointer must not cancel an
+        // explicit Search/keyboard result before the user can reach it.
+        scheduler.on_enter(held, now_ms, app.expand_delay_ms.get().max(0) as u32);
+        app.hover_scheduler.set(scheduler);
+        log_animation_proof_state(app, "explicit_surface_held", now_ms, None, None);
+        return;
+    }
     let next_zone = hover_zone.and_then(|id| {
         let zone = app.zones.get(id)?;
         if zone.is_stack_anchor()
@@ -334,6 +459,9 @@ pub(super) fn collapse_zone_from_header(app: &AppState, zone_id: ZoneId, now_ms:
     let selection_changed = app.selected_zone.get() == Some(zone_id);
     if selection_changed {
         app.selected_zone.set(None);
+    }
+    if app.explicit_zone_surface_hold.get() == Some(zone_id) {
+        app.explicit_zone_surface_hold.set(None);
     }
     let mut scheduler = app.hover_scheduler.get();
     scheduler.reset();
@@ -480,7 +608,9 @@ pub(super) fn update_main_zone_hover_for_point(
 ) -> bool {
     let hover_zone = stack_aware_hover_zone_for_point(app, x, y);
     let mut changed = false;
-    if app.hovered_zone.get() != hover_zone {
+    if app.hovered_zone.get() != hover_zone
+        || (hover_zone.is_some() && app.explicit_zone_surface_hold.get() == hover_zone)
+    {
         on_hover_target_changed(app, hover_zone, now_ms);
         changed = true;
     }
@@ -525,11 +655,20 @@ pub(super) fn zone_drag_pointer_offset(app: &AppState, id: ZoneId) -> Option<(i3
 }
 
 pub(super) fn resize_zone_live(app: &mut AppState, id: ZoneId, size: DispatchSize) -> bool {
+    resize_zone_live_with_minimum(app, id, size, DispatchSize::new(80, 60))
+}
+
+pub(super) fn resize_zone_live_with_minimum(
+    app: &mut AppState,
+    id: ZoneId,
+    size: DispatchSize,
+    minimum: DispatchSize,
+) -> bool {
     let Some(z) = app.zones.get_mut(id) else {
         return false;
     };
-    let width = size.width.max(80);
-    let height = size.height.max(60);
+    let width = size.width.max(minimum.width.max(0));
+    let height = size.height.max(minimum.height.max(0));
     if z.w == width && z.h == height {
         return false;
     }

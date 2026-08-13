@@ -49,11 +49,6 @@ pub const ITEM_GRID_TOP_OFFSET_PX: f32 = 56.0;
 /// Mirrors 1.x `props.gridColumns ?? 4`.
 pub const ITEM_GRID_DEFAULT_COLUMNS: u32 = 4;
 
-/// Minimum readable outer width for a standard item card. Below this threshold
-/// the 14px single-line label cannot keep a professional gap from neighbouring
-/// cards, so narrow panels reduce the effective column count at paint/hit time.
-pub const ITEM_GRID_MIN_CARD_WIDTH_PX: f32 = 64.0;
-
 /// Layout mode chosen once per zone load — switched only when item count
 /// crosses `ITEM_GRID_VIRTUAL_THRESHOLD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,18 +81,10 @@ pub const fn column_span_for(is_wide: bool) -> u32 {
     if is_wide { 2 } else { 1 }
 }
 
-pub fn effective_column_count(zone_width: f32, requested_columns: u32, inset_x: f32) -> u32 {
-    let mut columns = requested_columns.max(1);
-    let available = (zone_width - inset_x * 2.0).max(ITEM_GRID_MIN_CARD_WIDTH_PX);
-    while columns > 1 {
-        let gap_total = ITEM_GRID_COLUMN_GAP_PX * (columns - 1) as f32;
-        let cell_w = ((available - gap_total).max(0.0)) / columns as f32;
-        if cell_w >= ITEM_GRID_MIN_CARD_WIDTH_PX {
-            break;
-        }
-        columns -= 1;
-    }
-    columns
+pub fn effective_column_count(_zone_width: f32, requested_columns: u32, _inset_x: f32) -> u32 {
+    // The editor value is a layout contract, not a hint. This matches the
+    // original `repeat(grid_columns, 1fr)` grid and keeps paint/hit/drop aligned.
+    requested_columns.max(1)
 }
 
 /// Build the compatibility widget-tree descriptor for the grid host.
@@ -124,19 +111,20 @@ mod tests {
         assert!((ITEM_GRID_COLUMN_GAP_PX - 8.0).abs() < 0.01);
         assert!((ITEM_GRID_ROW_GAP_PX - 8.0).abs() < 0.01);
         assert_eq!(ITEM_GRID_DEFAULT_COLUMNS, 4);
-        assert!((ITEM_GRID_MIN_CARD_WIDTH_PX - 64.0).abs() < 0.01);
         // P3.6 (1:1) — grid starts at the 48-DIP Tauri `.panel-header` plus the
         // 8-DIP `--spacing-sm` content pad = 56.
         assert!((ITEM_GRID_TOP_OFFSET_PX - 56.0).abs() < 0.01);
     }
 
     #[test]
-    fn effective_column_count_keeps_cards_readable_in_narrow_panels() {
-        assert_eq!(effective_column_count(320.0, 5, 16.0), 4);
+    fn effective_column_count_preserves_the_user_setting() {
+        assert_eq!(effective_column_count(320.0, 5, 16.0), 5);
+        assert_eq!(effective_column_count(320.0, 6, 16.0), 6);
         assert_eq!(effective_column_count(320.0, 4, 16.0), 4);
-        assert_eq!(effective_column_count(240.0, 5, 16.0), 3);
+        assert_eq!(effective_column_count(240.0, 5, 16.0), 5);
         assert_eq!(effective_column_count(720.0, 5, 16.0), 5);
-        assert_eq!(effective_column_count(80.0, 5, 16.0), 1);
+        assert_eq!(effective_column_count(80.0, 5, 16.0), 5);
+        assert_eq!(effective_column_count(320.0, 0, 16.0), 1);
     }
 
     #[test]

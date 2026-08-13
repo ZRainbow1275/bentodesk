@@ -420,6 +420,13 @@ pub(super) fn parse_search_live_folder_zone_id(hit_id: &str) -> Option<ZoneId> {
     zone_raw.parse::<u64>().ok().map(ZoneId)
 }
 
+pub(super) fn stacked_owner_for_search_hit(app: &AppState, hit_id: &str) -> Option<ZoneId> {
+    let owner = parse_search_item_id(hit_id)
+        .map(|(zone_id, _)| zone_id)
+        .or_else(|| parse_search_live_folder_zone_id(hit_id))?;
+    app.zones.stack_anchor_for(owner).map(|_| owner)
+}
+
 pub(super) fn set_highlight_for_search_hit(
     root: &AppRoot,
     hit: &search_bar::SearchHit,
@@ -429,12 +436,21 @@ pub(super) fn set_highlight_for_search_hit(
     let mut pulse_paths = smallvec::SmallVec::<[String; 8]>::new();
     {
         let app = root.app.borrow();
+        // SAFETY: GetTickCount is total and thread-safe.
+        let now_ms = unsafe { GetTickCount() };
         match hit.kind {
             SearchItemKind::Zone => {
-                if let Some(zone_id) = parse_search_zone_id(hit.id.as_str())
-                    && let Some(zone) = app.zones.get(zone_id)
-                {
-                    targets.push(highlight_overlay::zone_target_rect(zone));
+                if let Some(zone_id) = parse_search_zone_id(hit.id.as_str()) {
+                    let stack_anchor = app.zones.stack_anchor_for(zone_id);
+                    let visible_id = stack_anchor.unwrap_or(zone_id);
+                    if let Some(zone) = app.zones.get(visible_id) {
+                        let rect = if timed && stack_anchor.is_none() {
+                            app.zone_expanded_placement(zone).panel
+                        } else {
+                            app.zone_effective_rect_at(zone, now_ms)
+                        };
+                        targets.push(highlight_overlay::zone_target_rect_for_rect(rect));
+                    }
                 }
             }
             SearchItemKind::File | SearchItemKind::Folder => {
@@ -442,11 +458,27 @@ pub(super) fn set_highlight_for_search_hit(
                     if let Some(zone) = app.zones.get(zone_id)
                         && let Some(item) = zone.item(item_id)
                     {
-                        targets.push(highlight_overlay::item_target_rect(zone, item));
+                        if zone.is_stacked_child() || !app.zone_pill_body_visible(zone) {
+                            let visible_id = app.zones.stack_anchor_for(zone_id).unwrap_or(zone_id);
+                            if let Some(visible_zone) = app.zones.get(visible_id) {
+                                targets.push(highlight_overlay::zone_target_rect_for_rect(
+                                    app.zone_effective_rect_at(visible_zone, now_ms),
+                                ));
+                            }
+                        } else {
+                            targets.push(highlight_overlay::item_target_rect_in_panel(
+                                zone,
+                                item,
+                                app.zone_effective_rect_at(zone, now_ms),
+                            ));
+                        }
                     }
                 } else if let Some(zone_id) = parse_search_live_folder_zone_id(hit.id.as_str()) {
-                    if let Some(zone) = app.zones.get(zone_id) {
-                        targets.push(highlight_overlay::zone_target_rect(zone));
+                    let visible_id = app.zones.stack_anchor_for(zone_id).unwrap_or(zone_id);
+                    if let Some(zone) = app.zones.get(visible_id) {
+                        targets.push(highlight_overlay::zone_target_rect_for_rect(
+                            app.zone_effective_rect_at(zone, now_ms),
+                        ));
                     }
                 } else {
                     let fallback_paths = [hit.breadcrumb.to_string()];
@@ -516,6 +548,7 @@ pub(super) fn push_search_action(root: &AppRoot, action_id: &str) -> bool {
 
 pub(super) fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> bool {
     let zh = bentodesk_style::current_locale_is(&bentodesk_style::ZH_CN);
+    let mut animate_main = false;
     let hit = {
         let app = root.app.borrow();
         app.search_bar
@@ -545,7 +578,6 @@ pub(super) fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> b
 
     match hit.kind {
         SearchItemKind::Zone => {
-            let _highlighted = set_highlight_for_search_hit(root, &hit, true);
             let Some(zone_id) = parse_search_zone_id(hit.id.as_str()) else {
                 let app = root.app.borrow();
                 app.search_status.borrow_mut().replace(localized_message(
@@ -555,7 +587,7 @@ pub(super) fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> b
                 ));
                 return false;
             };
-            let app = root.app.borrow();
+            let mut app = root.app.borrow_mut();
             if app.zones.get(zone_id).is_none() {
                 app.search_status.borrow_mut().replace(localized_message(
                     zh,
@@ -564,16 +596,47 @@ pub(super) fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> b
                 ));
                 return false;
             }
-            app.selected_zone.set(Some(zone_id));
-            app.hovered_zone.set(Some(zone_id));
-            app.search_status.borrow_mut().replace(localized_message(
-                zh,
-                format!("已选择区域 {}", zone_id.0),
-                format!("Selected Zone {}", zone_id.0),
-            ));
+            let stack_anchor = app.zones.stack_anchor_for(zone_id);
+            if let Some(anchor) = stack_anchor {
+                app.selected_zone.set(None);
+                app.hovered_zone.set(Some(anchor));
+                app.search_status.borrow_mut().replace(localized_message(
+                    zh,
+                    format!("已打开区域 {} 所在叠放", zone_id.0),
+                    format!("Opened stack for Zone {}", zone_id.0),
+                ));
+                drop(app);
+                let _highlighted = set_highlight_for_search_hit(root, &hit, true);
+                root.dispatcher.push(Command::OpenStackTray(zone_id));
+            } else {
+                if app
+                    .zones
+                    .get_mut(zone_id)
+                    .is_some_and(|zone| zone.set_visible(true))
+                {
+                    app.mark_dirty();
+                }
+                // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
+                animate_main = activate_free_zone_surface(&app, zone_id, unsafe { GetTickCount() });
+                app.explicit_zone_surface_hold.set(Some(zone_id));
+                app.search_status.borrow_mut().replace(localized_message(
+                    zh,
+                    format!("已选择区域 {}", zone_id.0),
+                    format!("Selected Zone {}", zone_id.0),
+                ));
+                drop(app);
+                let _highlighted = set_highlight_for_search_hit(root, &hit, true);
+            }
         }
         SearchItemKind::File | SearchItemKind::Folder => {
             let _highlighted = set_highlight_for_search_hit(root, &hit, true);
+            let stacked_owner = {
+                let app = root.app.borrow();
+                stacked_owner_for_search_hit(&app, hit.id.as_str())
+            };
+            if let Some(owner) = stacked_owner {
+                root.dispatcher.push(Command::OpenStackTray(owner));
+            }
             let launch_result = shell_execute_path("open", hit.breadcrumb.as_str(), None);
             let app = root.app.borrow();
             let status = match launch_result {
@@ -632,6 +695,9 @@ pub(super) fn activate_search_hit(root: &AppRoot, hit_id: &str, hwnd: HWND) -> b
         unsafe { ShowWindow(hwnd, SW_HIDE) };
     }
     if let Some(main) = find_main_hwnd(root) {
+        if animate_main {
+            arm_hover_frame_timer(main);
+        }
         request_redraw(main);
     }
     request_redraw(hwnd);

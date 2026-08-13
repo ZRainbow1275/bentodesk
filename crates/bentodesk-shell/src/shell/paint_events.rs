@@ -168,22 +168,39 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
     app.viewport = window_slot_logical_viewport(slot);
     // Load and repair before the first BeginDraw so invalid persisted geometry
     // is never presented or installed as the Main HWND's click region.
-    let repaired = if slot.kind == WindowKind::Main && !slot.state.first_paint_done.get() {
-        slot.state.load_zones_once(&mut app);
+    let first_main_paint = slot.kind == WindowKind::Main && !slot.state.first_paint_done.get();
+    let pending_geometry_normalize =
+        slot.kind == WindowKind::Main && slot.state.take_zone_geometry_normalize();
+    let repaired = if first_main_paint || pending_geometry_normalize {
+        if first_main_paint {
+            slot.state.load_zones_once(&mut app);
+        }
         let repaired = normalize_startup_zone_geometry(&mut app);
+        let phase = if pending_geometry_normalize {
+            "workarea"
+        } else {
+            "startup"
+        };
         if repaired > 0 {
             tracing::warn!(
                 target: "bentodesk::layout",
                 repaired,
-                "clamped persisted Zone geometry to the measured viewport"
+                runtime = pending_geometry_normalize,
+                "normalized Zone geometry to the measured logical viewport"
             );
-            log_static(format!("layout: startup geometry repaired_zones={repaired}\n").as_str());
+        }
+        if repaired > 0 || animation_proof_log_enabled() {
+            log_static(format!("layout: {phase} geometry repaired_zones={repaired}\n").as_str());
         }
         repaired
     } else {
         0
     };
-    let r = slot.paint(&mut app);
+    if slot.kind == WindowKind::Main {
+        app.geometry_frame_now_ms.set(now);
+        log_live_zone_geometry(&app, "pre_paint", now);
+    }
+    let r = slot.paint(&mut app, now);
     if slot.kind != WindowKind::Main {
         app.viewport = previous_viewport;
     }

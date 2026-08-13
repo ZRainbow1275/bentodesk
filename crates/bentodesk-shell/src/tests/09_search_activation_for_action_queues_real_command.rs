@@ -425,11 +425,16 @@ fn suggestor_selection_highlights_matching_zone_items() {
     let files = smart_group_sample_files();
     {
         let mut app = root.app.borrow_mut();
+        app.viewport = Size {
+            width: 800.0,
+            height: 600.0,
+        };
         let mut zone = Zone::new(ZoneId(5), "Docs", 10, 20, 260, 180);
         for file in &files {
             let _item_id = zone.add_item(Cow::Owned(file.path.clone()), Cow::Borrowed("hash"));
         }
         app.zones.add(zone);
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
     }
     seed_suggestor_from_files(&root, &files, 1, 0);
 

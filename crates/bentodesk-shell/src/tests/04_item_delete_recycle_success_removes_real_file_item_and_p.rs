@@ -362,6 +362,53 @@ fn seed_test_zone(root: &AppRoot, id: u64, title: &str) {
         .zones
         .add(Zone::new(ZoneId(id), title.to_string(), 24, 32, 180, 120));
 }
+
+#[test]
+fn workarea_refresh_clears_pending_and_active_pointer_sessions() {
+    let root = test_app_root();
+    let card = (ZoneId(3), ZoneItemId(4));
+    {
+        let app = root.app.borrow();
+        app.item_drag.borrow_mut().replace(ItemDragCandidate {
+            zone_id: card.0,
+            item_id: card.1,
+            path: SmolStr::new_static(r"C:\Desktop\proof.txt"),
+            start_x: 20,
+            start_y: 24,
+            last_x: 20,
+            last_y: 24,
+            is_internal_dragging: false,
+        });
+        app.stack_tray_drag.set(Some(stack_tray::StackTrayDragState::new(
+            ZoneId(5),
+            ZoneId(6),
+            0,
+        )));
+        let mut hover = app.item_hover.get();
+        hover.on_press(card, 100);
+        app.item_hover.set(hover);
+    }
+    root.pending_item_drag_out
+        .borrow_mut()
+        .replace(PendingItemDragOut {
+            zone_id: card.0,
+            item_id: card.1,
+            path: SmolStr::new_static(r"C:\Desktop\proof.txt"),
+            copy_only: false,
+        });
+    root.pending_stack_drop_bloom.set(Some(ZoneId(5)));
+
+    assert!(cancel_main_client_gestures(&root));
+    let app = root.app.borrow();
+    assert!(app.item_drag.borrow().is_none());
+    assert!(app.stack_tray_drag.get().is_none());
+    assert!(!app.item_hover.get().press_held(card));
+    assert!(root.pending_item_drag_out.borrow().is_none());
+    assert!(root.pending_stack_drop_bloom.get().is_none());
+    drop(app);
+    assert!(!cancel_main_client_gestures(&root));
+}
+
 #[test]
 fn tooltip_payload_helpers_seed_and_clear_render_state() {
     let root = test_app_root();
@@ -495,6 +542,10 @@ fn tooltip_hover_item_producer_queues_show_and_hide() {
     let root = test_app_root();
     {
         let mut app = root.app.borrow_mut();
+        app.viewport = Size {
+            width: 800.0,
+            height: 600.0,
+        };
         let mut zone = Zone::new(ZoneId(88), "Docs", 0, 0, 240, 160);
         let item_id = zone
             .add_item_with_metadata(

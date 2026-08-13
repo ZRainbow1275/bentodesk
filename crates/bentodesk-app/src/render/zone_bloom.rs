@@ -19,28 +19,13 @@ impl Renderer {
             && let Some(anchor) = app.zones.get(anchor_id)
             && let Some(member_ids) = app.zones.stack_member_ids(anchor.id)
         {
-            let frames = if app.stack_bloom_leaving.get()
-                && app.stack_bloom_anchor.get() == Some(anchor.id)
-            {
-                stack_tray::stack_bloom_exit_frames_at(
-                    app.viewport,
-                    anchor,
-                    member_ids.len(),
-                    app.stack_bloom_progress.get(),
-                )
-            } else {
-                let reveal_progress = if app.stack_bloom_anchor.get() == Some(anchor.id) {
-                    app.stack_bloom_progress.get()
-                } else {
-                    1.0
-                };
-                stack_tray::stack_bloom_frames_at(
-                    app.viewport,
-                    anchor,
-                    member_ids.len(),
-                    reveal_progress,
-                )
-            };
+            let frames = stack_tray::stack_bloom_visible_frames_at(
+                app.viewport,
+                anchor,
+                member_ids.len(),
+                app.stack_bloom_progress.get(),
+                app.stack_bloom_leaving.get(),
+            );
             let petal_size = stack_tray::stack_bloom_petal_size(member_ids.len());
             let bloom_interaction = app.stack_bloom_interaction.get();
             let overflow_count = stack_tray::stack_bloom_overflow_count(member_ids.len());
@@ -63,8 +48,8 @@ impl Renderer {
                 } else {
                     0.0
                 };
-                let active_scale = 1.0 + (STACK_BLOOM_ACTIVE_SCALE - 1.0) * active_t;
-                let petal_rect = animator::scale_rect_centered(frame.rect, active_scale);
+                let active_scale = 1.0 + (stack_tray::BLOOM_ACTIVE_SCALE - 1.0) * active_t;
+                let petal_rect = stack_tray::stack_bloom_active_rect(frame.rect, active_t);
                 if frame.connector.width > 0.5 && frame.connector.height > 0.5 {
                     self.fill_rounded_rect(
                         frame.connector,

@@ -226,6 +226,7 @@ impl Renderer {
         app: &mut AppState,
         win: &mut WindowState,
         kind: WindowKind,
+        frame_now_ms: u32,
     ) -> Result<(), RenderError> {
         // Mc-2b — generation self-heal. When another window hit DeviceLost and
         // the shell bumped the generation via `recover_device_chain`, this
@@ -348,6 +349,12 @@ impl Renderer {
         let Some(surface) = self.surface.as_ref() else {
             return Ok(());
         };
+        if kind == WindowKind::Main {
+            // One clock sample owns every animated geometry decision for this
+            // presented Main frame. The shell keeps using it until the next
+            // frame, so input always targets what is actually on screen.
+            app.geometry_frame_now_ms.set(frame_now_ms);
+        }
         let ctx = &surface.ctx;
 
         // SAFETY: surface valid (just unwrapped); D2D draw sequence

@@ -50,27 +50,27 @@ pub(super) fn stack_bloom_hit_for_point(
     if x >= capsule.x && x <= capsule.right() && y >= capsule.y && y <= capsule.bottom() {
         return None;
     }
-    let petal_index =
-        if app.stack_bloom_leaving.get() && app.stack_bloom_anchor.get() == Some(anchor.id) {
-            stack_tray::stack_bloom_exit_hit_test_at(
-                app.viewport,
-                anchor,
-                members.len(),
-                app.stack_bloom_progress.get(),
-                x,
-                y,
-            )?
-        } else {
-            let reveal_progress = stack_bloom_reveal_progress_for_anchor(app, anchor.id);
-            stack_tray::stack_bloom_hit_test_at(
-                app.viewport,
-                anchor,
-                members.len(),
-                reveal_progress,
-                x,
-                y,
-            )?
-        };
+    let interaction = app.stack_bloom_interaction.get();
+    let active_index = interaction
+        .active_member
+        .and_then(|member| members.iter().position(|candidate| *candidate == member));
+    let active_t = active_index
+        .map(|_| {
+            stack_tray::stack_bloom_active_transition_t(
+                app.geometry_frame_now_ms.get(),
+                interaction.active_member_started_ms,
+            )
+        })
+        .unwrap_or(0.0);
+    let petal_index = stack_tray::stack_bloom_visible_hit_test_at(
+        app.viewport,
+        anchor,
+        members.len(),
+        stack_bloom_reveal_progress_for_anchor(app, anchor.id),
+        app.stack_bloom_leaving.get(),
+        active_index.map(|index| (index, active_t)),
+        (x, y),
+    )?;
     let member_index = stack_tray::stack_bloom_member_index_for_petal(members.len(), petal_index)?;
     members
         .get(member_index)
@@ -110,6 +110,12 @@ pub(super) fn stack_bloom_preview_item_hit_for_point(
     let search_active = app.zone_search_target.get() == Some(member);
     let search_state = app.search_bar.borrow();
     let query = search_state.query.as_str();
+    let item_top_offset = if search_active {
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            * app.zone_search_animation_progress_at(app.geometry_frame_now_ms.get())
+    } else {
+        0.0
+    };
     let mut flow_slot = 0;
     for item in &zone.items {
         if search_active && !search_bar::zone_item_matches_query(item.name.as_ref(), query) {
@@ -120,11 +126,7 @@ pub(super) fn stack_bloom_preview_item_hit_for_point(
             preview,
             flow_slot,
             item.is_wide,
-            if search_active {
-                search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
-            } else {
-                0.0
-            },
+            item_top_offset,
         );
         flow_slot = next_slot;
         if rect.width > 0.0
@@ -152,29 +154,50 @@ pub(super) fn item_drag_target_zone_for_point(app: &AppState, x: f32, y: f32) ->
         .or_else(|| ui::hit_test_zone(app, x, y))
 }
 
-pub(super) fn item_grid_position_for_drag_point(
+pub(super) fn item_drop_target_for_drag_point(
     app: &AppState,
     zone_id: ZoneId,
+    source_zone_id: ZoneId,
+    source_item_id: ZoneItemId,
+    is_wide: bool,
     x: f32,
     y: f32,
-) -> Option<(i32, i32)> {
+) -> Option<(i32, i32, usize)> {
+    let source_item = (source_zone_id == zone_id).then_some(source_item_id);
+    let search_active = app.zone_search_target.get() == Some(zone_id);
+    let search_state = app.search_bar.borrow();
+    let search_query = search_state.query.as_str();
+    let dragged_item = app.zones.item(source_zone_id, source_item_id)?;
+    if search_active
+        && !search_bar::zone_item_matches_query(dragged_item.name.as_ref(), search_query)
+    {
+        return None;
+    }
     if let Some((_, member, preview)) = stack_bloom_preview_hit_for_point(app, x, y)
         && member == zone_id
     {
         let zone = app.zones.get(member)?;
-        return highlight_overlay::item_grid_position_for_panel(
+        let now_ms = app.geometry_frame_now_ms.get();
+        return highlight_overlay::item_drop_target_for_panel(
+            zone,
             preview,
-            zone.grid_columns,
-            x,
-            y,
-            if app.zone_search_target.get() == Some(member) {
+            source_item,
+            is_wide,
+            (x, y),
+            if search_active {
                 search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+                    * app.zone_search_animation_progress_at(now_ms)
             } else {
                 0.0
             },
-        );
+            |item| {
+                !search_active
+                    || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
+            },
+        )
+        .map(|(grid_x, grid_y, target_index, _)| (grid_x, grid_y, target_index));
     }
-    ui::item_grid_position_for_point(app, zone_id, x, y)
+    ui::item_drop_target_for_point(app, zone_id, source_item, is_wide, x, y)
 }
 
 pub(super) fn item_open_command_for_double_click(

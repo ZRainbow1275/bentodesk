@@ -95,8 +95,12 @@ pub(super) fn item_path_matches(item: &ZoneItem, target_path: &str) -> bool {
 
 pub(super) fn path_matches_visible_zone_item(app: &AppState, target_path: &str) -> bool {
     app.zones.iter().any(|zone| {
-        zone.is_visible()
-            && !zone.is_stacked_child()
+        let visible_zone = app
+            .zones
+            .stack_anchor_for(zone.id)
+            .and_then(|id| app.zones.get(id))
+            .unwrap_or(zone);
+        visible_zone.is_visible()
             && zone
                 .items
                 .iter()
@@ -182,8 +186,15 @@ pub(super) fn highlight_targets_for_paths(
     paths: &[String],
 ) -> smallvec::SmallVec<[HighlightRect; 8]> {
     let mut targets = smallvec::SmallVec::<[HighlightRect; 8]>::new();
+    // SAFETY: GetTickCount is total and thread-safe.
+    let now_ms = unsafe { GetTickCount() };
     for zone in app.zones.iter() {
-        if !zone.is_visible() || zone.is_stacked_child() {
+        let visible_zone = app
+            .zones
+            .stack_anchor_for(zone.id)
+            .and_then(|id| app.zones.get(id))
+            .unwrap_or(zone);
+        if !visible_zone.is_visible() {
             continue;
         }
         for item in &zone.items {
@@ -191,7 +202,20 @@ pub(super) fn highlight_targets_for_paths(
                 .iter()
                 .any(|target_path| item_path_matches(item, target_path))
             {
-                targets.push(highlight_overlay::item_target_rect(zone, item));
+                let target = if visible_zone.id == zone.id && app.zone_pill_body_visible(zone) {
+                    highlight_overlay::item_target_rect_in_panel(
+                        zone,
+                        item,
+                        app.zone_effective_rect_at(zone, now_ms),
+                    )
+                } else {
+                    highlight_overlay::zone_target_rect_for_rect(
+                        app.zone_effective_rect_at(visible_zone, now_ms),
+                    )
+                };
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
         }
     }

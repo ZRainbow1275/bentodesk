@@ -7,7 +7,10 @@
 //! integer-only with an `i64` widen so the squared sum cannot overflow, and
 //! the O(n) stack-target scan runs only once on mouse-up, off the hot path.
 
-use crate::zone_pill_geometry::{pill_layout_for_zone, stack_capsule_layout_for_zone};
+use crate::{
+    state::ZoneResizeSession,
+    zone_pill_geometry::{pill_layout_for_zone, stack_capsule_layout_for_zone},
+};
 use bentodesk_zone::{Zone, ZoneId, ZoneList};
 
 /// Tauri parity: `ZONE_DRAG_THRESHOLD_PX = 4` (`BentoZone.tsx:72`). Logical
@@ -40,6 +43,62 @@ pub fn exceeds_drag_threshold(dx: i32, dy: i32) -> bool {
     let dy = dy as i64;
     let thresh = (ZONE_DRAG_THRESHOLD_DIP as i64).pow(2);
     dx * dx + dy * dy >= thresh
+}
+
+/// Resolve a directional resize from the immutable mouse-down session.
+///
+/// Using the captured visible size (rather than re-reading the live Zone on
+/// every move) prevents cumulative drift and guarantees the first event at the
+/// mouse-down coordinates preserves the panel size exactly.
+pub fn directional_resize_size(
+    session: ZoneResizeSession,
+    pointer_x: f32,
+    pointer_y: f32,
+    max_width: f32,
+    max_height: f32,
+    min_width: f32,
+    min_height: f32,
+) -> (i32, i32) {
+    let max_width = finite_non_negative(max_width).floor();
+    let max_height = finite_non_negative(max_height).floor();
+    let min_width = finite_non_negative(min_width).min(max_width);
+    let min_height = finite_non_negative(min_height).min(max_height);
+    let delta_x = finite_or(pointer_x, session.start_pointer_x) - session.start_pointer_x;
+    let delta_y = finite_or(pointer_y, session.start_pointer_y) - session.start_pointer_y;
+    let desired_width = session.start_visible_width
+        + if session.anchor_right {
+            -delta_x
+        } else {
+            delta_x
+        };
+    let desired_height = session.start_visible_height
+        + if session.anchor_bottom {
+            -delta_y
+        } else {
+            delta_y
+        };
+    (
+        finite_or(desired_width, session.start_visible_width)
+            .clamp(min_width, max_width)
+            .round() as i32,
+        finite_or(desired_height, session.start_visible_height)
+            .clamp(min_height, max_height)
+            .round() as i32,
+    )
+}
+
+#[inline]
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+#[inline]
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
 }
 
 /// Port of `findOverlapStackTarget` (`BentoZone.tsx:755-848`). Given the
@@ -216,6 +275,55 @@ fn score_stack_candidate(
 mod tests {
     use super::*;
     use bentodesk_zone::{Zone, ZoneId, ZoneList};
+
+    fn resize_session(anchor_right: bool, anchor_bottom: bool) -> ZoneResizeSession {
+        ZoneResizeSession {
+            id: ZoneId(9),
+            start_pointer_x: 100.0,
+            start_pointer_y: 100.0,
+            start_visible_width: 240.0,
+            start_visible_height: 180.0,
+            anchor_right,
+            anchor_bottom,
+        }
+    }
+
+    #[test]
+    fn directional_resize_has_no_first_move_jump_and_tracks_all_four_corners() {
+        for anchor_right in [false, true] {
+            for anchor_bottom in [false, true] {
+                let session = resize_session(anchor_right, anchor_bottom);
+                assert_eq!(
+                    directional_resize_size(session, 100.0, 100.0, 600.0, 500.0, 80.0, 60.0),
+                    (240, 180)
+                );
+                let pointer_x = if anchor_right { 80.0 } else { 120.0 };
+                let pointer_y = if anchor_bottom { 70.0 } else { 130.0 };
+                assert_eq!(
+                    directional_resize_size(
+                        session, pointer_x, pointer_y, 600.0, 500.0, 80.0, 60.0,
+                    ),
+                    (260, 210)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn directional_resize_respects_directional_max_even_below_normal_minimum() {
+        assert_eq!(
+            directional_resize_size(
+                resize_session(false, false),
+                500.0,
+                500.0,
+                50.0,
+                40.0,
+                80.0,
+                60.0,
+            ),
+            (50, 40)
+        );
+    }
 
     // ── exceeds_drag_threshold ────────────────────────────────────────────
 

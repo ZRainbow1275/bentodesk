@@ -376,8 +376,7 @@ impl Renderer {
         query: &str,
     ) -> Result<(), RenderError> {
         let pal = app.active_theme_tauri();
-        // SAFETY: GetTickCount is total and thread-safe.
-        let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        let now_ms = app.geometry_frame_now_ms.get();
         let reveal = app
             .zone_search_animation_progress_at(now_ms)
             .clamp(0.0, 1.0);
@@ -528,10 +527,7 @@ impl Renderer {
 
         let search_active = app.zone_search_target.get() == Some(zone.id);
         let search_reveal = if search_active {
-            // SAFETY: GetTickCount is total and thread-safe.
-            app.zone_search_animation_progress_at(unsafe {
-                windows_sys::Win32::System::SystemInformation::GetTickCount()
-            })
+            app.zone_search_animation_progress_at(app.geometry_frame_now_ms.get())
         } else {
             0.0
         };
@@ -551,9 +547,7 @@ impl Renderer {
             pal.surface_hover,
             pal.border_hover,
         );
-        // SAFETY: `GetTickCount` is total and thread-safe. One sample keeps all
-        // preview cards on the same hover/press frame.
-        let anim_now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+        let anim_now_ms = app.geometry_frame_now_ms.get();
         let item_hover = app.item_hover.get();
         let item_drag = app.item_drag.borrow();
         let item_label_group_px = {
@@ -634,6 +628,30 @@ impl Renderer {
                 item_label_group_px,
                 1.0,
             )?;
+        }
+        if let Some(drag) = item_drag.as_ref().filter(|drag| {
+            drag.is_internal_dragging
+                && drag.last_x as f32 >= preview.x
+                && (drag.last_x as f32) < preview.right()
+                && drag.last_y as f32 >= preview.y
+                && (drag.last_y as f32) < preview.bottom()
+        }) && let Some(dragged) = app.zones.item(drag.zone_id, drag.item_id)
+            && (!search_active
+                || search_bar::zone_item_matches_query(dragged.name.as_ref(), search_query))
+            && let Some((_, _, _, drop_preview)) = highlight_overlay::item_drop_target_for_panel(
+                zone,
+                preview,
+                (drag.zone_id == zone.id).then_some(drag.item_id),
+                dragged.is_wide,
+                (drag.last_x as f32, drag.last_y as f32),
+                search_item_offset,
+                |item| {
+                    !search_active
+                        || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
+                },
+            )
+        {
+            self.draw_item_drop_preview(app, drop_preview, item_chrome.card_radius)?;
         }
         if search_active && visible_item_count == 0 {
             self.draw_text_no_wrap_with_style(

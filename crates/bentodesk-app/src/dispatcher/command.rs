@@ -138,15 +138,15 @@ pub enum Command {
     /// Copy an item's effective filesystem path to the Windows clipboard
     /// (1.x item context menu `Copy Path`).
     CopyItemPath(ItemPath),
-    /// Move an item within or between zones (1.x `move_item`). The
-    /// destination zone is implicit in the consumer's hit-test result.
-    MoveItem(ZoneId, ItemId, Point),
+    /// Move an item within a zone to a persisted point and CSS auto-flow
+    /// insertion index resolved from the live panel geometry.
+    MoveItem(ZoneId, ItemId, Point, usize),
     /// Toggle a card between one-column and two-column width (1.x
     /// `toggle_item_wide`).
     ToggleItemWide(ZoneId, ItemId),
     /// Move an item to another zone (1.x `move_item { from_zone_id,
     /// to_zone_id, item_id }`).
-    MoveItemToZone(ZoneId, ZoneId, ItemId),
+    MoveItemToZone(ZoneId, ZoneId, ItemId, Option<(Point, usize)>),
     /// Open the selected-stack native file rename surface for an item.
     OpenItemFileRename(ZoneId, ItemId),
     /// Rename the item's real filesystem entry in-place.
@@ -442,9 +442,9 @@ impl Command {
             Self::RemoveItem(_, _) => "RemoveItem",
             Self::OpenItemFile(_, _) => "OpenItemFile",
             Self::CopyItemPath(_) => "CopyItemPath",
-            Self::MoveItem(_, _, _) => "MoveItem",
+            Self::MoveItem(..) => "MoveItem",
             Self::ToggleItemWide(_, _) => "ToggleItemWide",
-            Self::MoveItemToZone(_, _, _) => "MoveItemToZone",
+            Self::MoveItemToZone(..) => "MoveItemToZone",
             Self::OpenItemFileRename(_, _) => "OpenItemFileRename",
             Self::RenameItemFile(_, _, _) => "RenameItemFile",
             Self::DeleteItemFileToRecycleBin(_, _) => "DeleteItemFileToRecycleBin",

@@ -356,9 +356,9 @@ pub(super) fn item_context_dispatch_for_action(
         ItemContextAction::ToggleWide => {
             ItemContextDispatch::Command(Command::ToggleItemWide(zone_id, item_id))
         }
-        ItemContextAction::MoveToZone(target_zone_id) => {
-            ItemContextDispatch::Command(Command::MoveItemToZone(zone_id, target_zone_id, item_id))
-        }
+        ItemContextAction::MoveToZone(target_zone_id) => ItemContextDispatch::Command(
+            Command::MoveItemToZone(zone_id, target_zone_id, item_id, None),
+        ),
         ItemContextAction::Remove => {
             ItemContextDispatch::Command(Command::RemoveItem(zone_id, item_id))
         }

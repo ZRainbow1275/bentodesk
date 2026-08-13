@@ -19,7 +19,7 @@ use bentodesk_style::tokens::{PaletteTauri, RadiusTauri};
 use bentodesk_style::{BorderRadius, Color, Edges, Length, Rect};
 use bentodesk_theme::{self as theme, PaletteTokens, RadiusTokens, radius};
 use bentodesk_widget::{ContainerNode, WidgetNode};
-use bentodesk_zone::{Zone, ZoneItem};
+use bentodesk_zone::{Zone, ZoneItem, ZoneItemId};
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 

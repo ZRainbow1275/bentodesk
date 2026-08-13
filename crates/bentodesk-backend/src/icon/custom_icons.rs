@@ -260,14 +260,17 @@ fn decode_ico_to_png(bytes: &[u8]) -> Result<Vec<u8>, IconError> {
 }
 
 /// Container-format selector for [`wic_decode_to_rgba`].
-enum ContainerFormat {
+pub(super) enum ContainerFormat {
     Png,
 }
 
 /// Internal: WIC decode → 32bppRGBA8 RGBA pixels + dimensions. The
 /// caller picks the container format (currently only PNG; ICO uses a
 /// specialised "pick largest frame" variant below).
-fn wic_decode_to_rgba(bytes: &[u8], fmt: ContainerFormat) -> Result<(Vec<u8>, u32, u32), String> {
+pub(super) fn wic_decode_to_rgba(
+    bytes: &[u8],
+    fmt: ContainerFormat,
+) -> Result<(Vec<u8>, u32, u32), String> {
     use windows::Win32::Graphics::Imaging::{
         CLSID_WICImagingFactory, GUID_ContainerFormatPng, GUID_WICPixelFormat32bppRGBA,
         IWICBitmapSource, IWICFormatConverter, IWICImagingFactory, IWICStream,

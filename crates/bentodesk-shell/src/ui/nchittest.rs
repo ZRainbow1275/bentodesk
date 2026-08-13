@@ -237,5 +237,26 @@ fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
     let Some(members) = app.zones.stack_member_ids(anchor.id) else {
         return false;
     };
-    stack_tray::stack_bloom_hit_test(app.viewport, anchor, members.len(), x, y).is_some()
+    let interaction = app.stack_bloom_interaction.get();
+    let active_index = interaction
+        .active_member
+        .and_then(|member| members.iter().position(|candidate| *candidate == member));
+    let active_t = active_index
+        .map(|_| {
+            stack_tray::stack_bloom_active_transition_t(
+                app.geometry_frame_now_ms.get(),
+                interaction.active_member_started_ms,
+            )
+        })
+        .unwrap_or(0.0);
+    stack_tray::stack_bloom_visible_hit_test_at(
+        app.viewport,
+        anchor,
+        members.len(),
+        app.stack_bloom_progress.get(),
+        app.stack_bloom_leaving.get(),
+        active_index.map(|index| (index, active_t)),
+        (x, y),
+    )
+    .is_some()
 }

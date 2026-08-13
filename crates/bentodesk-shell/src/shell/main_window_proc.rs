@@ -196,57 +196,7 @@ pub(super) unsafe extern "system" fn wnd_proc(
             }
             0
         }
-        WM_DPICHANGED => {
-            // PER_MONITOR_AWARE_V2 contract. T-012: rebuild swap chain at
-            // new monitor's pixel density (the OS suggested rect arrives in
-            // the *new monitor's* device pixels, so the backbuffer must
-            // follow or the next frame paints at the wrong resolution).
-            // T-012 / R4 — DPI cache is per-HWND (`WindowSlot.state.dpi`),
-            // never global.
-            //
-            // SAFETY: slot pointer fetched from window data — null-checked;
-            //         lParam is non-null per WM_DPICHANGED ABI guarantee.
-            unsafe {
-                let p = get_slot_ptr(hwnd);
-                if !p.is_null() {
-                    let new_dpi = (wparam as u32) & 0xFFFF;
-                    let slot = &mut *p;
-                    slot.state.dpi.set(new_dpi);
-                    slot.state.monitors = bentodesk_platform::enumerate_monitors();
-
-                    if !(lparam as *const RECT).is_null() {
-                        // SAFETY: WM_DPICHANGED ABI guarantees lParam is a
-                        //         valid pointer to a RECT for the duration
-                        //         of the message dispatch.
-                        let r = &*(lparam as *const RECT);
-                        let new_w = (r.right - r.left).max(1) as u32;
-                        let new_h = (r.bottom - r.top).max(1) as u32;
-                        SetWindowPos(
-                            hwnd,
-                            ptr::null_mut(),
-                            r.left,
-                            r.top,
-                            r.right - r.left,
-                            r.bottom - r.top,
-                            SWP_NOZORDER | SWP_NOACTIVATE,
-                        );
-                        // T-012 — rebuild swap chain at new monitor's pixel
-                        // density. `Renderer::resize` re-passes the swap
-                        // chain flags so the FRAME_LATENCY_WAITABLE_OBJECT
-                        // doesn't get demoted (Wave 12 contract).
-                        // Mc-2b / #10 — route a device loss on this resize into
-                        // recovery instead of discarding it.
-                        if let Err(bentodesk_app::RenderError::DeviceLost) =
-                            slot.renderer.resize(new_w, new_h)
-                            && let Some(root) = app_root()
-                        {
-                            handle_device_lost(root, hwnd);
-                        }
-                    }
-                }
-            }
-            0
-        }
+        WM_DPICHANGED => handle_window_dpi_changed(hwnd, wparam, lparam),
         WM_DISPLAYCHANGE => {
             // Display hotplug refresh (USB monitor unplugged, projector
             // connected, resolution change in Display Settings). WM_DPICHANGED
@@ -266,8 +216,15 @@ pub(super) unsafe extern "system" fn wnd_proc(
                 if !p.is_null() {
                     let slot = &mut *p;
                     slot.state.monitors = bentodesk_platform::enumerate_monitors();
-                    if slot.kind == WindowKind::Main {
+                    if message_requires_main_zone_geometry_refresh(
+                        slot.kind,
+                        WM_DISPLAYCHANGE,
+                        wparam,
+                    ) {
                         let (x, y, w, h) = bentodesk_platform::main_window_rect();
+                        if let Some(root) = app_root() {
+                            prepare_main_zone_geometry_refresh(root, slot, hwnd);
+                        }
                         SetWindowPos(
                             hwnd,
                             ptr::null_mut(),
@@ -311,6 +268,33 @@ pub(super) unsafe extern "system" fn wnd_proc(
                     let slot = &mut *p;
                     if slot.kind == WindowKind::Main {
                         slot.renderer.mark_backdrop_dirty();
+                        if message_requires_main_zone_geometry_refresh(
+                            slot.kind,
+                            WM_SETTINGCHANGE,
+                            wparam,
+                        ) {
+                            slot.state.monitors = bentodesk_platform::enumerate_monitors();
+                            let (x, y, width, height) = bentodesk_platform::main_window_rect();
+                            if let Some(root) = app_root() {
+                                prepare_main_zone_geometry_refresh(root, slot, hwnd);
+                            }
+                            SetWindowPos(
+                                hwnd,
+                                ptr::null_mut(),
+                                x,
+                                y,
+                                width.max(1),
+                                height.max(1),
+                                SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            if let Err(bentodesk_app::RenderError::DeviceLost) = slot
+                                .renderer
+                                .resize(width.max(1) as u32, height.max(1) as u32)
+                                && let Some(root) = app_root()
+                            {
+                                handle_device_lost(root, hwnd);
+                            }
+                        }
                     }
                 }
             }

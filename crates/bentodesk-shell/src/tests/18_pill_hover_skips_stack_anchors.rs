@@ -304,8 +304,16 @@ fn stack_bloom_preview_item_single_click_arms_drag_and_double_click_opens() {
         );
         assert_eq!(item_drag_target_zone_for_point(&app, x, y), Some(ZoneId(2)));
         assert_eq!(
-            item_grid_position_for_drag_point(&app, ZoneId(2), x, y),
-            Some((0, 0))
+            item_drop_target_for_drag_point(
+                &app,
+                ZoneId(2),
+                ZoneId(2),
+                ZoneItemId(41),
+                false,
+                x,
+                y,
+            ),
+            Some((0, 0, 0))
         );
         assert!(handle_stack_bloom_preview_lbutton_down(
             &app,
@@ -547,7 +555,18 @@ fn stack_bloom_petal_click_ignored_during_active_drag() {
         "zone drag owns mouse-up; stale bloom must not open tray",
     );
     assert_stack_bloom_ignores_drag(
-        |app| app.zone_resize.set(Some((ZoneId(1), 180, 130))),
+        |app| {
+            app.zone_resize
+                .set(Some(bentodesk_app::ZoneResizeSession {
+                    id: ZoneId(1),
+                    start_pointer_x: 0.0,
+                    start_pointer_y: 0.0,
+                    start_visible_width: 180.0,
+                    start_visible_height: 130.0,
+                    anchor_right: false,
+                    anchor_bottom: false,
+                }))
+        },
         "zone resize owns mouse-up; stale bloom must not open tray",
     );
     assert_stack_bloom_ignores_drag(
@@ -563,7 +582,18 @@ fn stack_tray_row_click_ignored_during_active_drag() {
         "zone drag owns mouse-up; tray row must not preview",
     );
     assert_stack_tray_row_ignores_drag(
-        |app| app.zone_resize.set(Some((ZoneId(1), 180, 130))),
+        |app| {
+            app.zone_resize
+                .set(Some(bentodesk_app::ZoneResizeSession {
+                    id: ZoneId(1),
+                    start_pointer_x: 0.0,
+                    start_pointer_y: 0.0,
+                    start_visible_width: 180.0,
+                    start_visible_height: 130.0,
+                    anchor_right: false,
+                    anchor_bottom: false,
+                }))
+        },
         "zone resize owns mouse-up; tray row must not preview",
     );
     assert_stack_tray_row_ignores_drag(

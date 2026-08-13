@@ -207,7 +207,7 @@ fn item_card_rect_for_item_in_panel_tracks_morph_panel_rect() {
 }
 
 #[test]
-fn item_card_rect_reflows_requested_columns_when_panel_is_too_narrow() {
+fn item_card_rect_preserves_requested_columns_when_panel_is_narrow() {
     let mut zone = Zone::new(bentodesk_zone::ZoneId(9), "Docs", 64, 332, 320, 220);
     zone.set_grid_columns(5);
 
@@ -215,14 +215,47 @@ fn item_card_rect_reflows_requested_columns_when_panel_is_too_narrow() {
     let fourth = item_card_rect_for_grid(&zone, 3, 0, false);
     let fifth = item_card_rect_for_grid(&zone, 4, 0, false);
 
-    assert!(first.width >= item_grid::ITEM_GRID_MIN_CARD_WIDTH_PX);
+    assert!(first.width > 0.0);
     assert!(
         fourth.right() <= zone.x as f32 + zone.w as f32 - expanded_zone_grid::HEADER_INSET_X + 0.01
     );
-    assert!((fifth.x - first.x).abs() < 0.01);
-    assert!(
-        fifth.y > fourth.y,
-        "5 requested columns in a 320-DIP panel should reflow to a new row"
+    assert!(fifth.x > fourth.x);
+    assert!((fifth.y - first.y).abs() < 0.01);
+}
+
+#[test]
+fn six_columns_at_320_dip_keep_paint_hit_and_drop_in_the_last_lane() {
+    let mut zone = Zone::new(bentodesk_zone::ZoneId(10), "Six", 64, 332, 320, 220);
+    zone.set_grid_columns(6);
+    for index in 0..6 {
+        zone.add_item(format!("C:/Desktop/item-{index}.txt"), format!("h{index}"))
+            .expect("fixture item");
+    }
+    let dragged = zone.items[0].id;
+    let panel = Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+    let sixth = item_card_rect_for_grid_in_panel(&zone, 5, 0, false, panel);
+    let (grid_x, grid_y, target_index, preview) = item_drop_target_for_panel(
+        &zone,
+        panel,
+        Some(dragged),
+        false,
+        (sixth.x + sixth.width * 0.5, sixth.y + sixth.height * 0.5),
+        0.0,
+        |_| true,
+    )
+    .expect("sixth-lane drop target");
+
+    assert_eq!((grid_x, grid_y), (5, 0));
+    assert_eq!(preview, sixth);
+    assert!(zone.move_item_to_index(dragged, grid_x, grid_y, target_index));
+    assert_eq!(
+        item_card_rect_for_item_in_panel(&zone, zone.item(dragged).expect("dragged"), panel),
+        preview
     );
 }
 
@@ -258,11 +291,115 @@ fn item_card_rect_for_item_advances_after_wide_cards() {
         third.x >= second.right() + item_grid::ITEM_GRID_COLUMN_GAP_PX - 0.01,
         "third card should continue after the second card"
     );
-    assert!((fourth.x - first.x).abs() < 0.01);
     assert!(
-        fourth.y > first.y,
-        "fourth card wraps because the first wide card consumed two lanes"
+        fourth.x >= third.right() + item_grid::ITEM_GRID_COLUMN_GAP_PX - 0.01,
+        "five configured columns leave the fifth lane on the first row"
     );
+    assert!((fourth.y - first.y).abs() < 0.01);
+}
+
+#[test]
+fn item_drop_target_matches_post_reorder_paint_for_normal_narrow_and_wide_grids() {
+    for (name, width, first_wide, dragged_wide, target_x, target_y) in [
+        ("normal", 360, false, false, 1, 0),
+        ("narrow", 240, false, false, 3, 0),
+        ("wide", 240, true, true, 3, 0),
+    ] {
+        let mut zone = Zone::new(bentodesk_zone::ZoneId(21), name, 10, 20, width, 300);
+        zone.set_grid_columns(4);
+        let first = zone.add_item("C:/Desktop/first.txt", "h1").expect("first");
+        for index in 2..=4 {
+            zone.add_item(format!("C:/Desktop/item-{index}.txt"), format!("h{index}"))
+                .expect("resident");
+        }
+        let dragged = zone
+            .add_item("C:/Desktop/dragged.txt", "drag")
+            .expect("dragged");
+        if first_wide {
+            assert!(zone.toggle_item_wide(first));
+        }
+        if dragged_wide {
+            assert!(zone.toggle_item_wide(dragged));
+        }
+        let panel = Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        };
+        let pointer_cell =
+            item_card_rect_for_grid_in_panel(&zone, target_x, target_y, false, panel);
+        let (grid_x, grid_y, target_index, preview) = item_drop_target_for_panel(
+            &zone,
+            panel,
+            Some(dragged),
+            dragged_wide,
+            (pointer_cell.x + 2.0, pointer_cell.y + 2.0),
+            0.0,
+            |_| true,
+        )
+        .expect("drop target");
+
+        assert!(zone.move_item_to_index(dragged, grid_x, grid_y, target_index));
+        let item = zone.item(dragged).expect("moved item");
+        assert_eq!((item.x, item.y), (grid_x, grid_y), "{name} persisted point");
+        assert_eq!(
+            item_card_rect_for_item_in_panel(&zone, item, panel),
+            preview,
+            "{name} preview must equal post-drop paint"
+        );
+    }
+}
+
+#[test]
+fn item_drop_target_uses_the_same_filtered_flow_as_inline_search() {
+    let mut zone = Zone::new(bentodesk_zone::ZoneId(22), "Search", 10, 20, 300, 260);
+    zone.set_grid_columns(3);
+    let mut ids = Vec::new();
+    for name in [
+        "hidden-first.txt",
+        "match-a.txt",
+        "hidden-middle.txt",
+        "match-b.txt",
+        "match-dragged.txt",
+    ] {
+        ids.push(
+            zone.add_item(format!("C:/Desktop/{name}"), "hash")
+                .expect("item"),
+        );
+    }
+    let dragged = ids[4];
+    let panel = Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+    let second_visible = item_card_rect_for_grid_in_panel(&zone, 1, 0, false, panel);
+    let (grid_x, grid_y, target_index, preview) = item_drop_target_for_panel(
+        &zone,
+        panel,
+        Some(dragged),
+        false,
+        (second_visible.x + 2.0, second_visible.y + 2.0),
+        44.0,
+        |item| item.name.contains("match"),
+    )
+    .expect("filtered target");
+
+    assert_eq!(target_index, 3, "insert before the second visible match");
+    assert!(zone.move_item_to_index(dragged, grid_x, grid_y, target_index));
+    let mut slot = 0;
+    let mut painted = None;
+    for item in zone.items.iter().filter(|item| item.name.contains("match")) {
+        let (rect, next_slot) =
+            item_card_rect_for_flow_slot_in_panel(&zone, panel, slot, item.is_wide, 44.0);
+        slot = next_slot;
+        if item.id == dragged {
+            painted = Some(rect);
+        }
+    }
+    assert_eq!(painted, Some(preview));
 }
 
 #[test]
@@ -442,4 +579,39 @@ fn floating_panel_flow_uses_zone_columns_and_shared_pointer_mapping() {
         Some((0, 0))
     );
     assert!(first.bottom() <= panel.bottom());
+}
+
+#[test]
+fn narrow_panel_pointer_slot_round_trips_through_requested_grid_coordinates() {
+    let mut zone = Zone::new(bentodesk_zone::ZoneId(14), "Narrow", 0, 0, 320, 300);
+    zone.set_grid_columns(4);
+    let panel = Rect {
+        x: 40.0,
+        y: 60.0,
+        width: 240.0,
+        height: 300.0,
+    };
+    let effective_columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns,
+        expanded_zone_grid::HEADER_INSET_X,
+    );
+    assert_eq!(effective_columns, 4);
+    let fourth_column = item_card_rect_for_grid_in_panel(&zone, 3, 0, false, panel);
+    assert!(fourth_column.x > panel.x + expanded_zone_grid::HEADER_INSET_X);
+    assert!((fourth_column.y - (panel.y + item_grid::ITEM_GRID_TOP_OFFSET_PX)).abs() < 0.01);
+
+    let persisted = item_grid_position_for_panel(
+        panel,
+        zone.grid_columns,
+        fourth_column.x + fourth_column.width * 0.5,
+        fourth_column.y + fourth_column.height * 0.5,
+        0.0,
+    );
+
+    assert_eq!(persisted, Some((3, 0)));
+    assert_eq!(
+        item_card_rect_for_grid_in_panel(&zone, 3, 0, false, panel),
+        fourth_column
+    );
 }

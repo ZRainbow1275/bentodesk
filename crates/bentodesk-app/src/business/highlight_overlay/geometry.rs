@@ -63,7 +63,27 @@ pub fn item_card_rect_for_flow_slot(
 /// live scroll offset; renderer clipping and shell hit-testing then share the
 /// same coordinates instead of shrinking inaccessible bottom rows.
 pub fn item_card_rect_for_item_scrolled(zone: &Zone, item: &ZoneItem, scroll_offset: f32) -> Rect {
-    let mut rect = item_card_rect_for_item(zone, item);
+    item_card_rect_for_item_scrolled_in_panel(
+        zone,
+        item,
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        },
+        scroll_offset,
+    )
+}
+
+/// Scrolled item-card geometry inside the resolved visible panel rectangle.
+pub fn item_card_rect_for_item_scrolled_in_panel(
+    zone: &Zone,
+    item: &ZoneItem,
+    panel: Rect,
+    scroll_offset: f32,
+) -> Rect {
+    let mut rect = item_card_rect_for_item_in_panel(zone, item, panel);
     rect.y -= scroll_offset.max(0.0);
     rect.height = item_grid::ITEM_GRID_ROW_HEIGHT_PX;
     rect
@@ -76,7 +96,32 @@ pub fn item_card_rect_for_flow_slot_scrolled(
     item_top_offset: f32,
     scroll_offset: f32,
 ) -> (Rect, i32) {
-    let (mut rect, next_slot) = item_card_rect_for_flow_slot(zone, slot, is_wide, item_top_offset);
+    item_card_rect_for_flow_slot_scrolled_in_panel(
+        zone,
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w as f32,
+            height: zone.h as f32,
+        },
+        slot,
+        is_wide,
+        item_top_offset,
+        scroll_offset,
+    )
+}
+
+/// Scrolled CSS-grid flow geometry inside the resolved visible panel.
+pub fn item_card_rect_for_flow_slot_scrolled_in_panel(
+    zone: &Zone,
+    panel: Rect,
+    slot: i32,
+    is_wide: bool,
+    item_top_offset: f32,
+    scroll_offset: f32,
+) -> (Rect, i32) {
+    let (mut rect, next_slot) =
+        item_card_rect_for_flow_slot_in_panel(zone, panel, slot, is_wide, item_top_offset);
     rect.y -= scroll_offset.max(0.0);
     rect.height = item_grid::ITEM_GRID_ROW_HEIGHT_PX;
     (rect, next_slot)
@@ -85,12 +130,25 @@ pub fn item_card_rect_for_flow_slot_scrolled(
 /// Axis-aligned viewport for expanded Zone items. The normal content viewport
 /// begins at the 48-DIP header seam; inline search consumes another 44 DIPs.
 pub fn item_content_clip_rect(zone: &Zone, item_top_offset: f32) -> Rect {
-    let top = zone.y as f32 + expanded_zone_grid::HEADER_BAND_HEIGHT + item_top_offset.max(0.0);
+    item_content_clip_rect_in_panel(
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w.max(0) as f32,
+            height: zone.h.max(0) as f32,
+        },
+        item_top_offset,
+    )
+}
+
+/// Axis-aligned item viewport inside the resolved visible panel rectangle.
+pub fn item_content_clip_rect_in_panel(panel: Rect, item_top_offset: f32) -> Rect {
+    let top = panel.y + expanded_zone_grid::HEADER_BAND_HEIGHT + item_top_offset.max(0.0);
     Rect {
-        x: zone.x as f32,
+        x: panel.x,
         y: top,
-        width: zone.w.max(0) as f32,
-        height: (zone.y as f32 + zone.h.max(0) as f32 - top).max(0.0),
+        width: panel.width.max(0.0),
+        height: (panel.bottom() - top).max(0.0),
     }
 }
 
@@ -102,7 +160,32 @@ pub fn item_flow_max_scroll(
     item_top_offset: f32,
     is_wide_items: impl IntoIterator<Item = bool>,
 ) -> f32 {
-    let columns = effective_grid_columns(zone).max(1) as i32;
+    item_flow_max_scroll_in_panel(
+        zone,
+        Rect {
+            x: zone.x as f32,
+            y: zone.y as f32,
+            width: zone.w.max(0) as f32,
+            height: zone.h.max(0) as f32,
+        },
+        item_top_offset,
+        is_wide_items,
+    )
+}
+
+/// Maximum scroll for the visible item flow inside a resolved panel rectangle.
+pub fn item_flow_max_scroll_in_panel(
+    zone: &Zone,
+    panel: Rect,
+    item_top_offset: f32,
+    is_wide_items: impl IntoIterator<Item = bool>,
+) -> f32 {
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    )
+    .max(1) as i32;
     let mut slot = 0_i32;
     let mut last_row = None;
     for is_wide in is_wide_items {
@@ -117,13 +200,13 @@ pub fn item_flow_max_scroll(
     let Some(last_row) = last_row else {
         return 0.0;
     };
-    let last_card_bottom = zone.y as f32
+    let last_card_bottom = panel.y
         + item_grid::ITEM_GRID_TOP_OFFSET_PX
         + item_top_offset.max(0.0)
         + last_row as f32 * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX)
         + item_grid::ITEM_GRID_ROW_HEIGHT_PX;
     let content_bottom = last_card_bottom + bentodesk_style::tokens::SPACING.lg;
-    (content_bottom - (zone.y + zone.h) as f32).max(0.0)
+    (content_bottom - panel.bottom()).max(0.0)
 }
 
 /// CSS-grid flow geometry inside an arbitrary panel rectangle. The floating
@@ -143,12 +226,7 @@ pub fn item_card_rect_for_flow_slot_in_panel(
         expanded_zone_grid::HEADER_INSET_X,
     );
     let columns_i = columns.max(1) as i32;
-    let span = bounded_column_span(is_wide, columns);
-    let mut placed_slot = slot.max(0);
-    let column = placed_slot % columns_i;
-    if column + span > columns_i {
-        placed_slot += columns_i - column;
-    }
+    let (placed_slot, next_slot) = flow_slots(slot, is_wide, columns);
     let mut rect = item_card_rect_for_effective_grid_in_panel(
         zone.grid_columns.max(1),
         panel,
@@ -159,12 +237,13 @@ pub fn item_card_rect_for_flow_slot_in_panel(
     );
     rect.y += item_top_offset;
     rect.height = rect.height.min((panel.bottom() - 8.0 - rect.y).max(0.0));
-    (rect, placed_slot + span)
+    (rect, next_slot)
 }
 
-/// Grid coordinate beneath a pointer in an arbitrary BentoPanel rectangle.
-/// Used by both ordinary expanded Zones and the floating Bloom preview so item
-/// reorder/cross-zone drag cannot mistake the preview for empty desktop.
+/// Canonical persisted grid coordinate beneath a pointer in an arbitrary
+/// BentoPanel rectangle. The pointer is resolved in the Zone's configured
+/// column space. Drop callers should use [`item_drop_target_for_panel`] so CSS
+/// auto-flow order and wide cards are included as well.
 pub fn item_grid_position_for_panel(
     panel: Rect,
     requested_columns: u32,
@@ -186,14 +265,90 @@ pub fn item_grid_position_for_panel(
     let raw_row = ((y - panel.y - item_grid::ITEM_GRID_TOP_OFFSET_PX - item_top_offset)
         / row_stride)
         .floor() as i32;
-    Some((raw_col.clamp(0, columns - 1), raw_row.max(0)))
+    let effective_slot = raw_row.max(0) * columns + raw_col.clamp(0, columns - 1);
+    let requested_columns = requested_columns.max(1) as i32;
+    Some((
+        effective_slot % requested_columns,
+        effective_slot / requested_columns,
+    ))
+}
+
+/// Resolve one item drop into the persisted grid point, post-removal insertion
+/// index, and the exact rectangle the renderer will use after that insertion.
+/// The target index follows the existing CSS-style auto-flow order, including
+/// wide-card spans and the Zone's configured column count.
+pub fn item_drop_target_for_panel(
+    zone: &Zone,
+    panel: Rect,
+    source_item: Option<ZoneItemId>,
+    is_wide: bool,
+    pointer: (f32, f32),
+    item_top_offset: f32,
+    mut item_visible: impl FnMut(&ZoneItem) -> bool,
+) -> Option<(i32, i32, usize, Rect)> {
+    let (x, y) = pointer;
+    let (pointer_x, pointer_y) =
+        item_grid_position_for_panel(panel, zone.grid_columns.max(1), x, y, item_top_offset)?;
+    let requested_columns = zone.grid_columns.max(1) as i32;
+    let pointer_slot = pointer_y * requested_columns + pointer_x;
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    )
+    .max(1);
+    let mut slot = 0_i32;
+    let post_removal_len = zone.items.len().saturating_sub(usize::from(
+        source_item.is_some_and(|id| zone.item(id).is_some()),
+    ));
+    let mut target_index = post_removal_len;
+    let mut post_removal_index = 0_usize;
+    for item in &zone.items {
+        if Some(item.id) == source_item {
+            continue;
+        }
+        if !item_visible(item) {
+            post_removal_index += 1;
+            continue;
+        }
+        let (_, next_slot) = flow_slots(slot, item.is_wide, columns);
+        if pointer_slot < next_slot {
+            target_index = post_removal_index;
+            break;
+        }
+        slot = next_slot;
+        target_index = post_removal_index + 1;
+        post_removal_index += 1;
+    }
+    let (placed_slot, _) = flow_slots(slot, is_wide, columns);
+    let columns_i = columns as i32;
+    let mut rect = item_card_rect_for_effective_grid_in_panel(
+        zone.grid_columns.max(1),
+        panel,
+        placed_slot % columns_i,
+        placed_slot / columns_i,
+        columns,
+        is_wide,
+    );
+    rect.y += item_top_offset;
+    rect.height = rect.height.min((panel.bottom() - 8.0 - rect.y).max(0.0));
+    Some((
+        placed_slot % requested_columns,
+        placed_slot / requested_columns,
+        target_index,
+        rect,
+    ))
 }
 
 /// Shared item-card geometry for a concrete zone item inside an arbitrary
 /// panel rect. Used by the in-flight capsule->panel morph so body content can
 /// fade in on the same timeline without cloning or mutating the persisted zone.
 pub fn item_card_rect_for_item_in_panel(zone: &Zone, item: &ZoneItem, panel: Rect) -> Rect {
-    let columns = effective_grid_columns(zone);
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    );
     if let Some(slot) = effective_grid_slot_for_item(zone, item, columns) {
         let columns_i = columns.max(1) as i32;
         return item_card_rect_for_effective_grid_in_panel(
@@ -208,7 +363,8 @@ pub fn item_card_rect_for_item_in_panel(zone: &Zone, item: &ZoneItem, panel: Rec
     item_card_rect_for_grid_in_panel(zone, item.x, item.y, item.is_wide, panel)
 }
 
-fn item_card_rect_for_grid_in_panel(
+/// Shared grid-slot geometry inside the resolved visible panel rectangle.
+pub fn item_card_rect_for_grid_in_panel(
     zone: &Zone,
     grid_x: i32,
     grid_y: i32,
@@ -248,19 +404,25 @@ fn bounded_column_span(is_wide: bool, columns: u32) -> i32 {
     item_grid::column_span_for(is_wide).min(columns.max(1)) as i32
 }
 
-fn effective_grid_slot_for_item(zone: &Zone, target: &ZoneItem, columns: u32) -> Option<i32> {
+fn flow_slots(slot: i32, is_wide: bool, columns: u32) -> (i32, i32) {
     let columns_i = columns.max(1) as i32;
+    let span = bounded_column_span(is_wide, columns);
+    let mut placed_slot = slot.max(0);
+    let column = placed_slot % columns_i;
+    if column + span > columns_i {
+        placed_slot += columns_i - column;
+    }
+    (placed_slot, placed_slot + span)
+}
+
+fn effective_grid_slot_for_item(zone: &Zone, target: &ZoneItem, columns: u32) -> Option<i32> {
     let mut slot = 0_i32;
     for item in &zone.items {
-        let span = bounded_column_span(item.is_wide, columns);
-        let col = slot % columns_i;
-        if col + span > columns_i {
-            slot += columns_i - col;
-        }
+        let (placed_slot, next_slot) = flow_slots(slot, item.is_wide, columns);
         if item.id == target.id {
-            return Some(slot);
+            return Some(placed_slot);
         }
-        slot += span;
+        slot = next_slot;
     }
     None
 }
@@ -327,9 +489,19 @@ pub fn zone_target_rect(zone: &Zone) -> HighlightRect {
     HighlightRect::new(zone.x as f32, zone.y as f32, zone.w as f32, zone.h as f32)
 }
 
+/// Full-zone target from the shared resolved visible rectangle.
+pub fn zone_target_rect_for_rect(rect: Rect) -> HighlightRect {
+    HighlightRect::from_rect(rect)
+}
+
 /// Item target used by Search item hits and Suggestor matching-path previews.
 pub fn item_target_rect(zone: &Zone, item: &ZoneItem) -> HighlightRect {
     HighlightRect::from_rect(item_card_rect_for_item(zone, item))
+}
+
+/// Item target inside the shared resolved visible panel rectangle.
+pub fn item_target_rect_in_panel(zone: &Zone, item: &ZoneItem, panel: Rect) -> HighlightRect {
+    HighlightRect::from_rect(item_card_rect_for_item_in_panel(zone, item, panel))
 }
 
 /// Renderer paint rect after applying the snap.md inset.

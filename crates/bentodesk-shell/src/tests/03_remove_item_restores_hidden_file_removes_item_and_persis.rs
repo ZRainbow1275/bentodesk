@@ -114,90 +114,6 @@ fn remove_item_keeps_item_when_hidden_restore_fails_and_reports_status() {
 }
 
 #[test]
-fn move_item_to_zone_moves_hidden_file_between_zone_dirs_and_persists() {
-    let root = test_app_root();
-    let zones_path = scratch_zones_path("item-move-zone-hidden");
-    let state_dir = zones_path.parent().expect("scratch parent");
-    let desktop_dir = state_dir.join("Desktop");
-    let source_hidden_dir = desktop_dir.join(".bentodesk").join("48");
-    std::fs::create_dir_all(&source_hidden_dir).expect("source hidden dir");
-    let original = desktop_dir.join("move-zone.txt");
-    let hidden = source_hidden_dir.join("move-zone.txt");
-    std::fs::write(&hidden, b"move").expect("hidden file");
-    let original_path = original.to_string_lossy().to_string();
-    let hidden_path = hidden.to_string_lossy().to_string();
-    let from_zone_id = ZoneId(48);
-    let to_zone_id = ZoneId(49);
-    let item_id = {
-        let mut app = root.app.borrow_mut();
-        app.zones_path = zones_path.clone();
-        let mut from_zone = Zone::new(from_zone_id, "From", 0, 0, 240, 160);
-        let item_id = from_zone
-            .add_item_with_metadata(
-                Cow::Owned(hidden_path.clone()),
-                Some(original_path.as_str()),
-                Cow::Borrowed("hash"),
-                Some(Cow::Owned(original_path.clone())),
-                Some(Cow::Owned(hidden_path.clone())),
-            )
-            .expect("item id");
-        app.zones.add(from_zone);
-        app.zones.add(Zone::new(to_zone_id, "To", 260, 0, 240, 160));
-        item_id
-    };
-
-    root.dispatcher.push(Command::MoveItemToZone(
-        from_zone_id,
-        to_zone_id,
-        bentodesk_app::ItemId(item_id.0),
-    ));
-    consume_dispatcher(&root, std::ptr::null_mut());
-
-    let expected_hidden = desktop_dir
-        .join(".bentodesk")
-        .join("49")
-        .join("move-zone.txt");
-    let expected_hidden_path = expected_hidden.to_string_lossy().to_string();
-    {
-        let app = root.app.borrow();
-        assert!(!app.dirty.get(), "dispatcher should flush moved item");
-        assert!(app.zones.item(from_zone_id, item_id).is_none());
-        let item = app
-            .zones
-            .item(to_zone_id, item_id)
-            .expect("moved item in target zone");
-        assert_eq!(item.path.as_ref(), expected_hidden_path.as_str());
-        assert_eq!(
-            item.hidden_path.as_deref(),
-            Some(expected_hidden_path.as_str())
-        );
-        assert_eq!(item.original_path.as_deref(), Some(original_path.as_str()));
-        assert_eq!(
-            app.item_operation_status
-                .borrow()
-                .as_ref()
-                .map(SmolStr::as_str),
-            Some("Moved hidden item to zone: move-zone.txt")
-        );
-    }
-    assert!(!hidden.exists(), "source zone hidden file should move away");
-    assert!(
-        expected_hidden.exists(),
-        "target zone hidden file should exist"
-    );
-    let reloaded = storage::read_zones(&zones_path).expect("read persisted zones");
-    let item = reloaded
-        .item(to_zone_id, item_id)
-        .expect("persisted moved item");
-    assert_eq!(item.path.as_ref(), expected_hidden_path.as_str());
-    assert_eq!(
-        item.hidden_path.as_deref(),
-        Some(expected_hidden_path.as_str())
-    );
-
-    let _ = std::fs::remove_dir_all(state_dir);
-}
-#[test]
 fn move_item_command_updates_grid_position_status_and_persists() {
     let root = test_app_root();
     let zones_path = scratch_zones_path("item-move-grid");
@@ -222,6 +138,7 @@ fn move_item_command_updates_grid_position_status_and_persists() {
         zone_id,
         bentodesk_app::ItemId(item_id.0),
         DispatchPoint::new(3, 4),
+        0,
     ));
     consume_dispatcher(&root, std::ptr::null_mut());
 

@@ -53,8 +53,10 @@ fn tauri_parity_focus_hotkeys_cycle_visible_top_level_zones() {
 
     assert!(focus_visible_zone(&root, true));
     assert_eq!(root.app.borrow().selected_zone.get(), Some(ZoneId(3)));
+    root.app.borrow().selected_zone.set(None);
     assert!(focus_visible_zone(&root, true));
     assert_eq!(root.app.borrow().selected_zone.get(), Some(ZoneId(1)));
+    root.app.borrow().selected_zone.set(None);
     assert!(focus_visible_zone(&root, false));
     assert_eq!(root.app.borrow().selected_zone.get(), Some(ZoneId(3)));
 }

@@ -24,6 +24,7 @@ pub(super) fn dispatch(
                     std::borrow::Cow::Owned(size.to_string()),
                     std::borrow::Cow::Owned(shape.to_string()),
                 );
+                normalize_startup_zone_geometry(&mut app);
                 app.mark_dirty();
                 effects.needs_redraw = true;
             }
@@ -130,11 +131,13 @@ pub(super) fn dispatch(
         }
         Command::FocusNextZone => {
             if focus_visible_zone(root, true) {
+                arm_hover_frame_timer(hwnd);
                 effects.needs_redraw = true;
             }
         }
         Command::FocusPreviousZone => {
             if focus_visible_zone(root, false) {
+                arm_hover_frame_timer(hwnd);
                 effects.needs_redraw = true;
             }
         }
@@ -142,6 +145,7 @@ pub(super) fn dispatch(
             let reveal_at_drop = root.pending_stack_drop_bloom.get() == Some(parent);
             let mut app = root.app.borrow_mut();
             if app.zones.stack(parent, child) {
+                normalize_startup_zone_geometry(&mut app);
                 log_static(
                     format!("stack: StackZone anchor={} child={}\n", parent.0, child.0).as_str(),
                 );
@@ -188,6 +192,7 @@ pub(super) fn dispatch(
             let viewport_w = app.viewport.width.max(1.0).round() as i32;
             let viewport_h = app.viewport.height.max(1.0).round() as i32;
             if app.zones.unstack_with_scatter(id, viewport_w, viewport_h) {
+                normalize_startup_zone_geometry(&mut app);
                 log_static(format!("stack: UnstackZone id={}\n", id.0).as_str());
                 app.stack_tray.borrow_mut().take();
                 app.mark_dirty();
@@ -221,6 +226,32 @@ pub(super) fn dispatch(
                             "Stack manager opened",
                         )),
                     );
+                    if selected != anchor
+                        && let Some(anchor_zone) = app.zones.get(anchor)
+                    {
+                        // Search first points at the only visible stack surface;
+                        // once the tray exists, move that same timed highlight to
+                        // the selected member's focused preview.
+                        let now_ms = unsafe { GetTickCount() };
+                        let anchor_target = highlight_overlay::zone_target_rect_for_rect(
+                            app.zone_effective_rect_at(anchor_zone, now_ms),
+                        );
+                        let mut overlay = app.highlight_overlay.borrow_mut();
+                        if overlay.targets() == [anchor_target]
+                            && let Some(remaining_ms) = overlay.auto_clear_remaining_ms()
+                        {
+                            let tray = stack_tray::stack_tray_rect(
+                                app.viewport,
+                                anchor_zone,
+                                members.len(),
+                            );
+                            let preview = stack_tray::focused_preview_rect(app.viewport, tray);
+                            overlay.set_targets_for(
+                                [highlight_overlay::zone_target_rect_for_rect(preview)],
+                                remaining_ms,
+                            );
+                        }
+                    }
                     arm_stack_tray_memory_trim(hwnd);
                     effects.needs_redraw = true;
                 }
@@ -369,6 +400,7 @@ pub(super) fn dispatch(
                 return;
             }
             if let Some(outcome) = app.zones.detach_from_stack(member) {
+                normalize_startup_zone_geometry(&mut app);
                 log_static(
                     format!(
                         "stack: DetachStackMember anchor={} member={} new_anchor={}\n",
@@ -402,6 +434,7 @@ pub(super) fn dispatch(
                 .zones
                 .dissolve_stack_scattered(anchor, viewport_w, viewport_h)
             {
+                normalize_startup_zone_geometry(&mut app);
                 log_static(format!("stack: DissolveStack anchor={}\n", anchor.0).as_str());
                 app.stack_tray.borrow_mut().take();
                 app.stack_tray_drag.set(None);

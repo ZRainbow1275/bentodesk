@@ -49,17 +49,21 @@ fn drop_preview_uses_renderer_grid_geometry() {
         last_y: 116.0,
     };
 
-    let rect = drop_preview_rect_for_zone(&zone, Some(drag), false, 0.0, 0.0).expect("preview");
+    let panel = bentodesk_style::Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+    let rect = drop_preview_rect_for_zone(&zone, panel, Some(drag), false, 0.0, 0.0, |_| true)
+        .expect("preview");
 
-    // P3.8 paint-hit parity: drag-preview placement uses the same grid SSoTs
-    // as painted cards. For a 240px zone, the 64-DIP readable-card floor
-    // reflows the requested 4 columns into 3 effective columns:
-    // cell_w = (240 - 16*2 - 8*2) / 3 = 64; col stride = 72.
-    // last_x=130 lands in col 1, last_y=116 lands in row 0 because row 0
-    // starts at zone_top(20) + ITEM_GRID_TOP_OFFSET_PX(56) = 76.
-    assert!((rect.x - 98.0).abs() < 0.01);
+    // The target Zone is empty, so CSS auto-flow paints the inserted card in
+    // slot zero even when the pointer is farther right. Preview must match
+    // that post-drop renderer position rather than promise a free-form slot.
+    assert!((rect.x - 26.0).abs() < 0.01);
     assert!((rect.y - 76.0).abs() < 0.01);
-    assert!((rect.width - 64.0).abs() < 0.01);
+    assert!((rect.width - 46.0).abs() < 0.01);
     assert!((rect.height - item_grid::ITEM_GRID_ROW_HEIGHT_PX).abs() < 0.01);
 }
 
@@ -87,12 +91,113 @@ fn drop_preview_targets_occupied_non_source_cell() {
         last_y: 116.0,
     };
 
-    let preview = drop_preview_rect_for_zone(&zone, Some(drag), false, 0.0, 0.0).expect("preview");
-    let resident_card = item_card_rect_for_item(&zone, &zone.items[1]);
+    let panel = bentodesk_style::Rect {
+        x: zone.x as f32,
+        y: zone.y as f32,
+        width: zone.w as f32,
+        height: zone.h as f32,
+    };
+    let preview = drop_preview_rect_for_zone(&zone, panel, Some(drag), false, 0.0, 0.0, |_| true)
+        .expect("preview");
+    let resident_card =
+        highlight_overlay::item_card_rect_for_item_in_panel(&zone, &zone.items[1], panel);
 
     assert_eq!(preview, resident_card);
     assert_ne!(drag.zone_id, zone.id);
     assert_ne!(drag.item_id, zone.items[1].id);
+}
+
+#[test]
+fn inline_search_hides_drop_preview_for_a_nonmatching_dragged_item() {
+    let mut source = Zone::new(ZoneId(1), Cow::Borrowed("source"), 10, 20, 240, 180);
+    source.items.push(ZoneItem::new(
+        ZoneItemId(1),
+        "C:/Users/BentoDeskTest/Desktop/hidden.txt",
+        "",
+        0,
+        0,
+    ));
+    let target = Zone::new(ZoneId(2), Cow::Borrowed("target"), 300, 20, 240, 180);
+    let mut app = AppState::new();
+    app.zones.add(source);
+    app.zones.add(target);
+    let panel = Rect {
+        x: 300.0,
+        y: 20.0,
+        width: 240.0,
+        height: 180.0,
+    };
+    let drag = ActiveItemDragVisual {
+        zone_id: ZoneId(1),
+        item_id: ZoneItemId(1),
+        last_x: 330.0,
+        last_y: 90.0,
+    };
+    let target = app.zones.get(ZoneId(2)).expect("target");
+
+    assert!(
+        drop_preview_rect_for_visible_drag(&app, target, panel, Some(drag), 0.0, 44.0, |item| item
+            .name
+            .contains("match"),)
+        .is_none()
+    );
+    assert!(
+        drop_preview_rect_for_visible_drag(&app, target, panel, Some(drag), 0.0, 44.0, |_| true,)
+            .is_some()
+    );
+}
+
+#[test]
+fn four_quadrant_drop_target_and_preview_use_effective_panel() {
+    for (name, x, y, anchor_right, anchor_bottom) in [
+        ("left-top", 20, 20, false, false),
+        ("right-top", 720, 20, true, false),
+        ("left-bottom", 20, 520, false, true),
+        ("right-bottom", 720, 520, true, true),
+    ] {
+        let mut app = AppState::new();
+        app.viewport = bentodesk_style::Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        app.zones.add(Zone::new(
+            ZoneId(70),
+            Cow::Borrowed("Directional"),
+            x,
+            y,
+            320,
+            240,
+        ));
+        app.set_zone_display_mode(crate::ZoneDisplayMode::Always);
+        let zone = app.zones.get(ZoneId(70)).expect("zone");
+        let placement = app.zone_expanded_placement(zone);
+        assert_eq!(placement.anchor_right, anchor_right, "{name}");
+        assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
+        let panel = app.zone_effective_rect_at(zone, 0);
+        let drag = ActiveItemDragVisual {
+            zone_id: ZoneId(1),
+            item_id: ZoneItemId(1),
+            last_x: panel.x + 24.0,
+            last_y: panel.y + 72.0,
+        };
+
+        assert_eq!(
+            hit_test_render_zone(&app, drag.last_x, drag.last_y, 0),
+            Some(zone.id),
+            "{name} drop target"
+        );
+        let preview =
+            drop_preview_rect_for_zone(zone, panel, Some(drag), false, 0.0, 0.0, |_| true)
+                .expect("directional preview");
+        assert!(
+            preview.x >= panel.x && preview.right() <= panel.right(),
+            "{name}"
+        );
+        assert!(
+            preview.y >= panel.y && preview.bottom() <= panel.bottom(),
+            "{name}"
+        );
+    }
 }
 
 #[test]

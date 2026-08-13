@@ -14,7 +14,7 @@
 
 use crate::business::zen_capsule::{CapsuleShape, CapsuleSize};
 use bentodesk_style::tokens::{RADIUS, SPACING, TYPOGRAPHY};
-use bentodesk_style::{BorderRadius, Rect};
+use bentodesk_style::{BorderRadius, Rect, Size};
 use bentodesk_zone::{Zone, ZoneId};
 
 /// Layout slot inside the collapsed pill (icon chip, label band, count
@@ -475,92 +475,97 @@ pub fn current_morph_rect(
     (morph, morph_pill_to_rect(pill, expanded, morph))
 }
 
-/// Reflow the collapsed Zen content slots inside the current morph rectangle.
+/// Directional expanded-panel placement resolved from a collapsed capsule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExpandedZonePlacement {
+    /// Visible expanded panel rectangle in Main-client logical DIPs.
+    pub panel: Rect,
+    /// `true` when the capsule's right edge is the fixed horizontal anchor.
+    pub anchor_right: bool,
+    /// `true` when the capsule's bottom edge is the fixed vertical anchor.
+    pub anchor_bottom: bool,
+}
+
+/// Resolve the expanded panel from the capsule's desktop quadrant.
 ///
-/// Tauri keeps `ZenCapsule` mounted at `width/height: 100%`, so its icon/title/
-/// badge row remains centered in the live container while that container grows
-/// or shrinks. Keeping these slots pinned to the final capsule coordinates
-/// created a visible teleport during cross-fade. This helper preserves the
-/// proven per-tier padding/gaps from `base` while re-anchoring them to `rect`.
-/// Pure, `Copy`, and allocation-free for the frame hot path.
-pub fn pill_content_layout_in_rect(base: ZonePillLayout, rect: Rect) -> ZonePillLayout {
-    let shadow_outer = Rect {
-        x: rect.x,
-        y: rect.y + PILL_SHADOW_OUTER_DY,
-        width: rect.width,
-        height: rect.height,
-    };
-    let shadow_inner = Rect {
-        x: rect.x,
-        y: rect.y + PILL_SHADOW_INNER_DY,
-        width: rect.width,
-        height: rect.height,
-    };
-
-    if base.label.width <= 0.0 && base.badge.width <= 0.0 {
-        let icon = Rect {
-            x: rect.x + (rect.width - base.icon.width) * 0.5,
-            y: rect.y + (rect.height - base.icon.height) * 0.5,
-            width: base.icon.width,
-            height: base.icon.height,
-        };
-        let centre = Rect {
-            x: rect.x + rect.width * 0.5,
-            y: rect.y + rect.height * 0.5,
-            width: 0.0,
-            height: 0.0,
-        };
-        return ZonePillLayout {
-            rect,
-            shadow_outer,
-            shadow_inner,
-            icon,
-            label: centre,
-            badge: centre,
-            radius: base.radius,
-            badge_radius: base.badge_radius,
-        };
+/// The selected capsule edge stays fixed; insufficient directional space
+/// shrinks the visible panel instead of translating it away from that edge.
+/// Center-line ties deterministically use the left/top expansion rules.
+pub fn expanded_zone_placement(
+    capsule: Rect,
+    stored_width: f32,
+    stored_height: f32,
+    viewport: Size,
+) -> ExpandedZonePlacement {
+    let viewport_width = finite_non_negative(viewport.width).floor();
+    let viewport_height = finite_non_negative(viewport.height).floor();
+    let capsule_left = finite_non_negative(capsule.x).min(viewport_width);
+    let capsule_top = finite_non_negative(capsule.y).min(viewport_height);
+    let capsule_right = finite_non_negative(capsule.right()).clamp(capsule_left, viewport_width);
+    let capsule_bottom = finite_non_negative(capsule.bottom()).clamp(capsule_top, viewport_height);
+    let anchor_right = (capsule_left + capsule_right) * 0.5 > viewport_width * 0.5;
+    let anchor_bottom = (capsule_top + capsule_bottom) * 0.5 > viewport_height * 0.5;
+    let available_width = if anchor_right {
+        capsule_right
+    } else {
+        viewport_width - capsule_left
     }
+    .max(0.0)
+    .floor();
+    let available_height = if anchor_bottom {
+        capsule_bottom
+    } else {
+        viewport_height - capsule_top
+    }
+    .max(0.0)
+    .floor();
+    let width = finite_non_negative(stored_width).min(available_width);
+    let height = finite_non_negative(stored_height).min(available_height);
 
-    let icon_left_inset = base.icon.x - base.rect.x;
-    let icon_center_dy = base.icon.y - (base.rect.y + (base.rect.height - base.icon.height) * 0.5);
-    let badge_right_inset = base.rect.right() - base.badge.right();
-    let badge_center_dy =
-        base.badge.y - (base.rect.y + (base.rect.height - base.badge.height) * 0.5);
-    let label_center_dy =
-        base.label.y - (base.rect.y + (base.rect.height - base.label.height) * 0.5);
-    let icon_label_gap = (base.label.x - base.icon.right()).max(0.0);
-    let label_badge_gap = (base.badge.x - base.label.right()).max(0.0);
+    ExpandedZonePlacement {
+        panel: Rect {
+            x: if anchor_right {
+                capsule_right - width
+            } else {
+                capsule_left
+            },
+            y: if anchor_bottom {
+                capsule_bottom - height
+            } else {
+                capsule_top
+            },
+            width,
+            height,
+        },
+        anchor_right,
+        anchor_bottom,
+    }
+}
 
-    let icon = Rect {
-        x: rect.x + icon_left_inset,
-        y: rect.y + (rect.height - base.icon.height) * 0.5 + icon_center_dy,
-        width: base.icon.width,
-        height: base.icon.height,
-    };
-    let badge = Rect {
-        x: rect.right() - badge_right_inset - base.badge.width,
-        y: rect.y + (rect.height - base.badge.height) * 0.5 + badge_center_dy,
-        width: base.badge.width,
-        height: base.badge.height,
-    };
-    let label_x = icon.right() + icon_label_gap;
-    let label = Rect {
-        x: label_x,
-        y: rect.y + (rect.height - base.label.height) * 0.5 + label_center_dy,
-        width: (badge.x - label_badge_gap - label_x).max(0.0),
-        height: base.label.height,
-    };
+/// Clamp a capsule home to a logical Main-client viewport.
+///
+/// Fractional viewport bounds are rounded down so the returned integer origin
+/// can never place the visible capsule across the right or bottom edge.
+pub fn clamp_capsule_origin_to_viewport(
+    x: i32,
+    y: i32,
+    capsule_width: i32,
+    capsule_height: i32,
+    viewport: Size,
+) -> (i32, i32) {
+    let viewport_width = finite_non_negative(viewport.width).floor() as i32;
+    let viewport_height = finite_non_negative(viewport.height).floor() as i32;
+    let max_x = viewport_width.saturating_sub(capsule_width.max(0)).max(0);
+    let max_y = viewport_height.saturating_sub(capsule_height.max(0)).max(0);
+    (x.clamp(0, max_x), y.clamp(0, max_y))
+}
 
-    ZonePillLayout {
-        rect,
-        shadow_outer,
-        shadow_inner,
-        icon,
-        label,
-        badge,
-        radius: base.radius,
-        badge_radius: base.badge_radius,
+#[inline]
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 

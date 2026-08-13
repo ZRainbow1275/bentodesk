@@ -226,6 +226,7 @@ fn item_context_dispatch_maps_actions_to_commands_and_side_effects() {
             zone_id,
             ZoneId(11),
             bentodesk_app::ItemId(item_id.0),
+            None,
         ))
     );
     assert_eq!(

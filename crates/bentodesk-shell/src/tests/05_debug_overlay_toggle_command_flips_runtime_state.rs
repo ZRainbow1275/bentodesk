@@ -262,35 +262,76 @@ fn w3_settings_mousewheel_delta_uses_native_wheel_direction() {
 }
 
 #[test]
-fn expanded_zone_wheel_target_is_content_only_and_query_aware() {
-    let mut app = AppState::new();
-    let mut zone = Zone::new(ZoneId(4), "Benchmark Zone 4", 64, 332, 320, 220);
-    zone.set_grid_columns(5);
-    for index in 1..=10 {
-        zone.add_item(
-            format!("C:/Desktop/item-{index:02}.txt"),
-            format!("hash-{index:02}"),
-        )
-        .expect("benchmark item");
+fn expanded_zone_wheel_target_is_directional_content_only_and_query_aware() {
+    for (name, x, y, anchor_right, anchor_bottom) in [
+        ("left-top", 20, 20, false, false),
+        ("right-top", 720, 20, true, false),
+        ("left-bottom", 20, 520, false, true),
+        ("right-bottom", 720, 520, true, true),
+    ] {
+        let mut app = AppState::new();
+        app.viewport = Size {
+            width: 800.0,
+            height: 600.0,
+        };
+        let mut zone = Zone::new(ZoneId(4), "Benchmark Zone 4", x, y, 320, 220);
+        zone.set_grid_columns(5);
+        for index in 1..=10 {
+            zone.add_item(
+                format!("C:/Desktop/item-{index:02}.txt"),
+                format!("hash-{index:02}"),
+            )
+            .expect("benchmark item");
+        }
+        app.zones.add(zone);
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
+        app.geometry_frame_now_ms.set(42_000);
+
+        let zone = app.zones.get(ZoneId(4)).expect("zone");
+        let placement = app.zone_expanded_placement(zone);
+        assert_eq!(placement.anchor_right, anchor_right, "{name}");
+        assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
+        let panel = app.zone_effective_rect_at(zone, 0);
+        let content =
+            bentodesk_app::business::highlight_overlay::item_content_clip_rect_in_panel(
+                panel, 0.0,
+            );
+        assert!(
+            zone_item_max_scroll_at(&app, zone, app.geometry_frame_now_ms.get()) > 0.0,
+            "{name}"
+        );
+        assert_eq!(
+            zone_scroll_target_for_point(&app, panel.x + 20.0, panel.y + 20.0),
+            None,
+            "{name} header"
+        );
+        let target = zone_scroll_target_for_point(&app, content.x + 1.0, content.y + 1.0)
+            .expect("content target");
+        assert_eq!(target.0, ZoneId(4), "{name}");
+        assert!(target.1 > 0.0, "{name}");
+
+        app.zone_search_target.set(Some(ZoneId(4)));
+        app.search_bar.borrow_mut().query = "item-01".into();
+        assert_eq!(
+            zone_item_max_scroll_at(&app, zone, app.geometry_frame_now_ms.get()),
+            0.0,
+            "{name}"
+        );
+        let search_content =
+            bentodesk_app::business::highlight_overlay::item_content_clip_rect_in_panel(
+                panel,
+                bentodesk_app::business::search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX,
+            );
+        assert_eq!(
+            zone_scroll_target_for_point(
+                &app,
+                search_content.x + 1.0,
+                search_content.y + 1.0,
+            ),
+            Some((ZoneId(4), 0.0)),
+            "{name} searched content"
+        );
     }
-    app.zones.add(zone);
-    app.set_zone_display_mode(ZoneDisplayMode::Always);
-
-    let zone = app.zones.get(ZoneId(4)).expect("zone");
-    assert!(zone_item_max_scroll(&app, zone) > 0.0);
-    assert_eq!(zone_scroll_target_for_point(&app, 100.0, 350.0), None);
-    let target = zone_scroll_target_for_point(&app, 100.0, 400.0).expect("content target");
-    assert_eq!(target.0, ZoneId(4));
-    assert!(target.1 > 0.0);
-
-    app.zone_search_target.set(Some(ZoneId(4)));
-    app.search_bar.borrow_mut().query = "item-01".into();
-    assert_eq!(zone_item_max_scroll(&app, zone), 0.0);
-    assert_eq!(zone_scroll_target_for_point(&app, 100.0, 410.0), None);
-    assert_eq!(
-        zone_scroll_target_for_point(&app, 100.0, 450.0),
-        Some((ZoneId(4), 0.0))
-    );
 }
 
 #[test]

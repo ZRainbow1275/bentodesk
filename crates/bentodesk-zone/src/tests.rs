@@ -612,7 +612,7 @@ fn zone_items_add_move_remove_and_missing_state() {
     ));
 
     zl.add(zone(2, 20));
-    assert!(zl.move_item_to_zone(ZoneId(1), ZoneId(2), item_id, None, None));
+    assert!(zl.move_item_to_zone(ZoneId(1), ZoneId(2), item_id, None, None, None));
     assert!(matches!(zl.get(ZoneId(1)), Some(zone) if zone.items.is_empty()));
     assert!(matches!(zl.get(ZoneId(2)), Some(zone) if zone.items.len() == 1));
 
@@ -689,9 +689,13 @@ fn add_item_and_cross_zone_move_use_target_grid_columns() {
         Some((0, 1))
     );
 
-    assert!(zl.move_item_to_zone(ZoneId(1), ZoneId(2), third, None, None));
+    assert!(zl.move_item_to_zone(ZoneId(1), ZoneId(2), third, None, None, None));
     assert_eq!(
-        zl.item(ZoneId(2), third).map(|item| (item.x, item.y)),
-        Some((0, 0))
+        zl.get(ZoneId(2))
+            .and_then(|zone| zone.items.first())
+            .map(|item| (item.id, item.x, item.y)),
+        Some((third, 0, 0))
     );
 }
+
+mod item_id_integrity;

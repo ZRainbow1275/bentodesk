@@ -120,34 +120,78 @@ pub(super) fn load_legacy_layout_with_backup(
     }
 }
 
-pub(super) fn install_startup_zones(root: &AppRoot, zones_path: &Path, zones: ZoneList) -> usize {
+pub(super) fn install_startup_zones(
+    root: &AppRoot,
+    zones_path: &Path,
+    mut zones: ZoneList,
+) -> usize {
     let count = zones.len();
     {
         let mut app = root.app.borrow_mut();
         app.zones_path = zones_path.to_path_buf();
+        if zones.repair_duplicate_item_ids() > 0 {
+            app.mark_dirty();
+        }
         app.zones = zones;
         bump_next_zone_id_from_zones(&app);
-        app.dirty.set(false);
     }
     count
 }
 
-/// Clamp selected-stack zones against the first measured logical viewport.
+/// Normalize persisted Zone geometry against the measured logical viewport.
 ///
 /// Persisted positions can be device-pixel or screen coordinates from older
-/// tray producers, so a valid `zones.bin` may still place every Zone outside
-/// the renderer's logical coordinate space. The caller flushes the dirty flag
-/// after this one-shot startup repair.
+/// producers. Panel dimensions and collapsed capsule homes have different
+/// contracts: dimensions are bounded independently, then each free surface is
+/// clamped by its actual capsule footprint. A Stack anchor is moved once via
+/// `move_group_to`, preserving every hidden member offset rigidly.
 pub(super) fn normalize_startup_zone_geometry(app: &mut AppState) -> usize {
     let viewport = app.viewport;
-    let mut repaired = 0;
+    let before: Vec<_> = app
+        .zones
+        .iter()
+        .map(|zone| (zone.id, zone.x, zone.y, zone.w, zone.h))
+        .collect();
+    let viewport_width = viewport.width.max(1.0).floor() as i32;
+    let viewport_height = viewport.height.max(1.0).floor() as i32;
+    let minimum_width = MIN_MIGRATED_ZONE_DIMENSION.min(viewport_width);
+    let minimum_height = MIN_MIGRATED_ZONE_DIMENSION.min(viewport_height);
+
     for zone in app.zones.iter_mut() {
-        let next = clamp_zone_rect_to_viewport(zone.x, zone.y, zone.w, zone.h, viewport);
-        if (zone.x, zone.y, zone.w, zone.h) != next {
-            (zone.x, zone.y, zone.w, zone.h) = next;
-            repaired += 1;
-        }
+        zone.w = zone.w.clamp(minimum_width, viewport_width);
+        zone.h = zone.h.clamp(minimum_height, viewport_height);
     }
+
+    let surface_ids: smallvec::SmallVec<[ZoneId; 8]> = app
+        .zones
+        .iter()
+        .filter(|zone| !zone.is_stacked_child())
+        .map(|zone| zone.id)
+        .collect();
+    for id in surface_ids {
+        let Some(zone) = app.zones.get(id) else {
+            continue;
+        };
+        let (_, _, capsule_width, capsule_height) =
+            bentodesk_app::zone_gesture_geometry::zone_drag_capsule_rect(&app.zones, zone);
+        let (x, y) = bentodesk_app::zone_pill_geometry::clamp_capsule_origin_to_viewport(
+            zone.x,
+            zone.y,
+            capsule_width,
+            capsule_height,
+            viewport,
+        );
+        let _ = app.zones.move_group_to(id, x, y);
+    }
+
+    let repaired = before
+        .iter()
+        .filter(|(id, x, y, w, h)| {
+            app.zones
+                .get(*id)
+                .is_some_and(|zone| (zone.x, zone.y, zone.w, zone.h) != (*x, *y, *w, *h))
+        })
+        .count();
     if repaired > 0 {
         app.mark_dirty();
     }

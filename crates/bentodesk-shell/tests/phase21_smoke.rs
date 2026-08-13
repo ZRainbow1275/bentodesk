@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use bentodesk_app::{AppState, Command, EventDispatcher};
+use bentodesk_app::{AppState, Command, EventDispatcher, ZoneResizeSession};
 use bentodesk_platform::WindowKind;
 use bentodesk_shell::ui;
 use bentodesk_style::{EN_US, Size, ZH_CN, current_locale_is, init_locale, set_locale};
@@ -223,12 +223,20 @@ fn zone_resize_state_clamps_to_minimum_dims() {
     };
     app.zones
         .add(Zone::new(ZoneId(2), Cow::Borrowed("z"), 100, 100, 200, 150));
-    app.zone_resize.set(Some((ZoneId(2), 200, 150)));
+    app.zone_resize.set(Some(ZoneResizeSession {
+        id: ZoneId(2),
+        start_pointer_x: 300.0,
+        start_pointer_y: 250.0,
+        start_visible_width: 200.0,
+        start_visible_height: 150.0,
+        anchor_right: false,
+        anchor_bottom: false,
+    }));
 
     // Simulate mouse pulled inside the zone — would naively shrink to
     // (10, 5) but clamping must protect the floor.
-    if let Some((id, _, _)) = app.zone_resize.get()
-        && let Some(z) = app.zones.get_mut(id)
+    if let Some(session) = app.zone_resize.get()
+        && let Some(z) = app.zones.get_mut(session.id)
     {
         let new_w = (110_i32 - z.x).max(80);
         let new_h = (105_i32 - z.y).max(60);

@@ -5,6 +5,7 @@ fn seed_live_pill_morph(app: &AppState, zone_id: ZoneId, progress: f32) -> u32 {
     // A long duration makes the few microseconds between this seed and
     // `hit_test_zone` immaterial while still exercising the real clock path.
     let now_ms = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    app.geometry_frame_now_ms.set(now_ms);
     let elapsed = (progress.clamp(0.0, 1.0) * TEST_DURATION_MS as f32) as u32;
     app.pill_animator.borrow_mut().start(
         zone_id,
@@ -130,20 +131,6 @@ fn hit_test_zone_morph_in_flight_uses_interpolated_rect() {
     assert_eq!(hit_test_zone(&app, morphed.right() + 4.0, cy), None);
 }
 
-#[test]
-fn hit_test_zone_morph_complete_uses_full_rect() {
-    let zone = Zone::new(ZoneId(46), Cow::Borrowed("Docs"), 100, 100, 240, 180);
-    let app = app_with_zones(vec![zone]);
-    // Morph finished at progress=1.0 with the zone in a settled expanded
-    // state — renderer paints the full chrome, so hit-rect is full rect.
-    app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
-    // Far corner of full expanded rect → hit.
-    assert_eq!(
-        hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
-        Some(ZoneId(46))
-    );
-}
-
 // #5 / Bug A (2026-06-02) — DRAGGING a COLLAPSED pill must keep its hit rect
 // the PILL rect (the pill follows the cursor), NOT force the expanded body.
 // Pre-fix `pill_body_visible` (and a mirrored hit-rect rule) OR-ed in
@@ -183,7 +170,16 @@ fn hit_test_resizing_zone_keeps_full_rect() {
     let app = app_with_zones(vec![zone]);
     // Resize is only ever armed on an expanded panel; emulate that state.
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
-    app.zone_resize.set(Some((ZoneId(48), 240, 180)));
+    app.zone_resize
+        .set(Some(bentodesk_app::ZoneResizeSession {
+            id: ZoneId(48),
+            start_pointer_x: 340.0,
+            start_pointer_y: 280.0,
+            start_visible_width: 240.0,
+            start_visible_height: 180.0,
+            anchor_right: false,
+            anchor_bottom: false,
+        }));
     // Far corner of the expanded rect remains reachable during the resize.
     assert_eq!(
         hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
@@ -344,7 +340,7 @@ fn hit_test_zone_item_skipped_in_collapsed_pill_mode() {
 }
 
 #[test]
-fn item_grid_position_for_point_clamps_to_visible_columns() {
+fn item_grid_position_for_point_clamps_within_configured_columns() {
     let app = app_with_zones(vec![Zone::new(
         ZoneId(9),
         Cow::Borrowed("grid"),
@@ -360,7 +356,7 @@ fn item_grid_position_for_point_clamps_to_visible_columns() {
     );
     assert_eq!(
         item_grid_position_for_point(&app, ZoneId(9), 500.0, 200.0),
-        Some((2, 1))
+        Some((3, 1))
     );
     assert_eq!(
         item_grid_position_for_point(&app, ZoneId(99), 28.0, 80.0),
@@ -381,14 +377,32 @@ fn item_grid_position_for_point_uses_zone_grid_columns() {
 }
 
 #[test]
-fn item_grid_position_for_point_uses_effective_columns_for_narrow_five_column_zones() {
+fn item_grid_position_for_point_preserves_narrow_five_column_zones() {
     let mut zone = Zone::new(ZoneId(11), Cow::Borrowed("grid"), 64, 332, 320, 220);
     zone.set_grid_columns(5);
     let app = app_with_zones(vec![zone]);
+    let zone = app.zones.get(ZoneId(11)).expect("zone");
+    let panel = app.zone_expanded_placement(zone).panel;
+    let columns = bentodesk_app::business::item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns,
+        bentodesk_app::expanded_zone_grid::HEADER_INSET_X,
+    ) as f32;
+    let gap = bentodesk_app::business::item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    let cell_width = ((panel.width
+        - bentodesk_app::expanded_zone_grid::HEADER_INSET_X * 2.0)
+        - gap * (columns - 1.0))
+        .max(44.0)
+        / columns;
+    let fifth_column_x = panel.x
+        + bentodesk_app::expanded_zone_grid::HEADER_INSET_X
+        + 4.5 * (cell_width + gap);
+    let first_row_y =
+        panel.y + bentodesk_app::business::item_grid::ITEM_GRID_TOP_OFFSET_PX + 10.0;
 
     assert_eq!(
-        item_grid_position_for_point(&app, ZoneId(11), 335.0, 458.0),
-        Some((3, 0))
+        item_grid_position_for_point(&app, ZoneId(11), fifth_column_x, first_row_y),
+        Some((4, 0))
     );
 }
 

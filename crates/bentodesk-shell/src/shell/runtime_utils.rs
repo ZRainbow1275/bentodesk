@@ -190,7 +190,7 @@ pub(super) fn hover_frame_pump_needed(app: &AppState) -> bool {
     let now_ms = unsafe { GetTickCount() };
     app.hover_scheduler.get().is_pending()
         || stack_bloom_animation_active(app)
-        || app.pill_animator.borrow().is_active(now_ms)
+        || app.pill_animator.borrow().needs_tick(now_ms)
         || app.settings_open_animation_pending_at(now_ms)
         || app.theme_transition_pending_at(now_ms)
 }

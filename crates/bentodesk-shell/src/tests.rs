@@ -71,6 +71,7 @@ use super::{
     ZONE_CONTEXT_BIND_LIVE_FOLDER_ID,
     ZoneContextAction,
     accent_hex_to_colorref,
+    activate_free_zone_surface,
     active_theme_id_is_builtin,
     add_item_to_zone_with,
     apply_active_theme_to_app,
@@ -98,11 +99,13 @@ use super::{
     bulk_metadata_updates_for_target_ids,
     bulk_text_update_for_id,
     bulk_text_updates_for_selected,
+    cancel_main_client_gestures,
     capture_context_capsule_for_path,
     capture_current_timeline_snapshot,
     capture_recovery_bundle,
     centered_fixed_aux_host_rect,
     clamp_zone_rect_to_viewport,
+    clear_hover,
     clear_stack_bloom_surface,
     close_settings_surface,
     collapse_zone_from_header,
@@ -171,8 +174,8 @@ use super::{
     item_context_dispatch_for_action,
     item_context_menu_rows,
     item_drag_target_zone_for_point,
+    item_drop_target_for_drag_point,
     item_file_display_path,
-    item_grid_position_for_drag_point,
     item_icon_startup_rehydrate_force,
     item_open_command_for_double_click,
     layout_new_auto_group_zones,
@@ -227,6 +230,7 @@ use super::{
     refresh_settings_plugins_for_root,
     rehydrate_live_folder_bindings_with,
     remove_item_from_zone,
+    reset_item_drag_hover_channels,
     reset_pointer_drag_hover_channels,
     reset_settings_transient_state,
     resize_zone_live,
@@ -311,6 +315,7 @@ use super::{
     update_check_interval,
     update_frequency_from_wire,
     update_frequency_setting_command_for,
+    update_main_zone_hover_for_point,
     update_stack_bloom_hover,
     update_stack_bloom_petal_hover,
     updater_event_should_auto_download,
@@ -324,7 +329,7 @@ use super::{
     zone_context_menu_rows,
     zone_display_mode_from_wire,
     zone_drag_pointer_offset,
-    zone_item_max_scroll,
+    zone_item_max_scroll_at,
     zone_list_from_bento_zones,
     zone_pill_geometry,
     zone_scroll_target_for_point,
@@ -407,3 +412,7 @@ include!("tests/19_stack_tray_row_drag_dispatches_reorder_command.rs");
 include!("tests/20_active_theme_applies_preextracted_plugin_provider_theme.rs");
 include!("tests/21_settings_backup_list_and_restore_latest_round_trips_real.rs");
 include!("tests/22_reported_move_keeps_card_when_source_still_exists.rs");
+include!("tests/23_search_stack_zone_routes_to_visible_anchor.rs");
+include!("tests/24_cross_zone_item_move_preserves_drop_and_identity.rs");
+include!("tests/25_startup_repairs_geometry_and_duplicate_item_ids.rs");
+include!("tests/26_stack_preview_item_drag_keeps_live_surface.rs");

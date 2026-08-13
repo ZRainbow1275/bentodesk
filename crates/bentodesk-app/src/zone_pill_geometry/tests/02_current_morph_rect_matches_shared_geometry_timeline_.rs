@@ -93,25 +93,6 @@ fn zone_morph_is_monotonic_and_can_drive_all_visual_channels() {
     assert_eq!(previous, 1.0);
 }
 
-#[test]
-fn zen_content_reflows_inside_the_live_morph_rect() {
-    let base = pill_layout_for_zone(&fixture(64, 332), 10);
-    let expanded = Rect {
-        x: 64.0,
-        y: 332.0,
-        width: 320.0,
-        height: 220.0,
-    };
-    let live = pill_content_layout_in_rect(base, expanded);
-
-    assert_eq!(pill_content_layout_in_rect(base, base.rect), base);
-    assert!((live.icon.x - base.icon.x).abs() < f32::EPSILON);
-    assert!(live.icon.y > base.icon.y);
-    assert!(live.badge.x > base.badge.x);
-    assert!(live.badge.y > base.badge.y);
-    assert!(live.label.width > base.label.width);
-}
-
 // --- M3 easeOutBack cubic-bezier solver --------------------------------
 
 #[test]

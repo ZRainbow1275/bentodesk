@@ -449,6 +449,11 @@ fn locale_for_ui_language(lang_id: u16) -> &'static bentodesk_style::LookupTable
 #[path = "shell/bootstrap.rs"]
 mod bootstrap;
 
+#[path = "shell/main_window_geometry_refresh.rs"]
+mod main_window_geometry_refresh;
+
+use main_window_geometry_refresh::*;
+
 #[path = "shell/main_window_proc.rs"]
 mod main_window_proc;
 
@@ -619,10 +624,20 @@ use settings_pointer::*;
 
 use pointer_down::*;
 
+#[path = "shell/zone_drag_bounds.rs"]
+mod zone_drag_bounds;
+
+use zone_drag_bounds::*;
+
 #[path = "shell/pointer_up_drag.rs"]
 mod pointer_up_drag;
 
 use pointer_up_drag::*;
+
+#[path = "shell/item_drag_out.rs"]
+mod item_drag_out;
+
+use item_drag_out::*;
 
 #[path = "shell/drop_files.rs"]
 mod drop_files;

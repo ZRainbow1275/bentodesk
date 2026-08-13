@@ -28,7 +28,7 @@ use super::extractor;
 use super::{IconConfig, IconError, custom_icons};
 
 const INTERNET_SHORTCUT_ICON_CACHE_REVISION: &str = "internet-shortcut-icon-resource-v1";
-const NATIVE_ICON_EXTRACTOR_CACHE_REVISION: &str = "native-hicon-alpha-mask-v3";
+const NATIVE_ICON_EXTRACTOR_CACHE_REVISION: &str = "native-hicon-alpha-mask-v4";
 
 /// Status code mirroring the 1.x HTTP response shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +256,10 @@ mod tests {
         assert_ne!(
             icon_cache_key("C:/Desktop/Game.exe"),
             extractor::compute_icon_hash("C:/Desktop/Game.exe")
+        );
+        assert_ne!(
+            icon_cache_key("C:/Desktop/Game.exe"),
+            extractor::compute_icon_hash("native-hicon-alpha-mask-v3\0C:/Desktop/Game.exe")
         );
     }
 }

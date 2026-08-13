@@ -4,8 +4,8 @@
 //! as the GPU/window draw paths; these tests pin the DIP rect set the region
 //! is built from. No GPU / window / Argon2 → runs under the min-RSS suite.
 use super::{
-    CHROME_REGION_SHADOW_MARGIN_DIP, chrome_region_rects, full_client_device_region,
-    main_region_precedes_present,
+    CHROME_REGION_SHADOW_MARGIN_DIP, chrome_region_rects, chrome_region_rects_at,
+    effective_zone_chrome_rect, full_client_device_region, main_region_precedes_present,
 };
 use crate::AppState;
 use crate::business::{icons::IconKind, popover};
@@ -166,6 +166,127 @@ fn click_mode_selected_zone_yields_its_full_body_rect() {
 }
 
 #[test]
+fn right_bottom_selected_zone_region_expands_left_and_up_from_capsule() {
+    let mut app = app_with_viewport();
+    app.zones
+        .add(Zone::new(ZoneId(8), "Corner", 1700, 900, 400, 300));
+    app.set_zone_display_mode(ZoneDisplayMode::Click);
+    app.selected_zone.set(Some(ZoneId(8)));
+
+    let rects = chrome_region_rects(&app);
+    assert_eq!(rects.len(), 1);
+    let zone = app.zones.get(ZoneId(8)).expect("zone");
+    let pill = crate::zone_pill_geometry::pill_layout_for_zone(zone, 0).rect;
+    let expected_right = pill.right();
+    let expected_bottom = pill.bottom();
+    let m = CHROME_REGION_SHADOW_MARGIN_DIP;
+    let got = rects[0];
+
+    assert!((got.right() - (expected_right + m)).abs() < 0.5);
+    assert!((got.bottom() - (expected_bottom + m)).abs() < 0.5);
+    assert!((got.width - (400.0 + m * 2.0)).abs() < 0.5);
+    assert!((got.height - (300.0 + m * 2.0)).abs() < 0.5);
+}
+
+#[test]
+fn four_quadrant_morph_effective_paint_and_region_rects_stay_joint() {
+    use crate::animator::{AnimChannel, Easing};
+
+    const NOW_MS: u32 = 200_000;
+    const DURATION_MS: u32 = 100_000;
+    let quadrants = [
+        ("left-top", 20, 20, false, false),
+        ("right-top", 1_040, 20, true, false),
+        ("left-bottom", 20, 760, false, true),
+        ("right-bottom", 1_040, 760, true, true),
+    ];
+
+    for (name, x, y, anchor_right, anchor_bottom) in quadrants {
+        for progress in [0.0_f32, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0] {
+            let mut app = AppState::new();
+            app.viewport = Size {
+                width: 1_200.0,
+                height: 900.0,
+            };
+            app.zones
+                .add(Zone::new(ZoneId(80), "Joint", x, y, 360, 260));
+            app.set_zone_display_mode(ZoneDisplayMode::Always);
+            let start_ms = NOW_MS.wrapping_sub((progress * DURATION_MS as f32) as u32);
+            app.pill_animator.borrow_mut().start(
+                ZoneId(80),
+                AnimChannel::PillMorph,
+                start_ms,
+                DURATION_MS,
+                0.0,
+                1.0,
+                Easing::PillMorph,
+            );
+
+            let zone = app.zones.get(ZoneId(80)).expect("zone");
+            let placement = app.zone_expanded_placement(zone);
+            assert_eq!(placement.anchor_right, anchor_right, "{name}");
+            assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
+            let effective = app.zone_effective_rect_at(zone, NOW_MS);
+            let paint = effective_zone_chrome_rect(&app, zone, NOW_MS);
+            for delta in [
+                (effective.x - paint.x).abs(),
+                (effective.y - paint.y).abs(),
+                (effective.width - paint.width).abs(),
+                (effective.height - paint.height).abs(),
+            ] {
+                assert!(
+                    delta <= 1.0,
+                    "{name} progress={progress} paint delta={delta}"
+                );
+            }
+
+            let regions = chrome_region_rects_at(&app, NOW_MS);
+            assert_eq!(regions.len(), 1, "{name} progress={progress}");
+            let region = regions[0];
+            let margin = CHROME_REGION_SHADOW_MARGIN_DIP;
+            assert!((region.x - (effective.x - margin)).abs() <= 1.0);
+            assert!((region.y - (effective.y - margin)).abs() <= 1.0);
+            assert!((region.width - (effective.width + margin * 2.0)).abs() <= 1.0);
+            assert!((region.height - (effective.height + margin * 2.0)).abs() <= 1.0);
+        }
+    }
+}
+
+#[test]
+fn region_wrapper_uses_the_last_committed_main_frame_sample() {
+    use crate::animator::{AnimChannel, Easing};
+
+    let mut app = app_with_viewport();
+    app.zones
+        .add(Zone::new(ZoneId(81), "Frame", 1_040, 760, 360, 260));
+    app.set_zone_display_mode(ZoneDisplayMode::Always);
+    app.geometry_frame_now_ms.set(50_000);
+    app.pill_animator.borrow_mut().start(
+        ZoneId(81),
+        AnimChannel::PillMorph,
+        49_900,
+        1_000,
+        0.0,
+        1.0,
+        Easing::PillMorph,
+    );
+
+    let zone = app.zones.get(ZoneId(81)).expect("zone");
+    let effective = app.zone_effective_rect_at(zone, 50_000);
+    let expected = chrome_region_rects_at(&app, 50_000);
+    assert_eq!(chrome_region_rects(&app), expected);
+    let future = app.zone_effective_rect_at(zone, 50_001);
+    assert!(
+        (effective.x - future.x).abs()
+            + (effective.y - future.y).abs()
+            + (effective.width - future.width).abs()
+            + (effective.height - future.height).abs()
+            > 0.01,
+        "fixture must expose the old independent-clock drift"
+    );
+}
+
+#[test]
 fn settings_aux_window_does_not_expand_main_region() {
     let app = app_with_viewport();
     app.settings_open.set(true);
@@ -244,10 +365,10 @@ fn oversized_zone_chrome_is_clamped_to_viewport() {
 }
 
 #[test]
-fn zone_fully_offscreen_yields_no_region_rect() {
-    // A zone whose body lies entirely past the viewport contributes nothing
-    // to the region (its clamp-intersection is empty), so the area stays
-    // click-through.
+fn offscreen_persisted_home_resolves_to_a_visible_region_rect() {
+    // The shared placement resolver defensively clamps a stale capsule home
+    // into the logical viewport even before the live normalizer persists the
+    // repaired home. Region generation must consume that same visible rect.
     let mut app = app_with_viewport();
     app.zones
         .add(Zone::new(ZoneId(3), "Gone", 5000, 5000, 160, 120));
@@ -256,8 +377,12 @@ fn zone_fully_offscreen_yields_no_region_rect() {
 
     let rects = chrome_region_rects(&app);
     assert!(
-        rects.is_empty(),
-        "fully-offscreen zone must add no region rect, got {rects:?}"
+        !rects.is_empty(),
+        "stale offscreen home must resolve to visible chrome"
     );
+    assert!(rects.iter().all(|rect| rect.x < app.viewport.width
+        && rect.y < app.viewport.height
+        && rect.right() > 0.0
+        && rect.bottom() > 0.0));
     assert!(!covered(&rects, 960.0, 540.0));
 }
