@@ -134,8 +134,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Prepare NSIS
-        shell: pwsh
-        run: choco install nsis --version=3.12.0 -y --no-progress
+        uses: ./.github/actions/setup-nsis
 
       - name: Resolve release identity
         id: identity
@@ -171,6 +170,24 @@ jobs:
             return 0
           }
 
+          function Test-ReleaseUnblockDiff([string]$From, [string]$To) {
+            $expectedBase = "1852462f403c47ee581c9b47bbcbeded7c7d2225"
+            $expectedPaths = @(
+              ".github/actions/setup-nsis/action.yml"
+              ".github/workflows/ci.yml"
+              ".github/workflows/release.yml"
+            )
+            if ((git rev-parse $From).Trim() -cne $expectedBase) {
+              return $false
+            }
+            $actualPaths = @(git diff --name-only $From $To --)
+            return (
+              $actualPaths.Count -ceq $expectedPaths.Count -and
+              @(Compare-Object $expectedPaths $actualPaths -CaseSensitive).Count -ceq 0
+            )
+          }
+
+          $releaseUnblockPreviousVersion = "2.0.10"
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $shell = @($metadata.packages | Where-Object name -ceq "bentodesk-shell")
           if ($shell.Count -cne 1) {
@@ -202,7 +219,8 @@ jobs:
               throw "Could not read the workspace version from the parent commit"
             }
             $parentVersion = $parentMatch.Groups[1].Value
-            if ((Compare-StableSemver $currentVersion $parentVersion) -le 0) {
+            $comparison = Compare-StableSemver $currentVersion $parentVersion
+            if ($comparison -lt 0) {
               throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
             }
             $tag = $expectedTag
@@ -215,6 +233,13 @@ jobs:
               throw "Release tag $tag already exists; every main commit must declare a new workspace version"
             } elseif ($tagExit -cne 1) {
               throw "Could not inspect tag $tag"
+            }
+            if ($comparison -eq 0) {
+              if (-not (Test-ReleaseUnblockDiff "${head}^" $head)) {
+                throw "Version $currentVersion may match its parent only for the unpublished exact 2.1.0 release-unblock commit"
+              }
+              $parentVersion = $releaseUnblockPreviousVersion
+              Write-Host "Approved exact 2.1.0 release-unblock main commit"
             }
           } elseif ($env:GITHUB_EVENT_NAME -ceq "workflow_dispatch") {
             $tag = $env:DISPATCH_TAG
@@ -271,6 +296,9 @@ jobs:
               throw "Could not read the workspace version from the parent commit"
             }
             $parentVersion = $parentMatch.Groups[1].Value
+          }
+          if (Test-ReleaseUnblockDiff "$($head)^" $head) {
+            $parentVersion = $releaseUnblockPreviousVersion
           }
 
           $notes = "docs/release-notes-$tag.md"

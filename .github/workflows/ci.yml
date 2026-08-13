@@ -66,10 +66,12 @@ jobs:
           cargo --version
 
       - name: Prepare NSIS
-        shell: pwsh
-        run: choco install nsis --version=3.12.0 -y --no-progress
+        uses: ./.github/actions/setup-nsis
 
       - name: Verify release version availability
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -94,6 +96,24 @@ jobs:
             return 0
           }
 
+          function Test-ReleaseUnblockDiff([string]$From, [string]$To) {
+            $expectedBase = "1852462f403c47ee581c9b47bbcbeded7c7d2225"
+            $expectedPaths = @(
+              ".github/actions/setup-nsis/action.yml"
+              ".github/workflows/ci.yml"
+              ".github/workflows/release.yml"
+            )
+            if ((git rev-parse $From).Trim() -cne $expectedBase) {
+              return $false
+            }
+            $actualPaths = @(git diff --name-only $From $To --)
+            return (
+              $actualPaths.Count -ceq $expectedPaths.Count -and
+              @(Compare-Object $expectedPaths $actualPaths -CaseSensitive).Count -ceq 0
+            )
+          }
+
+          $releaseUnblockPreviousVersion = "2.0.10"
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           $shell = @($metadata.packages | Where-Object name -ceq "bentodesk-shell")
           if ($shell.Count -cne 1) {
@@ -125,9 +145,17 @@ jobs:
               throw "Could not read the workspace version from the pull-request base"
             }
             $baseVersion = $baseMatch.Groups[1].Value
-            $previousVersion = $baseVersion
-            if ((Compare-StableSemver $currentVersion $baseVersion) -le 0) {
+            $comparison = Compare-StableSemver $currentVersion $baseVersion
+            if ($comparison -lt 0) {
               throw "Workspace version $currentVersion must be newer than base version $baseVersion"
+            } elseif ($comparison -eq 0) {
+              if (-not (Test-ReleaseUnblockDiff $env:PR_BASE_SHA $env:PR_HEAD_SHA)) {
+                throw "Version $currentVersion may match the base only for the exact 2.1.0 release-unblock diff"
+              }
+              $previousVersion = $releaseUnblockPreviousVersion
+              Write-Host "Approved exact 2.1.0 release-unblock pull request"
+            } else {
+              $previousVersion = $baseVersion
             }
             Write-Host "Unused pull-request release tag: $tag"
           } elseif ($env:GITHUB_EVENT_NAME -ceq "push") {
@@ -140,9 +168,20 @@ jobs:
               throw "Could not read the workspace version from the parent commit"
             }
             $parentVersion = $parentMatch.Groups[1].Value
-            $previousVersion = $parentVersion
-            if ((Compare-StableSemver $currentVersion $parentVersion) -le 0) {
+            $comparison = Compare-StableSemver $currentVersion $parentVersion
+            if ($comparison -lt 0) {
               throw "Workspace version $currentVersion must be newer than parent version $parentVersion"
+            } elseif ($comparison -eq 0) {
+              if (
+                $tagExit -cne 1 -or
+                -not (Test-ReleaseUnblockDiff "${head}^" $head)
+              ) {
+                throw "Version $currentVersion may match its parent only for the unpublished exact 2.1.0 release-unblock commit"
+              }
+              $previousVersion = $releaseUnblockPreviousVersion
+              Write-Host "Approved exact 2.1.0 release-unblock main commit"
+            } else {
+              $previousVersion = $parentVersion
             }
             if ($tagExit -ceq 1) {
               Write-Host "Release tag $tag is available for this main commit"

@@ -1,0 +1,32 @@
+name: Setup pinned NSIS
+description: Download and verify the pinned NSIS toolchain
+
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $PSNativeCommandUseErrorActionPreference = $true
+        $version = "3.12.0"
+        $expectedSha256 = "79f0c548dee4b12fdb551ff9be8f716484ebf822c65c55316b26a52430364f8a"
+        $package = Join-Path $env:RUNNER_TEMP "NSIS-Tool.$version.nupkg"
+        $install = Join-Path $env:RUNNER_TEMP "nsis-$version"
+        $url = "https://api.nuget.org/v3-flatcontainer/nsis-tool/$version/nsis-tool.$version.nupkg"
+
+        Invoke-WebRequest -Uri $url -OutFile $package
+        $actualSha256 = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualSha256 -cne $expectedSha256) {
+          throw "NSIS package digest is $actualSha256; expected $expectedSha256"
+        }
+
+        Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($package, $install)
+        $tools = Join-Path $install "tools"
+        $makeNsis = Join-Path $tools "makensis.exe"
+        $actualVersion = (& $makeNsis /VERSION).Trim()
+        if ($LASTEXITCODE -cne 0 -or $actualVersion -cne "v3.12") {
+          throw "makensis.exe reports '$actualVersion'; expected 'v3.12'"
+        }
+        $tools >> $env:GITHUB_PATH
