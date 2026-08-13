@@ -66,3 +66,4 @@ include!("tests/01_main_nchittest_empty_desktop_space_is_transparent.rs");
 include!("tests/02_hit_test_zone_uses_pill_rect_when_collapsed.rs");
 include!("tests/03_m1g_settings_hit_empty_backup_list_has_no_restore_but_ke.rs");
 include!("tests/04_settings_hit_compact_accent_picker_resolves_after_scroll.rs");
+include!("tests/05_directional_zone_hit_uses_committed_frame.rs");

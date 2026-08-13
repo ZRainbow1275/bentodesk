@@ -413,3 +413,6 @@ include!("tests/20_active_theme_applies_preextracted_plugin_provider_theme.rs");
 include!("tests/21_settings_backup_list_and_restore_latest_round_trips_real.rs");
 include!("tests/22_reported_move_keeps_card_when_source_still_exists.rs");
 include!("tests/23_search_stack_zone_routes_to_visible_anchor.rs");
+include!("tests/24_cross_zone_item_move_preserves_drop_and_identity.rs");
+include!("tests/25_startup_repairs_geometry_and_duplicate_item_ids.rs");
+include!("tests/26_stack_preview_item_drag_keeps_live_surface.rs");
