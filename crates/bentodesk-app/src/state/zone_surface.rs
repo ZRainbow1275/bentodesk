@@ -47,8 +47,74 @@ impl AppState {
         changed
     }
 
+    /// Resolve variable-height item flow and write the centrally clamped scroll
+    /// back to the existing per-Zone Cell. Paint, hit-test, wheel and drag
+    /// callers share this seam instead of independently clamping stale offsets.
+    pub fn resolve_zone_item_flow_layout<'a>(
+        &self,
+        zone: &Zone,
+        panel: Rect,
+        item_top_offset: f32,
+        items: impl IntoIterator<Item = &'a bentodesk_zone::ZoneItem>,
+    ) -> crate::business::highlight_overlay::ItemFlowLayout {
+        let stored_scroll = self.zone_content_scroll_offset(zone.id);
+        let layout = crate::business::highlight_overlay::item_flow_layout_in_panel(
+            zone,
+            panel,
+            item_top_offset,
+            stored_scroll,
+            items,
+        );
+        // Resolving a different Zone starts at zero by design. Do not write that
+        // zero into the single-owner Cell and accidentally erase the Zone that is
+        // currently scrolled; only this Zone's own clamp may change ownership.
+        if layout.resolved_scroll != stored_scroll {
+            self.set_zone_content_scroll(zone.id, layout.resolved_scroll);
+        }
+        layout
+    }
+
     pub fn reset_zone_content_scroll(&self) -> bool {
         self.zone_content_scroll.replace(None).is_some()
+    }
+
+    /// Visible Stack focused-preview panel for `zone_id`, regardless of whether
+    /// it is owned by the management tray or a Bloom petal. Render, hit and drag
+    /// geometry can therefore resolve the same child surface without pretending
+    /// the stacked child's persisted capsule rectangle is its preview panel.
+    pub fn stack_focused_preview_rect_for_zone(&self, zone_id: ZoneId) -> Option<Rect> {
+        let state = self.stack_tray.borrow();
+        let state = state.as_ref()?;
+        if state.selected_member_id != zone_id {
+            return None;
+        }
+        let anchor = self.zones.get(state.anchor_zone_id)?;
+        let member_ids = self.zones.stack_member_ids(anchor.id)?;
+        if state.is_bloom_preview() {
+            let member_index = member_ids.iter().position(|id| *id == zone_id)?;
+            let member = self.zones.get(zone_id)?;
+            let petals = crate::business::stack_tray::stack_bloom_petal_rects(
+                self.viewport,
+                anchor,
+                member_ids.len(),
+            );
+            let petal = petals.get(member_index).copied()?;
+            return Some(crate::business::stack_tray::focused_bloom_preview_rect(
+                self.viewport,
+                petal,
+                &petals,
+                member,
+            ));
+        }
+        if !crate::business::stack_tray::focused_preview_visible(anchor.id, zone_id) {
+            return None;
+        }
+        let tray =
+            crate::business::stack_tray::stack_tray_rect(self.viewport, anchor, member_ids.len());
+        Some(crate::business::stack_tray::focused_preview_rect(
+            self.viewport,
+            tray,
+        ))
     }
 
     /// Current reveal fraction for the inline Zone search field. A manually

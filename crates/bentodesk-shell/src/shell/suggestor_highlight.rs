@@ -181,6 +181,37 @@ pub(super) fn desktop_pulses_for_paths(
     pulses
 }
 
+/// Highlight geometry for a card on the currently visible normal/search flow.
+/// This intentionally resolves through the same variable-row layout and
+/// centrally clamped scroll Cell as paint, hit-test, drag and wheel routing.
+pub(super) fn highlight_target_for_zone_item(
+    app: &AppState,
+    zone: &Zone,
+    item: &ZoneItem,
+    panel: bentodesk_style::Rect,
+    now_ms: u32,
+) -> Option<HighlightRect> {
+    let search_active = app.zone_search_target.get() == Some(zone.id);
+    let search_state = app.search_bar.borrow();
+    let query = search_state.query.as_str();
+    let item_top_offset = if search_active {
+        search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
+    } else {
+        0.0
+    };
+    let layout = app.resolve_zone_item_flow_layout(
+        zone,
+        panel,
+        item_top_offset,
+        zone.items.iter().filter(|candidate| {
+            !search_active || search_bar::zone_item_matches_query(candidate.name.as_ref(), query)
+        }),
+    );
+    layout
+        .card_for(item.id)
+        .map(|card| HighlightRect::from_rect(card.rect))
+}
+
 pub(super) fn highlight_targets_for_paths(
     app: &AppState,
     paths: &[String],
@@ -203,17 +234,21 @@ pub(super) fn highlight_targets_for_paths(
                 .any(|target_path| item_path_matches(item, target_path))
             {
                 let target = if visible_zone.id == zone.id && app.zone_pill_body_visible(zone) {
-                    highlight_overlay::item_target_rect_in_panel(
+                    highlight_target_for_zone_item(
+                        app,
                         zone,
                         item,
                         app.zone_effective_rect_at(zone, now_ms),
+                        now_ms,
                     )
                 } else {
-                    highlight_overlay::zone_target_rect_for_rect(
+                    Some(highlight_overlay::zone_target_rect_for_rect(
                         app.zone_effective_rect_at(visible_zone, now_ms),
-                    )
+                    ))
                 };
-                if !targets.contains(&target) {
+                if let Some(target) = target
+                    && !targets.contains(&target)
+                {
                     targets.push(target);
                 }
             }

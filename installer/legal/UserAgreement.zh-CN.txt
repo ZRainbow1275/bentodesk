@@ -1,5 +1,5 @@
 ﻿BentoDesk 用户协议
-生效日期：2026 年 8 月 2 日
+生效日期：2026-08-18
 
 安装 BentoDesk 前，请完整阅读本协议。勾选同意并继续安装，即表示你已阅读并接受以下条款。
 
@@ -7,9 +7,9 @@
 
 BentoDesk 是由方寒维护的 Windows 原生桌面整理器。项目源代码依据 GNU Affero General Public License 第 3 版或任何后续版本（AGPL-3.0-or-later）授权。你使用、研究、修改和再分发软件的权利由 AGPL 规定；本协议不会缩减该许可证授予你的权利。
 
-二、本地运行
+二、本地优先运行
 
-BentoDesk 完全离线运行，不需要账号或云服务。软件不会采集或传输个人数据、设备标识、使用分析、崩溃报告、文件列表、文件内容，或电脑中的任何其他信息。
+BentoDesk 不需要账号或项目自建服务器，也不提供遥测、分析、广告、云存储或崩溃上传服务。除第四节说明的默认 GitHub 通道或受控 HTTPS 覆盖源产生的普通请求元数据外，软件不会上传个人数据、设备标识、使用记录、桌面文件列表或路径、图标、内容，或其他用户数据。
 
 为了提供桌面整理功能，BentoDesk 只会在本机读取桌面元数据，以及你明确拖入、选择或绑定的文件与文件夹；这些处理均留在你的电脑中。外部链接和网络位置仅在你主动操作后交由 Windows 对应的默认应用打开；之后如有网络访问，属于 Windows 或该应用，不属于 BentoDesk。
 
@@ -21,7 +21,9 @@ BentoDesk 通过 Windows Shell 与文件交互。普通拖拽可以移动项目�
 
 四、更新
 
-BentoDesk 不会连接更新服务器。新版本通过项目官方 GitHub Releases 页面发布，由你自行决定是否下载和安装。
+BentoDesk 的标准更新通道只会通过证书校验的 HTTPS 访问固定 endpoint https://api.github.com/repos/ZRainbow1275/bentodesk/releases/latest 及其精确安装包资源。受控的 BENTODESK_UPDATE_MANIFEST_URL 可选择 HTTPS、file 或本地覆盖源。选择自动检查周期后，调度器启动时会立即检查一次，之后按所选周期运行。默认设置为每周检查并开启自动下载；选择 Manual 会禁用定时检查，自动下载也可单独关闭。
+
+默认通道的自动下载只会在核对 GitHub SHA-256 digest 后暂存精确的官方安装包；受控覆盖源声明的安装包也必须先通过 manifest SHA-256 或内置公钥 minisign 签名校验。安装始终需要用户明确操作。GitHub 或受控 HTTPS 覆盖源的主机可能按其自身政策接收源 IP 地址、BentoDesk User-Agent 等普通 HTTPS 请求元数据；BentoDesk 不会在这些请求中附带遥测或用户文件数据。
 
 五、担保与责任
 

@@ -465,12 +465,14 @@ pub(super) fn set_highlight_for_search_hit(
                                     app.zone_effective_rect_at(visible_zone, now_ms),
                                 ));
                             }
-                        } else {
-                            targets.push(highlight_overlay::item_target_rect_in_panel(
-                                zone,
-                                item,
-                                app.zone_effective_rect_at(zone, now_ms),
-                            ));
+                        } else if let Some(target) = highlight_target_for_zone_item(
+                            &app,
+                            zone,
+                            item,
+                            app.zone_effective_rect_at(zone, now_ms),
+                            now_ms,
+                        ) {
+                            targets.push(target);
                         }
                     }
                 } else if let Some(zone_id) = parse_search_live_folder_zone_id(hit.id.as_str()) {

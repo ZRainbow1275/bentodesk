@@ -28,7 +28,7 @@ use super::extractor;
 use super::{IconConfig, IconError, custom_icons};
 
 const INTERNET_SHORTCUT_ICON_CACHE_REVISION: &str = "internet-shortcut-icon-resource-v1";
-const NATIVE_ICON_EXTRACTOR_CACHE_REVISION: &str = "native-hicon-alpha-mask-v4";
+const NATIVE_ICON_EXTRACTOR_CACHE_REVISION: &str = "native-icononly-128-alpha-mask-v5";
 
 /// Status code mirroring the 1.x HTTP response shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -83,6 +83,12 @@ pub(super) fn stack_bloom_preview_hit_for_point(
     x: f32,
     y: f32,
 ) -> Option<(ZoneId, ZoneId, bentodesk_style::Rect)> {
+    // A normal Zone move/resize owns capture through mouse-up. Do not let a
+    // focused Stack preview under the release point swallow that cleanup. Item
+    // drag intentionally remains eligible because the preview is a real target.
+    if app.zone_drag.get().is_some() || app.zone_resize.get().is_some() {
+        return None;
+    }
     let state = app.stack_tray.borrow().clone()?;
     if !state.is_bloom_preview() {
         return None;
@@ -116,30 +122,21 @@ pub(super) fn stack_bloom_preview_item_hit_for_point(
     } else {
         0.0
     };
-    let mut flow_slot = 0;
-    for item in &zone.items {
-        if search_active && !search_bar::zone_item_matches_query(item.name.as_ref(), query) {
-            continue;
-        }
-        let (rect, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_in_panel(
-            zone,
-            preview,
-            flow_slot,
-            item.is_wide,
-            item_top_offset,
-        );
-        flow_slot = next_slot;
-        if rect.width > 0.0
-            && rect.height > 0.0
-            && x >= rect.x
-            && x < rect.right()
-            && y >= rect.y
-            && y < rect.bottom()
-        {
-            return Some((anchor, member, item.id));
-        }
+    let clip = highlight_overlay::item_content_clip_rect_in_panel(preview, item_top_offset);
+    if x < clip.x || x >= clip.right() || y < clip.y || y >= clip.bottom() {
+        return None;
     }
-    None
+    let layout = app.resolve_zone_item_flow_layout(
+        zone,
+        preview,
+        item_top_offset,
+        zone.items.iter().filter(|item| {
+            !search_active || search_bar::zone_item_matches_query(item.name.as_ref(), query)
+        }),
+    );
+    layout
+        .hit_card(x, y)
+        .map(|card| (anchor, member, card.item_id))
 }
 
 pub(super) fn item_hit_for_point(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, ZoneItemId)> {
@@ -159,7 +156,7 @@ pub(super) fn item_drop_target_for_drag_point(
     zone_id: ZoneId,
     source_zone_id: ZoneId,
     source_item_id: ZoneItemId,
-    is_wide: bool,
+    _is_wide: bool,
     x: f32,
     y: f32,
 ) -> Option<(i32, i32, usize)> {
@@ -178,17 +175,20 @@ pub(super) fn item_drop_target_for_drag_point(
     {
         let zone = app.zones.get(member)?;
         let now_ms = app.geometry_frame_now_ms.get();
-        return highlight_overlay::item_drop_target_for_panel(
+        return highlight_overlay::item_drop_target_for_item_in_panel(
             zone,
-            preview,
             source_item,
-            is_wide,
-            (x, y),
-            if search_active {
-                search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
-                    * app.zone_search_animation_progress_at(now_ms)
-            } else {
-                0.0
+            dragged_item,
+            highlight_overlay::ItemDropProjection {
+                panel: preview,
+                pointer: (x, y),
+                item_top_offset: if search_active {
+                    search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+                        * app.zone_search_animation_progress_at(now_ms)
+                } else {
+                    0.0
+                },
+                stored_scroll: app.zone_content_scroll_offset(zone.id),
             },
             |item| {
                 !search_active
@@ -197,7 +197,7 @@ pub(super) fn item_drop_target_for_drag_point(
         )
         .map(|(grid_x, grid_y, target_index, _)| (grid_x, grid_y, target_index));
     }
-    ui::item_drop_target_for_point(app, zone_id, source_item, is_wide, x, y)
+    ui::item_drop_target_for_point(app, zone_id, source_item, dragged_item, x, y)
 }
 
 pub(super) fn item_open_command_for_double_click(

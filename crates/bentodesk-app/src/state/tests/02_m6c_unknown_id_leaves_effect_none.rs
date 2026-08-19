@@ -120,6 +120,43 @@ fn zone_content_scroll_is_bounded_to_its_current_zone() {
 }
 
 #[test]
+fn resolving_another_zone_does_not_clear_the_active_scroll_owner() {
+    let app = AppState::new();
+    let owner_id = ZoneId(4);
+    let other_zone = Zone::new(ZoneId(5), "Other", 0, 0, 240, 180);
+    assert!(app.set_zone_content_scroll(owner_id, 86.0));
+
+    let layout = app.resolve_zone_item_flow_layout(
+        &other_zone,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 180.0,
+        },
+        0.0,
+        std::iter::empty::<&bentodesk_zone::ZoneItem>(),
+    );
+
+    assert_eq!(layout.resolved_scroll, 0.0);
+    assert_eq!(app.zone_content_scroll_offset(owner_id), 86.0);
+
+    let owner_zone = Zone::new(owner_id, "Owner", 0, 0, 240, 180);
+    app.resolve_zone_item_flow_layout(
+        &owner_zone,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 180.0,
+        },
+        0.0,
+        std::iter::empty::<&bentodesk_zone::ZoneItem>(),
+    );
+    assert_eq!(app.zone_content_scroll_offset(owner_id), 0.0);
+}
+
+#[test]
 fn inline_zone_search_progress_has_stable_open_and_animated_states() {
     let app = AppState::new();
     let zone_id = ZoneId(4);

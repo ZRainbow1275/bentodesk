@@ -119,62 +119,47 @@ pub(super) fn dispatch(
             effects.needs_redraw = true;
         }
         Command::CheckForUpdates => {
-            {
-                let app = root.app.borrow();
-                *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Checking;
-            }
-            match root.updater.check() {
-                Ok(Some(info)) => {
-                    let version = info.version.clone();
+            let start = root.updater.try_start_check();
+            match start {
+                bentodesk_backend::updater::UpdateStart::Started
+                | bentodesk_backend::updater::UpdateStart::Joined(
+                    bentodesk_backend::updater::UpdateOperation::Checking,
+                ) => {
                     let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() =
-                        SettingsUpdaterStatus::Available { version };
+                    *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Checking;
+                    log_static("updater: CheckForUpdates started/joined\n");
+                }
+                bentodesk_backend::updater::UpdateStart::Rejected(operation)
+                | bentodesk_backend::updater::UpdateStart::Joined(operation) => {
                     log_static(
-                        format!(
-                            "updater: CheckForUpdates available version={}\n",
-                            info.version
-                        )
-                        .as_str(),
+                        format!("updater: CheckForUpdates rejected operation={operation:?}\n")
+                            .as_str(),
                     );
-                }
-                Ok(None) => {
-                    let app = root.app.borrow();
-                    *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::UpToDate {
-                        current_version: bentodesk_backend::updater::pkg_version(),
-                    };
-                    log_static("updater: CheckForUpdates up-to-date\n");
-                }
-                Err(error) => {
-                    let app = root.app.borrow();
-                    set_update_error(&app, "检查更新失败", "Update check failed", &error);
-                    log_static(format!("updater: CheckForUpdates failed error={error}\n").as_str());
                 }
             }
             effects.needs_redraw = true;
         }
         Command::DownloadUpdate => {
-            {
-                let app = root.app.borrow();
-                *app.settings_updater_status.borrow_mut() = SettingsUpdaterStatus::Downloading {
-                    chunk_len: 0,
-                    total_bytes: None,
-                };
-            }
-            let result = root.updater.download();
-            let _ = drain_updater_events(root);
-            match result {
-                Ok(()) => {
-                    let staged = root
-                        .updater
-                        .staged_artifact()
-                        .map(|path| path.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "<none>".to_owned());
-                    log_static(format!("updater: DownloadUpdate ready staged={staged}\n").as_str());
-                }
-                Err(error) => {
+            let start = root.updater.try_start_download();
+            match start {
+                bentodesk_backend::updater::UpdateStart::Started
+                | bentodesk_backend::updater::UpdateStart::Joined(
+                    bentodesk_backend::updater::UpdateOperation::Downloading,
+                ) => {
                     let app = root.app.borrow();
-                    set_update_error(&app, "无法下载更新", "Update download unavailable", &error);
-                    log_static(format!("updater: DownloadUpdate failed error={error}\n").as_str());
+                    *app.settings_updater_status.borrow_mut() =
+                        SettingsUpdaterStatus::Downloading {
+                            chunk_len: 0,
+                            total_bytes: None,
+                        };
+                    log_static("updater: DownloadUpdate started/joined\n");
+                }
+                bentodesk_backend::updater::UpdateStart::Rejected(operation)
+                | bentodesk_backend::updater::UpdateStart::Joined(operation) => {
+                    log_static(
+                        format!("updater: DownloadUpdate rejected operation={operation:?}\n")
+                            .as_str(),
+                    );
                 }
             }
             effects.needs_redraw = true;

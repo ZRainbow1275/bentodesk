@@ -146,6 +146,8 @@ struct CachedInvertMask {
 struct CachedIconBitmap {
     bitmap: ID2D1Bitmap1,
     invert_mask: Option<CachedInvertMask>,
+    source_width: u32,
+    source_height: u32,
 }
 
 /// Per-window renderer owning the D2D surface + DComp tree + brush cache.

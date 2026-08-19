@@ -18,7 +18,7 @@ param(
     [string]$StateSeedExpectedSha256,
     [string]$ProofOutputRoot,
     [string]$BuildTargetDirectory,
-    [string]$ExpectedProductVersion = '2.1.0',
+    [string]$ExpectedProductVersion = '2.2.0',
     [int]$ExpectedDpi = 144,
     [int]$ExpectedViewportWidth = 1707,
     [int]$ExpectedViewportHeight = 912,

@@ -13,13 +13,33 @@ pub(super) fn cancel_main_client_gestures(root: &AppRoot) -> bool {
     cancelled || pending_drag_out || pending_stack_bloom
 }
 
+/// Cancel only when capture was lost with a custom gesture still in flight.
+pub(super) fn cancel_main_client_gestures_after_capture_loss(root: &AppRoot) -> bool {
+    let pending_drag_out = root.pending_item_drag_out.borrow().is_some();
+    let active = {
+        let app = root.app.borrow();
+        app.zone_drag.get().is_some()
+            || app.zone_resize.get().is_some()
+            || app.item_drag.borrow().is_some()
+            || app.stack_tray_drag.get().is_some()
+    };
+    if !pending_drag_out && !active {
+        return false;
+    }
+    cancel_main_client_gestures(root)
+}
+
 pub(super) fn prepare_main_zone_geometry_refresh(root: &AppRoot, slot: &WindowSlot, hwnd: HWND) {
     slot.state.schedule_zone_geometry_normalize();
+    let was_resize = root.app.borrow().zone_resize.get().is_some();
     let cancelled = cancel_main_client_gestures(root);
     if cancelled {
         // SAFETY: a work-area transition invalidates the Main-client gesture
         // coordinates, so releasing this thread's current capture is required.
         unsafe { ReleaseCapture() };
+    }
+    if was_resize {
+        restore_default_main_cursor(root, slot, hwnd);
     }
     request_redraw(hwnd);
 }

@@ -379,11 +379,12 @@ fn workarea_refresh_clears_pending_and_active_pointer_sessions() {
             last_y: 24,
             is_internal_dragging: false,
         });
-        app.stack_tray_drag.set(Some(stack_tray::StackTrayDragState::new(
-            ZoneId(5),
-            ZoneId(6),
-            0,
-        )));
+        app.stack_tray_drag
+            .set(Some(stack_tray::StackTrayDragState::new(
+                ZoneId(5),
+                ZoneId(6),
+                0,
+            )));
         let mut hover = app.item_hover.get();
         hover.on_press(card, 100);
         app.item_hover.set(hover);
@@ -407,6 +408,17 @@ fn workarea_refresh_clears_pending_and_active_pointer_sessions() {
     assert!(root.pending_stack_drop_bloom.get().is_none());
     drop(app);
     assert!(!cancel_main_client_gestures(&root));
+}
+
+#[test]
+fn self_release_capture_preserves_completed_stack_drop_marker() {
+    let root = test_app_root();
+    root.pending_stack_drop_bloom.set(Some(ZoneId(5)));
+
+    assert!(!crate::cancel_main_client_gestures_after_capture_loss(
+        &root
+    ));
+    assert_eq!(root.pending_stack_drop_bloom.get(), Some(ZoneId(5)));
 }
 
 #[test]
@@ -549,10 +561,14 @@ fn tooltip_hover_item_producer_queues_show_and_hide() {
         let mut zone = Zone::new(ZoneId(88), "Docs", 0, 0, 240, 160);
         let item_id = zone
             .add_item_with_metadata(
-                Cow::Owned("C:/Users/BentoDeskTest/Desktop/.bentodesk/docs/contract.pdf".to_owned()),
+                Cow::Owned(
+                    "C:/Users/BentoDeskTest/Desktop/.bentodesk/docs/contract.pdf".to_owned(),
+                ),
                 Some("C:/Users/BentoDeskTest/Desktop/contract.pdf"),
                 Cow::Borrowed("hash"),
-                Some(Cow::Owned("C:/Users/BentoDeskTest/Desktop/contract.pdf".to_owned())),
+                Some(Cow::Owned(
+                    "C:/Users/BentoDeskTest/Desktop/contract.pdf".to_owned(),
+                )),
                 Some(Cow::Owned(
                     "C:/Users/BentoDeskTest/Desktop/.bentodesk/docs/contract.pdf".to_owned(),
                 )),
@@ -576,7 +592,9 @@ fn tooltip_hover_item_producer_queues_show_and_hide() {
             assert_eq!(anchor, bentodesk_app::WindowHandle::NULL);
             assert!(
                 text.as_str().contains("contract.pdf")
-                    && text.as_str().contains("C:/Users/BentoDeskTest/Desktop/contract.pdf")
+                    && text
+                        .as_str()
+                        .contains("C:/Users/BentoDeskTest/Desktop/contract.pdf")
             );
         }
         other => panic!("expected ShowTooltip for hovered item, got {other:?}"),

@@ -162,18 +162,28 @@ fn free_zone_search_and_keyboard_activation_expand_in_all_modes_and_quadrants() 
 
                 let app = root.app.borrow();
                 let zone = app.zones.get(ZoneId(71)).expect("free zone");
-                assert_eq!(app.selected_zone.get(), Some(zone.id), "{mode:?} {quadrant} {activation}");
-                assert_eq!(app.hovered_zone.get(), Some(zone.id), "{mode:?} {quadrant} {activation}");
-                assert!(app.zone_pill_body_visible(zone), "{mode:?} {quadrant} {activation}");
+                assert_eq!(
+                    app.selected_zone.get(),
+                    Some(zone.id),
+                    "{mode:?} {quadrant} {activation}"
+                );
+                assert_eq!(
+                    app.hovered_zone.get(),
+                    Some(zone.id),
+                    "{mode:?} {quadrant} {activation}"
+                );
+                assert!(
+                    app.zone_pill_body_visible(zone),
+                    "{mode:?} {quadrant} {activation}"
+                );
                 assert_eq!(
                     app.explicit_zone_surface_hold.get(),
                     Some(zone.id),
                     "{mode:?} {quadrant} {activation}"
                 );
 
-                let hold_now = unsafe {
-                    windows_sys::Win32::System::SystemInformation::GetTickCount()
-                };
+                let hold_now =
+                    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
                 drive_hover_scheduler(&app, None, hold_now);
                 assert!(
                     !poll_hover_scheduler(&app, hold_now.wrapping_add(5_000)),
@@ -186,8 +196,14 @@ fn free_zone_search_and_keyboard_activation_expand_in_all_modes_and_quadrants() 
 
                 let capsule = app.zone_collapsed_rect(zone);
                 let placement = app.zone_expanded_placement(zone);
-                assert_eq!(placement.anchor_right, anchor_right, "{mode:?} {quadrant} {activation}");
-                assert_eq!(placement.anchor_bottom, anchor_bottom, "{mode:?} {quadrant} {activation}");
+                assert_eq!(
+                    placement.anchor_right, anchor_right,
+                    "{mode:?} {quadrant} {activation}"
+                );
+                assert_eq!(
+                    placement.anchor_bottom, anchor_bottom,
+                    "{mode:?} {quadrant} {activation}"
+                );
                 if anchor_right {
                     assert!((placement.panel.right() - capsule.right()).abs() < 0.01);
                 } else {
@@ -206,9 +222,15 @@ fn free_zone_search_and_keyboard_activation_expand_in_all_modes_and_quadrants() 
                     windows_sys::Win32::System::SystemInformation::GetTickCount()
                 });
                 if mode == ZoneDisplayMode::Always {
-                    assert!(morph.is_none(), "Always activation must not shrink an already-open panel");
+                    assert!(
+                        morph.is_none(),
+                        "Always activation must not shrink an already-open panel"
+                    );
                 } else {
-                    assert!(morph.is_some(), "{mode:?} {quadrant} {activation} must start PillMorph");
+                    assert!(
+                        morph.is_some(),
+                        "{mode:?} {quadrant} {activation} must start PillMorph"
+                    );
                 }
 
                 drive_hover_scheduler(&app, Some(zone.id), hold_now.wrapping_add(5_002));
@@ -239,11 +261,12 @@ fn hidden_or_removed_explicit_target_cannot_block_visible_hover_zone() {
             if remove_target {
                 assert!(app.zones.remove(ZoneId(81)));
             } else {
-                assert!(app
-                    .zones
-                    .get_mut(ZoneId(81))
-                    .expect("explicit target")
-                    .set_visible(false));
+                assert!(
+                    app.zones
+                        .get_mut(ZoneId(81))
+                        .expect("explicit target")
+                        .set_visible(false)
+                );
             }
         }
 
@@ -326,7 +349,11 @@ fn four_quadrant_search_and_suggestor_highlights_use_effective_panel() {
         ("left-bottom", 20, 760),
         ("right-bottom", 1_040, 760),
     ] {
-        for mode in [ZoneDisplayMode::Hover, ZoneDisplayMode::Click, ZoneDisplayMode::Always] {
+        for mode in [
+            ZoneDisplayMode::Hover,
+            ZoneDisplayMode::Click,
+            ZoneDisplayMode::Always,
+        ] {
             let root = test_app_root();
             let path = format!(r"C:\Desktop\{name}-{mode:?}-contract.txt");
             {
@@ -352,17 +379,29 @@ fn four_quadrant_search_and_suggestor_highlights_use_effective_panel() {
             let panel = app.zone_expanded_placement(zone).panel;
             let search_targets = app.highlight_overlay.borrow();
             assert_eq!(search_targets.targets().len(), 1, "{name} {mode:?} search");
-            assert_eq!(search_targets.targets()[0].to_rect(), panel, "{name} {mode:?} search");
+            assert_eq!(
+                search_targets.targets()[0].to_rect(),
+                panel,
+                "{name} {mode:?} search"
+            );
             drop(search_targets);
 
             if mode == ZoneDisplayMode::Always {
                 let suggestor_targets = super::highlight_targets_for_paths(&app, &[path]);
-                let expected = bentodesk_app::business::highlight_overlay::item_target_rect_in_panel(
-                    zone,
-                    &zone.items[0],
-                    panel,
+                let expected = app
+                    .resolve_zone_item_flow_layout(zone, panel, 0.0, zone.items.iter())
+                    .card_for(zone.items[0].id)
+                    .map(|card| {
+                        bentodesk_app::business::highlight_overlay::HighlightRect::from_rect(
+                            card.rect,
+                        )
+                    })
+                    .expect("shared responsive highlight card");
+                assert_eq!(
+                    suggestor_targets.as_slice(),
+                    &[expected],
+                    "{name} suggestor"
                 );
-                assert_eq!(suggestor_targets.as_slice(), &[expected], "{name} suggestor");
             }
         }
     }

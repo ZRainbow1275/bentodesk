@@ -678,6 +678,48 @@ pub(super) fn resize_zone_live_with_minimum(
     true
 }
 
+/// Apply the axis-selective result of the shared resize geometry. Moving the
+/// Zone through `move_group_to` keeps every Stack member's persisted offset
+/// rigid when the dragged edge is also the capsule anchor edge.
+pub(super) fn apply_zone_resize_live(
+    app: &mut AppState,
+    id: ZoneId,
+    geometry: bentodesk_app::zone_gesture_geometry::ZoneResizeGeometry,
+) -> bool {
+    let Some(current) = app.zones.get(id) else {
+        return false;
+    };
+    let current_x = current.x;
+    let current_y = current.y;
+    let home_x = geometry.home_x.unwrap_or(current_x);
+    let home_y = geometry.home_y.unwrap_or(current_y);
+    let moved =
+        (home_x != current_x || home_y != current_y) && app.zones.move_group_to(id, home_x, home_y);
+
+    let Some(zone) = app.zones.get_mut(id) else {
+        return moved;
+    };
+    let mut resized = false;
+    if let Some(width) = geometry.width
+        && zone.w != width
+    {
+        zone.w = width;
+        resized = true;
+    }
+    if let Some(height) = geometry.height
+        && zone.h != height
+    {
+        zone.h = height;
+        resized = true;
+    }
+    if moved || resized {
+        app.mark_dirty();
+        true
+    } else {
+        false
+    }
+}
+
 /// M3-A2 — record a pointer-down on the item card at `(x, y)`, starting the
 /// 80ms press ramp toward Tauri's `:active` `scale(0.97)`. No-op when the down
 /// did not land on a card. Mirrors `start_pill_press_animator`.
@@ -749,26 +791,7 @@ pub(super) fn release_pill_press_animator(app: &AppState, now_ms: u32) -> bool {
     true
 }
 
-/// V-8 per-frame tick of the pill hover/press animator. Drops fully-decayed
-/// entries and returns `true` only while a sampled visual transition is still
-/// in flight. `StatusDotPulse` helpers are dormant until a paint consumer
-/// samples them, so they must not keep the main window repainting by themselves.
-pub(super) fn tick_pill_animator(app: &AppState, now_ms: u32) -> bool {
-    let mut anim = app.pill_animator.borrow_mut();
-    if animation_proof_log_enabled() {
-        let occupancy = anim.occupancy();
-        for zone in app.zones.iter() {
-            if let Some(value) = anim.sample_if_present(zone.id, AnimChannel::PillMorph, now_ms) {
-                log_static(
-                    format!(
-                        "pill_morph_tick: now_ms={now_ms} zone={} value={value:.3} active={} occupancy={occupancy}\n",
-                        zone.id.0,
-                        anim.is_active_entry(zone.id, AnimChannel::PillMorph, now_ms)
-                    )
-                    .as_str(),
-                );
-            }
-        }
-    }
-    anim.tick(now_ms)
-}
+#[path = "zone_motion/pill_animator.rs"]
+mod pill_animator;
+
+pub(super) use pill_animator::tick_pill_animator;

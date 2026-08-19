@@ -633,18 +633,12 @@ impl Renderer {
             self.draw_expanded_panel_header(app, zone, &morph_layout, pal, morph_clamped, false)?;
 
             if morph_clamped > 0.0 {
-                let item_label_group_px =
-                    item_label_group_font_size(zone.items.iter().filter_map(|item| {
-                        let card_rect =
-                            highlight_overlay::item_card_rect_for_item_in_panel(zone, item, rect);
-                        (card_rect.width > 0.0 && card_rect.height > 0.0).then_some((
-                            item_label_visible_name(item.name.as_ref()),
-                            (card_rect.width - 8.0).max(0.0),
-                        ))
-                    }));
+                let item_flow =
+                    app.resolve_zone_item_flow_layout(zone, rect, 0.0, zone.items.iter());
                 for item in &zone.items {
-                    let card_rect =
-                        highlight_overlay::item_card_rect_for_item_in_panel(zone, item, rect);
+                    let Some(card_rect) = item_flow.card_for(item.id).map(|card| card.rect) else {
+                        continue;
+                    };
                     if card_rect.width <= 0.0 || card_rect.height <= 0.0 {
                         continue;
                     }
@@ -667,7 +661,8 @@ impl Renderer {
                         0.0,
                         false,
                         1.0,
-                        item_label_group_px,
+                        item_grid::responsive_item_metrics(card_rect.width, item.name.as_ref())
+                            .label_font_px,
                         morph_clamped,
                     )?;
                 }

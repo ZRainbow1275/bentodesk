@@ -1,5 +1,190 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemFlowCard {
+    pub item_id: ZoneItemId,
+    pub rect: Rect,
+    pub grid_x: i32,
+    pub grid_y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemFlowLayout {
+    pub cards: SmallVec<[ItemFlowCard; 16]>,
+    pub content_bottom: f32,
+    pub max_scroll: f32,
+    pub resolved_scroll: f32,
+    panel: Rect,
+    requested_columns: i32,
+    columns: i32,
+    cell_width: f32,
+    first_row_top: f32,
+    row_tops: SmallVec<[f32; 16]>,
+    row_heights: SmallVec<[f32; 16]>,
+}
+
+impl ItemFlowLayout {
+    #[inline]
+    pub fn card_for(&self, item_id: ZoneItemId) -> Option<ItemFlowCard> {
+        self.cards
+            .iter()
+            .copied()
+            .find(|card| card.item_id == item_id)
+    }
+
+    #[inline]
+    pub fn hit_card(&self, x: f32, y: f32) -> Option<ItemFlowCard> {
+        self.cards.iter().copied().find(|card| {
+            card.rect.width > 0.0
+                && card.rect.height > 0.0
+                && x >= card.rect.x
+                && x < card.rect.right()
+                && y >= card.rect.y
+                && y < card.rect.bottom()
+        })
+    }
+
+    /// Persisted grid coordinate beneath a pointer in this exact variable-row
+    /// layout. Vertical gaps remain associated with the row above, matching the
+    /// former fixed-stride floor behavior; space below the final row maps to an
+    /// append row. The returned coordinate is converted back into the Zone's
+    /// configured column space.
+    pub fn grid_position_for_point(&self, x: f32, y: f32) -> Option<(i32, i32)> {
+        if self.panel.width <= 0.0 || self.panel.height <= 0.0 {
+            return None;
+        }
+        let stride = (self.cell_width + item_grid::ITEM_GRID_COLUMN_GAP_PX).max(1.0);
+        let column =
+            ((x - self.panel.x - expanded_zone_grid::HEADER_INSET_X) / stride).floor() as i32;
+        let column = column.clamp(0, self.columns - 1);
+        let content_y = y + self.resolved_scroll;
+        let row = if self.row_tops.is_empty() {
+            ((content_y - self.first_row_top)
+                / (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX))
+                .floor()
+                .max(0.0) as i32
+        } else if content_y < self.row_tops[0] {
+            0
+        } else {
+            self.row_tops
+                .iter()
+                .zip(&self.row_heights)
+                .position(|(top, height)| {
+                    content_y < *top + *height + item_grid::ITEM_GRID_ROW_GAP_PX
+                })
+                .map_or(self.row_tops.len() as i32, |index| index as i32)
+        };
+        let effective_slot = row * self.columns + column;
+        Some((
+            effective_slot % self.requested_columns,
+            effective_slot / self.requested_columns,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ItemFlowSeed {
+    item_id: ZoneItemId,
+    row: i32,
+    column: i32,
+    width: f32,
+}
+
+/// Variable-height CSS-style item flow. Every consumer receives the same card
+/// rectangles and the same centrally resolved scroll value.
+pub fn item_flow_layout_in_panel<'a>(
+    zone: &Zone,
+    panel: Rect,
+    item_top_offset: f32,
+    stored_scroll: f32,
+    items: impl IntoIterator<Item = &'a ZoneItem>,
+) -> ItemFlowLayout {
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    )
+    .max(1);
+    let columns_i = columns as i32;
+    let gap = item_grid::ITEM_GRID_COLUMN_GAP_PX;
+    let inset = expanded_zone_grid::HEADER_INSET_X;
+    let usable_width = (panel.width - inset * 2.0 - gap * (columns as f32 - 1.0)).max(0.0);
+    let cell_width = usable_width / columns as f32;
+    let mut seeds = SmallVec::<[ItemFlowSeed; 16]>::new();
+    let mut row_heights = SmallVec::<[f32; 16]>::new();
+    let mut slot = 0_i32;
+
+    for item in items {
+        let (placed_slot, next_slot) = flow_slots(slot, item.is_wide, columns);
+        slot = next_slot;
+        let row = placed_slot / columns_i;
+        let column = placed_slot % columns_i;
+        let span = bounded_column_span(item.is_wide, columns) as f32;
+        let x = panel.x + inset + column as f32 * (cell_width + gap);
+        let width =
+            (cell_width * span + gap * (span - 1.0)).min((panel.right() - inset - x).max(0.0));
+        let required =
+            item_grid::responsive_item_metrics(width, item.name.as_ref()).required_height;
+        while row_heights.len() <= row as usize {
+            row_heights.push(item_grid::ITEM_GRID_ROW_HEIGHT_PX);
+        }
+        row_heights[row as usize] = row_heights[row as usize].max(required);
+        seeds.push(ItemFlowSeed {
+            item_id: item.id,
+            row,
+            column,
+            width,
+        });
+    }
+
+    let first_top = panel.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + item_top_offset.max(0.0);
+    let mut row_tops = SmallVec::<[f32; 16]>::new();
+    let mut next_top = first_top;
+    for height in &row_heights {
+        row_tops.push(next_top);
+        next_top += *height + item_grid::ITEM_GRID_ROW_GAP_PX;
+    }
+    let content_bottom = row_heights
+        .last()
+        .map(|_| next_top - item_grid::ITEM_GRID_ROW_GAP_PX + bentodesk_style::tokens::SPACING.lg)
+        .unwrap_or(first_top);
+    let visible_bottom = panel.bottom() - item_grid::ITEM_GRID_BOTTOM_RESIZE_INSET_PX;
+    let max_scroll = (content_bottom - visible_bottom).max(0.0);
+    let resolved_scroll = if stored_scroll.is_finite() {
+        stored_scroll.clamp(0.0, max_scroll)
+    } else {
+        0.0
+    };
+    let mut cards = SmallVec::<[ItemFlowCard; 16]>::new();
+    for seed in seeds {
+        let x = panel.x + inset + seed.column as f32 * (cell_width + gap);
+        cards.push(ItemFlowCard {
+            item_id: seed.item_id,
+            rect: Rect {
+                x,
+                y: row_tops[seed.row as usize] - resolved_scroll,
+                width: seed.width,
+                height: row_heights[seed.row as usize],
+            },
+            grid_x: seed.column,
+            grid_y: seed.row,
+        });
+    }
+    ItemFlowLayout {
+        cards,
+        content_bottom,
+        max_scroll,
+        resolved_scroll,
+        panel,
+        requested_columns: zone.grid_columns.max(1) as i32,
+        columns: columns_i,
+        cell_width,
+        first_row_top: first_top,
+        row_tops,
+        row_heights,
+    }
+}
+
 /// Shared item-card geometry for Search/Suggestor target mapping and renderer
 /// painting. This must stay aligned with the item-grid renderer so the overlay
 /// lands on the same real item cards that the user sees.
@@ -144,11 +329,12 @@ pub fn item_content_clip_rect(zone: &Zone, item_top_offset: f32) -> Rect {
 /// Axis-aligned item viewport inside the resolved visible panel rectangle.
 pub fn item_content_clip_rect_in_panel(panel: Rect, item_top_offset: f32) -> Rect {
     let top = panel.y + expanded_zone_grid::HEADER_BAND_HEIGHT + item_top_offset.max(0.0);
+    let bottom = panel.bottom() - item_grid::ITEM_GRID_BOTTOM_RESIZE_INSET_PX;
     Rect {
         x: panel.x,
         y: top,
         width: panel.width.max(0.0),
-        height: (panel.bottom() - top).max(0.0),
+        height: (bottom - top).max(0.0),
     }
 }
 
@@ -206,7 +392,7 @@ pub fn item_flow_max_scroll_in_panel(
         + last_row as f32 * (item_grid::ITEM_GRID_ROW_HEIGHT_PX + item_grid::ITEM_GRID_ROW_GAP_PX)
         + item_grid::ITEM_GRID_ROW_HEIGHT_PX;
     let content_bottom = last_card_bottom + bentodesk_style::tokens::SPACING.lg;
-    (content_bottom - panel.bottom()).max(0.0)
+    (content_bottom - (panel.bottom() - item_grid::ITEM_GRID_BOTTOM_RESIZE_INSET_PX)).max(0.0)
 }
 
 /// CSS-grid flow geometry inside an arbitrary panel rectangle. The floating
@@ -236,7 +422,9 @@ pub fn item_card_rect_for_flow_slot_in_panel(
         is_wide,
     );
     rect.y += item_top_offset;
-    rect.height = rect.height.min((panel.bottom() - 8.0 - rect.y).max(0.0));
+    rect.height = rect
+        .height
+        .min((panel.bottom() - item_grid::ITEM_GRID_BOTTOM_RESIZE_INSET_PX - rect.y).max(0.0));
     (rect, next_slot)
 }
 
@@ -338,6 +526,102 @@ pub fn item_drop_target_for_panel(
         target_index,
         rect,
     ))
+}
+
+/// Full-item drag projection. The preview is laid out after removing the
+/// source (for an in-Zone reorder) and inserting the actual dragged ZoneItem,
+/// so its name-driven row height and wide span exactly match the committed
+/// result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemDropProjection {
+    pub panel: Rect,
+    pub pointer: (f32, f32),
+    pub item_top_offset: f32,
+    pub stored_scroll: f32,
+}
+
+pub fn item_drop_target_for_item_in_panel(
+    zone: &Zone,
+    source_item: Option<ZoneItemId>,
+    dragged: &ZoneItem,
+    projection: ItemDropProjection,
+    mut item_visible: impl FnMut(&ZoneItem) -> bool,
+) -> Option<(i32, i32, usize, Rect)> {
+    let ItemDropProjection {
+        panel,
+        pointer,
+        item_top_offset,
+        stored_scroll,
+    } = projection;
+    let current = item_flow_layout_in_panel(
+        zone,
+        panel,
+        item_top_offset,
+        stored_scroll,
+        zone.items.iter().filter(|item| item_visible(item)),
+    );
+    let requested_columns = zone.grid_columns.max(1) as i32;
+    let pointer_grid = current
+        .hit_card(pointer.0, pointer.1)
+        .map(|card| (card.grid_x, card.grid_y))
+        .or_else(|| current.grid_position_for_point(pointer.0, pointer.1))?;
+    let pointer_slot = pointer_grid.1 * requested_columns + pointer_grid.0;
+    let columns = item_grid::effective_column_count(
+        panel.width,
+        zone.grid_columns.max(1),
+        expanded_zone_grid::HEADER_INSET_X,
+    )
+    .max(1);
+    let mut slot = 0_i32;
+    let mut target_index = zone.items.len().saturating_sub(usize::from(
+        source_item.is_some_and(|id| zone.item(id).is_some()),
+    ));
+    let mut post_removal_index = 0_usize;
+    for item in &zone.items {
+        if Some(item.id) == source_item {
+            continue;
+        }
+        if !item_visible(item) {
+            post_removal_index += 1;
+            continue;
+        }
+        let (_, next_slot) = flow_slots(slot, item.is_wide, columns);
+        if pointer_slot < next_slot {
+            target_index = post_removal_index;
+            break;
+        }
+        slot = next_slot;
+        target_index = post_removal_index + 1;
+        post_removal_index += 1;
+    }
+
+    let mut projected = SmallVec::<[&ZoneItem; 16]>::new();
+    for item in &zone.items {
+        if Some(item.id) != source_item {
+            projected.push(item);
+        }
+    }
+    projected.insert(target_index.min(projected.len()), dragged);
+    let mut projected_visible = SmallVec::<[&ZoneItem; 16]>::new();
+    let mut dragged_visible_index = None;
+    for item in projected {
+        if item_visible(item) {
+            if std::ptr::eq(item, dragged) {
+                dragged_visible_index = Some(projected_visible.len());
+            }
+            projected_visible.push(item);
+        }
+    }
+    let dragged_visible_index = dragged_visible_index?;
+    let projected_layout = item_flow_layout_in_panel(
+        zone,
+        panel,
+        item_top_offset,
+        current.resolved_scroll,
+        projected_visible,
+    );
+    let preview = projected_layout.cards.get(dragged_visible_index).copied()?;
+    Some((preview.grid_x, preview.grid_y, target_index, preview.rect))
 }
 
 /// Shared item-card geometry for a concrete zone item inside an arbitrary
@@ -484,74 +768,6 @@ fn item_card_rect_for_effective_grid_in_panel(
     }
 }
 
-/// Full-zone target used by Search zone hits and live-folder hits.
-pub fn zone_target_rect(zone: &Zone) -> HighlightRect {
-    HighlightRect::new(zone.x as f32, zone.y as f32, zone.w as f32, zone.h as f32)
-}
-
-/// Full-zone target from the shared resolved visible rectangle.
-pub fn zone_target_rect_for_rect(rect: Rect) -> HighlightRect {
-    HighlightRect::from_rect(rect)
-}
-
-/// Item target used by Search item hits and Suggestor matching-path previews.
-pub fn item_target_rect(zone: &Zone, item: &ZoneItem) -> HighlightRect {
-    HighlightRect::from_rect(item_card_rect_for_item(zone, item))
-}
-
-/// Item target inside the shared resolved visible panel rectangle.
-pub fn item_target_rect_in_panel(zone: &Zone, item: &ZoneItem, panel: Rect) -> HighlightRect {
-    HighlightRect::from_rect(item_card_rect_for_item_in_panel(zone, item, panel))
-}
-
-/// Renderer paint rect after applying the snap.md inset.
-pub fn paint_rect(target: HighlightRect) -> Rect {
-    let rect = target.to_rect();
-    Rect {
-        x: rect.x + TARGET_INSET_PX,
-        y: rect.y + TARGET_INSET_PX,
-        width: (rect.width - (TARGET_INSET_PX * 2.0)).max(0.0),
-        height: (rect.height - (TARGET_INSET_PX * 2.0)).max(0.0),
-    }
-}
-
-/// Clamp an elapsed pulse value into the repeat-loop phase `0.0..=1.0`.
-pub fn pulse_phase(elapsed_ms: u32) -> f32 {
-    if PULSE_LOOP_MS == 0 {
-        return 0.0;
-    }
-    (elapsed_ms % PULSE_LOOP_MS) as f32 / PULSE_LOOP_MS as f32
-}
-
-/// Expanding halo rect for a desktop-icon pulse.
-pub fn pulse_halo_rect(target: &HighlightPulse, phase: f32) -> Rect {
-    let clamped = phase.clamp(0.0, 1.0);
-    let radius =
-        PULSE_HALO_MIN_RADIUS_PX + (PULSE_HALO_RADIUS_PX - PULSE_HALO_MIN_RADIUS_PX) * clamped;
-    Rect {
-        x: target.x - radius,
-        y: target.y - radius,
-        width: radius * 2.0,
-        height: radius * 2.0,
-    }
-}
-
-/// Solid center dot rect for a desktop-icon pulse.
-pub fn pulse_core_rect(target: &HighlightPulse) -> Rect {
-    Rect {
-        x: target.x - PULSE_CORE_RADIUS_PX,
-        y: target.y - PULSE_CORE_RADIUS_PX,
-        width: PULSE_CORE_RADIUS_PX * 2.0,
-        height: PULSE_CORE_RADIUS_PX * 2.0,
-    }
-}
-
-/// Target corner radius from explicit active radius tokens.
-pub fn target_radius_from_tokens(radius: RadiusTokens) -> BorderRadius {
-    radius.lg
-}
-
-/// Target corner radius from the process-default theme.
-pub fn target_radius() -> BorderRadius {
-    target_radius_from_tokens(radius::DEFAULT)
-}
+#[path = "geometry/targets.rs"]
+mod targets;
+pub use targets::*;

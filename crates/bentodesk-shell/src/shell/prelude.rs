@@ -134,7 +134,7 @@ pub(super) use windows_sys::Win32::UI::Controls::Dialogs::{
 };
 pub(super) use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 pub(super) use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
+    GetAsyncKeyState, GetCapture, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
     ReleaseCapture, SetActiveWindow, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, UnregisterHotKey, VK_CONTROL,
 };
@@ -146,19 +146,21 @@ pub(super) use windows_sys::Win32::UI::Shell::{
 };
 pub(super) use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BringWindowToTop, CREATESTRUCTW, CreatePopupMenu, DefWindowProcW, DestroyMenu,
-    DestroyWindow, EnumWindows, FindWindowW, GWL_EXSTYLE, GWLP_USERDATA, GetClassNameW,
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HTTRANSPARENT, HWND_NOTOPMOST,
-    HWND_TOP, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KillTimer, MB_ICONERROR,
-    MB_OK, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterWindowMessageW, SPI_SETWORKAREA, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_LEFTALIGN,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP,
-    WM_CHAR, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    DestroyWindow, EnumWindows, FindWindowW, GUITHREADINFO, GWL_EXSTYLE, GWLP_USERDATA,
+    GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW,
+    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsIconic, IsWindow, IsWindowVisible,
+    IsZoomed, KillTimer, LoadCursorW, MB_ICONERROR, MB_OK, MF_SEPARATOR, MF_STRING, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterWindowMessageW, SPI_SETWORKAREA, SW_HIDE, SW_MAXIMIZE,
+    SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CANCELMODE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_DROPFILES, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_POWERBROADCAST,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
     WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WindowFromPoint,
 };
 

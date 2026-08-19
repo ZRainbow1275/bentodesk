@@ -168,7 +168,7 @@ around that job.
 
 ## Quick start
 
-1. Download `BentoDesk-2.1.0-windows-x64-setup.exe` from
+1. Download `BentoDesk-2.2.0-windows-x64-setup.exe` from
    [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest), then
    review and accept the User Agreement and Privacy Policy in Setup. The
    portable ZIP remains available for a no-install workflow.
@@ -179,10 +179,28 @@ around that job.
 5. Choose a theme, expansion mode, and language in Settings.
 
 Neither package needs Node.js, Tauri, WebView2, or a separate browser runtime.
-BentoDesk is fully offline and contains no telemetry. Setup preserves local
-settings on uninstall by default; its separate, unchecked removal option only
-deletes BentoDesk state. See the [User Agreement](installer/legal/UserAgreement.en.txt)
-and [Privacy Policy](installer/legal/PrivacyPolicy.en.txt).
+BentoDesk is local-first and has no account, project-operated server, telemetry,
+analytics, advertising, cloud storage, or crash uploads. It does not upload
+desktop file paths, names, icons, or contents.
+
+The updater uses the default official GitHub endpoint
+`https://api.github.com/repos/ZRainbow1275/bentodesk/releases/latest` over
+HTTPS. A controlled `BENTODESK_UPDATE_MANIFEST_URL` may select an HTTPS, file, or
+local override. With scheduled checks enabled, it checks immediately at startup
+and then at the selected cadence (Weekly by default; Manual disables scheduled
+checks).
+Auto-download is enabled by default. On the default channel, it stages the exact
+official Setup only after its GitHub SHA-256 digest is verified. A controlled
+override stages its declared artifact only after the manifest SHA-256 or
+embedded-key minisign signature is verified. Installation always requires an
+explicit user action. GitHub, or the host selected by a controlled HTTPS
+override, can receive ordinary HTTPS request metadata such as the source IP
+address and BentoDesk User-Agent under its own policies.
+
+Setup preserves local settings on uninstall by default; its separate, unchecked
+removal option only deletes BentoDesk state. See the
+[User Agreement](installer/legal/UserAgreement.en.txt) and
+[Privacy Policy](installer/legal/PrivacyPolicy.en.txt).
 
 ### Requirements
 
@@ -211,7 +229,7 @@ One isolated run of the public BentoDesk 2.0.2 Windows x64 release at
 | Graphics | Direct2D, DirectWrite, DirectComposition, D3D11 |
 | Icons and images | Windows Imaging Component, Windows Shell |
 | File interaction | Shell/OLE, `ReadDirectoryChangesW` |
-| Offline and system security | No network client, DPAPI |
+| Privacy and system security | Local-first, no telemetry, official GitHub HTTPS updater, DPAPI |
 | Data | Atomic local persistence, encrypted settings vault |
 | Build | MSVC x64, static CRT, size optimization, Fat LTO |
 

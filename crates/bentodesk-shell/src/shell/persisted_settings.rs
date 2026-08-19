@@ -547,6 +547,15 @@ pub(super) fn apply_update_event_to_app(app: &AppState, event: UpdateEvent) {
         UpdateEvent::Available { info } => SettingsUpdaterStatus::Available {
             version: info.version,
         },
+        UpdateEvent::UpToDate { current_version } => {
+            if !matches!(
+                *app.settings_updater_status.borrow(),
+                SettingsUpdaterStatus::Checking | SettingsUpdaterStatus::Available { .. }
+            ) {
+                return;
+            }
+            SettingsUpdaterStatus::UpToDate { current_version }
+        }
         UpdateEvent::Progress { progress } => SettingsUpdaterStatus::Downloading {
             chunk_len: progress.chunk_len,
             total_bytes: progress.total_bytes,

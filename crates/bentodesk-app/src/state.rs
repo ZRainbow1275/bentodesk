@@ -67,6 +67,57 @@ pub use window::*;
 
 use settings::{is_valid_accent_hex, normalize_accent_hex_char};
 
+/// One of the eight standard resize handles on an expanded Zone panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneResizeHandle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ZoneResizeHandle {
+    #[inline]
+    pub const fn resizes_horizontally(self) -> bool {
+        matches!(
+            self,
+            Self::Left
+                | Self::Right
+                | Self::TopLeft
+                | Self::TopRight
+                | Self::BottomLeft
+                | Self::BottomRight
+        )
+    }
+
+    #[inline]
+    pub const fn resizes_vertically(self) -> bool {
+        matches!(
+            self,
+            Self::Top
+                | Self::Bottom
+                | Self::TopLeft
+                | Self::TopRight
+                | Self::BottomLeft
+                | Self::BottomRight
+        )
+    }
+
+    #[inline]
+    pub const fn drags_left(self) -> bool {
+        matches!(self, Self::Left | Self::TopLeft | Self::BottomLeft)
+    }
+
+    #[inline]
+    pub const fn drags_top(self) -> bool {
+        matches!(self, Self::Top | Self::TopLeft | Self::TopRight)
+    }
+}
+
 /// Transient geometry captured when one directional panel resize begins.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZoneResizeSession {
@@ -76,13 +127,21 @@ pub struct ZoneResizeSession {
     pub start_pointer_x: f32,
     /// Pointer y coordinate at mouse-down, in Main-client logical DIPs.
     pub start_pointer_y: f32,
-    /// Visible panel width at mouse-down.
-    pub start_visible_width: f32,
-    /// Visible panel height at mouse-down.
-    pub start_visible_height: f32,
-    /// Whether the panel's right edge stays fixed during this session.
+    /// Handle selected at mouse-down. It is immutable for the whole drag.
+    pub handle: ZoneResizeHandle,
+    /// Visible expanded panel rectangle at mouse-down.
+    pub start_panel: Rect,
+    /// Persisted dimensions at mouse-down. They may exceed the clipped panel.
+    pub start_persisted_width: i32,
+    pub start_persisted_height: i32,
+    /// Persisted capsule/Stack home at mouse-down.
+    pub start_home_x: i32,
+    pub start_home_y: i32,
+    /// Actual collapsed capsule rectangle at mouse-down.
+    pub start_capsule: Rect,
+    /// Placement quadrant captured from the capsule's horizontal anchor.
     pub anchor_right: bool,
-    /// Whether the panel's bottom edge stays fixed during this session.
+    /// Placement quadrant captured from the capsule's vertical anchor.
     pub anchor_bottom: bool,
 }
 

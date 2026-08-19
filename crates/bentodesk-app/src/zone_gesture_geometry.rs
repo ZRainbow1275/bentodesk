@@ -9,8 +9,11 @@
 
 use crate::{
     state::ZoneResizeSession,
-    zone_pill_geometry::{pill_layout_for_zone, stack_capsule_layout_for_zone},
+    zone_pill_geometry::{
+        expanded_zone_placement, pill_layout_for_zone, stack_capsule_layout_for_zone,
+    },
 };
+use bentodesk_style::Size;
 use bentodesk_zone::{Zone, ZoneId, ZoneList};
 
 /// Tauri parity: `ZONE_DRAG_THRESHOLD_PX = 4` (`BentoZone.tsx:72`). Logical
@@ -45,46 +48,201 @@ pub fn exceeds_drag_threshold(dx: i32, dy: i32) -> bool {
     dx * dx + dy * dy >= thresh
 }
 
-/// Resolve a directional resize from the immutable mouse-down session.
-///
-/// Using the captured visible size (rather than re-reading the live Zone on
-/// every move) prevents cumulative drift and guarantees the first event at the
-/// mouse-down coordinates preserves the panel size exactly.
-pub fn directional_resize_size(
+/// Axis-selective result of one resize frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ZoneResizeGeometry {
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub home_x: Option<i32>,
+    pub home_y: Option<i32>,
+}
+
+/// Resolve one of the eight standard resize handles from the immutable
+/// mouse-down snapshot. The opposite selected edge remains fixed. An inactive
+/// axis is always `None`, so a clipped persisted dimension cannot be
+/// accidentally overwritten by an orthogonal edge drag.
+pub fn directional_resize_geometry(
     session: ZoneResizeSession,
     pointer_x: f32,
     pointer_y: f32,
-    max_width: f32,
-    max_height: f32,
+    viewport: Size,
     min_width: f32,
     min_height: f32,
-) -> (i32, i32) {
-    let max_width = finite_non_negative(max_width).floor();
-    let max_height = finite_non_negative(max_height).floor();
-    let min_width = finite_non_negative(min_width).min(max_width);
-    let min_height = finite_non_negative(min_height).min(max_height);
+) -> ZoneResizeGeometry {
+    let viewport_width = finite_non_negative(viewport.width).floor();
+    let viewport_height = finite_non_negative(viewport.height).floor();
     let delta_x = finite_or(pointer_x, session.start_pointer_x) - session.start_pointer_x;
     let delta_y = finite_or(pointer_y, session.start_pointer_y) - session.start_pointer_y;
-    let desired_width = session.start_visible_width
-        + if session.anchor_right {
-            -delta_x
+
+    let mut result = ZoneResizeGeometry::default();
+    if session.handle.resizes_horizontally() {
+        let start_selected = if session.handle.drags_left() {
+            session.start_panel.x
         } else {
-            delta_x
+            session.start_panel.right()
         };
-    let desired_height = session.start_visible_height
-        + if session.anchor_bottom {
-            -delta_y
+        let fixed = if session.handle.drags_left() {
+            session.start_panel.right()
         } else {
-            delta_y
+            session.start_panel.x
         };
-    (
-        finite_or(desired_width, session.start_visible_width)
-            .clamp(min_width, max_width)
-            .round() as i32,
-        finite_or(desired_height, session.start_visible_height)
-            .clamp(min_height, max_height)
-            .round() as i32,
-    )
+        let available = if session.handle.drags_left() {
+            fixed
+        } else {
+            viewport_width - fixed
+        }
+        .max(0.0);
+        let floor = finite_non_negative(min_width)
+            .min(session.start_panel.width.max(0.0))
+            .min(available);
+        let desired = finite_or(start_selected + delta_x, start_selected);
+        let mut selected = if session.handle.drags_left() {
+            desired.clamp(0.0, fixed - floor)
+        } else {
+            desired.clamp(fixed + floor, viewport_width)
+        };
+
+        let moves_home = (session.handle.drags_left() && !session.anchor_right)
+            || (!session.handle.drags_left() && session.anchor_right);
+        if moves_home {
+            let requested_home = session.start_home_x as f32 + selected - start_selected;
+            let max_home = (viewport_width - session.start_capsule.width)
+                .max(0.0)
+                .floor() as i32;
+            let mut home = requested_home.round() as i32;
+            home = home.clamp(0, max_home);
+            let center_limit = viewport_width * 0.5 - session.start_capsule.width * 0.5;
+            home = if session.anchor_right {
+                home.max(center_limit.floor() as i32 + 1)
+            } else {
+                home.min(center_limit.floor() as i32)
+            }
+            .clamp(0, max_home);
+            // The placement quadrant is derived rather than persisted. Re-run
+            // the real placement resolver after integer rounding so its strict
+            // `>` centre-line rule remains the final authority. The arithmetic
+            // clamp above normally makes this a no-op; a one-DIP correction is
+            // sufficient only for a representational boundary tie.
+            let horizontal_capsule = bentodesk_style::Rect {
+                x: home as f32,
+                ..session.start_capsule
+            };
+            if expanded_zone_placement(
+                horizontal_capsule,
+                session.start_persisted_width as f32,
+                session.start_persisted_height as f32,
+                viewport,
+            )
+            .anchor_right
+                != session.anchor_right
+            {
+                home = if session.anchor_right {
+                    home.saturating_add(1).min(max_home)
+                } else {
+                    home.saturating_sub(1)
+                };
+            }
+            selected = if session.handle.drags_left() {
+                home as f32
+            } else {
+                home as f32 + session.start_capsule.width
+            };
+            // The active home axis is snapshot-relative too. Returning the
+            // start home on the down-point frame lets the live seam restore a
+            // value that a previous frame changed; inactive axes stay `None`.
+            result.home_x = Some(home);
+        }
+
+        let selected = selected.round();
+        let width = if selected == start_selected.round() {
+            session.start_persisted_width
+        } else {
+            (fixed.round() - selected).abs() as i32
+        };
+        // Always emit the active axis, including its mouse-down value.
+        result.width = Some(width);
+    }
+
+    if session.handle.resizes_vertically() {
+        let start_selected = if session.handle.drags_top() {
+            session.start_panel.y
+        } else {
+            session.start_panel.bottom()
+        };
+        let fixed = if session.handle.drags_top() {
+            session.start_panel.bottom()
+        } else {
+            session.start_panel.y
+        };
+        let available = if session.handle.drags_top() {
+            fixed
+        } else {
+            viewport_height - fixed
+        }
+        .max(0.0);
+        let floor = finite_non_negative(min_height)
+            .min(session.start_panel.height.max(0.0))
+            .min(available);
+        let desired = finite_or(start_selected + delta_y, start_selected);
+        let mut selected = if session.handle.drags_top() {
+            desired.clamp(0.0, fixed - floor)
+        } else {
+            desired.clamp(fixed + floor, viewport_height)
+        };
+
+        let moves_home = (session.handle.drags_top() && !session.anchor_bottom)
+            || (!session.handle.drags_top() && session.anchor_bottom);
+        if moves_home {
+            let requested_home = session.start_home_y as f32 + selected - start_selected;
+            let max_home = (viewport_height - session.start_capsule.height)
+                .max(0.0)
+                .floor() as i32;
+            let mut home = requested_home.round() as i32;
+            home = home.clamp(0, max_home);
+            let center_limit = viewport_height * 0.5 - session.start_capsule.height * 0.5;
+            home = if session.anchor_bottom {
+                home.max(center_limit.floor() as i32 + 1)
+            } else {
+                home.min(center_limit.floor() as i32)
+            }
+            .clamp(0, max_home);
+            let vertical_capsule = bentodesk_style::Rect {
+                y: home as f32,
+                ..session.start_capsule
+            };
+            if expanded_zone_placement(
+                vertical_capsule,
+                session.start_persisted_width as f32,
+                session.start_persisted_height as f32,
+                viewport,
+            )
+            .anchor_bottom
+                != session.anchor_bottom
+            {
+                home = if session.anchor_bottom {
+                    home.saturating_add(1).min(max_home)
+                } else {
+                    home.saturating_sub(1)
+                };
+            }
+            selected = if session.handle.drags_top() {
+                home as f32
+            } else {
+                home as f32 + session.start_capsule.height
+            };
+            result.home_y = Some(home);
+        }
+
+        let selected = selected.round();
+        let height = if selected == start_selected.round() {
+            session.start_persisted_height
+        } else {
+            (fixed.round() - selected).abs() as i32
+        };
+        // Always emit the active axis, including its mouse-down value.
+        result.height = Some(height);
+    }
+    result
 }
 
 #[inline]
@@ -273,275 +431,5 @@ fn score_stack_candidate(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bentodesk_zone::{Zone, ZoneId, ZoneList};
-
-    fn resize_session(anchor_right: bool, anchor_bottom: bool) -> ZoneResizeSession {
-        ZoneResizeSession {
-            id: ZoneId(9),
-            start_pointer_x: 100.0,
-            start_pointer_y: 100.0,
-            start_visible_width: 240.0,
-            start_visible_height: 180.0,
-            anchor_right,
-            anchor_bottom,
-        }
-    }
-
-    #[test]
-    fn directional_resize_has_no_first_move_jump_and_tracks_all_four_corners() {
-        for anchor_right in [false, true] {
-            for anchor_bottom in [false, true] {
-                let session = resize_session(anchor_right, anchor_bottom);
-                assert_eq!(
-                    directional_resize_size(session, 100.0, 100.0, 600.0, 500.0, 80.0, 60.0),
-                    (240, 180)
-                );
-                let pointer_x = if anchor_right { 80.0 } else { 120.0 };
-                let pointer_y = if anchor_bottom { 70.0 } else { 130.0 };
-                assert_eq!(
-                    directional_resize_size(
-                        session, pointer_x, pointer_y, 600.0, 500.0, 80.0, 60.0,
-                    ),
-                    (260, 210)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn directional_resize_respects_directional_max_even_below_normal_minimum() {
-        assert_eq!(
-            directional_resize_size(
-                resize_session(false, false),
-                500.0,
-                500.0,
-                50.0,
-                40.0,
-                80.0,
-                60.0,
-            ),
-            (50, 40)
-        );
-    }
-
-    // ── exceeds_drag_threshold ────────────────────────────────────────────
-
-    #[test]
-    fn threshold_below_4_dip_is_still_a_click() {
-        assert!(!exceeds_drag_threshold(0, 0));
-        assert!(!exceeds_drag_threshold(3, 0));
-        assert!(!exceeds_drag_threshold(0, 3));
-        // (2,2) ⇒ 8 < 16 ⇒ still a click.
-        assert!(!exceeds_drag_threshold(2, 2));
-        // (-3, 0) symmetric with (3, 0).
-        assert!(!exceeds_drag_threshold(-3, 0));
-    }
-
-    #[test]
-    fn threshold_at_or_past_4_dip_is_a_drag() {
-        // (4,0) ⇒ 16 >= 16 ⇒ drag (the first qualifying frame).
-        assert!(exceeds_drag_threshold(4, 0));
-        assert!(exceeds_drag_threshold(0, 4));
-        // (3,3) ⇒ 18 >= 16 ⇒ drag.
-        assert!(exceeds_drag_threshold(3, 3));
-        assert!(exceeds_drag_threshold(-3, 3));
-        assert!(exceeds_drag_threshold(100, -100));
-    }
-
-    #[test]
-    fn threshold_does_not_overflow_on_large_deltas() {
-        // 50_000² = 2.5e9 > i32::MAX (~2.1e9), so a same-width i32 multiply
-        // would overflow; the i64 widen keeps it safe for any realistic
-        // multi-monitor desktop delta (Tauri parity range is a few thousand).
-        assert!(exceeds_drag_threshold(50_000, 50_000));
-        assert!(exceeds_drag_threshold(-50_000, 50_000));
-    }
-
-    // ── score_stack_candidate (pure rect math) ────────────────────────────
-
-    #[test]
-    fn score_far_apart_does_not_fire() {
-        // Two 200x200 zones, centres ~1000 apart, no overlap, far beyond
-        // proximity radius (0.8 * (100 + 100) = 160).
-        assert!(score_stack_candidate((0, 0, 200, 200), (1000, 0, 200, 200)).is_none());
-    }
-
-    #[test]
-    fn score_full_overlap_fires_with_high_score() {
-        // Identical rects ⇒ overlapRatio ≈ 1.0 ⇒ score ≈ 2.0.
-        let s = score_stack_candidate((0, 0, 200, 200), (0, 0, 200, 200)).unwrap();
-        assert!((s - 2.0).abs() < 1e-3, "score was {s}");
-    }
-
-    #[test]
-    fn score_25_percent_overlap_below_threshold_with_far_centres() {
-        // Construct ~25% overlap of the smaller area but keep centres outside
-        // the proximity radius so trigger B does NOT rescue it.
-        // self 200x200 at (0,0): area 40000. other 200x200 shifted so the
-        // intersection area is ~25% of 40000 = 10000 ⇒ overlap rect 100x100.
-        // overlap 100x100 needs other to start at (100,100): inter = [100,200)
-        // both axes ⇒ 100x100 = 10000 ⇒ ratio 0.25 < 0.30.
-        // BUT centres: self (100,100), other (200,200) ⇒ dist ~141.4, radius
-        // 160 ⇒ proximity WOULD fire. So push other further to (160,160):
-        // inter_w = 200-160 = 40, area 1600 ⇒ ratio 0.04; centres (100,100)
-        // vs (260,260) ⇒ dist ~226 > 160 ⇒ neither fires.
-        assert!(score_stack_candidate((0, 0, 200, 200), (160, 160, 200, 200)).is_none());
-    }
-
-    #[test]
-    fn score_35_percent_overlap_fires() {
-        // self 200x200 at (0,0); other shifted to give >30% overlap of the
-        // smaller area. other at (74,0): inter_w = 200-74 = 126, inter_h 200
-        // ⇒ 25200 / 40000 = 0.63 > 0.30 ⇒ fires.
-        let s = score_stack_candidate((0, 0, 200, 200), (74, 0, 200, 200)).unwrap();
-        // overlap > 0 ⇒ score = ratio + 1 > 1.
-        assert!(s > 1.0, "overlapping score must exceed 1.0, was {s}");
-    }
-
-    #[test]
-    fn score_proximity_only_fires_below_one() {
-        // No overlap but centres within 0.8*(rSelf+rOther). Two 100x100 zones
-        // (r = 50 each), radius = 0.8 * 100 = 80. Place them edge-touching so
-        // there is zero overlap (gap of 0) but centres 100 apart along x:
-        // self (0,0,100,100) centre (50,50); other (100,0,100,100) centre
-        // (150,50) ⇒ dist 100 > 80 ⇒ no fire. Move closer: other at (60,0):
-        // inter_w = 100-60 = 40 ⇒ overlap fires. To get PURE proximity with
-        // zero overlap we need a gap on one axis but proximity on centres —
-        // use a vertical gap: self (0,0,100,100), other (0,120,100,100):
-        // no overlap (gap 20 on y), centres (50,50) vs (50,170) ⇒ dist 120 >
-        // 80 ⇒ no fire. Tighten gap: other (0,100,100,100): touching, dist
-        // 100 > 80 still. The proximity trigger only beats overlap when boxes
-        // are SMALL relative to radius; use 100x100 with a diagonal near-touch
-        // that has zero AABB overlap is geometrically impossible here, so test
-        // proximity via a thin gap that yields ratio 0 yet dist <= radius:
-        // self (0,0,200,40) centre (100,20) r=(200+40)/4=60; other
-        // (0,50,200,40) centre (100,70) r=60; radius=0.8*120=96; dist=50<=96;
-        // AABB overlap: y [0,40) vs [50,90) ⇒ none ⇒ pure proximity.
-        let s = score_stack_candidate((0, 0, 200, 40), (0, 50, 200, 40)).unwrap();
-        // Pure proximity ⇒ score in (0, 1].
-        assert!(
-            s > 0.0 && s <= 1.0,
-            "proximity score must be in (0,1], was {s}"
-        );
-    }
-
-    // ── stack_target_for_drop (ZoneList integration, no window) ───────────
-
-    fn zone_at(id: u64, x: i32, y: i32, w: i32, h: i32) -> Zone {
-        Zone::new(ZoneId(id), "z", x, y, w, h)
-    }
-
-    #[test]
-    fn drop_far_from_all_returns_none() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 0, 0, 200, 200));
-        zones.add(zone_at(2, 5000, 5000, 200, 200));
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn expanded_panel_size_does_not_create_an_invisible_merge_halo() {
-        let mut zones = ZoneList::new();
-        // The persisted expanded panels overlap by 300×600 DIP, but the
-        // painted medium capsules are only 214×48 and sit 286 DIP apart.
-        // Tauri scores the capsules, so this drop must remain independent.
-        zones.add(zone_at(1, 0, 100, 800, 600));
-        zones.add(zone_at(2, 500, 100, 800, 600));
-
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn painted_capsule_overlap_forms_a_stack_regardless_of_panel_size() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 100, 100, 80, 60));
-        zones.add(zone_at(2, 180, 100, 900, 700));
-
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), Some(ZoneId(2)));
-    }
-
-    #[test]
-    fn drop_onto_overlapping_zone_returns_that_anchor() {
-        let mut zones = ZoneList::new();
-        // Dragged (id 1) fully inside id 2 → high overlap.
-        zones.add(zone_at(1, 50, 50, 100, 100));
-        zones.add(zone_at(2, 0, 0, 300, 300));
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), Some(ZoneId(2)));
-    }
-
-    #[test]
-    fn self_is_never_returned() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 0, 0, 200, 200));
-        // Only the dragged zone exists → no target.
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn highest_scoring_candidate_wins() {
-        let mut zones = ZoneList::new();
-        // Dragged at (100,100,100,100), centre (150,150).
-        zones.add(zone_at(1, 100, 100, 100, 100));
-        // Candidate 2: small overlap.
-        zones.add(zone_at(2, 180, 100, 100, 100)); // inter_w=20 ⇒ ratio 0.2 (<0.30) but proximity may fire
-        // Candidate 3: near-full overlap ⇒ much higher score.
-        zones.add(zone_at(3, 110, 110, 100, 100));
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), Some(ZoneId(3)));
-    }
-
-    #[test]
-    fn locked_candidate_is_skipped() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 50, 50, 100, 100));
-        let mut locked = zone_at(2, 0, 0, 300, 300);
-        locked.locked = true;
-        zones.add(locked);
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn invisible_candidate_is_skipped() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 50, 50, 100, 100));
-        let mut hidden = zone_at(2, 0, 0, 300, 300);
-        hidden.visible = false;
-        zones.add(hidden);
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn stacked_child_candidate_is_skipped() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 50, 50, 100, 100));
-        let mut child = zone_at(2, 0, 0, 300, 300);
-        child.stack_parent = Some(ZoneId(9)); // is_stacked_child() == true
-        zones.add(child);
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn same_stack_candidate_is_skipped() {
-        let mut zones = ZoneList::new();
-        // Anchor (id 2) overlaps dragged (id 1); make id 1 already a member of
-        // id 2's stack so they share the same anchor ⇒ skip the restack.
-        zones.add(zone_at(1, 50, 50, 100, 100));
-        zones.add(zone_at(2, 0, 0, 300, 300));
-        assert!(zones.stack(ZoneId(2), ZoneId(1)));
-        // Now dragged (1) shares anchor (2) with the only candidate (2, the
-        // anchor). is_stacked_child(1)==true is irrelevant for the dragged;
-        // the candidate 2 shares the anchor with 1 ⇒ skip ⇒ None.
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
-
-    #[test]
-    fn existing_stack_anchor_does_not_enter_the_free_zone_auto_merge_path() {
-        let mut zones = ZoneList::new();
-        zones.add(zone_at(1, 100, 100, 400, 300));
-        zones.add(zone_at(2, 100, 100, 400, 300));
-        zones.add(zone_at(3, 100, 100, 400, 300));
-        assert!(zones.stack(ZoneId(1), ZoneId(2)));
-
-        assert_eq!(stack_target_for_drop(&zones, ZoneId(1)), None);
-    }
+    include!("zone_gesture_geometry/tests.rs");
 }

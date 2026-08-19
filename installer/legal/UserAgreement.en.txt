@@ -1,5 +1,5 @@
 ﻿BentoDesk User Agreement
-Effective date: 2 August 2026
+Effective date: 2026-08-18
 
 Please read this agreement before installing BentoDesk. By selecting the acceptance checkbox and continuing, you confirm that you have read and accepted these terms.
 
@@ -7,9 +7,9 @@ Please read this agreement before installing BentoDesk. By selecting the accepta
 
 BentoDesk is a native Windows desktop organizer maintained by Fang Han. Its source code is licensed under the GNU Affero General Public License, version 3 or any later version (AGPL-3.0-or-later). The AGPL governs your rights to use, study, modify, and redistribute the software. This agreement does not reduce the rights granted by that license.
 
-2. Local operation
+2. Local-first operation
 
-BentoDesk runs fully offline. It does not require an account or cloud service and does not collect or transmit personal data, device identifiers, usage analytics, crash reports, file lists, file contents, or any other information from your computer.
+BentoDesk does not require an account or project-operated server and provides no telemetry, analytics, advertising, cloud storage, or crash-upload service. Apart from the ordinary HTTPS request metadata from the default GitHub channel or a controlled HTTPS override described in section 4, it does not upload personal data, device identifiers, usage records, desktop file lists or paths, icons, contents, or other user data.
 
 To provide its desktop-organizing features, BentoDesk reads local desktop metadata and the files or folders you explicitly drag, select, or bind. This processing stays on your computer. External links and network locations are opened only after your explicit action and are handed to the corresponding default Windows application; any network access then belongs to Windows or that application, not to BentoDesk.
 
@@ -21,7 +21,9 @@ Application settings are stored locally. The uninstaller preserves them by defau
 
 4. Updates
 
-BentoDesk does not contact an update server. New versions are distributed through the official GitHub Releases page and can be downloaded and installed at your discretion.
+BentoDesk's standard updater channel contacts only https://api.github.com/repos/ZRainbow1275/bentodesk/releases/latest and its exact setup asset on GitHub over certificate-validated HTTPS. A controlled BENTODESK_UPDATE_MANIFEST_URL may select an HTTPS, file, or local override. When an automatic frequency is selected, the scheduler checks immediately when it starts and then at the selected cadence. The defaults are Weekly and auto-download enabled; selecting Manual disables scheduled checks, and auto-download can be disabled independently.
+
+On the default channel, auto-download stages the exact official setup only after its GitHub SHA-256 digest is verified. A controlled override stages its declared artifact only after the manifest SHA-256 or embedded-key minisign signature is verified. Installation always requires an explicit user action. GitHub, or the host selected by a controlled HTTPS override, can receive ordinary HTTPS request metadata such as the source IP address and BentoDesk User-Agent under its own policies; BentoDesk does not attach telemetry or user-file data to these requests.
 
 5. Warranty and liability
 

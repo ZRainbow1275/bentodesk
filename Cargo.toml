@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "2.1.0"
+version      = "2.2.0"
 edition      = "2024"
 rust-version = "1.89"
 license      = "AGPL-3.0-or-later"
@@ -106,6 +106,8 @@ windows-sys = { version = "0.59", default-features = false, features = [
     # OS-locale UI-language default (non-Chinese OS → English). Feature on the
     # already-present windows-sys crate; no new external dependency (§8).
     "Win32_Globalization",
+    # Native updater HTTPS transport via WinHTTP/Schannel and the system proxy.
+    "Win32_Networking_WinHttp",
 ] }
 
 # --- COM-typed graphics surfaces (spec §3.1.1) ---

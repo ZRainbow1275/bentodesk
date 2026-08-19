@@ -38,6 +38,7 @@ pub(super) fn hit_test_render_zone(app: &AppState, x: f32, y: f32, now_ms: u32) 
     None
 }
 
+#[cfg(test)]
 pub(super) fn drop_preview_rect_for_zone(
     zone: &Zone,
     panel: bentodesk_style::Rect,
@@ -75,15 +76,20 @@ pub(super) fn drop_preview_rect_for_visible_drag(
     let drag = drag?;
     let dragged = app.zones.item(drag.zone_id, drag.item_id)?;
     item_visible(dragged).then_some(())?;
-    drop_preview_rect_for_zone(
+    let source_item = (drag.zone_id == zone.id).then_some(drag.item_id);
+    highlight_overlay::item_drop_target_for_item_in_panel(
         zone,
-        panel,
-        Some(drag),
-        dragged.is_wide,
-        scroll_offset,
-        item_top_offset,
+        source_item,
+        dragged,
+        highlight_overlay::ItemDropProjection {
+            panel,
+            pointer: (drag.last_x, drag.last_y),
+            item_top_offset,
+            stored_scroll: scroll_offset,
+        },
         item_visible,
     )
+    .map(|(_, _, _, rect)| rect)
 }
 
 impl Renderer {
