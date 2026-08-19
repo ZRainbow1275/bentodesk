@@ -7,6 +7,12 @@ pub(super) fn handle_rbutton_up(root: &AppRoot, hwnd: HWND, x: f32, y: f32) {
     if app.settings_open.get() {
         return;
     }
+    // A left-button Zone/item gesture owns capture through its release. Opening
+    // the custom menu on a simultaneous right-button release would reuse the
+    // same Main HWND capture and leave the gesture/cursor live behind the menu.
+    if normal_pointer_drag_active(&app) {
+        return;
+    }
     if app
         .active_context_menu
         .borrow()
@@ -546,6 +552,7 @@ pub(super) fn close_context_menu_surface(root: &AppRoot) {
             }
         };
         if changed {
+            refresh_main_zone_resize_cursor(root, hwnd);
             request_redraw(hwnd);
         }
     }

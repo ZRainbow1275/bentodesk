@@ -103,6 +103,39 @@ fn automatic_icon_extraction_rejects_network_paths_before_shell_access() {
 }
 
 #[test]
+fn internet_shortcut_rejects_unc_icon_before_shell_access() {
+    let path =
+        std::env::temp_dir().join(format!("bentodesk-unsafe-icon-{}.url", std::process::id()));
+    std::fs::write(
+        &path,
+        "[InternetShortcut]\r\nURL=https://example.invalid/\r\nIconFile=\\\\server\\share\\icon.dll\r\nIconIndex=7\r\n",
+    )
+    .expect("write unsafe Internet Shortcut fixture");
+
+    assert!(matches!(
+        extract_icon_png(&path.to_string_lossy()),
+        Err(IconError::Io { message, .. }) if message.contains("Internet Shortcut icon path")
+    ));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn native_icon_request_covers_responsive_hover_slot() {
+    assert_eq!(native_icon_request_px(), 128);
+}
+
+#[test]
+fn shell_item_image_request_is_icon_only_without_thumbnail_or_scaleup_flags() {
+    use windows::Win32::UI::Shell::{SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY};
+
+    assert_eq!(
+        shell_item_image_flags(),
+        SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK
+    );
+}
+
+#[test]
 fn premultiplied_bgra_becomes_straight_rgba() {
     let mut pixels = [16, 32, 64, 128, 0, 0, 0, 0];
 

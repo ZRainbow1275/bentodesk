@@ -550,128 +550,131 @@ impl Renderer {
         let anim_now_ms = app.geometry_frame_now_ms.get();
         let item_hover = app.item_hover.get();
         let item_drag = app.item_drag.borrow();
-        let item_label_group_px = {
-            let mut label_flow_slot = 0;
-            item_label_group_font_size(zone.items.iter().filter_map(|item| {
+        let item_flow = app.resolve_zone_item_flow_layout(
+            zone,
+            preview,
+            search_item_offset,
+            zone.items.iter().filter(|item| {
+                !search_active
+                    || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
+            }),
+        );
+        let content_clip =
+            highlight_overlay::item_content_clip_rect_in_panel(preview, search_item_offset);
+        self.push_clip(content_clip)?;
+        let content_result = (|| -> Result<(), RenderError> {
+            let mut visible_item_count = 0usize;
+            for item in &zone.items {
                 if search_active
                     && !search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
                 {
-                    return None;
+                    continue;
                 }
-                let (rect, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_in_panel(
-                    zone,
-                    preview,
-                    label_flow_slot,
-                    item.is_wide,
-                    search_item_offset,
-                );
-                label_flow_slot = next_slot;
-                (rect.width > 0.0 && rect.height > 0.0).then_some((
-                    item_label_visible_name(item.name.as_ref()),
-                    (rect.width - 8.0).max(0.0),
-                ))
-            }))
-        };
-        let mut flow_slot = 0;
-        let mut visible_item_count = 0usize;
-        for item in &zone.items {
-            if search_active
-                && !search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
-            {
-                continue;
-            }
-            visible_item_count += 1;
-            let (rect, next_slot) = highlight_overlay::item_card_rect_for_flow_slot_in_panel(
-                zone,
-                preview,
-                flow_slot,
-                item.is_wide,
-                search_item_offset,
-            );
-            flow_slot = next_slot;
-            if rect.width <= 0.0 || rect.height <= 0.0 {
-                continue;
-            }
-            let is_dragged_source = item_drag
-                .as_ref()
-                .is_some_and(|drag| drag.zone_id == zone.id && drag.item_id == item.id);
-            let card_key = (zone.id, item.id);
-            let (hover_raw, press_t) = if is_dragged_source {
-                (0.0, 0.0)
-            } else {
-                item_hover.sample(card_key, anim_now_ms)
-            };
-            let hover_t = if is_dragged_source || item.file_missing {
-                0.0
-            } else {
-                hover_raw
-            };
-            let item_scale = if is_dragged_source {
-                1.0
-            } else {
-                item_card::card_scale_for(hover_raw, press_t)
-            };
-            self.draw_item_card(
-                item,
-                rect,
-                if is_dragged_source {
-                    item_chrome.drag_source_background
-                } else if item.file_missing {
-                    item_chrome.missing_background
+                visible_item_count += 1;
+                let Some(flow_card) = item_flow.card_for(item.id) else {
+                    continue;
+                };
+                let rect = flow_card.rect;
+                if rect.width <= 0.0
+                    || rect.height <= 0.0
+                    || rect.bottom() <= content_clip.y
+                    || rect.y >= content_clip.bottom()
+                {
+                    continue;
+                }
+                let is_dragged_source = item_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.zone_id == zone.id && drag.item_id == item.id);
+                let card_key = (zone.id, item.id);
+                let (hover_raw, press_t) = if is_dragged_source {
+                    (0.0, 0.0)
                 } else {
-                    item_chrome.normal_background
-                },
-                &item_chrome,
-                hover_t,
-                !is_dragged_source && item_hover.press_held(card_key),
-                item_scale,
-                item_label_group_px,
-                1.0,
-            )?;
-        }
-        if let Some(drag) = item_drag.as_ref().filter(|drag| {
-            drag.is_internal_dragging
-                && drag.last_x as f32 >= preview.x
-                && (drag.last_x as f32) < preview.right()
-                && drag.last_y as f32 >= preview.y
-                && (drag.last_y as f32) < preview.bottom()
-        }) && let Some(dragged) = app.zones.item(drag.zone_id, drag.item_id)
-            && (!search_active
-                || search_bar::zone_item_matches_query(dragged.name.as_ref(), search_query))
-            && let Some((_, _, _, drop_preview)) = highlight_overlay::item_drop_target_for_panel(
-                zone,
-                preview,
-                (drag.zone_id == zone.id).then_some(drag.item_id),
-                dragged.is_wide,
-                (drag.last_x as f32, drag.last_y as f32),
-                search_item_offset,
-                |item| {
-                    !search_active
-                        || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
-                },
-            )
-        {
-            self.draw_item_drop_preview(app, drop_preview, item_chrome.card_radius)?;
-        }
-        if search_active && visible_item_count == 0 {
-            self.draw_text_no_wrap_with_style(
-                bentodesk_style::t(bentodesk_style::i18n_zh_cn::ids::SEARCH_EMPTY),
-                bentodesk_style::Rect {
-                    x: preview.x + expanded_zone_grid::HEADER_INSET_X,
-                    y: preview.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + search_item_offset,
-                    width: (preview.width - expanded_zone_grid::HEADER_INSET_X * 2.0).max(0.0),
-                    height: 28.0,
-                },
-                pal.text_muted,
-                12.0,
-                400,
-                1.4,
-                dwrite::TextAlign {
-                    h: dwrite::HAlign::Center,
-                    v: dwrite::VAlign::Center,
-                },
-            )?;
-        }
-        Ok(())
+                    item_hover.sample(card_key, anim_now_ms)
+                };
+                let hover_t = if is_dragged_source || item.file_missing {
+                    0.0
+                } else {
+                    hover_raw
+                };
+                let item_scale = if is_dragged_source {
+                    1.0
+                } else {
+                    item_card::card_scale_for(hover_raw, press_t)
+                };
+                let label_font_px =
+                    item_grid::responsive_item_metrics(rect.width, item.name.as_ref())
+                        .label_font_px;
+                self.draw_item_card(
+                    item,
+                    rect,
+                    if is_dragged_source {
+                        item_chrome.drag_source_background
+                    } else if item.file_missing {
+                        item_chrome.missing_background
+                    } else {
+                        item_chrome.normal_background
+                    },
+                    &item_chrome,
+                    hover_t,
+                    !is_dragged_source && item_hover.press_held(card_key),
+                    item_scale,
+                    label_font_px,
+                    1.0,
+                )?;
+            }
+            if let Some(drag) = item_drag.as_ref().filter(|drag| {
+                drag.is_internal_dragging
+                    && drag.last_x as f32 >= preview.x
+                    && (drag.last_x as f32) < preview.right()
+                    && drag.last_y as f32 >= preview.y
+                    && (drag.last_y as f32) < preview.bottom()
+            }) && let Some(dragged) = app.zones.item(drag.zone_id, drag.item_id)
+                && (!search_active
+                    || search_bar::zone_item_matches_query(dragged.name.as_ref(), search_query))
+                && let Some((_, _, _, drop_preview)) =
+                    highlight_overlay::item_drop_target_for_item_in_panel(
+                        zone,
+                        (drag.zone_id == zone.id).then_some(drag.item_id),
+                        dragged,
+                        highlight_overlay::ItemDropProjection {
+                            panel: preview,
+                            pointer: (drag.last_x as f32, drag.last_y as f32),
+                            item_top_offset: search_item_offset,
+                            stored_scroll: app.zone_content_scroll_offset(zone.id),
+                        },
+                        |item| {
+                            !search_active
+                                || search_bar::zone_item_matches_query(
+                                    item.name.as_ref(),
+                                    search_query,
+                                )
+                        },
+                    )
+            {
+                self.draw_item_drop_preview(app, drop_preview, item_chrome.card_radius)?;
+            }
+            if search_active && visible_item_count == 0 {
+                self.draw_text_no_wrap_with_style(
+                    bentodesk_style::t(bentodesk_style::i18n_zh_cn::ids::SEARCH_EMPTY),
+                    bentodesk_style::Rect {
+                        x: preview.x + expanded_zone_grid::HEADER_INSET_X,
+                        y: preview.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + search_item_offset,
+                        width: (preview.width - expanded_zone_grid::HEADER_INSET_X * 2.0).max(0.0),
+                        height: 28.0,
+                    },
+                    pal.text_muted,
+                    12.0,
+                    400,
+                    1.4,
+                    dwrite::TextAlign {
+                        h: dwrite::HAlign::Center,
+                        v: dwrite::VAlign::Center,
+                    },
+                )?;
+            }
+            Ok(())
+        })();
+        let pop_result = self.pop_clip();
+        content_result.and(pop_result)
     }
 }

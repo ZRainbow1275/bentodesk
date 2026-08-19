@@ -33,6 +33,7 @@ fn updater_with_test_minisign_key(
 
 include!("tests/01_decode_tauri_minisign_signature_accepts_raw_and_base64.rs");
 include!("tests/02_recurring_background_check_repeats_until_test_run_limit.rs");
+include!("tests/03_github_release_and_operation_gate.rs");
 
 #[test]
 fn local_manifest_read_is_bounded() {
@@ -81,10 +82,9 @@ fn update_artifact_size_is_bounded() {
 }
 
 #[test]
-fn updater_rejects_network_manifest_sources() {
+fn updater_rejects_insecure_or_network_filesystem_manifest_sources() {
     let (tx, _rx) = unbounded::<UpdateEvent>();
     for source in [
-        "https://example.com/update.json",
         "http://127.0.0.1/update.json",
         r"\\server\share\update.json",
         r"file://\\server\share\update.json",

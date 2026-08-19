@@ -31,6 +31,18 @@ pub use super::shortcut::resolve_lnk_target;
 
 const MAX_INTERNET_SHORTCUT_BYTES: usize = 64 * 1024;
 const MAX_ICON_DIMENSION: u32 = 1_024;
+const NATIVE_ICON_REQUEST_PX: i32 = 128;
+
+#[inline]
+fn native_icon_request_px() -> i32 {
+    NATIVE_ICON_REQUEST_PX
+}
+
+#[inline]
+fn shell_item_image_flags() -> windows::Win32::UI::Shell::SIIGBF {
+    use windows::Win32::UI::Shell::{SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY};
+    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK
+}
 
 struct HiconPixels {
     rgba: Vec<u8>,
@@ -180,9 +192,18 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
         };
         if metadata.blocked_reference {
             tracing::warn!(%path, "shortcut network reference rejected before icon extraction");
+            return Err(IconError::Io {
+                path: std::path::PathBuf::from(path),
+                message: "shortcut references a path rejected by automatic icon extraction"
+                    .to_owned(),
+            });
         }
-        let blocked_reference = metadata.blocked_reference;
         if let Some(location) = metadata.icon {
+            if let Ok(png) = extract_icon_via_shdef(&location.path, location.index)
+                && super::hicon::png_has_visible_content(&png)
+            {
+                return Ok(png);
+            }
             match extract_icon_via_extract_icon_ex(&location.path, location.index) {
                 Ok(png) if super::hicon::png_has_visible_content(&png) => return Ok(png),
                 Ok(_) => tracing::debug!(
@@ -199,6 +220,12 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
 
         if let Some(target) = metadata.target {
             tracing::info!("Resolved .lnk target: {} -> {}", path, target);
+
+            if let Ok(png) = extract_icon_via_shell_item_image_factory(&target)
+                && super::hicon::png_has_visible_content(&png)
+            {
+                return Ok(png);
+            }
 
             if target.to_ascii_lowercase().ends_with(".exe") {
                 match extract_icon_via_extract_icon_ex(&target, 0) {
@@ -229,21 +256,23 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
             }
         }
 
-        if blocked_reference {
-            return Err(IconError::Io {
-                path: std::path::PathBuf::from(path),
-                message: "shortcut references a path rejected by automatic icon extraction"
-                    .to_owned(),
-            });
-        }
-
         Err(IconError::AllTransparent {
             path: path.to_string(),
         })
     } else if is_url {
-        if let Some(location) = read_internet_shortcut_icon(path)
-            && !crate::path_may_access_network(std::path::Path::new(&location.path))
-        {
+        if let Some(location) = read_internet_shortcut_icon(path) {
+            if crate::path_may_access_network(std::path::Path::new(&location.path)) {
+                return Err(IconError::Io {
+                    path: std::path::PathBuf::from(path),
+                    message: "Internet Shortcut icon path rejected by automatic icon extraction"
+                        .to_owned(),
+                });
+            }
+            if let Ok(png) = extract_icon_via_shdef(&location.path, location.index)
+                && super::hicon::png_has_visible_content(&png)
+            {
+                return Ok(png);
+            }
             match extract_icon_via_extract_icon_ex(&location.path, location.index) {
                 Ok(png) if super::hicon::png_has_visible_content(&png) => {
                     tracing::info!(
@@ -271,8 +300,19 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
                 }
             }
         }
-        extract_icon_via_shgetfileinfo(path)
+        extract_icon_via_shell_item_image_factory(path)
+            .or_else(|_| extract_icon_via_shgetfileinfo(path))
     } else if lower.ends_with(".exe") {
+        if let Ok(png) = extract_icon_via_shell_item_image_factory(path)
+            && super::hicon::png_has_visible_content(&png)
+        {
+            return Ok(png);
+        }
+        if let Ok(png) = extract_icon_via_shdef(path, 0)
+            && super::hicon::png_has_visible_content(&png)
+        {
+            return Ok(png);
+        }
         match extract_icon_via_extract_icon_ex(path, 0) {
             Ok(png) if super::hicon::png_has_visible_content(&png) => return Ok(png),
             Ok(_) => {
@@ -284,8 +324,200 @@ pub fn extract_icon_png(path: &str) -> Result<Vec<u8>, IconError> {
         }
         extract_icon_via_shgetfileinfo(path)
     } else {
-        extract_icon_via_shgetfileinfo(path)
+        extract_icon_via_shell_item_image_factory(path)
+            .or_else(|_| extract_icon_via_shgetfileinfo(path))
     }
+}
+
+fn extract_icon_via_shdef(path: &str, icon_index: i32) -> Result<Vec<u8>, IconError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::SHDefExtractIconW;
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
+    use windows::core::PCWSTR;
+
+    let wide_path: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut icon = HICON::default();
+    // SAFETY: path is a valid NUL-terminated UTF-16 buffer and `icon` is the
+    // single caller-owned output slot. LOWORD requests a 128px large icon.
+    unsafe {
+        SHDefExtractIconW(
+            PCWSTR(wide_path.as_ptr()),
+            icon_index,
+            0,
+            Some(&mut icon),
+            None,
+            native_icon_request_px() as u32,
+        )
+        .ok()
+        .map_err(|error| IconError::Com {
+            ctx: "SHDefExtractIconW",
+            message: error.to_string(),
+        })?;
+    }
+    if icon.is_invalid() {
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        });
+    }
+    let png = hicon_to_png(icon, path);
+    // SAFETY: SHDefExtractIconW transferred ownership of this HICON.
+    if let Err(error) = unsafe { DestroyIcon(icon) } {
+        tracing::warn!(%path, %error, "DestroyIcon failed after SHDefExtractIconW");
+    }
+    png
+}
+
+fn extract_icon_via_shell_item_image_factory(path: &str) -> Result<Vec<u8>, IconError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::DeleteObject;
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName};
+    use windows::core::PCWSTR;
+
+    let wide_path: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: the guarded local path is a live NUL-terminated UTF-16 buffer.
+    let factory: IShellItemImageFactory = unsafe {
+        SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None).map_err(|error| {
+            IconError::Com {
+                ctx: "SHCreateItemFromParsingName<IShellItemImageFactory>",
+                message: error.to_string(),
+            }
+        })?
+    };
+    // Deliberately omit SIIGBF_SCALEUP, SIIGBF_THUMBNAILONLY, overlay and
+    // background flags: this path requests the file's native icon identity.
+    // SAFETY: `factory` is live and returns a caller-owned HBITMAP.
+    let bitmap = unsafe {
+        factory
+            .GetImage(
+                SIZE {
+                    cx: native_icon_request_px(),
+                    cy: native_icon_request_px(),
+                },
+                shell_item_image_flags(),
+            )
+            .map_err(|error| IconError::Com {
+                ctx: "IShellItemImageFactory::GetImage",
+                message: error.to_string(),
+            })?
+    };
+    let png = hbitmap_to_png(bitmap, path);
+    // SAFETY: GetImage transfers ownership of the returned HBITMAP.
+    if !unsafe { DeleteObject(bitmap) }.as_bool() {
+        tracing::warn!(%path, win32_error = last_win32_error(), "DeleteObject failed after Shell item image extraction");
+    }
+    png
+}
+
+fn hbitmap_to_png(
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    path: &str,
+) -> Result<Vec<u8>, IconError> {
+    use windows::Win32::Graphics::Gdi::{
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+        GetDIBits, GetObjectW,
+    };
+    if bitmap.is_invalid() {
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        });
+    }
+    let mut value = BITMAP::default();
+    // SAFETY: `bitmap` is live and `value` exactly matches the advertised size.
+    let written = unsafe {
+        GetObjectW(
+            bitmap,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some((&mut value as *mut BITMAP).cast()),
+        )
+    };
+    if written != std::mem::size_of::<BITMAP>() as i32 {
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        });
+    }
+    let width = u32::try_from(value.bmWidth).map_err(|_| IconError::Com {
+        ctx: "hbitmap_to_png/dimensions",
+        message: "bitmap width is not positive".to_owned(),
+    })?;
+    let height = u32::try_from(value.bmHeight).map_err(|_| IconError::Com {
+        ctx: "hbitmap_to_png/dimensions",
+        message: "bitmap height is not positive".to_owned(),
+    })?;
+    let mut pixels =
+        vec![
+            0_u8;
+            checked_icon_pixel_len(width, height).map_err(|message| IconError::Com {
+                ctx: "hbitmap_to_png/buffer",
+                message: message.to_owned(),
+            })?
+        ];
+    let width_i32 = i32::try_from(width).map_err(|_| IconError::Com {
+        ctx: "hbitmap_to_png/GetDIBits",
+        message: "bitmap width exceeds i32".to_owned(),
+    })?;
+    let height_i32 = i32::try_from(height).map_err(|_| IconError::Com {
+        ctx: "hbitmap_to_png/GetDIBits",
+        message: "bitmap height exceeds i32".to_owned(),
+    })?;
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width_i32,
+            biHeight: -height_i32,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: screen-compatible memory DC; deleted below on every result path.
+    let hdc = unsafe { CreateCompatibleDC(None) };
+    if hdc.is_invalid() {
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        });
+    }
+    // SAFETY: HBITMAP/HDC are live and the output is exactly width*height*4.
+    let rows = unsafe {
+        GetDIBits(
+            hdc,
+            bitmap,
+            0,
+            height,
+            Some(pixels.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    // SAFETY: this function owns the compatible DC.
+    if !unsafe { DeleteDC(hdc) }.as_bool() {
+        tracing::warn!(%path, win32_error = last_win32_error(), "DeleteDC failed after HBITMAP conversion");
+    }
+    if rows != height_i32 {
+        return Err(IconError::Extract {
+            path: path.to_owned(),
+            win32_error: last_win32_error(),
+        });
+    }
+    normalize_color_bgra_to_rgba(&mut pixels, None, true).map_err(|message| IconError::Com {
+        ctx: "hbitmap_to_png/normalise",
+        message: message.to_owned(),
+    })?;
+    wic::encode_png(&pixels, width, height)
 }
 
 /// Strategy 1 — `.exe`/PE files: read embedded icon resource directly
@@ -402,230 +634,9 @@ fn extract_icon_via_shgetfileinfo(path: &str) -> Result<Vec<u8>, IconError> {
 
 // ─── HICON → RGBA → PNG via WIC ──────────────────────────────────────
 
-/// Convert an HICON to a PNG byte vector at the icon's native
-/// resolution. Detects the actual HICON bitmap dimensions via
-/// `GetObject(BITMAP)` so high-DPI icons (e.g. 48x48 on 150% scaling)
-/// are captured in full rather than truncated to 32x32.
-fn hicon_to_png(
-    hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
-    path: &str,
-) -> Result<Vec<u8>, IconError> {
-    use windows::Win32::Graphics::Gdi::{
-        BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
-        DeleteObject, GetDIBits, GetObjectW, HBITMAP,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
-
-    // SAFETY: GetIconInfo is called with a valid HICON; returns BOOL
-    // mapped to `windows::core::Result<()>`. On failure we surface the
-    // wrapped HRESULT as a `Com` error (call-site context preserved).
-    let mut icon_info = ICONINFO::default();
-    unsafe {
-        GetIconInfo(hicon, &mut icon_info).map_err(|e| IconError::Com {
-            ctx: "hicon_to_png/GetIconInfo",
-            message: e.to_string(),
-        })?;
-    }
-
-    // SAFETY: CreateCompatibleDC(None) = compatible with the screen DC.
-    let hdc = unsafe { CreateCompatibleDC(None) };
-    let pixel_result = (|| -> Result<HiconPixels, IconError> {
-        if hdc.is_invalid() {
-            return Err(IconError::Extract {
-                path: path.to_owned(),
-                win32_error: last_win32_error(),
-            });
-        }
-
-        fn bitmap_dimensions(bitmap: HBITMAP, path: &str) -> Result<(u32, u32), IconError> {
-            if bitmap.is_invalid() {
-                return Err(IconError::Com {
-                    ctx: "hicon_to_png/bitmap_dimensions",
-                    message: format!("missing bitmap for {path}"),
-                });
-            }
-            let mut value = BITMAP::default();
-            // SAFETY: `bitmap` is a live HBITMAP returned by GetIconInfo and
-            // `value` has exactly the size advertised to GetObjectW.
-            let written = unsafe {
-                GetObjectW(
-                    bitmap,
-                    std::mem::size_of::<BITMAP>() as i32,
-                    Some((&mut value as *mut BITMAP).cast()),
-                )
-            };
-            if written != std::mem::size_of::<BITMAP>() as i32 {
-                return Err(IconError::Extract {
-                    path: path.to_owned(),
-                    win32_error: last_win32_error(),
-                });
-            }
-            let width = u32::try_from(value.bmWidth).map_err(|_| IconError::Com {
-                ctx: "hicon_to_png/bitmap_dimensions",
-                message: "bitmap width is not positive".to_owned(),
-            })?;
-            let height = u32::try_from(value.bmHeight).map_err(|_| IconError::Com {
-                ctx: "hicon_to_png/bitmap_dimensions",
-                message: "bitmap height is not positive".to_owned(),
-            })?;
-            checked_icon_pixel_len(width, height).map_err(|message| IconError::Com {
-                ctx: "hicon_to_png/bitmap_dimensions",
-                message: message.to_owned(),
-            })?;
-            Ok((width, height))
-        }
-
-        fn read_bgra(
-            hdc: windows::Win32::Graphics::Gdi::HDC,
-            bitmap: HBITMAP,
-            width: u32,
-            height: u32,
-            path: &str,
-        ) -> Result<Vec<u8>, IconError> {
-            let width_i32 = i32::try_from(width).map_err(|_| IconError::Com {
-                ctx: "hicon_to_png/GetDIBits",
-                message: "bitmap width exceeds i32".to_owned(),
-            })?;
-            let height_i32 = i32::try_from(height).map_err(|_| IconError::Com {
-                ctx: "hicon_to_png/GetDIBits",
-                message: "bitmap height exceeds i32".to_owned(),
-            })?;
-            let mut bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width_i32,
-                    biHeight: -height_i32,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: 0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut pixels =
-                vec![
-                    0u8;
-                    checked_icon_pixel_len(width, height).map_err(|message| IconError::Com {
-                        ctx: "hicon_to_png/GetDIBits",
-                        message: message.to_owned(),
-                    },)?
-                ];
-            // SAFETY: `bitmap` and `hdc` are live GDI handles. `pixels` is
-            // exactly width * height * 4 bytes and the requested DIB is 32bpp.
-            let rows = unsafe {
-                GetDIBits(
-                    hdc,
-                    bitmap,
-                    0,
-                    height,
-                    Some(pixels.as_mut_ptr().cast()),
-                    &mut bmi,
-                    DIB_RGB_COLORS,
-                )
-            };
-            if rows != height_i32 {
-                return Err(IconError::Extract {
-                    path: path.to_owned(),
-                    win32_error: last_win32_error(),
-                });
-            }
-            Ok(pixels)
-        }
-
-        if !icon_info.hbmColor.is_invalid() {
-            let (width, height) = bitmap_dimensions(icon_info.hbmColor, path)?;
-            tracing::info!("HICON actual bitmap size: {}x{}", width, height);
-            let mut pixels = read_bgra(hdc, icon_info.hbmColor, width, height, path)?;
-            let all_alpha_zero = pixels.chunks_exact(4).all(|pixel| pixel[3] == 0);
-            let mask = if all_alpha_zero {
-                let (mask_width, mask_height) = bitmap_dimensions(icon_info.hbmMask, path)?;
-                if mask_width != width || mask_height < height {
-                    return Err(IconError::Com {
-                        ctx: "hicon_to_png/AND-mask dimensions",
-                        message: "colour and AND-mask dimensions differ".to_owned(),
-                    });
-                }
-                Some(read_bgra(hdc, icon_info.hbmMask, width, height, path)?)
-            } else {
-                pixels = super::hicon::render_bgra(hdc, hicon, width, height, path)?;
-                None
-            };
-            normalize_color_bgra_to_rgba(&mut pixels, mask.as_deref(), !all_alpha_zero).map_err(
-                |message| IconError::Com {
-                    ctx: "hicon_to_png/normalise colour",
-                    message: message.to_owned(),
-                },
-            )?;
-            Ok(HiconPixels {
-                rgba: pixels,
-                width,
-                height,
-                invert_mask: None,
-            })
-        } else {
-            let (width, mask_height) = bitmap_dimensions(icon_info.hbmMask, path)?;
-            if mask_height % 2 != 0 {
-                return Err(IconError::Com {
-                    ctx: "hicon_to_png/monochrome dimensions",
-                    message: "monochrome HICON mask height must contain AND and XOR planes"
-                        .to_owned(),
-                });
-            }
-            let height = mask_height / 2;
-            let mask = read_bgra(hdc, icon_info.hbmMask, width, mask_height, path)?;
-            let (pixels, invert_mask) =
-                monochrome_mask_to_rgba(&mask, width, height).map_err(|message| {
-                    IconError::Com {
-                        ctx: "hicon_to_png/normalise monochrome",
-                        message: message.to_owned(),
-                    }
-                })?;
-            Ok(HiconPixels {
-                rgba: pixels,
-                width,
-                height,
-                invert_mask,
-            })
-        }
-    })();
-
-    // SAFETY: We own the DC and bitmap handles from GetIconInfo. The
-    // HICON itself is owned by the caller (NOT freed here).
-    unsafe {
-        if !hdc.is_invalid() && !DeleteDC(hdc).as_bool() {
-            tracing::warn!(
-                %path,
-                win32_error = last_win32_error(),
-                "DeleteDC failed after HICON conversion"
-            );
-        }
-        if !icon_info.hbmColor.is_invalid() && !DeleteObject(icon_info.hbmColor).as_bool() {
-            tracing::warn!(
-                %path,
-                win32_error = last_win32_error(),
-                "DeleteObject failed for HICON colour bitmap"
-            );
-        }
-        if !icon_info.hbmMask.is_invalid() && !DeleteObject(icon_info.hbmMask).as_bool() {
-            tracing::warn!(
-                %path,
-                win32_error = last_win32_error(),
-                "DeleteObject failed for HICON mask bitmap"
-            );
-        }
-    }
-
-    let pixels = pixel_result?;
-    let mut png = wic::encode_png(&pixels.rgba, pixels.width, pixels.height)?;
-    if let Some(bits) = pixels.invert_mask {
-        super::hicon::attach_legacy_invert_mask(&mut png, pixels.width, pixels.height, &bits)
-            .map_err(|message| IconError::Com {
-                ctx: "hicon_to_png/legacy invert mask",
-                message: message.to_owned(),
-            })?;
-    }
-    Ok(png)
-}
+#[path = "extractor/hicon.rs"]
+mod hicon;
+use hicon::hicon_to_png;
 
 pub(super) fn checked_icon_pixel_len(width: u32, height: u32) -> Result<usize, &'static str> {
     if width == 0 || height == 0 {

@@ -33,6 +33,9 @@ pub(super) fn parse_update_manifest(
     text: &str,
     fallback_current_version: SmolStr,
 ) -> Result<UpdateInfo, UpdaterError> {
+    if let Some(info) = github::try_parse_release(text, fallback_current_version.clone())? {
+        return Ok(info);
+    }
     let raw: RawManifest = serde_json::from_str(text)
         .map_err(|error| UpdaterError::InvalidManifest(error.to_string()))?;
     let version = raw
@@ -156,6 +159,16 @@ pub(super) fn copy_artifact_to_stage(
     event_tx: &Sender<UpdateEvent>,
 ) -> Result<(), UpdaterError> {
     let source = source.trim();
+    if source.starts_with("https://") {
+        winhttp::download_to_stage(
+            source,
+            stage_path,
+            MAX_UPDATE_ARTIFACT_BYTES,
+            ARTIFACT_DOWNLOAD_DEADLINE,
+            event_tx,
+        )?;
+        return Ok(());
+    }
     let source_path = artifact_source_path(source)?;
     let mut input = File::open(&source_path).map_err(|error| {
         UpdaterError::FetchFailed(format!("{}: {error}", source_path.display()))
@@ -168,6 +181,7 @@ pub(super) fn copy_artifact_to_stage(
         .map_err(|error| UpdaterError::FetchFailed(format!("{}: {error}", stage_path.display())))?;
     let mut buffer = [0u8; DOWNLOAD_BUFFER_BYTES];
     let mut written = 0u64;
+    let mut progress = DownloadProgress::new(event_tx, total_bytes);
     loop {
         let count = input
             .read(&mut buffer)
@@ -181,27 +195,70 @@ pub(super) fn copy_artifact_to_stage(
             .write_all(&buffer[..count])
             .map_err(|error| UpdaterError::FetchFailed(error.to_string()))?;
         written = next_written;
-        emit_download_progress(event_tx, written, total_bytes)?;
+        progress.observe(written)?;
+    }
+    if total_bytes.is_some_and(|total| total != written) {
+        return Err(UpdaterError::FetchFailed(
+            "local artifact length changed during copy".to_owned(),
+        ));
     }
     output
         .flush()
         .map_err(|error| UpdaterError::FetchFailed(error.to_string()))?;
+    progress.finish(written)?;
     Ok(())
 }
 
-pub(super) fn emit_download_progress(
-    event_tx: &Sender<UpdateEvent>,
-    written: u64,
+pub(super) struct DownloadProgress<'a> {
+    event_tx: &'a Sender<UpdateEvent>,
     total_bytes: Option<u64>,
-) -> Result<(), UpdaterError> {
-    event_tx
-        .send(UpdateEvent::Progress {
-            progress: UpdateProgress {
-                chunk_len: written,
-                total_bytes,
-            },
-        })
-        .map_err(|_| UpdaterError::EventChannelClosed)
+    next_at: u64,
+    step: u64,
+    last_emitted: Option<u64>,
+}
+
+impl<'a> DownloadProgress<'a> {
+    pub(super) fn new(event_tx: &'a Sender<UpdateEvent>, total_bytes: Option<u64>) -> Self {
+        let step = total_bytes
+            .map(|total| total.div_ceil(MAX_PROGRESS_EVENTS).max(1))
+            .unwrap_or(UNKNOWN_PROGRESS_STEP_BYTES);
+        Self {
+            event_tx,
+            total_bytes,
+            next_at: step,
+            step,
+            last_emitted: None,
+        }
+    }
+
+    pub(super) fn observe(&mut self, written: u64) -> Result<(), UpdaterError> {
+        if written < self.next_at && self.total_bytes.is_none_or(|total| written != total) {
+            return Ok(());
+        }
+        self.emit(written)?;
+        self.next_at = written.saturating_add(self.step);
+        Ok(())
+    }
+
+    pub(super) fn finish(&mut self, written: u64) -> Result<(), UpdaterError> {
+        if self.last_emitted == Some(written) {
+            return Ok(());
+        }
+        self.emit(written)
+    }
+
+    fn emit(&mut self, written: u64) -> Result<(), UpdaterError> {
+        self.event_tx
+            .send(UpdateEvent::Progress {
+                progress: UpdateProgress {
+                    chunk_len: written,
+                    total_bytes: self.total_bytes,
+                },
+            })
+            .map_err(|_| UpdaterError::EventChannelClosed)?;
+        self.last_emitted = Some(written);
+        Ok(())
+    }
 }
 
 pub(super) fn validate_manifest_integrity_policy(info: &UpdateInfo) -> Result<(), UpdaterError> {
@@ -573,6 +630,9 @@ pub(super) fn launch_nsis_installer(path: &Path) -> Result<(), UpdaterError> {
 }
 
 pub(super) fn version_is_newer(candidate: &str, current: &str) -> bool {
+    if let Some(ordering) = github::compare_canonical_versions(candidate, current) {
+        return ordering.is_gt();
+    }
     let candidate = candidate.trim().trim_start_matches('v');
     let current = current.trim().trim_start_matches('v');
     if candidate == current {

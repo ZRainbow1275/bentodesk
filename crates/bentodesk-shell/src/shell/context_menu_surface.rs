@@ -63,6 +63,7 @@ pub(super) fn show_active_context_menu(
         // is process-global and can be consumed by another thread.
         SetCapture(hwnd);
     }
+    refresh_main_zone_resize_cursor(root, hwnd);
     request_redraw(hwnd);
     Some(hwnd)
 }

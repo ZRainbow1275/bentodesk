@@ -504,12 +504,12 @@ pub(super) fn update_check_interval(
 
 pub(super) fn maybe_start_background_update_check(root: &AppRoot) {
     let frequency = root.app.borrow().update_check_frequency.get();
-    if !should_start_background_update_check(frequency) {
-        return;
-    }
-    if let Some(interval) = update_check_interval(frequency) {
-        root.updater.spawn_recurring_background_check(interval);
-    }
+    let interval = if should_start_background_update_check(frequency) {
+        update_check_interval(frequency)
+    } else {
+        None
+    };
+    root.updater.configure_scheduler(interval);
 }
 
 pub(super) fn encryption_mode_from_wire(value: &str) -> Option<SettingsEncryptionMode> {

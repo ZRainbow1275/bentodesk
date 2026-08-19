@@ -176,7 +176,7 @@ pub fn main_nchittest_kind(app: &AppState, win: &WindowState, x: f32, y: f32) ->
     }
 }
 
-fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
+pub(super) fn stack_overlay_contains(app: &AppState, x: f32, y: f32) -> bool {
     let stack_surface = app.stack_tray.borrow().clone();
     if let Some(state) = stack_surface.as_ref()
         && let Some(anchor) = app.zones.get(state.anchor_zone_id)

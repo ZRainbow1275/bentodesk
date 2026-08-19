@@ -61,6 +61,10 @@ pub(super) fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND,
         return;
     }
 
+    // Resize discoverability is evaluated against the surface that was
+    // actually visible at mouse-down. Click-mode selection below may expand or
+    // collapse a Zone, but must not create/destroy the handle for this event.
+    let resize_session_before_select = ui::actionable_zone_resize_session_for_point(&app, x, y);
     let clicked_zone = ui::hit_test_zone(&app, x, y);
     let clicked_zone_is_stack_anchor = clicked_zone
         .and_then(|id| app.zones.get(id))
@@ -184,18 +188,10 @@ pub(super) fn handle_lbutton_down(root: &AppRoot, slot: &WindowSlot, hwnd: HWND,
         }
     }
 
-    if let Some(session) = ui::zone_resize_session_for_point(&app, x, y) {
-        if let Some(z) = app.zones.get(session.id) {
-            // M4 locked gate — a locked zone cannot resize (Tauri parity:
-            // BentoZone.tsx:1198 `if (zoneLocked()) return;`). Selection on
-            // mouse-down (above) still applies; we just don't arm zone_resize.
-            if z.locked {
-                return;
-            }
-            app.zone_resize.set(Some(session));
-            // SAFETY: SetCapture canonical.
-            unsafe { SetCapture(hwnd) };
-        }
+    if let Some(session) = resize_session_before_select {
+        app.zone_resize.set(Some(session));
+        // SAFETY: `hwnd` is the live Main window receiving this button-down.
+        unsafe { SetCapture(hwnd) };
         return;
     }
     if let Some(id) = ui::hit_test_zone(&app, x, y)

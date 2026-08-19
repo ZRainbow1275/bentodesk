@@ -1,17 +1,21 @@
 ﻿BentoDesk Privacy Policy
-Effective date: 2 August 2026
+Effective date: 2026-08-18
 
-This policy describes BentoDesk's data behavior. It is intentionally short because BentoDesk has no server, account system, telemetry, advertising, analytics, or cloud storage.
+This policy describes BentoDesk's data behavior. BentoDesk has no account system, project-operated server, telemetry, advertising, analytics, cloud storage, or crash-upload service.
 
 1. No collection
 
-BentoDesk does not collect, upload, sell, or share personal data or information from your computer. It does not generate device identifiers, usage profiles, analytics events, crash uploads, or remote logs.
+BentoDesk does not collect, sell, or share application data or user files. Apart from the ordinary HTTPS request metadata from the default GitHub channel or a controlled HTTPS override described in section 2, it does not transmit personal data, device identifiers, usage profiles, analytics events, crash reports, remote logs, or desktop file names, paths, icons, or contents.
 
-2. Fully offline
+2. Update network boundary
 
-The BentoDesk process creates no network connection. Core features, settings, icon extraction, search, Zone layout, plugins, backups, and local update-package verification operate entirely on your computer.
+Core features, settings, icon extraction, search, Zone layout, plugins, backups, and update-package verification operate locally. The updater's standard channel contacts only https://api.github.com/repos/ZRainbow1275/bentodesk/releases/latest and its exact setup asset on GitHub over certificate-validated HTTPS. A controlled BENTODESK_UPDATE_MANIFEST_URL may select an HTTPS, file, or local override.
 
-Background icon hydration and local update checks reject UNC and mapped-network paths. When you explicitly open an external link or network location, BentoDesk asks Windows to use the corresponding default application. Any subsequent network activity belongs to Windows or that application and the service you chose to visit, not to BentoDesk.
+When scheduled checks are enabled, the updater checks immediately when its scheduler starts and then at the selected cadence. The defaults are Weekly and auto-download enabled. Selecting Manual disables scheduled checks, and auto-download can be disabled independently. On the default channel, auto-download stages the exact official setup only after its GitHub SHA-256 digest is verified. A controlled override stages its declared artifact only after the manifest SHA-256 or embedded-key minisign signature is verified. Installation always requires an explicit user action.
+
+GitHub, or the host selected by a controlled HTTPS override, can receive ordinary HTTPS request metadata such as the source IP address and BentoDesk User-Agent under its own policies. BentoDesk sends no account, telemetry, analytics, advertising, crash, desktop-path, file, icon, or content data with those requests.
+
+Background icon hydration and local update inputs reject UNC and mapped-network paths. When you explicitly open an external link or network location, BentoDesk asks Windows to use the corresponding default application. Any subsequent network activity belongs to Windows or that application and the service you chose to visit.
 
 3. Local data
 

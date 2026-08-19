@@ -287,6 +287,9 @@ pub(super) fn handle_lbutton_up(root: &AppRoot, slot: &WindowSlot, hwnd: HWND, x
         // SAFETY: ReleaseCapture canonical.
         unsafe { ReleaseCapture() };
     }
+    if was_resize {
+        refresh_zone_resize_cursor_after_release(root, slot, hwnd);
+    }
     if stack_bloom_click_changed || stack_drop_surface_changed || click_expand_changed {
         arm_hover_frame_timer(hwnd);
         request_redraw(hwnd);
@@ -420,36 +423,20 @@ pub(super) fn handle_active_pointer_drag(
         }
         if let Some(session) = app.zone_resize.get() {
             if let Some(z) = app.zones.get(session.id) {
-                let collapsed = app.zone_collapsed_rect(z);
-                let directional_max = bentodesk_app::zone_pill_geometry::expanded_zone_placement(
-                    collapsed,
-                    i32::MAX as f32,
-                    i32::MAX as f32,
-                    app.viewport,
-                )
-                .panel;
-                let (new_w, new_h) = bentodesk_app::zone_gesture_geometry::directional_resize_size(
+                let minimum_width =
+                    bentodesk_app::business::item_grid::minimum_panel_width(z.grid_columns);
+                let geometry = bentodesk_app::zone_gesture_geometry::directional_resize_geometry(
                     session,
                     x,
                     y,
-                    directional_max.width,
-                    directional_max.height,
-                    80.0,
+                    app.viewport,
+                    minimum_width,
                     60.0,
-                );
-                let minimum = DispatchSize::new(
-                    80.min(directional_max.width.floor() as i32),
-                    60.min(directional_max.height.floor() as i32),
                 );
                 // SAFETY: GetTickCount has no failure mode and is documented MT-safe.
                 let now_ms = unsafe { GetTickCount() };
                 reset_pointer_drag_hover_channels(&app, Some(session.id), now_ms);
-                let _ = resize_zone_live_with_minimum(
-                    &mut app,
-                    session.id,
-                    DispatchSize::new(new_w, new_h),
-                    minimum,
-                );
+                let _ = apply_zone_resize_live(&mut app, session.id, geometry);
                 log_animation_proof_state(&app, "zone_resize_live", now_ms, Some(x), Some(y));
             }
             return true;

@@ -291,10 +291,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw full item labels with no wrapping and no generated ellipsis.
-    /// Tauri ItemCard's `useTextAbbrGroup` keeps the complete display name and
-    /// shrinks the font size toward 8px instead of substituting `...`.
-    pub(super) fn draw_item_label_no_wrap(
+    /// Draw the complete ItemCard label with DWrite wrapping and no generated
+    /// ellipsis. Variable flow rows reserve the full layout height first.
+    pub(super) fn draw_item_label_wrapped(
         &mut self,
         text: &str,
         rect: bentodesk_style::Rect,
@@ -309,12 +308,11 @@ impl Renderer {
         for u in text.encode_utf16() {
             self.utf16_scratch.push(u);
         }
-        let layout = dwrite::create_layout_no_wrap(
+        let layout = dwrite::create_layout(
             &self.utf16_scratch,
             &format,
             rect.width.max(1.0),
             rect.height.max(1.0),
-            None,
             dwrite::TextAlign {
                 h: dwrite::HAlign::Center,
                 v: dwrite::VAlign::Near,

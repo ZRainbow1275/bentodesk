@@ -170,16 +170,30 @@ fn hit_test_resizing_zone_keeps_full_rect() {
     let app = app_with_zones(vec![zone]);
     // Resize is only ever armed on an expanded panel; emulate that state.
     app.set_zone_display_mode(bentodesk_app::ZoneDisplayMode::Always);
-    app.zone_resize
-        .set(Some(bentodesk_app::ZoneResizeSession {
-            id: ZoneId(48),
-            start_pointer_x: 340.0,
-            start_pointer_y: 280.0,
-            start_visible_width: 240.0,
-            start_visible_height: 180.0,
-            anchor_right: false,
-            anchor_bottom: false,
-        }));
+    app.zone_resize.set(Some(bentodesk_app::ZoneResizeSession {
+        id: ZoneId(48),
+        start_pointer_x: 340.0,
+        start_pointer_y: 280.0,
+        handle: bentodesk_app::ZoneResizeHandle::BottomRight,
+        start_panel: Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 240.0,
+            height: 180.0,
+        },
+        start_persisted_width: 240,
+        start_persisted_height: 180,
+        start_home_x: 100,
+        start_home_y: 100,
+        start_capsule: Rect {
+            x: 100.0,
+            y: 100.0,
+            width: 160.0,
+            height: 48.0,
+        },
+        anchor_right: false,
+        anchor_bottom: false,
+    }));
     // Far corner of the expanded rect remains reachable during the resize.
     assert_eq!(
         hit_test_zone(&app, 100.0 + 200.0, 100.0 + 150.0),
@@ -389,16 +403,13 @@ fn item_grid_position_for_point_preserves_narrow_five_column_zones() {
         bentodesk_app::expanded_zone_grid::HEADER_INSET_X,
     ) as f32;
     let gap = bentodesk_app::business::item_grid::ITEM_GRID_COLUMN_GAP_PX;
-    let cell_width = ((panel.width
-        - bentodesk_app::expanded_zone_grid::HEADER_INSET_X * 2.0)
+    let cell_width = ((panel.width - bentodesk_app::expanded_zone_grid::HEADER_INSET_X * 2.0)
         - gap * (columns - 1.0))
         .max(44.0)
         / columns;
-    let fifth_column_x = panel.x
-        + bentodesk_app::expanded_zone_grid::HEADER_INSET_X
-        + 4.5 * (cell_width + gap);
-    let first_row_y =
-        panel.y + bentodesk_app::business::item_grid::ITEM_GRID_TOP_OFFSET_PX + 10.0;
+    let fifth_column_x =
+        panel.x + bentodesk_app::expanded_zone_grid::HEADER_INSET_X + 4.5 * (cell_width + gap);
+    let first_row_y = panel.y + bentodesk_app::business::item_grid::ITEM_GRID_TOP_OFFSET_PX + 10.0;
 
     assert_eq!(
         item_grid_position_for_point(&app, ZoneId(11), fifth_column_x, first_row_y),

@@ -32,6 +32,9 @@ pub const ITEM_GRID_COLUMN_GAP_PX: f32 = 8.0;
 /// Inter-row gap (logical px) — locked.
 pub const ITEM_GRID_ROW_GAP_PX: f32 = 8.0;
 
+/// Keep the continuous bottom resize strip clear of clipped ItemCards.
+pub const ITEM_GRID_BOTTOM_RESIZE_INSET_PX: f32 = 8.0;
+
 /// Vertical offset (logical px) of the first item row below the panel's top
 /// edge — i.e. where the item grid starts, immediately under the expanded
 /// `PanelHeader` band. P3.6 (2026-06-02, 1:1): Tauri's `.panel-header` is
@@ -48,6 +51,103 @@ pub const ITEM_GRID_TOP_OFFSET_PX: f32 = 56.0;
 /// Default column count when the zone configuration supplies none.
 /// Mirrors 1.x `props.gridColumns ?? 4`.
 pub const ITEM_GRID_DEFAULT_COLUMNS: u32 = 4;
+
+/// Smallest expanded width that can contain the configured number of columns
+/// without shrinking a card below its 44-DIP interaction target.
+pub fn minimum_panel_width(grid_columns: u32) -> f32 {
+    let columns = grid_columns.max(1) as f32;
+    let inset = crate::expanded_zone_grid::HEADER_INSET_X;
+    (inset * 2.0 + (columns - 1.0) * ITEM_GRID_COLUMN_GAP_PX + columns * 44.0).max(80.0)
+}
+
+pub const ITEM_ICON_MIN_PX: f32 = 24.0;
+pub const ITEM_ICON_MAX_PX: f32 = 48.0;
+pub const ITEM_ICON_HOVER_SCALE: f32 = 1.12;
+pub const ITEM_LABEL_MIN_FONT_PX: f32 = 11.0;
+pub const ITEM_LABEL_MAX_FONT_PX: f32 = 16.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResponsiveItemMetrics {
+    pub icon_side: f32,
+    pub icon_slot_side: f32,
+    pub label_font_px: f32,
+    pub label_line_height: f32,
+    pub label_lines: u32,
+    pub required_height: f32,
+}
+
+#[inline]
+pub fn visible_item_name(name: &str) -> &str {
+    let Some(ext) = name.get(name.len().saturating_sub(4)..) else {
+        return name;
+    };
+    if ext.eq_ignore_ascii_case(".lnk") || ext.eq_ignore_ascii_case(".url") {
+        name.get(..name.len() - 4).unwrap_or(name)
+    } else {
+        name
+    }
+}
+
+/// Responsive ItemCard metrics used by both flow layout and paint. The line
+/// count intentionally uses conservative glyph widths so W-heavy, CJK, emoji,
+/// and unbroken names reserve enough row height before DWrite wraps them.
+pub fn responsive_item_metrics(card_width: f32, name: &str) -> ResponsiveItemMetrics {
+    let inner_width = (card_width - 8.0).max(0.0);
+    let icon_side = (card_width * 0.36)
+        .clamp(ITEM_ICON_MIN_PX, ITEM_ICON_MAX_PX)
+        .min(inner_width / ITEM_ICON_HOVER_SCALE);
+    let icon_slot_side = icon_side * ITEM_ICON_HOVER_SCALE;
+    let label_font_px = (card_width * 0.13).clamp(ITEM_LABEL_MIN_FONT_PX, ITEM_LABEL_MAX_FONT_PX);
+    let label_line_height = label_font_px * 1.4;
+    let text = visible_item_name(name);
+    let max_ems = (inner_width / label_font_px.max(1.0)).max(0.5);
+    let mut lines = 1_u32;
+    let mut line_ems = 0.0_f32;
+    for ch in text.chars() {
+        if ch == '\n' {
+            lines += 1;
+            line_ems = 0.0;
+            continue;
+        }
+        // Deliberately use upper bounds instead of average glyph advances.
+        // DWrite may fall back to a different face for CJK/emoji, so every
+        // non-ASCII scalar reserves more than a full em. Latin `W`/`M` and
+        // lower-case `m` are the reason the former average-width table was not
+        // safe for geometry.
+        let em = if ch.is_ascii_whitespace() {
+            0.5
+        } else if ch.is_ascii_uppercase() {
+            1.10
+        } else if ch.is_ascii_alphanumeric() {
+            0.90
+        } else if ch.is_ascii() {
+            0.75
+        } else {
+            1.25
+        };
+        if line_ems > 0.0 && line_ems + em > max_ems {
+            lines += 1;
+            line_ems = em;
+        } else {
+            line_ems += em;
+        }
+    }
+    // Wrapped labels reserve one additional safety line. Real DWrite metrics
+    // tests below keep this business estimate an upper bound even when font
+    // fallback changes glyph advances.
+    if lines > 1 {
+        lines += 1;
+    }
+    let required_height = 8.0 + icon_slot_side + 4.0 + label_line_height * lines as f32 + 8.0;
+    ResponsiveItemMetrics {
+        icon_side,
+        icon_slot_side,
+        label_font_px,
+        label_line_height,
+        label_lines: lines,
+        required_height: required_height.max(ITEM_GRID_ROW_HEIGHT_PX),
+    }
+}
 
 /// Layout mode chosen once per zone load — switched only when item count
 /// crosses `ITEM_GRID_VIRTUAL_THRESHOLD`.
@@ -110,6 +210,7 @@ mod tests {
         assert_eq!(ITEM_GRID_OVERSCAN_ROWS, 3);
         assert!((ITEM_GRID_COLUMN_GAP_PX - 8.0).abs() < 0.01);
         assert!((ITEM_GRID_ROW_GAP_PX - 8.0).abs() < 0.01);
+        assert!((ITEM_GRID_BOTTOM_RESIZE_INSET_PX - 8.0).abs() < 0.01);
         assert_eq!(ITEM_GRID_DEFAULT_COLUMNS, 4);
         // P3.6 (1:1) — grid starts at the 48-DIP Tauri `.panel-header` plus the
         // 8-DIP `--spacing-sm` content pad = 56.
@@ -125,6 +226,86 @@ mod tests {
         assert_eq!(effective_column_count(720.0, 5, 16.0), 5);
         assert_eq!(effective_column_count(80.0, 5, 16.0), 5);
         assert_eq!(effective_column_count(320.0, 0, 16.0), 1);
+    }
+
+    #[test]
+    fn minimum_panel_width_contains_every_configured_card_target() {
+        assert_eq!(minimum_panel_width(1), 80.0);
+        assert_eq!(minimum_panel_width(4), 232.0);
+        assert_eq!(minimum_panel_width(6), 336.0);
+    }
+
+    #[test]
+    fn responsive_metrics_reserve_wrapped_long_and_non_ascii_labels() {
+        let short = responsive_item_metrics(96.0, "A.txt");
+        let long = responsive_item_metrics(52.0, "WWWWWWWWWWWWWWWWWWWW.txt");
+        let cjk = responsive_item_metrics(52.0, "超长文件名字测试测试测试.txt");
+        assert!((ITEM_ICON_MIN_PX..=ITEM_ICON_MAX_PX).contains(&short.icon_side));
+        assert!((ITEM_LABEL_MIN_FONT_PX..=ITEM_LABEL_MAX_FONT_PX).contains(&short.label_font_px));
+        assert!(long.label_lines > 1 && long.required_height > ITEM_GRID_ROW_HEIGHT_PX);
+        assert!(cjk.label_lines > 1 && cjk.required_height > ITEM_GRID_ROW_HEIGHT_PX);
+        assert_eq!(
+            short.icon_slot_side,
+            short.icon_side * ITEM_ICON_HOVER_SCALE
+        );
+    }
+
+    #[test]
+    fn responsive_line_budget_upper_bounds_real_dwrite_wrapping() {
+        use bentodesk_platform::dwrite;
+
+        for name in [
+            "WWWWWWWWWWWWWWWWWWWWWWWW.txt",
+            "Mixed Wide MWmw Latin 2026.txt",
+            "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm.txt",
+            "超长文件名字测试测试测试测试.txt",
+            "📁🚀🧭✨📦🖥️🗂️.txt",
+            "unbrokenfilenamewithmanywidelettersMWMWMWMW.txt",
+        ] {
+            let card_width = 52.0;
+            let metrics = responsive_item_metrics(card_width, name);
+            let format = dwrite::text_format_from_family_name_with_metrics(
+                "Segoe UI",
+                metrics.label_font_px,
+                400,
+                1.4,
+                dwrite::locale_zh_cn(),
+            )
+            .expect("item label text format");
+            let utf16 = visible_item_name(name).encode_utf16().collect::<Vec<_>>();
+            let layout = dwrite::create_layout(
+                &utf16,
+                &format,
+                (card_width - 8.0).max(1.0),
+                4096.0,
+                dwrite::TextAlign::DEFAULT,
+            )
+            .expect("item label layout");
+            let mut actual_lines = 0_u32;
+            // SAFETY: `layout` is live; a missing buffer asks DWrite only for
+            // the required line count and writes it to `actual_lines`. Windows
+            // reports `ERROR_INSUFFICIENT_BUFFER` for that sizing call.
+            let _ = unsafe { layout.GetLineMetrics(None, &mut actual_lines) };
+            assert!(
+                actual_lines > 0,
+                "{name:?}: DWrite returned no line metrics"
+            );
+            let mut line_metrics = vec![
+                windows::Win32::Graphics::DirectWrite::DWRITE_LINE_METRICS::default();
+                actual_lines as usize
+            ];
+            // SAFETY: the vector has exactly the entry count requested above.
+            unsafe {
+                layout
+                    .GetLineMetrics(Some(&mut line_metrics), &mut actual_lines)
+                    .expect("item label line metrics");
+            }
+            assert!(
+                actual_lines <= metrics.label_lines,
+                "{name:?}: DWrite used {actual_lines} lines, budget reserved {}",
+                metrics.label_lines
+            );
+        }
     }
 
     #[test]

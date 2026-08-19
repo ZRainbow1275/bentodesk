@@ -516,6 +516,87 @@ fn arm_test_item_drag(app: &AppState) {
     });
 }
 
+fn arm_test_zone_resize(app: &AppState) {
+    app.zone_resize.set(Some(bentodesk_app::ZoneResizeSession {
+        id: ZoneId(1),
+        start_pointer_x: 0.0,
+        start_pointer_y: 0.0,
+        handle: bentodesk_app::ZoneResizeHandle::BottomRight,
+        start_panel: bentodesk_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 180.0,
+            height: 130.0,
+        },
+        start_persisted_width: 180,
+        start_persisted_height: 130,
+        start_home_x: 0,
+        start_home_y: 0,
+        start_capsule: bentodesk_style::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 48.0,
+            height: 48.0,
+        },
+        anchor_right: false,
+        anchor_bottom: false,
+    }));
+}
+
+#[test]
+fn stack_bloom_preview_does_not_consume_active_zone_resize_release() {
+    let root = open_stack_bloom_preview();
+    let preview = stack_bloom_preview_rect_for_test(&root);
+    let x = preview.x + 16.0;
+    let y = preview.y + preview.height - 16.0;
+    {
+        let app = root.app.borrow();
+        arm_test_zone_resize(&app);
+        assert!(stack_bloom_preview_hit_for_point(&app, x, y).is_none());
+    }
+    assert!(!handle_stack_bloom_preview_lbutton_up(
+        &root,
+        std::ptr::null_mut(),
+        x,
+        y,
+    ));
+    assert!(root.app.borrow().zone_resize.get().is_some());
+}
+
+#[test]
+fn right_click_does_not_open_context_menu_during_active_zone_resize() {
+    let root = test_app_root();
+    {
+        let mut app = root.app.borrow_mut();
+        app.viewport = Size {
+            width: 1_280.0,
+            height: 720.0,
+        };
+        app.zones
+            .add(Zone::new(ZoneId(1), "Resizable", 100, 100, 240, 180));
+        app.set_zone_display_mode(ZoneDisplayMode::Always);
+        arm_test_zone_resize(&app);
+    }
+
+    handle_rbutton_up(&root, std::ptr::null_mut(), 160.0, 160.0);
+
+    let app = root.app.borrow();
+    assert!(app.active_context_menu.borrow().is_none());
+    assert!(app.zone_resize.get().is_some());
+}
+
+#[test]
+fn opening_settings_cancels_an_active_zone_resize_before_aux_focus() {
+    let root = test_app_root();
+    {
+        let app = root.app.borrow();
+        arm_test_zone_resize(&app);
+    }
+
+    assert!(cancel_main_gestures_for_settings_open(&root));
+    assert!(root.app.borrow().zone_resize.get().is_none());
+}
+
 fn assert_stack_bloom_ignores_drag(arm_drag: impl FnOnce(&AppState), expected_message: &str) {
     let (root, x, y) = stack_bloom_click_fixture();
     {
@@ -555,18 +636,7 @@ fn stack_bloom_petal_click_ignored_during_active_drag() {
         "zone drag owns mouse-up; stale bloom must not open tray",
     );
     assert_stack_bloom_ignores_drag(
-        |app| {
-            app.zone_resize
-                .set(Some(bentodesk_app::ZoneResizeSession {
-                    id: ZoneId(1),
-                    start_pointer_x: 0.0,
-                    start_pointer_y: 0.0,
-                    start_visible_width: 180.0,
-                    start_visible_height: 130.0,
-                    anchor_right: false,
-                    anchor_bottom: false,
-                }))
-        },
+        arm_test_zone_resize,
         "zone resize owns mouse-up; stale bloom must not open tray",
     );
     assert_stack_bloom_ignores_drag(
@@ -582,18 +652,7 @@ fn stack_tray_row_click_ignored_during_active_drag() {
         "zone drag owns mouse-up; tray row must not preview",
     );
     assert_stack_tray_row_ignores_drag(
-        |app| {
-            app.zone_resize
-                .set(Some(bentodesk_app::ZoneResizeSession {
-                    id: ZoneId(1),
-                    start_pointer_x: 0.0,
-                    start_pointer_y: 0.0,
-                    start_visible_width: 180.0,
-                    start_visible_height: 130.0,
-                    anchor_right: false,
-                    anchor_bottom: false,
-                }))
-        },
+        arm_test_zone_resize,
         "zone resize owns mouse-up; tray row must not preview",
     );
     assert_stack_tray_row_ignores_drag(

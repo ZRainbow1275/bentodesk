@@ -206,6 +206,13 @@ pub(super) unsafe fn paint(hwnd: HWND) -> Result<(), bentodesk_app::RenderError>
     }
     drop(app);
 
+    // Run startup icon repair only after the first Main paint has completed its
+    // persisted-Zone retry. WM_CREATE can precede that retry after a transient
+    // startup read error, which would otherwise permanently queue zero items.
+    if first_main_paint && r.is_ok() {
+        start_startup_icon_rehydrate(root, hwnd);
+    }
+
     if repaired > 0 {
         request_redraw(hwnd);
     }
@@ -457,6 +464,26 @@ pub(super) fn drain_updater_events(root: &AppRoot) -> bool {
     let mut drained = 0u32;
     let mut changed = false;
     while let Ok(event) = root.updater_events.try_recv() {
+        root.updater.acknowledge_event(&event);
+        let stale_available = match &event {
+            UpdateEvent::Available { info } => root
+                .updater
+                .current_skipped()
+                .as_deref()
+                .is_some_and(|version| version == info.version.as_str()),
+            _ => false,
+        };
+        if stale_available {
+            if let UpdateEvent::Available { info } = &event {
+                root.updater.discard_pending_version(info.version.as_str());
+            }
+            drained = drained.saturating_add(1);
+            changed = true;
+            if drained >= 16 {
+                break;
+            }
+            continue;
+        }
         let should_auto_download = {
             let app = root.app.borrow();
             let should = updater_event_should_auto_download(&app, &event);
@@ -466,17 +493,20 @@ pub(super) fn drain_updater_events(root: &AppRoot) -> bool {
         drained = drained.saturating_add(1);
         changed = true;
         if should_auto_download {
-            match root.updater.download() {
-                Ok(()) => {}
-                Err(error) => {
+            match root.updater.try_start_download() {
+                bentodesk_backend::updater::UpdateStart::Started
+                | bentodesk_backend::updater::UpdateStart::Joined(
+                    bentodesk_backend::updater::UpdateOperation::Downloading,
+                ) => {
                     let app = root.app.borrow();
-                    set_update_error(
-                        &app,
-                        "自动下载更新失败",
-                        "Automatic update download failed",
-                        &error,
-                    );
+                    *app.settings_updater_status.borrow_mut() =
+                        SettingsUpdaterStatus::Downloading {
+                            chunk_len: 0,
+                            total_bytes: None,
+                        };
                 }
+                bentodesk_backend::updater::UpdateStart::Rejected(_)
+                | bentodesk_backend::updater::UpdateStart::Joined(_) => {}
             }
         }
         if drained >= 16 {

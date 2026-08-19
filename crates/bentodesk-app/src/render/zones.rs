@@ -344,72 +344,24 @@ impl Renderer {
                     )?;
                 }
                 let item_top_offset = search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * zone_search_reveal;
-                let item_scroll_max = if zone_search_active {
-                    highlight_overlay::item_flow_max_scroll_in_panel(
-                        zone,
-                        rect,
-                        item_top_offset,
-                        zone.items
-                            .iter()
-                            .filter(|item| {
-                                search_bar::zone_item_matches_query(
-                                    item.name.as_ref(),
-                                    zone_search_query.as_str(),
-                                )
-                            })
-                            .map(|item| item.is_wide),
-                    )
-                } else {
-                    highlight_overlay::item_flow_max_scroll_in_panel(
-                        zone,
-                        rect,
-                        item_top_offset,
-                        zone.items.iter().map(|item| item.is_wide),
-                    )
-                };
-                let item_scroll = app.zone_content_scroll_offset(zone.id).min(item_scroll_max);
+                let item_flow = app.resolve_zone_item_flow_layout(
+                    zone,
+                    rect,
+                    item_top_offset,
+                    zone.items.iter().filter(|item| {
+                        !zone_search_active
+                            || search_bar::zone_item_matches_query(
+                                item.name.as_ref(),
+                                zone_search_query.as_str(),
+                            )
+                    }),
+                );
+                let item_scroll_max = item_flow.max_scroll;
+                let item_scroll = item_flow.resolved_scroll;
                 let content_clip =
                     highlight_overlay::item_content_clip_rect_in_panel(rect, item_top_offset);
                 self.push_clip(content_clip)?;
                 let content_result = (|| -> Result<(), RenderError> {
-                    let item_label_group_px = {
-                        let mut label_flow_slot = 0;
-                        item_label_group_font_size(zone.items.iter().filter_map(|item| {
-                            if zone_search_active
-                                && !search_bar::zone_item_matches_query(
-                                    item.name.as_ref(),
-                                    zone_search_query.as_str(),
-                                )
-                            {
-                                return None;
-                            }
-                            let card_rect = if zone_search_active {
-                                let (card, next_slot) =
-                                    highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
-                                        zone,
-                                        rect,
-                                        label_flow_slot,
-                                        item.is_wide,
-                                        item_top_offset,
-                                        item_scroll,
-                                    );
-                                label_flow_slot = next_slot;
-                                card
-                            } else {
-                                highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
-                                    zone,
-                                    item,
-                                    rect,
-                                    item_scroll,
-                                )
-                            };
-                            (card_rect.width > 0.0).then_some((
-                                item_label_visible_name(item.name.as_ref()),
-                                (card_rect.width - 8.0).max(0.0),
-                            ))
-                        }))
-                    };
-                    let mut search_flow_slot = 0;
                     let mut visible_item_count = 0usize;
                     for item in &zone.items {
                         if zone_search_active
@@ -421,26 +373,10 @@ impl Renderer {
                             continue;
                         }
                         visible_item_count += 1;
-                        let card_rect = if zone_search_active {
-                            let (card, next_slot) =
-                                highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
-                                    zone,
-                                    rect,
-                                    search_flow_slot,
-                                    item.is_wide,
-                                    item_top_offset,
-                                    item_scroll,
-                                );
-                            search_flow_slot = next_slot;
-                            card
-                        } else {
-                            highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
-                                zone,
-                                item,
-                                rect,
-                                item_scroll,
-                            )
+                        let Some(flow_card) = item_flow.card_for(item.id) else {
+                            continue;
                         };
+                        let card_rect = flow_card.rect;
                         if card_rect.width <= 0.0
                             || card_rect.bottom() <= content_clip.y
                             || card_rect.y >= content_clip.bottom()
@@ -489,6 +425,9 @@ impl Renderer {
                         // actively held (Tauri `:active` scale-only override). On
                         // release the lift returns while the press scale ramps out.
                         let press_held = !is_dragged_source && item_hover.press_held(card_key);
+                        let label_font_px =
+                            item_grid::responsive_item_metrics(card_rect.width, item.name.as_ref())
+                                .label_font_px;
                         self.draw_item_card(
                             item,
                             card_rect,
@@ -497,7 +436,7 @@ impl Renderer {
                             hover_t,
                             press_held,
                             item_scale,
-                            item_label_group_px,
+                            label_font_px,
                             1.0,
                         )?;
                     }
@@ -605,11 +544,31 @@ impl Renderer {
         if let Some(drag) = item_drag
             && let Some((zone, item)) = source_drag_item(app, drag)
         {
-            let source_rect = highlight_overlay::item_card_rect_for_item_in_panel(
+            let source_panel = app
+                .stack_focused_preview_rect_for_zone(zone.id)
+                .unwrap_or_else(|| app.zone_effective_rect_at(zone, anim_now_ms));
+            let source_search_active = zone_search_target == Some(zone.id);
+            let source_item_top_offset = if source_search_active {
+                search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+                    * app.zone_search_animation_progress_at(anim_now_ms)
+            } else {
+                0.0
+            };
+            let source_flow = app.resolve_zone_item_flow_layout(
                 zone,
-                item,
-                app.zone_effective_rect_at(zone, anim_now_ms),
+                source_panel,
+                source_item_top_offset,
+                zone.items.iter().filter(|candidate| {
+                    !source_search_active
+                        || search_bar::zone_item_matches_query(
+                            candidate.name.as_ref(),
+                            zone_search_query.as_str(),
+                        )
+                }),
             );
+            let Some(source_rect) = source_flow.card_for(item.id).map(|card| card.rect) else {
+                return Ok(());
+            };
             let ghost_rect = drag_ghost_rect(app, drag, source_rect);
             let shadow_rect = bentodesk_style::Rect {
                 x: ghost_rect.x + 4.0,
@@ -638,10 +597,8 @@ impl Renderer {
                 0.0,
                 false,
                 1.0,
-                item_label_font_size_for_width(
-                    item_label_visible_name(item.name.as_ref()),
-                    (ghost_rect.width - 8.0).max(0.0),
-                ),
+                item_grid::responsive_item_metrics(ghost_rect.width, item.name.as_ref())
+                    .label_font_px,
                 1.0,
             )?;
         }

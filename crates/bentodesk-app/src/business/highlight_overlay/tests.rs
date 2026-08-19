@@ -423,7 +423,10 @@ fn expanded_item_scroll_keeps_full_card_geometry_and_shared_clip() {
         zone.y as f32 + expanded_zone_grid::HEADER_BAND_HEIGHT
     );
     assert_eq!(search_clip.y, normal_clip.y + 44.0);
-    assert_eq!(normal_clip.bottom(), (zone.y + zone.h) as f32);
+    assert_eq!(
+        normal_clip.bottom(),
+        (zone.y + zone.h) as f32 - item_grid::ITEM_GRID_BOTTOM_RESIZE_INSET_PX
+    );
     assert_eq!(search_clip.bottom(), normal_clip.bottom());
 }
 
@@ -579,6 +582,93 @@ fn floating_panel_flow_uses_zone_columns_and_shared_pointer_mapping() {
         Some((0, 0))
     );
     assert!(first.bottom() <= panel.bottom());
+}
+
+#[test]
+fn variable_item_flow_uses_row_max_height_and_clamps_scroll_once() {
+    let mut zone = Zone::new(bentodesk_zone::ZoneId(91), "Flow", 0, 0, 160, 150);
+    zone.set_grid_columns(2);
+    let long = zone
+        .add_item("C:/Desktop/WWWWWWWWWWWWWWWWWWWWWWWW.txt", "h1")
+        .expect("long");
+    let short = zone.add_item("C:/Desktop/a.txt", "h2").expect("short");
+    let next = zone.add_item("C:/Desktop/b.txt", "h3").expect("next");
+    let panel = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 160.0,
+        height: 150.0,
+    };
+    let layout = item_flow_layout_in_panel(&zone, panel, 0.0, 999.0, zone.items.iter());
+    let long_rect = layout.card_for(long).expect("long rect").rect;
+    let short_rect = layout.card_for(short).expect("short rect").rect;
+    let next_rect = layout.card_for(next).expect("next rect").rect;
+    assert_eq!(long_rect.height, short_rect.height);
+    assert!(long_rect.height > item_grid::ITEM_GRID_ROW_HEIGHT_PX);
+    assert!((next_rect.y - (long_rect.bottom() + item_grid::ITEM_GRID_ROW_GAP_PX)).abs() < 0.01);
+    assert_eq!(layout.resolved_scroll, layout.max_scroll);
+    assert!(layout.content_bottom > panel.bottom());
+    assert_eq!(
+        layout.grid_position_for_point(next_rect.x + 2.0, next_rect.y + 2.0),
+        Some((0, 1))
+    );
+    assert_eq!(
+        layout.grid_position_for_point(
+            long_rect.x + 2.0,
+            long_rect.bottom() + item_grid::ITEM_GRID_ROW_GAP_PX * 0.5,
+        ),
+        Some((0, 0))
+    );
+}
+
+#[test]
+fn cross_zone_drop_preview_uses_inserted_item_when_ids_collide() {
+    let mut target = Zone::new(bentodesk_zone::ZoneId(92), "Target", 0, 0, 160, 220);
+    target.set_grid_columns(2);
+    let resident_id = target
+        .add_item("C:/Desktop/resident.txt", "resident")
+        .expect("resident");
+    let mut source = Zone::new(bentodesk_zone::ZoneId(93), "Source", 0, 0, 160, 220);
+    let dragged_id = source
+        .add_item("C:/Desktop/WWWWWWWWWWWWWWWWWWWW-dragged.txt", "dragged")
+        .expect("dragged");
+    assert_eq!(
+        resident_id, dragged_id,
+        "fixture requires per-Zone id collision"
+    );
+    let dragged = source.item(dragged_id).expect("dragged item");
+    let panel = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 160.0,
+        height: 220.0,
+    };
+    let (_, _, target_index, preview) = item_drop_target_for_item_in_panel(
+        &target,
+        None,
+        dragged,
+        ItemDropProjection {
+            panel,
+            pointer: (
+                panel.right() - 18.0,
+                panel.y + item_grid::ITEM_GRID_TOP_OFFSET_PX + 4.0,
+            ),
+            item_top_offset: 0.0,
+            stored_scroll: 0.0,
+        },
+        |_| true,
+    )
+    .expect("projected cross-Zone drop");
+    let resident = item_flow_layout_in_panel(&target, panel, 0.0, 0.0, target.items.iter())
+        .card_for(resident_id)
+        .expect("resident card")
+        .rect;
+    assert_eq!(target_index, 1);
+    assert!(
+        preview.x > resident.x,
+        "preview must be the inserted second card"
+    );
+    assert!(preview.height > item_grid::ITEM_GRID_ROW_HEIGHT_PX);
 }
 
 #[test]

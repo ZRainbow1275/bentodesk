@@ -19,6 +19,8 @@ use super::UpdateInfo;
 pub enum UpdateEvent {
     /// A non-skipped version is available.
     Available { info: UpdateInfo },
+    /// The configured channel completed a check without a newer version.
+    UpToDate { current_version: SmolStr },
     /// Streaming download progress. `total_bytes` is `None` when the server
     /// did not send a Content-Length header.
     Progress { progress: UpdateProgress },

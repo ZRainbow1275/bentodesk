@@ -342,13 +342,13 @@ pub(super) fn dispatch(
                         vault.set_setting(&key, backend_value);
                         stored_in_vault = true;
                         if let Err(e) = vault.flush() {
+                            stored_in_vault = false;
                             tracing::warn!(
                                 target: "bentodesk::vault",
                                 %key, error = %e,
                                 "SetSetting flush failed — value retained in memory"
                             );
                             if let Some(action) = key.as_str().strip_prefix(KEYBINDING_PREFIX) {
-                                stored_in_vault = false;
                                 let app = root.app.borrow();
                                 set_keybinding_feedback(
                                     &app,
@@ -424,6 +424,12 @@ pub(super) fn dispatch(
                 }
                 if apply_setting_value_to_app(&app, key.as_str(), &value) || hotkey_changed {
                     effects.needs_redraw = true;
+                }
+                drop(app);
+                if key.as_str() == SETTING_UPDATES_CHECK_FREQUENCY {
+                    // Reuse the startup entry point so a successful persisted
+                    // frequency change cancels or reconfigures the one scheduler.
+                    maybe_start_background_update_check(root);
                 }
             }
         }

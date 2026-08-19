@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[path = "main_window_proc/destroy.rs"]
+mod destroy;
+use destroy::*;
+
 // -----------------------------------------------------------------------------
 // Window procedure
 // -----------------------------------------------------------------------------
@@ -60,7 +64,6 @@ pub(super) unsafe extern "system" fn wnd_proc(
                 schedule_tray_retry(root, hwnd);
                 // SAFETY: `hwnd` is the just-created Main HWND.
                 unsafe { register_global_hotkeys(root, hwnd) };
-                start_startup_icon_rehydrate(root, hwnd);
             }
             // SAFETY: `hwnd` is the just-created Main HWND. Timer messages
             // are delivered on the same UI thread and use no callback.
@@ -627,6 +630,72 @@ pub(super) unsafe extern "system" fn wnd_proc(
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         },
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            // Losing capture or entering a cancelled mode terminates every
+            // Main-client gesture; otherwise a stale resize session would keep
+            // mutating geometry on later buttonless mouse moves.
+            unsafe {
+                let p = get_slot_ptr(hwnd);
+                let mut refresh_resize_cursor = false;
+                if !p.is_null() {
+                    let slot = &*p;
+                    if slot.kind == WindowKind::Main
+                        && let Some(root) = app_root()
+                    {
+                        let was_resize = root.app.borrow().zone_resize.get().is_some();
+                        let cancelled = cancel_main_client_gestures_after_capture_loss(root);
+                        if cancelled {
+                            // WM_CAPTURECHANGED's lParam names a new capture owner.
+                            // Never overwrite that window's cursor.
+                            refresh_resize_cursor =
+                                was_resize && (msg == WM_CANCELMODE || lparam == 0);
+                            request_redraw(hwnd);
+                        }
+                    }
+                }
+                let result = if msg == WM_CANCELMODE {
+                    // Default processing releases capture and cancels any
+                    // standard menu/scrollbar mode after our state is clear.
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                } else {
+                    0
+                };
+                if refresh_resize_cursor
+                    && !p.is_null()
+                    && let Some(root) = app_root()
+                {
+                    refresh_zone_resize_cursor_after_release(root, &*p, hwnd);
+                }
+                result
+            }
+        }
+        WM_SETCURSOR => {
+            // SAFETY: GWLP_USERDATA belongs to this live HWND for the duration
+            // of dispatch; the default procedure is valid for every fallback.
+            unsafe {
+                let p = get_slot_ptr(hwnd);
+                if !p.is_null()
+                    && let Some(root) = app_root()
+                    && set_zone_resize_cursor(root, &*p, hwnd)
+                {
+                    1
+                } else {
+                    let result = DefWindowProcW(hwnd, msg, wparam, lparam);
+                    // The class cursor is IDC_ARROW, but the default procedure
+                    // may report handled without replacing a cursor set by the
+                    // previous custom WM_SETCURSOR. Reapply that same arrow only
+                    // when Main still owns a non-transparent pointer surface.
+                    if !p.is_null()
+                        && let Some(root) = app_root()
+                        && restore_default_main_cursor(root, &*p, hwnd)
+                    {
+                        1
+                    } else {
+                        result
+                    }
+                }
+            }
+        }
         WM_NCHITTEST => {
             // Top toolbar band acts as a drag handle (HTCAPTION).
             unsafe {
@@ -722,45 +791,7 @@ pub(super) unsafe extern "system" fn wnd_proc(
             }
             0
         }
-        WM_DESTROY => {
-            // Clear GWLP_USERDATA BEFORE unregister so any in-flight dispatch
-            // on this HWND from the OS message queue sees null and returns
-            // early (vs following a freed pointer).
-            // SAFETY: state freed via registry; tray removed; PostQuitMessage canonical.
-            unsafe {
-                KillTimer(hwnd, GHOST_PASSTHROUGH_TIMER_ID);
-                KillTimer(hwnd, BACKEND_EVENT_POLL_TIMER_ID);
-                KillTimer(hwnd, HOVER_FRAME_TIMER_ID);
-                KillTimer(hwnd, STARTUP_MEMORY_TRIM_TIMER_ID);
-                KillTimer(hwnd, RESIDENT_MEMORY_TRIM_TIMER_ID);
-                KillTimer(hwnd, STACK_TRAY_MEMORY_TRIM_TIMER_ID);
-                KillTimer(hwnd, CONTEXT_MENU_INPUT_TIMER_ID);
-                if let Err(e) = bentodesk_backend::drag_drop::unregister_drop_target(hwnd as *mut _)
-                {
-                    tracing::warn!(
-                        target: "bentodesk::drag_drop",
-                        error = %e,
-                        "RevokeDragDrop failed during main-window teardown"
-                    );
-                }
-                if let Some(root) = app_root() {
-                    unregister_tray_icon(root, hwnd);
-                    set_slot_ptr(hwnd, ptr::null_mut());
-                    unregister_global_hotkeys(root, hwnd);
-                    // Final save attempt before teardown.
-                    let app = root.app.borrow();
-                    if !app.zones_path.as_os_str().is_empty() && app.dirty.get() {
-                        let _ = storage::write_zones_atomic(&app.zones_path, &app.zones);
-                    }
-                    drop(app);
-                    let _ = root.registry.borrow_mut().unregister(hwnd);
-                } else {
-                    set_slot_ptr(hwnd, ptr::null_mut());
-                }
-                PostQuitMessage(0);
-            }
-            0
-        }
+        WM_DESTROY => handle_main_window_destroy(hwnd),
         // SAFETY: defaulting unhandled messages.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

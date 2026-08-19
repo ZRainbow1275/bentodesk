@@ -155,7 +155,7 @@ BentoDesk 刻意保持专注：只支持 Windows，不替代 Explorer，也不�
 ## 快速开始
 
 1. 从 [Releases](https://github.com/ZRainbow1275/bentodesk/releases/latest)
-   下载 `BentoDesk-2.1.0-windows-x64-setup.exe`，在安装程序中阅读并同意用户
+   下载 `BentoDesk-2.2.0-windows-x64-setup.exe`，在安装程序中阅读并同意用户
    协议与隐私政策；如不想安装，也可选择便携 ZIP；
 2. 使用同页 `SHA256SUMS.txt` 校验所选安装包或便携包，然后安装或解压；
 3. 从托盘菜单新建或管理 Zone；
@@ -163,8 +163,20 @@ BentoDesk 刻意保持专注：只支持 Windows，不替代 Explorer，也不�
 5. 在设置中选择主题、展开方式与语言。
 
 两种发行包都不需要 Node.js、Tauri、WebView2 或额外浏览器运行时。BentoDesk
-完全离线且不含遥测。卸载时默认保留本地设置；只有另行勾选并确认后才会删除
-BentoDesk 自身状态。详见[用户协议](installer/legal/UserAgreement.zh-CN.txt)与
+以本地运行为主，不需要账号或项目自建服务器，也不含遥测、分析、广告、云存储
+或崩溃上传；不会上传桌面文件路径、名称、图标或内容。
+
+更新器默认通过 HTTPS 查询 BentoDesk 官方 GitHub endpoint：
+`https://api.github.com/repos/ZRainbow1275/bentodesk/releases/latest`。受控的
+`BENTODESK_UPDATE_MANIFEST_URL` 也可选择 HTTPS、file 或本地覆盖源。启用定时检查
+时，应用启动后会立即检查一次，之后按所选周期执行（默认每周；Manual 只禁用定时检查）。
+默认开启自动下载。默认通道只会在核对 GitHub SHA-256 digest 后暂存精确的官方
+安装包；受控覆盖源声明的安装包也必须先通过 manifest SHA-256 或内置公钥 minisign
+签名校验。安装始终需要用户明确操作。GitHub 或受控 HTTPS 覆盖源的主机可能按其
+自身政策接收源 IP 地址、BentoDesk User-Agent 等普通 HTTPS 请求元数据。
+
+卸载时默认保留本地设置；只有另行勾选并确认后才会删除 BentoDesk 自身状态。
+详见[用户协议](installer/legal/UserAgreement.zh-CN.txt)与
 [隐私政策](installer/legal/PrivacyPolicy.zh-CN.txt)。
 
 ### 系统要求
@@ -194,7 +206,7 @@ BentoDesk 自身状态。详见[用户协议](installer/legal/UserAgreement.zh-C
 | 图形 | Direct2D、DirectWrite、DirectComposition、D3D11 |
 | 图标与图像 | Windows Imaging Component、Windows Shell |
 | 文件交互 | Shell/OLE、`ReadDirectoryChangesW` |
-| 离线与系统安全 | 无网络客户端、DPAPI |
+| 隐私与系统安全 | 本地优先、无遥测、官方 GitHub HTTPS 更新、DPAPI |
 | 数据 | 本地原子写入、加密设置仓库 |
 | 构建 | MSVC x64、静态 CRT、size optimization、Fat LTO |
 

@@ -114,8 +114,11 @@ pub(super) const PANEL_ACCENT_EDGE_THICKNESS_PX: f32 = 2.0;
 // Tauri `ItemCard.css` uses `--font-size-xs` (11px).  The previous 14px
 // runtime-frame override made short names dominate the grid while long names
 // collapsed to the 8px floor, so one row visibly mixed several type scales.
+#[cfg(test)]
 pub(super) const ITEM_LABEL_BASE_FONT_PX: f32 = 11.0;
+#[cfg(test)]
 pub(super) const ITEM_LABEL_MIN_FONT_PX: f32 = 8.0;
+#[cfg(test)]
 pub(super) const ITEM_LABEL_BOTTOM_INSET_PX: f32 = 8.0;
 
 #[inline]
@@ -544,6 +547,7 @@ pub(super) fn item_label_visible_name(name: &str) -> &str {
 }
 
 #[inline]
+#[cfg(test)]
 pub(super) fn item_label_font_size_for_width(text: &str, avail_w: f32) -> f32 {
     // Tauri ItemCard delegates to `useTextAbbrGroup`: keep the complete label
     // text and shrink toward the shared 8px floor instead of emitting `...`.
@@ -560,6 +564,7 @@ pub(super) fn item_label_font_size_for_width(text: &str, avail_w: f32) -> f32 {
 }
 
 #[inline]
+#[cfg(test)]
 pub(super) fn item_label_group_font_size<'a>(labels: impl Iterator<Item = (&'a str, f32)>) -> f32 {
     labels.fold(ITEM_LABEL_BASE_FONT_PX, |group_px, (text, avail_w)| {
         group_px.min(item_label_font_size_for_width(text, avail_w))
@@ -567,6 +572,7 @@ pub(super) fn item_label_group_font_size<'a>(labels: impl Iterator<Item = (&'a s
 }
 
 #[inline]
+#[cfg(test)]
 pub(super) fn item_label_estimated_width(text: &str, font_px: f32) -> f32 {
     let mut ems = 0.0_f32;
     for ch in text.chars() {
@@ -576,6 +582,7 @@ pub(super) fn item_label_estimated_width(text: &str, font_px: f32) -> f32 {
 }
 
 #[inline]
+#[cfg(test)]
 pub(super) fn item_label_char_width_em(ch: char) -> f32 {
     let cp = ch as u32;
     if (0x4E00..=0x9FFF).contains(&cp)
@@ -599,7 +606,7 @@ pub(super) fn item_label_char_width_em(ch: char) -> f32 {
     0.7
 }
 
-#[inline]
+#[cfg(test)]
 pub(super) fn item_icon_slots_for_card(
     card_rect: bentodesk_style::Rect,
     is_wide: bool,
@@ -627,7 +634,7 @@ pub(super) fn item_icon_slots_for_card(
     (container, render)
 }
 
-#[inline]
+#[cfg(test)]
 pub(super) fn item_label_rect_for_card(
     card_rect: bentodesk_style::Rect,
     scale: f32,

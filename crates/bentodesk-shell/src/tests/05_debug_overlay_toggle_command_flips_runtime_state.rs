@@ -293,9 +293,7 @@ fn expanded_zone_wheel_target_is_directional_content_only_and_query_aware() {
         assert_eq!(placement.anchor_bottom, anchor_bottom, "{name}");
         let panel = app.zone_effective_rect_at(zone, 0);
         let content =
-            bentodesk_app::business::highlight_overlay::item_content_clip_rect_in_panel(
-                panel, 0.0,
-            );
+            bentodesk_app::business::highlight_overlay::item_content_clip_rect_in_panel(panel, 0.0);
         assert!(
             zone_item_max_scroll_at(&app, zone, app.geometry_frame_now_ms.get()) > 0.0,
             "{name}"
@@ -312,9 +310,24 @@ fn expanded_zone_wheel_target_is_directional_content_only_and_query_aware() {
 
         app.zone_search_target.set(Some(ZoneId(4)));
         app.search_bar.borrow_mut().query = "item-01".into();
+        let search_offset = bentodesk_app::business::search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX
+            * app.zone_search_animation_progress_at(app.geometry_frame_now_ms.get());
+        let expected_search_max = app
+            .resolve_zone_item_flow_layout(
+                zone,
+                panel,
+                search_offset,
+                zone.items.iter().filter(|item| {
+                    bentodesk_app::business::search_bar::zone_item_matches_query(
+                        item.name.as_ref(),
+                        "item-01",
+                    )
+                }),
+            )
+            .max_scroll;
         assert_eq!(
             zone_item_max_scroll_at(&app, zone, app.geometry_frame_now_ms.get()),
-            0.0,
+            expected_search_max,
             "{name}"
         );
         let search_content =
@@ -323,12 +336,8 @@ fn expanded_zone_wheel_target_is_directional_content_only_and_query_aware() {
                 bentodesk_app::business::search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX,
             );
         assert_eq!(
-            zone_scroll_target_for_point(
-                &app,
-                search_content.x + 1.0,
-                search_content.y + 1.0,
-            ),
-            Some((ZoneId(4), 0.0)),
+            zone_scroll_target_for_point(&app, search_content.x + 1.0, search_content.y + 1.0,),
+            Some((ZoneId(4), expected_search_max)),
             "{name} searched content"
         );
     }

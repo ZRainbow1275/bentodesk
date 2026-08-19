@@ -15,9 +15,10 @@ fn recurring_background_check_repeats_until_test_run_limit() {
             .recv_timeout(Duration::from_secs(2))
             .expect("recurring updater event");
         assert!(matches!(
-            event,
+            &event,
             UpdateEvent::Available { info } if info.version.as_str() == "9.9.2"
         ));
+        updater.acknowledge_event(&event);
     }
     let _ = std::fs::remove_file(&manifest_path);
 }
@@ -58,14 +59,45 @@ fn install_launches_staged_nsis_artifact_and_emits_installing() {
     updater.download().expect("download");
     let staged = updater.staged_artifact().expect("staged artifact");
 
-    let launched = std::cell::RefCell::new(None::<PathBuf>);
-    updater
-        .install_with_launcher(|path| {
-            launched.borrow_mut().replace(path.to_path_buf());
-            Ok(())
-        })
-        .expect("install");
-    assert_eq!(launched.borrow().as_ref(), Some(&staged));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<PathBuf>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let updater_ref = &updater;
+        let install_thread = scope.spawn(move || {
+            updater_ref.install_with_launcher(|path| {
+                assert!(
+                    path.exists(),
+                    "verified stage must survive through launcher handoff"
+                );
+                entered_tx.send(path.to_path_buf()).expect("launcher entered");
+                release_rx.recv().expect("release launcher barrier");
+                Ok(())
+            })
+        });
+        let launched_path = entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("launcher barrier after verification");
+        assert_eq!(launched_path, staged);
+        assert_eq!(updater.operation_state(), UpdateOperation::Installing);
+        assert_eq!(
+            updater.try_start_check(),
+            UpdateStart::Rejected(UpdateOperation::Installing)
+        );
+        release_tx.send(()).expect("release launcher");
+        install_thread
+            .join()
+            .expect("install thread")
+            .expect("install");
+    });
+    assert_eq!(updater.operation_state(), UpdateOperation::Installing);
+    assert_eq!(
+        updater.try_start_check(),
+        UpdateStart::Rejected(UpdateOperation::Installing)
+    );
+    assert_eq!(
+        updater.try_start_download(),
+        UpdateStart::Rejected(UpdateOperation::Installing)
+    );
 
     let mut saw_installing = false;
     while let Ok(event) = rx.try_recv() {
@@ -116,6 +148,7 @@ fn install_rejects_a_staged_artifact_tampered_after_download() {
         .expect_err("tampered artifact must not launch");
     assert!(matches!(error, UpdaterError::VerificationFailed(_)));
     assert!(!launched.get());
+    assert_eq!(updater.operation_state(), UpdateOperation::Idle);
 
     let _ = std::fs::remove_file(&manifest_path);
     let _ = std::fs::remove_file(&artifact_path);

@@ -27,9 +27,49 @@ fn effective_zone_hit_rect(app: &AppState, zone: &Zone, now_ms: u32) -> Rect {
 // Phase 2.1 Ruling D — zone hit-testing helpers.
 // -----------------------------------------------------------------------------
 
-/// DIP edge length of the bottom-right resize corner box. Spec: 12 DIP square
-/// is the canonical "easy to grab without crowding the zone body".
-pub const ZONE_RESIZE_CORNER: f32 = 12.0;
+/// DIP edge length of each directional resize corner box.
+/// Issue #25 expands the target to 24 DIP without changing resize geometry.
+pub const ZONE_RESIZE_CORNER: f32 = 24.0;
+/// Continuous edge target thickness between the four corner targets.
+pub const ZONE_RESIZE_EDGE: f32 = 8.0;
+
+fn resize_handle_for_panel(panel: Rect, x: f32, y: f32) -> Option<bentodesk_app::ZoneResizeHandle> {
+    use bentodesk_app::ZoneResizeHandle;
+
+    if !rect_contains(panel, x, y) {
+        return None;
+    }
+    let left_corner = x < panel.x + ZONE_RESIZE_CORNER;
+    let right_corner = x >= panel.right() - ZONE_RESIZE_CORNER;
+    let top_corner = y < panel.y + ZONE_RESIZE_CORNER;
+    let bottom_corner = y >= panel.bottom() - ZONE_RESIZE_CORNER;
+
+    // Corners win their overlap with the continuous edge strips.
+    if left_corner && top_corner {
+        return Some(ZoneResizeHandle::TopLeft);
+    }
+    if right_corner && top_corner {
+        return Some(ZoneResizeHandle::TopRight);
+    }
+    if left_corner && bottom_corner {
+        return Some(ZoneResizeHandle::BottomLeft);
+    }
+    if right_corner && bottom_corner {
+        return Some(ZoneResizeHandle::BottomRight);
+    }
+
+    if x < panel.x + ZONE_RESIZE_EDGE {
+        Some(ZoneResizeHandle::Left)
+    } else if x >= panel.right() - ZONE_RESIZE_EDGE {
+        Some(ZoneResizeHandle::Right)
+    } else if y < panel.y + ZONE_RESIZE_EDGE {
+        Some(ZoneResizeHandle::Top)
+    } else if y >= panel.bottom() - ZONE_RESIZE_EDGE {
+        Some(ZoneResizeHandle::Bottom)
+    } else {
+        None
+    }
+}
 
 /// Topmost (= last drawn = highest z) zone whose effective surface contains
 /// `(x, y)`. Z-order (2026-06-02): mirror the two-layer draw stack in
@@ -63,9 +103,15 @@ pub fn hit_test_zone(app: &AppState, x: f32, y: f32) -> Option<ZoneId> {
 /// and effective filesystem path. Geometry mirrors `Renderer::draw_zones` so
 /// drag-out hit-testing stays aligned with what the user sees.
 pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, ZoneItemId, String)> {
+    hit_test_zone_item_ref(app, x, y)
+        .map(|(zone_id, item_id, path)| (zone_id, item_id, path.to_owned()))
+}
+
+fn hit_test_zone_item_ref(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, ZoneItemId, &str)> {
+    let topmost = hit_test_zone(app, x, y)?;
     let now_ms = app.geometry_frame_now_ms.get();
     for z in app.zones.iter().rev() {
-        if !z.is_visible() || z.is_stacked_child() {
+        if z.id != topmost || !z.is_visible() || z.is_stacked_child() {
             continue;
         }
         // Wave C — collapsed pill mode hides the item grid, so items attached
@@ -96,50 +142,19 @@ pub fn hit_test_zone_item(app: &AppState, x: f32, y: f32) -> Option<(ZoneId, Zon
         if !rect_contains(content_clip, x, y) {
             continue;
         }
-        let scroll_offset = app.zone_content_scroll_offset(z.id);
-        let search_query = search_active.then(|| app.search_bar.borrow().query.clone());
-        let mut search_slot = 0;
-        for item in &z.items {
-            if let Some(query) = search_query.as_ref()
-                && !search_bar::zone_item_matches_query(item.name.as_ref(), query.as_str())
-            {
-                continue;
-            }
-            // P3.8 paint-hit parity: reuse the same item-card rectangle SSoT as
-            // the renderer and highlight overlay. This keeps the 16-DIP horizontal
-            // inset, 56-DIP grid top, row height, wide-card span, and bottom clamp
-            // in lockstep; the old local 8/16/48 math made hit/drag targets drift
-            // from the cards the user actually saw.
-            let card = if search_active {
-                let (card, next_slot) =
-                    highlight_overlay::item_card_rect_for_flow_slot_scrolled_in_panel(
-                        z,
-                        panel,
-                        search_slot,
-                        item.is_wide,
-                        item_top_offset,
-                        scroll_offset,
-                    );
-                search_slot = next_slot;
-                card
-            } else {
-                highlight_overlay::item_card_rect_for_item_scrolled_in_panel(
-                    z,
-                    item,
-                    panel,
-                    scroll_offset,
-                )
-            };
-            if card.width > 0.0
-                && card.height > 0.0
-                && x >= card.x
-                && x < card.right()
-                && y >= card.y
-                && y < card.bottom()
-            {
-                return Some((z.id, item.id, item.path.to_string()));
-            }
-        }
+        let search_state = app.search_bar.borrow();
+        let query = search_state.query.as_str();
+        let layout = app.resolve_zone_item_flow_layout(
+            z,
+            panel,
+            item_top_offset,
+            z.items.iter().filter(|item| {
+                !search_active || search_bar::zone_item_matches_query(item.name.as_ref(), query)
+            }),
+        );
+        let hit = layout.hit_card(x, y)?;
+        let item = z.item(hit.item_id)?;
+        return Some((z.id, item.id, item.path.as_ref()));
     }
     None
 }
@@ -157,6 +172,9 @@ pub fn hit_test_inline_zone_search(app: &AppState, x: f32, y: f32) -> Option<Inl
     }
     let zone_id = app.zone_search_target.get()?;
     let zone = app.zones.get(zone_id)?;
+    if hit_test_zone(app, x, y) != Some(zone_id) {
+        return None;
+    }
     let now_ms = app.geometry_frame_now_ms.get();
     if app.zone_pill_morph_in_flight_at(zone, now_ms) {
         return None;
@@ -192,32 +210,36 @@ pub fn item_grid_position_for_point(
 ) -> Option<(i32, i32)> {
     let z = app.zones.get(zone_id)?;
     let now_ms = app.geometry_frame_now_ms.get();
-    let item_top_offset = if app.zone_search_target.get() == Some(zone_id) {
+    let search_active = app.zone_search_target.get() == Some(zone_id);
+    let item_top_offset = if search_active {
         // SAFETY: GetTickCount is total and thread-safe.
         search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
     } else {
         0.0
     };
-    let scroll_offset = app.zone_content_scroll_offset(zone_id);
     let panel = if app.zone_pill_morph_at(zone_id, now_ms).is_some() {
         app.zone_effective_rect_at(z, now_ms)
     } else {
         app.zone_expanded_placement(z).panel
     };
-    highlight_overlay::item_grid_position_for_panel(
+    let search_state = app.search_bar.borrow();
+    let query = search_state.query.as_str();
+    app.resolve_zone_item_flow_layout(
+        z,
         panel,
-        z.grid_columns,
-        x,
-        y + scroll_offset,
         item_top_offset,
+        z.items.iter().filter(|item| {
+            !search_active || search_bar::zone_item_matches_query(item.name.as_ref(), query)
+        }),
     )
+    .grid_position_for_point(x, y)
 }
 
 pub fn item_drop_target_for_point(
     app: &AppState,
     zone_id: ZoneId,
     source_item: Option<ZoneItemId>,
-    is_wide: bool,
+    dragged_item: &bentodesk_zone::ZoneItem,
     x: f32,
     y: f32,
 ) -> Option<(i32, i32, usize)> {
@@ -237,13 +259,16 @@ pub fn item_drop_target_for_point(
     } else {
         app.zone_expanded_placement(zone).panel
     };
-    highlight_overlay::item_drop_target_for_panel(
+    highlight_overlay::item_drop_target_for_item_in_panel(
         zone,
-        panel,
         source_item,
-        is_wide,
-        (x, y + scroll_offset),
-        item_top_offset,
+        dragged_item,
+        highlight_overlay::ItemDropProjection {
+            panel,
+            pointer: (x, y),
+            item_top_offset,
+            stored_scroll: scroll_offset,
+        },
         |item| {
             !search_active || search_bar::zone_item_matches_query(item.name.as_ref(), search_query)
         },
@@ -251,67 +276,63 @@ pub fn item_drop_target_for_point(
     .map(|(grid_x, grid_y, target_index, _)| (grid_x, grid_y, target_index))
 }
 
-/// Capture the topmost directional resize session under `(x, y)`.
-///
-/// The handle is opposite the capsule's fixed horizontal/vertical anchor, so
-/// all four desktop quadrants resize without translating the anchored edge.
+/// Capture a resize session only for the topmost visible Zone surface.
 pub fn zone_resize_session_for_point(
     app: &AppState,
     x: f32,
     y: f32,
 ) -> Option<bentodesk_app::ZoneResizeSession> {
     let now_ms = app.geometry_frame_now_ms.get();
-    for z in app.zones.iter().rev() {
-        if !z.is_visible() || z.is_stacked_child() {
-            continue;
-        }
-        // Wave C — collapsed pills have no resize handle (they auto-size to
-        // their badge + label content). Only expanded zones surface the
-        // bottom-right resize corner. #4 (2026-06-02): a collapsed stack anchor
-        // is now a compact pill too, so it has no resize handle either.
-        if !app.zone_pill_body_visible(z) {
-            continue;
-        }
-        // The transient shell/card layout is still moving. Arming a resize
-        // against it would capture a non-final start size and jump on move.
-        if app.zone_pill_morph_in_flight_at(z, now_ms) {
-            continue;
-        }
-        let placement = app.zone_expanded_placement(z);
-        let panel = placement.panel;
-        let corner_left = if placement.anchor_right {
-            panel.x
-        } else {
-            panel.right() - ZONE_RESIZE_CORNER
-        };
-        let corner_right = if placement.anchor_right {
-            panel.x + ZONE_RESIZE_CORNER
-        } else {
-            panel.right()
-        };
-        let corner_top = if placement.anchor_bottom {
-            panel.y
-        } else {
-            panel.bottom() - ZONE_RESIZE_CORNER
-        };
-        let corner_bottom = if placement.anchor_bottom {
-            panel.y + ZONE_RESIZE_CORNER
-        } else {
-            panel.bottom()
-        };
-        if x >= corner_left && x < corner_right && y >= corner_top && y < corner_bottom {
-            return Some(bentodesk_app::ZoneResizeSession {
-                id: z.id,
-                start_pointer_x: x,
-                start_pointer_y: y,
-                start_visible_width: panel.width,
-                start_visible_height: panel.height,
-                anchor_right: placement.anchor_right,
-                anchor_bottom: placement.anchor_bottom,
-            });
-        }
+    let z = app.zones.get(hit_test_zone(app, x, y)?)?;
+    // Wave C — collapsed pills have no resize handle (they auto-size to
+    // their badge + label content). Only expanded zones surface a corner.
+    if !app.zone_pill_body_visible(z) {
+        return None;
     }
-    None
+    // The transient shell/card layout is still moving. Arming a resize
+    // against it would capture a non-final start size and jump on move.
+    if app.zone_pill_morph_in_flight_at(z, now_ms) {
+        return None;
+    }
+    let placement = app.zone_expanded_placement(z);
+    let handle = resize_handle_for_panel(placement.panel, x, y)?;
+    Some(bentodesk_app::ZoneResizeSession {
+        id: z.id,
+        start_pointer_x: x,
+        start_pointer_y: y,
+        handle,
+        start_panel: placement.panel,
+        start_persisted_width: z.w,
+        start_persisted_height: z.h,
+        start_home_x: z.x,
+        start_home_y: z.y,
+        start_capsule: app.zone_collapsed_rect(z),
+        anchor_right: placement.anchor_right,
+        anchor_bottom: placement.anchor_bottom,
+    })
+}
+
+/// Actionable resize session after applying the same higher-priority pointer
+/// surfaces and lock gate used by Main-client mouse down.
+pub fn actionable_zone_resize_session_for_point(
+    app: &AppState,
+    x: f32,
+    y: f32,
+) -> Option<bentodesk_app::ZoneResizeSession> {
+    let session = zone_resize_session_for_point(app, x, y)?;
+    let zone = app.zones.get(session.id)?;
+    if zone.locked
+        || app.settings_open.get()
+        || app.about_open.get()
+        || app.active_context_menu.borrow().is_some()
+        || stack_overlay_contains(app, x, y)
+        || hit_test_inline_zone_search(app, x, y).is_some()
+        || hit_test_zone_item_ref(app, x, y).is_some()
+        || hit_test_zone_header_button(app, x, y).is_some()
+    {
+        return None;
+    }
+    Some(session)
 }
 
 /// Topmost directional resize handle under `(x, y)`.
@@ -342,9 +363,10 @@ pub fn hit_test_zone_header_button(
     x: f32,
     y: f32,
 ) -> Option<(ZoneId, HeaderButton)> {
+    let topmost = hit_test_zone(app, x, y)?;
     let now_ms = app.geometry_frame_now_ms.get();
     for z in app.zones.iter().rev() {
-        if !z.is_visible() || z.is_stacked_child() {
+        if z.id != topmost || !z.is_visible() || z.is_stacked_child() {
             continue;
         }
         if !app.zone_pill_body_visible(z) {

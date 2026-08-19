@@ -10,8 +10,23 @@ fn workarea_refresh_cancels_every_main_client_pointer_session() {
         id: ZoneId(2),
         start_pointer_x: 100.0,
         start_pointer_y: 120.0,
-        start_visible_width: 240.0,
-        start_visible_height: 180.0,
+        handle: ZoneResizeHandle::BottomLeft,
+        start_panel: Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 180.0,
+        },
+        start_persisted_width: 240,
+        start_persisted_height: 180,
+        start_home_x: 0,
+        start_home_y: 0,
+        start_capsule: Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 48.0,
+            height: 48.0,
+        },
         anchor_right: true,
         anchor_bottom: false,
     }));
@@ -25,11 +40,8 @@ fn workarea_refresh_cancels_every_main_client_pointer_session() {
         last_y: 18,
         is_internal_dragging: false,
     });
-    app.stack_tray_drag.set(Some(StackTrayDragState::new(
-        ZoneId(5),
-        ZoneId(6),
-        0,
-    )));
+    app.stack_tray_drag
+        .set(Some(StackTrayDragState::new(ZoneId(5), ZoneId(6), 0)));
 
     assert!(app.cancel_viewport_gestures());
     assert_eq!(app.zone_drag.get(), None);

@@ -277,6 +277,144 @@ pub(super) fn refresh_ghost_cursor_passthrough(
     Some((x, y, passthrough))
 }
 
+/// Show the directional system cursor for an active or hoverable Zone resize corner.
+pub(super) fn set_zone_resize_cursor(root: &AppRoot, slot: &WindowSlot, hwnd: HWND) -> bool {
+    if slot.kind != WindowKind::Main {
+        return false;
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos initializes `point`; the ownership check only reads
+    // current/foreground capture and topmost-window state.
+    if unsafe { GetCursorPos(&mut point) == 0 } || !main_owns_cursor_point(hwnd, point) {
+        return false;
+    }
+    let app = root.app.borrow();
+    let session = if let Some(session) = app.zone_resize.get() {
+        session
+    } else {
+        // SAFETY: `hwnd` is the live Main window and `point` is initialized.
+        if unsafe { ScreenToClient(hwnd, &mut point) == 0 } {
+            return false;
+        }
+        let dpi = slot.state.dpi.get();
+        let x = bentodesk_style::dpi::device_to_logical_f32(point.x as f32, dpi);
+        let y = bentodesk_style::dpi::device_to_logical_f32(point.y as f32, dpi);
+        let Some(session) = ui::actionable_zone_resize_session_for_point(&app, x, y) else {
+            return false;
+        };
+        session
+    };
+    drop(app);
+    set_zone_resize_cursor_for_session(session)
+}
+
+fn main_owns_cursor_point(hwnd: HWND, point: POINT) -> bool {
+    // SAFETY: these calls only query current user32 state; `point` and the
+    // size-tagged GUITHREADINFO are initialized before use.
+    let capture = unsafe { GetCapture() };
+    if capture == hwnd {
+        return true;
+    }
+    if !capture.is_null() {
+        return false;
+    }
+    let mut foreground = unsafe { std::mem::zeroed::<GUITHREADINFO>() };
+    foreground.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    if unsafe { GetGUIThreadInfo(0, &mut foreground) } == 0 {
+        return false;
+    }
+    let under_pointer = unsafe { WindowFromPoint(point) };
+    main_owns_cursor_handles(hwnd, capture, foreground.hwndCapture, under_pointer)
+}
+
+fn main_owns_cursor_handles(
+    hwnd: HWND,
+    thread_capture: HWND,
+    foreground_capture: HWND,
+    under_pointer: HWND,
+) -> bool {
+    thread_capture == hwnd
+        || (thread_capture.is_null() && foreground_capture.is_null() && under_pointer == hwnd)
+}
+
+fn zone_resize_cursor_name(handle: bentodesk_app::ZoneResizeHandle) -> *const u16 {
+    use bentodesk_app::ZoneResizeHandle;
+    match handle {
+        ZoneResizeHandle::Left | ZoneResizeHandle::Right => IDC_SIZEWE,
+        ZoneResizeHandle::Top | ZoneResizeHandle::Bottom => IDC_SIZENS,
+        ZoneResizeHandle::TopLeft | ZoneResizeHandle::BottomRight => IDC_SIZENWSE,
+        ZoneResizeHandle::TopRight | ZoneResizeHandle::BottomLeft => IDC_SIZENESW,
+    }
+}
+
+fn set_zone_resize_cursor_for_session(session: bentodesk_app::ZoneResizeSession) -> bool {
+    let cursor_name = zone_resize_cursor_name(session.handle);
+    // SAFETY: a null module handle selects a predefined shared system cursor.
+    let cursor = unsafe { LoadCursorW(ptr::null_mut(), cursor_name) };
+    if cursor.is_null() {
+        return false;
+    }
+    // SAFETY: `cursor` is a live shared system cursor and must not be destroyed.
+    unsafe { SetCursor(cursor) };
+    true
+}
+
+/// Re-evaluate Main's cursor after resize capture ends.
+pub(super) fn refresh_zone_resize_cursor_after_release(
+    root: &AppRoot,
+    slot: &WindowSlot,
+    hwnd: HWND,
+) {
+    if set_zone_resize_cursor(root, slot, hwnd) {
+        return;
+    }
+    restore_default_main_cursor(root, slot, hwnd);
+}
+
+/// Re-evaluate the live Main cursor after a pointer-surface state change.
+pub(super) fn refresh_main_zone_resize_cursor(root: &AppRoot, hwnd: HWND) {
+    // SAFETY: the process-private HWND slot pointer is null-checked before use.
+    unsafe {
+        let slot = get_slot_ptr(hwnd);
+        if !slot.is_null() {
+            refresh_zone_resize_cursor_after_release(root, &*slot, hwnd);
+        }
+    }
+}
+
+/// Restore Main's arrow only where Main owns the current pointer surface.
+pub(super) fn restore_default_main_cursor(root: &AppRoot, slot: &WindowSlot, hwnd: HWND) -> bool {
+    if slot.kind != WindowKind::Main {
+        return false;
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos initializes `point`; ScreenToClient then translates
+    // it for the live Main window after actual cursor ownership is confirmed.
+    if unsafe { GetCursorPos(&mut point) == 0 } || !main_owns_cursor_point(hwnd, point) {
+        return false;
+    }
+    if unsafe { ScreenToClient(hwnd, &mut point) == 0 } {
+        return false;
+    }
+    let dpi = slot.state.dpi.get();
+    let x = bentodesk_style::dpi::device_to_logical_f32(point.x as f32, dpi);
+    let y = bentodesk_style::dpi::device_to_logical_f32(point.y as f32, dpi);
+    let app = root.app.borrow();
+    if ui::main_nchittest_kind(&app, &slot.state, x, y) == ui::HitKind::Transparent {
+        return false;
+    }
+    drop(app);
+
+    // SAFETY: a null module handle selects the shared system arrow cursor.
+    let cursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_ARROW) };
+    if !cursor.is_null() {
+        // SAFETY: `cursor` is a live shared system cursor and must not be destroyed.
+        unsafe { SetCursor(cursor) };
+        return true;
+    }
+    false
+}
+
 pub(super) fn should_clear_stale_main_hover(
     has_hover: bool,
     pointer_drag_active: bool,
@@ -421,5 +559,54 @@ pub(super) fn clear_hover(root: &AppRoot) {
     drop(app);
     if should_hide_tooltip {
         root.dispatcher.push(Command::HideTooltip);
+    }
+}
+
+#[cfg(test)]
+mod zone_resize_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_matches_all_eight_resize_handles() {
+        use bentodesk_app::ZoneResizeHandle::*;
+        assert_eq!(zone_resize_cursor_name(Left), IDC_SIZEWE);
+        assert_eq!(zone_resize_cursor_name(Right), IDC_SIZEWE);
+        assert_eq!(zone_resize_cursor_name(Top), IDC_SIZENS);
+        assert_eq!(zone_resize_cursor_name(Bottom), IDC_SIZENS);
+        assert_eq!(zone_resize_cursor_name(TopLeft), IDC_SIZENWSE);
+        assert_eq!(zone_resize_cursor_name(BottomRight), IDC_SIZENWSE);
+        assert_eq!(zone_resize_cursor_name(TopRight), IDC_SIZENESW);
+        assert_eq!(zone_resize_cursor_name(BottomLeft), IDC_SIZENESW);
+    }
+
+    #[test]
+    fn direct_cursor_refresh_requires_main_to_own_capture_or_topmost_point() {
+        let main = 1usize as HWND;
+        let other = 2usize as HWND;
+        assert!(main_owns_cursor_handles(
+            main,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            main
+        ));
+        assert!(main_owns_cursor_handles(main, main, ptr::null_mut(), other));
+        assert!(!main_owns_cursor_handles(
+            main,
+            other,
+            ptr::null_mut(),
+            main
+        ));
+        assert!(!main_owns_cursor_handles(
+            main,
+            ptr::null_mut(),
+            other,
+            main
+        ));
+        assert!(!main_owns_cursor_handles(
+            main,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            other
+        ));
     }
 }

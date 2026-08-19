@@ -100,6 +100,7 @@ use super::{
     bulk_text_update_for_id,
     bulk_text_updates_for_selected,
     cancel_main_client_gestures,
+    cancel_main_gestures_for_settings_open,
     capture_context_capsule_for_path,
     capture_current_timeline_snapshot,
     capture_recovery_bundle,
@@ -146,6 +147,7 @@ use super::{
     handle_bulk_manager_text_edit_keydown,
     handle_icon_picker_keydown,
     handle_icon_picker_lbutton_up,
+    handle_rbutton_up,
     handle_rules_wizard_char,
     handle_rules_wizard_keydown,
     handle_rules_wizard_lbutton_up,
@@ -416,3 +418,4 @@ include!("tests/23_search_stack_zone_routes_to_visible_anchor.rs");
 include!("tests/24_cross_zone_item_move_preserves_drop_and_identity.rs");
 include!("tests/25_startup_repairs_geometry_and_duplicate_item_ids.rs");
 include!("tests/26_stack_preview_item_drag_keeps_live_surface.rs");
+include!("tests/27_updater_background_gate_and_idle_pump.rs");

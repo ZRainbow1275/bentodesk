@@ -16,7 +16,7 @@ impl Renderer {
         hover_t: f32,
         press_held: bool,
         scale: f32,
-        label_font_px: f32,
+        _label_font_px: f32,
         alpha: f32,
     ) -> Result<(), RenderError> {
         let alpha = alpha.clamp(0.0, 1.0);
@@ -108,28 +108,44 @@ impl Renderer {
         // `settings_focused_field` for the Settings text inputs). Building
         // focus-tracking plumbing is out of scope for this parity pass — paint
         // the ring once an item keyboard-focus channel lands.
-        // V21-C3 — mirror Tauri's ItemIcon slot: a 36px/28px centred container
-        // with the actual bitmap/glyph rendered at 24px/20px inside it.
-        let (_icon_container_rect, icon_rect) =
-            item_icon_slots_for_card(card_rect, item.is_wide, scale);
-        if !self.draw_item_bitmap(item.icon_hash.as_ref(), icon_rect, alpha)? {
+        let metrics = item_grid::responsive_item_metrics(base_rect.width, item.name.as_ref());
+        let slot_side = metrics.icon_slot_side * scale;
+        let idle_side = metrics.icon_side * scale;
+        let icon_slot = bentodesk_style::Rect {
+            x: card_rect.x + ((card_rect.width - slot_side) * 0.5).max(0.0),
+            y: card_rect.y + 8.0 * scale,
+            width: slot_side,
+            height: slot_side,
+        };
+        let requested_idle_icon = bentodesk_style::Rect {
+            x: icon_slot.x + (icon_slot.width - idle_side) * 0.5,
+            y: icon_slot.bottom() - idle_side,
+            width: idle_side,
+            height: idle_side,
+        };
+        let hover_icon_scale = 1.0 + (item_grid::ITEM_ICON_HOVER_SCALE - 1.0) * hover_clamped;
+        let fallback_icon_rect =
+            animator::scale_rect_centered(requested_idle_icon, hover_icon_scale);
+        if !self.draw_item_bitmap_for_card(
+            item.icon_hash.as_ref(),
+            requested_idle_icon,
+            hover_clamped,
+            alpha,
+        )? {
             // Wave I2 / R4 — cache misses still use selected-stack line-art
             // icon families, never the old extension-keyed emoji text fallback.
             let kind =
                 item_icon::fallback_icon_kind_for_item(item.icon_hash.as_ref(), item.path.as_ref());
-            self.draw_icon_glyph(kind.as_str(), icon_rect, icon_text)?;
+            self.draw_icon_glyph(kind.as_str(), fallback_icon_rect, icon_text)?;
         }
-        // V21-C3/V21-N108/V21-N110 — the label sits on the lower card text
-        // rail and follows Tauri's full-text shrink contract (`useTextAbbr`),
-        // not DWrite ellipsis trimming.
         let label_text = item_label_visible_name(item.name.as_ref());
-        let label_rect = item_label_rect_for_card(card_rect, scale, label_font_px);
-        // V21-C3/V21-N129 — weight stays Tauri's 400 contract; size and colour
-        // follow the captured 2026-06-02 frame where source tokens conflict.
-        // #1 step 13 / V21-N108 — the run is horizontally CENTERED, while the
-        // layout box is pinned to the lower rail so DWrite top-near glyph ink
-        // matches the WebView reference instead of drifting upward.
-        self.draw_item_label_no_wrap(label_text, label_rect, text, label_font_px)?;
+        let label_rect = bentodesk_style::Rect {
+            x: card_rect.x + 4.0 * scale,
+            y: icon_slot.bottom() + 4.0 * scale,
+            width: (card_rect.width - 8.0 * scale).max(0.0),
+            height: (card_rect.bottom() - 8.0 * scale - icon_slot.bottom() - 4.0 * scale).max(0.0),
+        };
+        self.draw_item_label_wrapped(label_text, label_rect, text, metrics.label_font_px * scale)?;
         Ok(())
     }
 
@@ -145,27 +161,72 @@ impl Renderer {
         if opacity <= 0.0 {
             return Ok(true);
         }
+        let Some(bitmap) = self.cached_item_bitmap(icon_hash)? else {
+            return Ok(false);
+        };
+        self.draw_cached_item_bitmap(&bitmap, rect, opacity)?;
+        Ok(true)
+    }
+
+    fn draw_item_bitmap_for_card(
+        &mut self,
+        icon_hash: &str,
+        requested_idle: bentodesk_style::Rect,
+        hover_t: f32,
+        opacity: f32,
+    ) -> Result<bool, RenderError> {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return Ok(true);
+        }
+        let Some(bitmap) = self.cached_item_bitmap(icon_hash)? else {
+            return Ok(false);
+        };
+        let decoded_side = bitmap.source_width.min(bitmap.source_height) as f32
+            / self.base_scale.max(f32::EPSILON);
+        let idle_side = requested_idle
+            .width
+            .min(requested_idle.height)
+            .min(decoded_side / item_grid::ITEM_ICON_HOVER_SCALE);
+        let idle = bentodesk_style::Rect {
+            x: requested_idle.x + (requested_idle.width - idle_side) * 0.5,
+            y: requested_idle.bottom() - idle_side,
+            width: idle_side,
+            height: idle_side,
+        };
+        let scale = 1.0 + (item_grid::ITEM_ICON_HOVER_SCALE - 1.0) * hover_t.clamp(0.0, 1.0);
+        let rect = animator::scale_rect_centered(idle, scale);
+        self.draw_cached_item_bitmap(&bitmap, rect, opacity)?;
+        Ok(true)
+    }
+
+    fn cached_item_bitmap(
+        &mut self,
+        icon_hash: &str,
+    ) -> Result<Option<CachedIconBitmap>, RenderError> {
         if icon_hash.is_empty()
             || icon_hash.starts_with("builtin:")
             || self.icon_bitmap_failures.contains(icon_hash)
         {
-            return Ok(false);
+            return Ok(None);
         }
 
         if !self.icon_bitmaps.contains_key(icon_hash) {
             let Some(cache) = bentodesk_backend::icon::cache_handle() else {
-                return Ok(false);
+                return Ok(None);
             };
             let Some(bytes) = cache.get(icon_hash) else {
                 // Startup icon repair populates the cache off the UI thread.
                 // A miss is therefore pending, not a permanent decode failure.
-                return Ok(false);
+                return Ok(None);
             };
             let Some(surface) = self.surface.as_ref() else {
-                return Ok(false);
+                return Ok(None);
             };
             let decoded =
                 d2d::bitmap_from_png_bytes(&surface.ctx, bytes.as_ref()).and_then(|bitmap| {
+                    // SAFETY: `bitmap` is a live decoded D2D bitmap for this call.
+                    let source = unsafe { bitmap.GetPixelSize() };
                     let invert_mask = bentodesk_backend::icon::legacy_invert_mask(bytes.as_ref())
                         .map(|(width, height, bits)| {
                             d2d::invert_mask_effect(&surface.ctx, width, height, bits).map(
@@ -180,6 +241,8 @@ impl Renderer {
                     Ok(CachedIconBitmap {
                         bitmap,
                         invert_mask,
+                        source_width: source.width,
+                        source_height: source.height,
                     })
                 });
             match decoded {
@@ -199,14 +262,19 @@ impl Renderer {
                         "failed to decode cached icon bitmap; using fallback glyph"
                     );
                     let _ = self.icon_bitmap_failures.insert(icon_hash.to_owned());
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
         }
+        Ok(self.icon_bitmaps.get(icon_hash).cloned())
+    }
 
-        let Some(bitmap) = self.icon_bitmaps.get(icon_hash).cloned() else {
-            return Ok(false);
-        };
+    fn draw_cached_item_bitmap(
+        &self,
+        bitmap: &CachedIconBitmap,
+        rect: bentodesk_style::Rect,
+        opacity: f32,
+    ) -> Result<(), RenderError> {
         let d2d_rect = D2D_RECT_F {
             left: rect.x,
             top: rect.y,
@@ -214,7 +282,7 @@ impl Renderer {
             bottom: rect.y + rect.height,
         };
         let Some(surface) = self.surface.as_ref() else {
-            return Ok(false);
+            return Ok(());
         };
         d2d::draw_bitmap(&surface.ctx, &bitmap.bitmap, d2d_rect, opacity)?;
         if let Some(mask) = bitmap.invert_mask.as_ref() {
@@ -227,7 +295,7 @@ impl Renderer {
                 opacity,
             )?;
         }
-        Ok(true)
+        Ok(())
     }
 
     pub(super) fn draw_image_file(

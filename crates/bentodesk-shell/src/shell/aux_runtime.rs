@@ -586,7 +586,19 @@ pub(super) fn reset_settings_transient_state(app: &AppState) {
     app.scroll_offset_y.set(0.0);
 }
 
+pub(super) fn cancel_main_gestures_for_settings_open(root: &AppRoot) -> bool {
+    let was_resize = root.app.borrow().zone_resize.get().is_some();
+    let cancelled = cancel_main_client_gestures(root);
+    if cancelled {
+        // Settings can open from a global hotkey while Main owns capture. Clear
+        // the gesture before showing the aux HWND, then release that capture.
+        unsafe { ReleaseCapture() };
+    }
+    was_resize
+}
+
 pub(super) fn show_settings_surface(root: &AppRoot) -> bool {
+    let cancelled_resize = cancel_main_gestures_for_settings_open(root);
     {
         let app = root.app.borrow();
         app.settings_open.set(true);
@@ -602,6 +614,11 @@ pub(super) fn show_settings_surface(root: &AppRoot) -> bool {
         app.settings_save_error.borrow_mut().take();
         app.set_settings_encryption_mode_hover(None);
         app.set_settings_close_hover(false);
+    }
+    if cancelled_resize && let Some(main) = find_main_hwnd(root) {
+        // settings_open now suppresses resize arbitration at a stationary
+        // pointer, so no stale diagonal cursor survives the hotkey transition.
+        refresh_main_zone_resize_cursor(root, main);
     }
     // M1i — populate the §2 Paths desktop-source list on open (mirrors Tauri's
     // `getDesktopSources()` on mount) so the dynamic read-only cards reflect the

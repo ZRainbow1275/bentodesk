@@ -408,27 +408,17 @@ pub(super) fn zone_item_max_scroll_at(
     } else {
         0.0
     };
-    if search_active {
-        let query = app.search_bar.borrow();
-        highlight_overlay::item_flow_max_scroll_in_panel(
-            zone,
-            app.zone_effective_rect_at(zone, now_ms),
-            item_top_offset,
-            zone.items
-                .iter()
-                .filter(|item| {
-                    search_bar::zone_item_matches_query(item.name.as_ref(), query.query.as_str())
-                })
-                .map(|item| item.is_wide),
-        )
-    } else {
-        highlight_overlay::item_flow_max_scroll_in_panel(
-            zone,
-            app.zone_effective_rect_at(zone, now_ms),
-            item_top_offset,
-            zone.items.iter().map(|item| item.is_wide),
-        )
-    }
+    let query = app.search_bar.borrow();
+    app.resolve_zone_item_flow_layout(
+        zone,
+        app.zone_effective_rect_at(zone, now_ms),
+        item_top_offset,
+        zone.items.iter().filter(|item| {
+            !search_active
+                || search_bar::zone_item_matches_query(item.name.as_ref(), query.query.as_str())
+        }),
+    )
+    .max_scroll
 }
 
 pub(super) fn zone_scroll_target_for_point(
@@ -437,6 +427,32 @@ pub(super) fn zone_scroll_target_for_point(
     y: f32,
 ) -> Option<(ZoneId, f32)> {
     let now_ms = app.geometry_frame_now_ms.get();
+    if let Some((_, member_id, preview)) = stack_bloom_preview_hit_for_point(app, x, y) {
+        let zone = app.zones.get(member_id)?;
+        let search_active = app.zone_search_target.get() == Some(member_id);
+        let item_top_offset = if search_active {
+            search_bar::ZONE_INLINE_ITEM_OFFSET_Y_PX * app.zone_search_animation_progress_at(now_ms)
+        } else {
+            0.0
+        };
+        let clip = highlight_overlay::item_content_clip_rect_in_panel(preview, item_top_offset);
+        if x >= clip.x && x < clip.right() && y >= clip.y && y < clip.bottom() {
+            let query = app.search_bar.borrow();
+            let layout = app.resolve_zone_item_flow_layout(
+                zone,
+                preview,
+                item_top_offset,
+                zone.items.iter().filter(|item| {
+                    !search_active
+                        || search_bar::zone_item_matches_query(
+                            item.name.as_ref(),
+                            query.query.as_str(),
+                        )
+                }),
+            );
+            return Some((member_id, layout.max_scroll));
+        }
+    }
     for zone in app.zones.iter().rev() {
         if !zone.is_visible() || zone.is_stacked_child() || !app.zone_pill_body_visible(zone) {
             continue;
