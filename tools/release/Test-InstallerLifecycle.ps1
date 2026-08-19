@@ -174,8 +174,8 @@ $installedMetadata = [ordered]@{
 }
 $expectedPublisher = -join @([char]0x65B9, [char]0x5BD2)
 if (
-    $installedMetadata.agreement -cne '2026-08-02' -or
-    $installedMetadata.privacy -cne '2026-08-02' -or
+    $installedMetadata.agreement -cne '2026-08-18' -or
+    $installedMetadata.privacy -cne '2026-08-18' -or
     $installedMetadata.publisher -cne $expectedPublisher -or
     $installedMetadata.contact -cne 'hybridrevis@gmail.com'
 ) {
