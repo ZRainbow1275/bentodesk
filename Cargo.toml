@@ -220,7 +220,7 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 # Updater authenticity parity (0505) — verifies Tauri/minisign signature
 # strings against the embedded BentoDesk public key without pulling an async
 # updater framework, TLS stack, or general-purpose crypto dependency tree.
-minisign-verify = "0.2.5"
+minisign-verify = "0.3.0"
 
 # -----------------------------------------------------------------------------
 # Profile (spec §7 — locked, do not modify).
